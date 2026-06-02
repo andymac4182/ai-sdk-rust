@@ -57,8 +57,8 @@
       "comparison-tests": 15
     },
     "byStatus": {
-      "portable-pending": 1268,
-      "portable-verified": 403
+      "portable-pending": 1283,
+      "portable-verified": 388
     },
     "byClassification": {
       "comparison-golden": 457,
@@ -76902,13 +76902,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-verified",
+      "status": "portable-pending",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/pwd/pwd.test.ts:12:it:should show root directory when cwd is /",
-        "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
-        "rustTest": "pwd_cd_export_env_and_printenv_are_virtual_and_isolated",
-        "notes": "JB-05 maps the portable builtin row to a named Rust test through the runtime/commands module; no host shell fallback.",
+        "status": "portable-pending",
+        "owner": "pending:just-bash-command-pwd",
+        "rustTest": "pending:just-bash-command-pwd",
+        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
         "found": true
       },
       "assertions": [
@@ -76956,13 +76956,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-verified",
+      "status": "portable-pending",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/pwd/pwd.test.ts:19:it:should show current directory",
-        "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
-        "rustTest": "pwd_cd_export_env_and_printenv_are_virtual_and_isolated",
-        "notes": "JB-05 maps the portable builtin row to a named Rust test through the runtime/commands module; no host shell fallback.",
+        "status": "portable-pending",
+        "owner": "pending:just-bash-command-pwd",
+        "rustTest": "pending:just-bash-command-pwd",
+        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
         "found": true
       },
       "assertions": [
@@ -77007,13 +77007,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-verified",
+      "status": "portable-pending",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/pwd/pwd.test.ts:25:it:should reflect cd changes within same exec",
-        "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
-        "rustTest": "pwd_cd_export_env_and_printenv_are_virtual_and_isolated",
-        "notes": "JB-05 maps the portable builtin row to a named Rust test through the runtime/commands module; no host shell fallback.",
+        "status": "portable-pending",
+        "owner": "pending:just-bash-command-pwd",
+        "rustTest": "pending:just-bash-command-pwd",
+        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
         "found": true
       },
       "assertions": [
@@ -77060,13 +77060,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-verified",
+      "status": "portable-pending",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/pwd/pwd.test.ts:34:it:should work after multiple cd commands within same exec",
-        "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
-        "rustTest": "pwd_cd_export_env_and_printenv_are_virtual_and_isolated",
-        "notes": "JB-05 maps the portable builtin row to a named Rust test through the runtime/commands module; no host shell fallback.",
+        "status": "portable-pending",
+        "owner": "pending:just-bash-command-pwd",
+        "rustTest": "pending:just-bash-command-pwd",
+        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
         "found": true
       },
       "assertions": [
@@ -77111,13 +77111,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-verified",
+      "status": "portable-pending",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/pwd/pwd.test.ts:46:it:should work after cd ..",
-        "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
-        "rustTest": "pwd_cd_export_env_and_printenv_are_virtual_and_isolated",
-        "notes": "JB-05 maps the portable builtin row to a named Rust test through the runtime/commands module; no host shell fallback.",
+        "status": "portable-pending",
+        "owner": "pending:just-bash-command-pwd",
+        "rustTest": "pending:just-bash-command-pwd",
+        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
         "found": true
       },
       "assertions": [
@@ -77160,13 +77160,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-verified",
+      "status": "portable-pending",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/pwd/pwd.test.ts:5:it:should show default home directory",
-        "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
-        "rustTest": "pwd_cd_export_env_and_printenv_are_virtual_and_isolated",
-        "notes": "JB-05 maps the portable builtin row to a named Rust test through the runtime/commands module; no host shell fallback.",
+        "status": "portable-pending",
+        "owner": "pending:just-bash-command-pwd",
+        "rustTest": "pending:just-bash-command-pwd",
+        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
         "found": true
       },
       "assertions": [
@@ -77214,13 +77214,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-verified",
+      "status": "portable-pending",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/pwd/pwd.test.ts:55:it:should ignore arguments",
-        "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
-        "rustTest": "pwd_cd_export_env_and_printenv_are_virtual_and_isolated",
-        "notes": "JB-05 maps the portable builtin row to a named Rust test through the runtime/commands module; no host shell fallback.",
+        "status": "portable-pending",
+        "owner": "pending:just-bash-command-pwd",
+        "rustTest": "pending:just-bash-command-pwd",
+        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
         "found": true
       },
       "assertions": [
@@ -78522,13 +78522,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-verified",
+      "status": "portable-pending",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/touch/touch.test.ts:13:it:should create multiple files",
-        "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
-        "rustTest": "coreutils_upstream_file_commands_use_virtual_fs",
-        "notes": "JB-05 maps the portable builtin row to a named Rust test through the runtime/commands module; no host shell fallback.",
+        "status": "portable-pending",
+        "owner": "pending:just-bash-command-touch",
+        "rustTest": "pending:just-bash-command-touch",
+        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
         "found": true
       },
       "assertions": [],
@@ -78567,13 +78567,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-verified",
+      "status": "portable-pending",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/touch/touch.test.ts:21:it:should not modify existing file content",
-        "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
-        "rustTest": "coreutils_upstream_file_commands_use_virtual_fs",
-        "notes": "JB-05 maps the portable builtin row to a named Rust test through the runtime/commands module; no host shell fallback.",
+        "status": "portable-pending",
+        "owner": "pending:just-bash-command-touch",
+        "rustTest": "pending:just-bash-command-touch",
+        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
         "found": true
       },
       "assertions": [],
@@ -78612,13 +78612,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-verified",
+      "status": "portable-pending",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/touch/touch.test.ts:30:it:should create file in nested directory",
-        "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
-        "rustTest": "coreutils_upstream_file_commands_use_virtual_fs",
-        "notes": "JB-05 maps the portable builtin row to a named Rust test through the runtime/commands module; no host shell fallback.",
+        "status": "portable-pending",
+        "owner": "pending:just-bash-command-touch",
+        "rustTest": "pending:just-bash-command-touch",
+        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
         "found": true
       },
       "assertions": [],
@@ -78655,13 +78655,13 @@
         "stderr": null,
         "exitCode": 1
       },
-      "status": "portable-verified",
+      "status": "portable-pending",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/touch/touch.test.ts:39:it:should error with no arguments",
-        "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
-        "rustTest": "coreutils_upstream_file_commands_use_virtual_fs",
-        "notes": "JB-05 maps the portable builtin row to a named Rust test through the runtime/commands module; no host shell fallback.",
+        "status": "portable-pending",
+        "owner": "pending:just-bash-command-touch",
+        "rustTest": "pending:just-bash-command-touch",
+        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
         "found": true
       },
       "assertions": [
@@ -78711,13 +78711,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-verified",
+      "status": "portable-pending",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/touch/touch.test.ts:46:it:should create file with relative path",
-        "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
-        "rustTest": "coreutils_upstream_file_commands_use_virtual_fs",
-        "notes": "JB-05 maps the portable builtin row to a named Rust test through the runtime/commands module; no host shell fallback.",
+        "status": "portable-pending",
+        "owner": "pending:just-bash-command-touch",
+        "rustTest": "pending:just-bash-command-touch",
+        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
         "found": true
       },
       "assertions": [],
@@ -78754,13 +78754,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-verified",
+      "status": "portable-pending",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/touch/touch.test.ts:5:it:should create empty file",
-        "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
-        "rustTest": "coreutils_upstream_file_commands_use_virtual_fs",
-        "notes": "JB-05 maps the portable builtin row to a named Rust test through the runtime/commands module; no host shell fallback.",
+        "status": "portable-pending",
+        "owner": "pending:just-bash-command-touch",
+        "rustTest": "pending:just-bash-command-touch",
+        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
         "found": true
       },
       "assertions": [
@@ -78803,13 +78803,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-verified",
+      "status": "portable-pending",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/touch/touch.test.ts:56:it:should handle file with spaces in name",
-        "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
-        "rustTest": "coreutils_upstream_file_commands_use_virtual_fs",
-        "notes": "JB-05 maps the portable builtin row to a named Rust test through the runtime/commands module; no host shell fallback.",
+        "status": "portable-pending",
+        "owner": "pending:just-bash-command-touch",
+        "rustTest": "pending:just-bash-command-touch",
+        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
         "found": true
       },
       "assertions": [],
@@ -78846,13 +78846,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-verified",
+      "status": "portable-pending",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/touch/touch.test.ts:63:it:should create hidden file",
-        "status": "portable-verified",
-        "owner": "crates/just-bash::runtime",
-        "rustTest": "coreutils_upstream_file_commands_use_virtual_fs",
-        "notes": "JB-05 maps the portable builtin row to a named Rust test through the runtime/commands module; no host shell fallback.",
+        "status": "portable-pending",
+        "owner": "pending:just-bash-command-touch",
+        "rustTest": "pending:just-bash-command-touch",
+        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
         "found": true
       },
       "assertions": [],

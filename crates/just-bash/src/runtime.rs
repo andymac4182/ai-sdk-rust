@@ -3,8 +3,9 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    JustBashCustomCommand, JustBashExecOptions, JustBashExecResult, JustBashResult,
-    JustBashSession, JustBashSessionOptions, NetworkPolicy, NetworkResponse, path::resolve_path,
+    JustBashCustomCommand, JustBashExecOptions, JustBashExecResult, JustBashLanguageRuntime,
+    JustBashResult, JustBashSession, JustBashSessionOptions, NetworkPolicy, NetworkResponse,
+    path::resolve_path,
 };
 
 /// Construction options for the upstream-style [`Bash`] facade.
@@ -20,6 +21,9 @@ pub struct BashOptions {
     pub cwd: Option<String>,
     /// Public Rust custom commands available before built-ins.
     pub custom_commands: Vec<JustBashCustomCommand>,
+    /// Explicit optional language runtimes for `js-exec`/`node` or
+    /// `python3`/`python`.
+    pub language_runtimes: Vec<JustBashLanguageRuntime>,
     /// Optional network policy. When present, upstream-style `curl` is
     /// registered and backed by fake responses.
     pub network_policy: Option<NetworkPolicy>,
@@ -54,6 +58,7 @@ impl Bash {
         });
         session_options.commands = options.commands;
         session_options.custom_commands = options.custom_commands;
+        session_options.language_runtimes = options.language_runtimes;
         session_options.create_default_layout = create_default_layout;
         session_options.network_policy = options.network_policy;
         session_options.network_responses = options.network_responses;

@@ -1427,7 +1427,7 @@ const jbc28CaseGroups = [
     rustTest:
       'just_bash_optional_js_python_commands_fail_closed_without_host_runtime; open_agents_just_bash_blocks_js_python_host_runtime_without_fallback',
     notes:
-      'JBC-28 verifies python3/python remain unavailable by default in the Rust and Open Agents Just Bash backends and fail closed without invoking host Python. The python-enabled row remains pending.',
+      'JBC-28 verifies python3/python remain unavailable by default in the Rust and Open Agents Just Bash backends and fail closed without invoking host Python. JBC-39 maps the explicit fake-backend opt-in row separately.',
   },
   {
     file: 'packages/just-bash/src/commands/js-exec/js-exec.security.test.ts',
@@ -1456,6 +1456,102 @@ const jbc28CaseGroups = [
     rustTest: 'just_bash_runtime_bridge_surfaces_are_classified_nonportable',
     notes:
       'JBC-28 classifies QuickJS child_process, Node compatibility shims, Python/worker bridge output limits, and JS worker attack-regression rows as optional JavaScript host-runtime behavior. Rust keeps the optional runtime absent; portable host-fallback probes are mapped separately.',
+  },
+];
+
+const jbc39RuntimeSourceFiles = [
+  'packages/just-bash/src/commands/js-exec/js-exec.ts',
+  'packages/just-bash/src/commands/python3/python3.ts',
+];
+
+const jbc39PackageRuntimeSourceFiles = [
+  'packages/just-bash/vitest.config.ts',
+  'packages/just-bash/vitest.wasm.config.ts',
+];
+
+const jbc39JsExecRuntimeTestFiles = [
+  'packages/just-bash/src/commands/js-exec/js-exec.esm.test.ts',
+  'packages/just-bash/src/commands/js-exec/js-exec.fs.test.ts',
+  'packages/just-bash/src/commands/js-exec/js-exec.http.test.ts',
+  'packages/just-bash/src/commands/js-exec/js-exec.invoke-tool.test.ts',
+  'packages/just-bash/src/commands/js-exec/js-exec.test.ts',
+  'packages/just-bash/src/commands/js-exec/js-exec.ts-strip.test.ts',
+  'packages/just-bash/src/commands/js-exec/js-exec.utf8-stdin.test.ts',
+];
+
+const jbc39PythonRuntimeTestFiles = [
+  'packages/just-bash/src/commands/python3/python3.advanced.test.ts',
+  'packages/just-bash/src/commands/python3/python3.env.test.ts',
+  'packages/just-bash/src/commands/python3/python3.files.test.ts',
+  'packages/just-bash/src/commands/python3/python3.http.test.ts',
+  'packages/just-bash/src/commands/python3/python3.oop.test.ts',
+  'packages/just-bash/src/commands/python3/python3.security.test.ts',
+  'packages/just-bash/src/commands/python3/python3.stdlib.test.ts',
+  'packages/just-bash/src/commands/python3/python3.test.ts',
+  'packages/just-bash/src/commands/python3/python3.utf8-stdin.test.ts',
+];
+
+const jbc39SourceGroups = [
+  {
+    files: jbc39RuntimeSourceFiles,
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::optional-language-runtimes',
+    notes:
+      'JBC-39 classifies the real QuickJS/CPython worker-backed language command implementations as JavaScript package host-runtime behavior. Rust exposes only an explicit fake/runtime-provider boundary and keeps host fallback disabled.',
+  },
+  {
+    files: jbc39PackageRuntimeSourceFiles,
+    status: 'js-only-documented',
+    owner: 'packages/just-bash::vitest-package-runtime',
+    notes:
+      'JBC-39 classifies package Vitest and WASM worker isolation configuration as JavaScript package-runtime tooling, not portable Rust runtime behavior.',
+  },
+];
+
+const jbc39CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/js-exec/js-exec.test.ts',
+    lines: [225],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::optional-language-runtimes',
+    rustTest:
+      'just_bash_optional_language_commands_fail_closed_until_backend_is_explicit; open_agents_just_bash_blocks_js_python_host_runtime_without_fallback',
+    notes:
+      'JBC-39 verifies js-exec/node remain unavailable unless an explicit Rust language backend is injected and Open Agents still does not fall back to host JavaScript runtimes.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/python3/python3.optin.test.ts',
+    lines: [13],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::optional-language-runtimes',
+    rustTest: 'just_bash_optional_language_commands_use_only_explicit_fake_backend',
+    notes:
+      'JBC-39 verifies the portable opt-in boundary with an injected fake Python backend that registers python3/python and handles --version without invoking host Python. Real CPython/WASM execution rows remain JS-only runtime behavior.',
+  },
+  {
+    file: 'packages/just-bash/src/Bash.commands.test.ts',
+    lines: [86, 106],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::custom-command-host-boundary',
+    rustTest: 'just_bash_host_runtime_custom_command_defense_rows_are_classified_nonportable',
+    notes:
+      'JBC-39 classifies trusted/untrusted JavaScript custom-command defense-in-depth rows as Node global monkey-patching behavior. Rust custom commands are trusted in-process callbacks verified separately and do not expose an untrusted JS global runtime.',
+  },
+  {
+    files: jbc39JsExecRuntimeTestFiles,
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::optional-language-runtimes',
+    rustTest: 'just_bash_optional_language_commands_use_only_explicit_fake_backend',
+    notes:
+      'JBC-39 classifies enabled js-exec execution, QuickJS ESM/TypeScript parsing, filesystem/HTTP/tool bridges, process shims, output limits, bootstrap code, and UTF-8 guest execution as JavaScript host-runtime behavior. Rust verifies only explicit backend injection and no host fallback.',
+  },
+  {
+    files: jbc39PythonRuntimeTestFiles,
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::optional-language-runtimes',
+    rustTest: 'just_bash_optional_language_commands_use_only_explicit_fake_backend',
+    notes:
+      'JBC-39 classifies enabled python3/python execution, CPython/Emscripten standard library behavior, filesystem/HTTP/env bridges, security controls, queueing, and UTF-8 guest execution as JavaScript package WASM-runtime behavior. Rust verifies only explicit backend injection and no host fallback.',
   },
 ];
 
@@ -2863,6 +2959,7 @@ function sourceOverrideFor(relativePath) {
     ...jb06SourceGroups,
     ...jbc12SourceGroups,
     ...jbc13SourceGroups,
+    ...jbc39SourceGroups,
     ...jbc31SourceGroups,
     ...jbc17SourceGroups,
     ...jbc18SourceGroups,
@@ -2875,6 +2972,7 @@ function sourceOverrideFor(relativePath) {
 
 function caseOverrideFor(testCase) {
   const group = [
+    ...jbc39CaseGroups,
     ...jbc28CaseGroups,
     ...jb06CaseGroups,
     ...jbc07CaseGroups,
