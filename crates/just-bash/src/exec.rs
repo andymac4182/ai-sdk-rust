@@ -18031,6 +18031,176 @@ mod tests {
         assert_eq!(json_from_entries(&json!([])), json!({}));
     }
 
+    fn query_safe_object(value: &JsonValue) -> Result<&JsonMap<String, JsonValue>, &'static str> {
+        match value {
+            JsonValue::Object(map) => Ok(map),
+            JsonValue::Array(_) => Err("expected object, got array"),
+            _ => Err("expected object"),
+        }
+    }
+
+    fn query_safe_object_mut(
+        value: &mut JsonValue,
+    ) -> Result<&mut JsonMap<String, JsonValue>, &'static str> {
+        match value {
+            JsonValue::Object(map) => Ok(map),
+            JsonValue::Array(_) => Err("expected object, got array"),
+            _ => Err("expected object"),
+        }
+    }
+
+    fn query_safe_get(value: &JsonValue, key: &str) -> Result<Option<JsonValue>, &'static str> {
+        let object = query_safe_object(value)?;
+        if is_safe_json_object_key(key) {
+            Ok(object.get(key).cloned())
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn query_safe_set(
+        value: &mut JsonValue,
+        key: &str,
+        next: JsonValue,
+    ) -> Result<(), &'static str> {
+        insert_json_object_key(query_safe_object_mut(value)?, key.to_string(), next);
+        Ok(())
+    }
+
+    fn query_safe_delete(value: &mut JsonValue, key: &str) -> Result<(), &'static str> {
+        let object = query_safe_object_mut(value)?;
+        if is_safe_json_object_key(key) {
+            object.remove(key);
+        }
+        Ok(())
+    }
+
+    fn query_safe_assign<'a>(
+        target: &'a mut JsonValue,
+        source: &JsonValue,
+    ) -> Result<&'a mut JsonValue, &'static str> {
+        let source = query_safe_object(source)?;
+        let target_object = query_safe_object_mut(target)?;
+        for (key, value) in source {
+            insert_json_object_key(target_object, key.clone(), value.clone());
+        }
+        Ok(target)
+    }
+
+    fn query_safe_copy(source: &JsonValue) -> Result<JsonValue, &'static str> {
+        let mut target = JsonMap::new();
+        for (key, value) in query_safe_object(source)? {
+            insert_json_object_key(&mut target, key.clone(), value.clone());
+        }
+        Ok(JsonValue::Object(target))
+    }
+
+    fn query_safe_has_own(value: &JsonValue, key: &str) -> Result<bool, &'static str> {
+        Ok(query_safe_object(value)?.contains_key(key) && is_safe_json_object_key(key))
+    }
+
+    #[test]
+    fn structured_data_jbc44_query_engine_safe_object_rows() {
+        let object = json!({"a": 1, "b": "test"});
+        assert_eq!(query_safe_get(&object, "a").unwrap(), Some(json!(1)));
+        assert_eq!(query_safe_get(&object, "b").unwrap(), Some(json!("test")));
+        assert_eq!(query_safe_get(&object, "missing").unwrap(), None);
+
+        let mut dangerous = JsonMap::new();
+        dangerous.insert("__proto__".to_string(), json!("polluted"));
+        dangerous.insert("safe".to_string(), json!("ok"));
+        let dangerous = JsonValue::Object(dangerous);
+        assert_eq!(query_safe_get(&dangerous, "__proto__").unwrap(), None);
+        assert_eq!(
+            query_safe_get(&dangerous, "safe").unwrap(),
+            Some(json!("ok"))
+        );
+
+        let array = json!([]);
+        assert_eq!(
+            query_safe_get(&array, "0").unwrap_err(),
+            "expected object, got array"
+        );
+        assert_eq!(
+            query_safe_has_own(&array, "length").unwrap_err(),
+            "expected object, got array"
+        );
+
+        let mut set_target = json!({});
+        query_safe_set(&mut set_target, "a", json!(1)).unwrap();
+        query_safe_set(&mut set_target, "b", json!("test")).unwrap();
+        query_safe_set(&mut set_target, "__proto__", json!("polluted")).unwrap();
+        query_safe_set(&mut set_target, "constructor", json!("polluted")).unwrap();
+        query_safe_set(&mut set_target, "prototype", json!("polluted")).unwrap();
+        assert_eq!(set_target, json!({"a": 1, "b": "test"}));
+
+        let mut delete_target = json!({"a": 1, "b": 2});
+        query_safe_delete(&mut delete_target, "a").unwrap();
+        query_safe_delete(&mut delete_target, "__proto__").unwrap();
+        query_safe_delete(&mut delete_target, "constructor").unwrap();
+        assert_eq!(delete_target, json!({"b": 2}));
+
+        let mut assign_source = JsonMap::new();
+        assign_source.insert("b".to_string(), json!(2));
+        assign_source.insert("c".to_string(), json!(3));
+        assign_source.insert("__proto__".to_string(), json!("polluted"));
+        let mut assign_target = json!({"a": 1});
+        let target_ptr = std::ptr::from_ref(&assign_target);
+        let result_ptr = std::ptr::from_ref(
+            query_safe_assign(&mut assign_target, &JsonValue::Object(assign_source)).unwrap(),
+        );
+        assert_eq!(target_ptr, result_ptr);
+        assert_eq!(assign_target, json!({"a": 1, "b": 2, "c": 3}));
+
+        let mut copy_source = JsonMap::new();
+        copy_source.insert("a".to_string(), json!(1));
+        copy_source.insert("__proto_key__".to_string(), json!("safe"));
+        copy_source.insert("toString".to_string(), json!("filtered"));
+        let copied = query_safe_copy(&JsonValue::Object(copy_source)).unwrap();
+        assert_eq!(copied, json!({"a": 1, "__proto_key__": "safe"}));
+
+        assert!(query_safe_has_own(&json!({"a": 1}), "a").unwrap());
+        assert!(!query_safe_has_own(&json!({"a": 1}), "b").unwrap());
+        assert!(!query_safe_has_own(&json!({"own": true}), "toString").unwrap());
+        assert!(!query_safe_has_own(&json!({"own": true}), "hasOwnProperty").unwrap());
+
+        let mut array_set = json!([]);
+        assert_eq!(
+            query_safe_set(&mut array_set, "0", json!(1)).unwrap_err(),
+            "expected object, got array"
+        );
+        let mut array_delete = json!([]);
+        assert_eq!(
+            query_safe_delete(&mut array_delete, "0").unwrap_err(),
+            "expected object, got array"
+        );
+
+        let mut pollution_target = json!({});
+        query_safe_set(
+            &mut pollution_target,
+            "__proto__",
+            json!({"polluted": true}),
+        )
+        .unwrap();
+        let pollution_entries = json!([{"key": "__proto__", "value": {"polluted": true}}]);
+        assert_eq!(json_from_entries(&pollution_entries), json!({}));
+        let mut pollution_source = JsonMap::new();
+        pollution_source.insert("__proto__".to_string(), json!({"polluted": true}));
+        query_safe_assign(&mut pollution_target, &JsonValue::Object(pollution_source)).unwrap();
+        assert_eq!(pollution_target, json!({}));
+
+        let mut chained = json_from_entries(&json!([
+            {"key": "a", "value": 1},
+            {"key": "__proto__", "value": 999},
+            {"key": "b", "value": 2}
+        ]));
+        query_safe_set(&mut chained, "c", json!(3)).unwrap();
+        query_safe_set(&mut chained, "constructor", json!(999)).unwrap();
+        query_safe_delete(&mut chained, "a").unwrap();
+        query_safe_assign(&mut chained, &json!({"d": 4, "prototype": 999})).unwrap();
+        assert_eq!(chained, json!({"b": 2, "c": 3, "d": 4}));
+    }
+
     #[test]
     fn just_bash_core_stdout_stderr_status_redirection_and_chaining() {
         let bash = JustBashSession::with_options(

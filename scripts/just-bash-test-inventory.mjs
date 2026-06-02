@@ -3339,6 +3339,30 @@ const jbc37CaseGroups = [
   },
 ];
 
+const jbc44CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/query-engine/safe-object.test.ts',
+    lines: [
+      74, 80, 91, 101, 109, 142, 148, 192, 211, 241, 255, 260, 265, 279,
+      287, 291, 295, 299, 305, 331,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jbc44_query_engine_safe_object_rows',
+    notes:
+      'JBC-44 verifies portable query-engine safe-object get/set/delete/assign/copy/has-own semantics over Rust serde_json maps, including dangerous-key filtering, missing keys, array rejection, same-target assignment, and chained updates.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/query-engine/safe-object.test.ts',
+    lines: [96, 134, 155, 218, 224, 232, 273],
+    status: 'js-only-documented',
+    owner: 'docs/just-bash::query-engine-js-object-sanitizer',
+    rustTest: 'js-only-documented',
+    notes:
+      'JBC-44 documents these rows as JavaScript object prototype or reference-identity guard behavior; Rust serde_json maps have no JS prototype chain or nested object identity to validate.',
+  },
+];
+
 const jbc38CaseGroups = [
   {
     files: [
@@ -3526,6 +3550,7 @@ function caseOverrideFor(testCase) {
     ...jbc30AgentExampleCaseGroups,
     ...jbc33CaseGroups,
     ...jbc37CaseGroups,
+    ...jbc44CaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&
