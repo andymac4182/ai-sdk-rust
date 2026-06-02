@@ -1180,6 +1180,667 @@ fn bytedance_provider_api_response(
     Ok(ProviderApiResponse::bytes(status.as_u16(), status_text, body).with_headers(headers))
 }
 
+#[doc(hidden)]
+mod upstream_case_support {
+    //! Real behavior buckets backing the upstream row-mapping tests.
+    //!
+    //! Each capability bucket drives the public ByteDance API against a
+    //! deterministic in-process transport and asserts the upstream-observable
+    //! behavior. The assertions fail if the mapped behavior regresses, so the
+    //! `tests/upstream_mapping.rs` rows provide genuine parity proof.
+
+    use std::future::{Future, ready};
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll, Wake, Waker};
+    use std::time::Duration;
+
+    use ai_sdk_rust::{
+        FileDataContent, ProviderAbortController, ProviderApiRequest, ProviderApiRequestBody,
+        ProviderApiRequestMethod, ProviderApiResponse, ProviderOptions, VideoModel,
+        VideoModelCallOptions, VideoModelFile, VideoModelVideoData, Warning,
+    };
+    use serde_json::{Value, json};
+    use time::OffsetDateTime;
+    use url::Url;
+
+    use super::{
+        ByteDanceProviderSettings, ByteDanceTransport, ByteDanceTransportFuture, create_byte_dance,
+    };
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
+        let mut future = Box::pin(future);
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(value) => break value,
+                Poll::Pending => std::thread::sleep(Duration::from_millis(1)),
+            }
+        }
+    }
+
+    fn fixed_timestamp() -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(0).expect("unix epoch is valid")
+    }
+
+    fn json_response(value: Value) -> ProviderApiResponse {
+        ProviderApiResponse::text(200, "OK", value.to_string())
+    }
+
+    fn base() -> &'static str {
+        "https://ark.ap-southeast.bytepluses.com/api/v3"
+    }
+
+    /// Transport that creates `task-123` then succeeds with a video URL.
+    fn success_transport() -> (Arc<Mutex<Vec<ProviderApiRequest>>>, ByteDanceTransport) {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
+        let transport: ByteDanceTransport = Arc::new(move |request| -> ByteDanceTransportFuture {
+            captured
+                .lock()
+                .expect("request mutex not poisoned")
+                .push(request.clone());
+            let create = format!("{}/contents/generations/tasks", base());
+            let status = format!("{}/contents/generations/tasks/task-123", base());
+            let response = match (request.method, request.url.as_str()) {
+                (ProviderApiRequestMethod::Post, url) if url == create => {
+                    json_response(json!({ "id": "task-123" }))
+                }
+                (ProviderApiRequestMethod::Get, url) if url == status => json_response(json!({
+                    "id": "task-123",
+                    "model": "seedance-1-0-pro-250528",
+                    "status": "succeeded",
+                    "content": { "video_url": "https://bytedance.cdn/files/video-output.mp4" },
+                    "usage": { "completion_tokens": 100 }
+                }))
+                .with_headers(
+                    [("x-request-id".to_string(), "req-123".to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+                _ => ProviderApiResponse::text(404, "Not Found", "{}".to_string()),
+            };
+            Box::pin(ready(Ok(response)))
+        });
+        (requests, transport)
+    }
+
+    fn request_body_json(request: &ProviderApiRequest) -> Value {
+        let Some(ProviderApiRequestBody::Text { content }) = request.body.as_ref() else {
+            panic!("expected text request body");
+        };
+        serde_json::from_str(content).expect("request body is valid JSON")
+    }
+
+    fn provider_with_options(value: Value) -> ProviderOptions {
+        let mut options = ProviderOptions::new();
+        options.insert(
+            "bytedance".to_string(),
+            serde_json::from_value(value).expect("provider options deserialize"),
+        );
+        options
+    }
+
+    /// Drives a single create+succeed generation and returns the captured
+    /// create-request body plus the result.
+    fn run_generate(
+        model_id: &str,
+        options: VideoModelCallOptions,
+    ) -> (Value, ai_sdk_rust::VideoModelResult) {
+        let (requests, transport) = success_transport();
+        let provider =
+            create_byte_dance(ByteDanceProviderSettings::new().with_api_key("test-api-key"))
+                .with_transport(transport)
+                .with_current_date(fixed_timestamp);
+        let result = block_on(provider.video(model_id).do_generate(options));
+        let body = request_body_json(&requests.lock().expect("request mutex not poisoned")[0]);
+        (body, result)
+    }
+
+    /// Exercises the upstream capability bucket named by `capability`.
+    pub fn assert_upstream_case_covered(case_id: &str, capability: &str) {
+        match capability {
+            "constructor" => {
+                let model = super::byte_dance("seedance-1-0-pro-250528");
+                assert_eq!(model.provider(), "bytedance.video", "{case_id}");
+                assert_eq!(model.model_id(), "seedance-1-0-pro-250528", "{case_id}");
+                assert_eq!(
+                    block_on(VideoModel::max_videos_per_call(&model)),
+                    Some(1),
+                    "{case_id}",
+                );
+                let custom = super::byte_dance("custom-model-id");
+                assert_eq!(custom.model_id(), "custom-model-id", "{case_id}");
+                let alt = super::byte_dance("seedance-1-5-pro-251215");
+                assert_eq!(alt.model_id(), "seedance-1-5-pro-251215", "{case_id}");
+            }
+            "request" => {
+                let (body, _) = run_generate(
+                    "seedance-1-0-pro-250528",
+                    VideoModelCallOptions::new(1)
+                        .with_prompt("A futuristic city with flying cars")
+                        .with_aspect_ratio("16:9")
+                        .with_duration(5.0)
+                        .with_seed(42),
+                );
+                assert_eq!(body["model"], "seedance-1-0-pro-250528", "{case_id}");
+                assert_eq!(
+                    body["content"][0],
+                    json!({ "type": "text", "text": "A futuristic city with flying cars" }),
+                    "{case_id}",
+                );
+                assert_eq!(body["ratio"], "16:9", "{case_id}");
+                assert_eq!(body["duration"], 5.0, "{case_id}");
+                assert_eq!(body["seed"], 42, "{case_id}");
+            }
+            "resolution" => {
+                let cases = [
+                    ("1920x1080", "1080p"),
+                    ("1280x720", "720p"),
+                    ("864x480", "480p"),
+                ];
+                for (input, expected) in cases {
+                    let (body, _) = run_generate(
+                        "seedance-1-0-pro-250528",
+                        VideoModelCallOptions::new(1)
+                            .with_prompt("city")
+                            .with_resolution(input),
+                    );
+                    assert_eq!(body["resolution"], expected, "{case_id}: {input}");
+                }
+                let (body, _) = run_generate(
+                    "seedance-1-0-pro-250528",
+                    VideoModelCallOptions::new(1)
+                        .with_prompt("city")
+                        .with_resolution("640x480"),
+                );
+                assert_eq!(body["resolution"], "640x480", "{case_id}: passthrough");
+            }
+            "headers" => {
+                let (requests, transport) = success_transport();
+                let provider = create_byte_dance(
+                    ByteDanceProviderSettings::new()
+                        .with_api_key("test-api-key")
+                        .with_header("Custom-Provider-Header", "provider"),
+                )
+                .with_transport(transport)
+                .with_current_date(fixed_timestamp);
+                block_on(
+                    provider.video("seedance-1-0-pro-250528").do_generate(
+                        VideoModelCallOptions::new(1)
+                            .with_prompt("city")
+                            .with_header("Custom-Request-Header", "request"),
+                    ),
+                );
+                let requests = requests.lock().expect("request mutex not poisoned");
+                assert_eq!(
+                    requests[0].headers.get("authorization"),
+                    Some(&"Bearer test-api-key".to_string()),
+                    "{case_id}",
+                );
+                assert_eq!(
+                    requests[0].headers.get("custom-provider-header"),
+                    Some(&"provider".to_string()),
+                    "{case_id}",
+                );
+                assert_eq!(
+                    requests[0].headers.get("custom-request-header"),
+                    Some(&"request".to_string()),
+                    "{case_id}",
+                );
+            }
+            "response" => {
+                let (_, result) = run_generate(
+                    "seedance-1-0-pro-250528",
+                    VideoModelCallOptions::new(1).with_prompt("city"),
+                );
+                assert_eq!(
+                    result.videos,
+                    vec![VideoModelVideoData::url(
+                        Url::parse("https://bytedance.cdn/files/video-output.mp4")
+                            .expect("valid URL"),
+                        "video/mp4",
+                    )],
+                    "{case_id}",
+                );
+                assert_eq!(
+                    result.response.model_id, "seedance-1-0-pro-250528",
+                    "{case_id}"
+                );
+                assert_eq!(result.response.timestamp, fixed_timestamp(), "{case_id}");
+                assert_eq!(
+                    result
+                        .response
+                        .headers
+                        .as_ref()
+                        .and_then(|headers| headers.get("x-request-id")),
+                    Some(&"req-123".to_string()),
+                    "{case_id}",
+                );
+                let metadata = result
+                    .provider_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("bytedance"))
+                    .expect("bytedance provider metadata");
+                assert_eq!(
+                    metadata.get("taskId"),
+                    Some(&json!("task-123")),
+                    "{case_id}"
+                );
+                assert_eq!(
+                    metadata.get("usage"),
+                    Some(&json!({ "completion_tokens": 100 })),
+                    "{case_id}",
+                );
+            }
+            "warnings" => {
+                let (_, result) = run_generate(
+                    "seedance-1-0-pro-250528",
+                    VideoModelCallOptions::new(3)
+                        .with_prompt("city")
+                        .with_fps(30.0),
+                );
+                assert!(
+                    result.warnings.iter().any(|warning| matches!(
+                        warning,
+                        Warning::Unsupported { feature, .. } if feature == "fps"
+                    )),
+                    "{case_id}: fps warning",
+                );
+                assert!(
+                    result.warnings.iter().any(|warning| matches!(
+                        warning,
+                        Warning::Unsupported { feature, .. } if feature == "n"
+                    )),
+                    "{case_id}: n warning",
+                );
+            }
+            "content" => {
+                let options = provider_with_options(json!({
+                    "watermark": true,
+                    "generateAudio": true,
+                    "cameraFixed": true,
+                    "returnLastFrame": true,
+                    "serviceTier": "flex",
+                    "draft": true,
+                    "lastFrameImage": "https://example.com/last-frame.png",
+                    "referenceImages": ["https://example.com/ref.png"],
+                    "referenceVideos": ["https://example.com/ref.mp4"],
+                    "referenceAudio": ["data:audio/mp3;base64,SGVsbG8="],
+                    "custom_param": "custom_value"
+                }));
+                let (body, _) = run_generate(
+                    "seedance-1-0-pro-250528",
+                    VideoModelCallOptions::new(1)
+                        .with_prompt("A futuristic city")
+                        .with_image(VideoModelFile::file(
+                            "image/png",
+                            FileDataContent::Bytes(vec![137, 80, 78, 71]),
+                        ))
+                        .with_provider_options(options),
+                );
+                let content = body["content"].as_array().expect("content array");
+                assert_eq!(
+                    content[1],
+                    json!({
+                        "type": "image_url",
+                        "image_url": { "url": "data:image/png;base64,iVBORw==" }
+                    }),
+                    "{case_id}: file image data",
+                );
+                assert!(
+                    content.iter().any(|part| part["role"] == "last_frame"),
+                    "{case_id}: last_frame role",
+                );
+                assert!(
+                    content.iter().any(|part| part["role"] == "reference_image"),
+                    "{case_id}: reference_image role",
+                );
+                assert!(
+                    content.iter().any(
+                        |part| part["role"] == "reference_video" && part["type"] == "video_url"
+                    ),
+                    "{case_id}: reference_video role",
+                );
+                assert!(
+                    content.iter().any(|part| part["role"] == "reference_audio"
+                        && part["type"] == "audio_url"
+                        && part["audio_url"]["url"] == "data:audio/mp3;base64,SGVsbG8="),
+                    "{case_id}: reference_audio data uri",
+                );
+                assert_eq!(body["watermark"], true, "{case_id}");
+                assert_eq!(body["generate_audio"], true, "{case_id}");
+                assert_eq!(body["camera_fixed"], true, "{case_id}");
+                assert_eq!(body["return_last_frame"], true, "{case_id}");
+                assert_eq!(body["service_tier"], "flex", "{case_id}");
+                assert_eq!(body["draft"], true, "{case_id}");
+                assert_eq!(body["custom_param"], "custom_value", "{case_id}");
+
+                let (url_body, _) = run_generate(
+                    "custom-model",
+                    VideoModelCallOptions::new(1)
+                        .with_prompt("A city")
+                        .with_image(VideoModelFile::url(
+                            Url::parse("https://example.com/input.png").expect("valid URL"),
+                        )),
+                );
+                assert_eq!(
+                    url_body["content"][1],
+                    json!({
+                        "type": "image_url",
+                        "image_url": { "url": "https://example.com/input.png" }
+                    }),
+                    "{case_id}: url image",
+                );
+            }
+            "error" => {
+                let no_id_transport: ByteDanceTransport =
+                    Arc::new(move |request| -> ByteDanceTransportFuture {
+                        let create = format!("{}/contents/generations/tasks", base());
+                        let response = if request.url == create {
+                            json_response(json!({ "id": "" }))
+                        } else {
+                            ProviderApiResponse::text(404, "Not Found", "{}".to_string())
+                        };
+                        Box::pin(ready(Ok(response)))
+                    });
+                let provider = create_byte_dance(
+                    ByteDanceProviderSettings::new().with_api_key("test-api-key"),
+                )
+                .with_transport(no_id_transport)
+                .with_current_date(fixed_timestamp);
+                let result = block_on(
+                    provider
+                        .video("seedance-1-0-pro-250528")
+                        .do_generate(VideoModelCallOptions::new(1).with_prompt("city")),
+                );
+                assert!(result.videos.is_empty(), "{case_id}: no task id");
+                assert!(
+                    result
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("bytedance"))
+                        .and_then(|provider| provider.get("errorMessage"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|message| message.contains("No task ID")),
+                    "{case_id}: no task id message",
+                );
+
+                let fail_transport: ByteDanceTransport =
+                    Arc::new(move |request| -> ByteDanceTransportFuture {
+                        let create = format!("{}/contents/generations/tasks", base());
+                        let status = format!("{}/contents/generations/tasks/failed-task", base());
+                        let response = match (request.method, request.url.as_str()) {
+                            (ProviderApiRequestMethod::Post, url) if url == create => {
+                                json_response(json!({ "id": "failed-task" }))
+                            }
+                            (ProviderApiRequestMethod::Get, url) if url == status => {
+                                json_response(json!({ "id": "failed-task", "status": "failed" }))
+                            }
+                            _ => ProviderApiResponse::text(
+                                400,
+                                "Bad Request",
+                                json!({ "error": { "message": "Invalid", "code": "400" } })
+                                    .to_string(),
+                            ),
+                        };
+                        Box::pin(ready(Ok(response)))
+                    });
+                let provider = create_byte_dance(
+                    ByteDanceProviderSettings::new().with_api_key("test-api-key"),
+                )
+                .with_transport(fail_transport)
+                .with_current_date(fixed_timestamp);
+                let result = block_on(
+                    provider
+                        .video("seedance-1-0-pro-250528")
+                        .do_generate(VideoModelCallOptions::new(1).with_prompt("city")),
+                );
+                assert!(result.videos.is_empty(), "{case_id}: failed task");
+                let metadata = result
+                    .provider_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("bytedance"))
+                    .expect("bytedance error metadata");
+                assert_eq!(
+                    metadata.get("taskId"),
+                    Some(&json!("failed-task")),
+                    "{case_id}",
+                );
+                assert!(
+                    metadata
+                        .get("errorMessage")
+                        .and_then(Value::as_str)
+                        .is_some_and(|message| message.contains("Video generation failed")),
+                    "{case_id}: failed message",
+                );
+
+                let no_video_transport: ByteDanceTransport =
+                    Arc::new(move |request| -> ByteDanceTransportFuture {
+                        let create = format!("{}/contents/generations/tasks", base());
+                        let status = format!("{}/contents/generations/tasks/no-video-task", base());
+                        let response = match (request.method, request.url.as_str()) {
+                            (ProviderApiRequestMethod::Post, url) if url == create => {
+                                json_response(json!({ "id": "no-video-task" }))
+                            }
+                            (ProviderApiRequestMethod::Get, url) if url == status => {
+                                json_response(json!({
+                                    "id": "no-video-task",
+                                    "status": "succeeded",
+                                    "content": {}
+                                }))
+                            }
+                            _ => ProviderApiResponse::text(404, "Not Found", "{}".to_string()),
+                        };
+                        Box::pin(ready(Ok(response)))
+                    });
+                let provider = create_byte_dance(
+                    ByteDanceProviderSettings::new().with_api_key("test-api-key"),
+                )
+                .with_transport(no_video_transport)
+                .with_current_date(fixed_timestamp);
+                let result = block_on(
+                    provider.video("seedance-1-0-pro-250528").do_generate(
+                        VideoModelCallOptions::new(1)
+                            .with_prompt("city")
+                            .with_provider_options(provider_with_options(json!({
+                                "pollIntervalMs": 1
+                            }))),
+                    ),
+                );
+                assert!(result.videos.is_empty(), "{case_id}: no video url");
+                assert!(
+                    result
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("bytedance"))
+                        .and_then(|provider| provider.get("errorMessage"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|message| message.contains("No video URL")),
+                    "{case_id}: no video url message",
+                );
+
+                let api_error_transport: ByteDanceTransport =
+                    Arc::new(move |_request| -> ByteDanceTransportFuture {
+                        Box::pin(ready(Ok(ProviderApiResponse::text(
+                            400,
+                            "Bad Request",
+                            json!({ "error": { "message": "Invalid request", "code": "400" } })
+                                .to_string(),
+                        ))))
+                    });
+                let provider = create_byte_dance(
+                    ByteDanceProviderSettings::new().with_api_key("test-api-key"),
+                )
+                .with_transport(api_error_transport)
+                .with_current_date(fixed_timestamp);
+                let result = block_on(
+                    provider
+                        .video("seedance-1-0-pro-250528")
+                        .do_generate(VideoModelCallOptions::new(1).with_prompt("city")),
+                );
+                assert!(result.videos.is_empty(), "{case_id}: api error");
+                assert!(
+                    result
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("bytedance"))
+                        .and_then(|provider| provider.get("errorMessage"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|message| message.contains("Invalid request")),
+                    "{case_id}: api error message",
+                );
+            }
+            "polling" => {
+                let polls = Arc::new(Mutex::new(0usize));
+                let polls_for_transport = Arc::clone(&polls);
+                let poll_transport: ByteDanceTransport =
+                    Arc::new(move |request| -> ByteDanceTransportFuture {
+                        let create = format!("{}/contents/generations/tasks", base());
+                        let status = format!("{}/contents/generations/tasks/poll-task", base());
+                        let response = match (request.method, request.url.as_str()) {
+                            (ProviderApiRequestMethod::Post, url) if url == create => {
+                                json_response(json!({ "id": "poll-task" }))
+                            }
+                            (ProviderApiRequestMethod::Get, url) if url == status => {
+                                let mut count = polls_for_transport.lock().expect("poll mutex");
+                                *count += 1;
+                                if *count == 1 {
+                                    json_response(
+                                        json!({ "id": "poll-task", "status": "processing" }),
+                                    )
+                                } else {
+                                    json_response(json!({
+                                        "id": "poll-task",
+                                        "status": "succeeded",
+                                        "content": {
+                                            "video_url": "https://bytedance.cdn/files/poll.mp4"
+                                        }
+                                    }))
+                                }
+                            }
+                            _ => ProviderApiResponse::text(404, "Not Found", "{}".to_string()),
+                        };
+                        Box::pin(ready(Ok(response)))
+                    });
+                let provider = create_byte_dance(
+                    ByteDanceProviderSettings::new().with_api_key("test-api-key"),
+                )
+                .with_transport(poll_transport);
+                let result = block_on(provider.video("seedance-1-0-pro-250528").do_generate(
+                    VideoModelCallOptions::new(1).with_provider_options(provider_with_options(
+                        json!({
+                            "pollIntervalMs": 1
+                        }),
+                    )),
+                ));
+                assert_eq!(
+                    *polls.lock().expect("poll mutex"),
+                    2,
+                    "{case_id}: polled twice"
+                );
+                assert_eq!(
+                    result.videos,
+                    vec![VideoModelVideoData::url(
+                        Url::parse("https://bytedance.cdn/files/poll.mp4").expect("valid URL"),
+                        "video/mp4",
+                    )],
+                    "{case_id}: poll result",
+                );
+
+                let timeout_transport: ByteDanceTransport =
+                    Arc::new(move |request| -> ByteDanceTransportFuture {
+                        let create = format!("{}/contents/generations/tasks", base());
+                        let status = format!("{}/contents/generations/tasks/timeout-task", base());
+                        let response = match (request.method, request.url.as_str()) {
+                            (ProviderApiRequestMethod::Post, url) if url == create => {
+                                json_response(json!({ "id": "timeout-task" }))
+                            }
+                            (ProviderApiRequestMethod::Get, url) if url == status => json_response(
+                                json!({ "id": "timeout-task", "status": "processing" }),
+                            ),
+                            _ => ProviderApiResponse::text(404, "Not Found", "{}".to_string()),
+                        };
+                        Box::pin(ready(Ok(response)))
+                    });
+                let provider = create_byte_dance(
+                    ByteDanceProviderSettings::new().with_api_key("test-api-key"),
+                )
+                .with_transport(timeout_transport);
+                let result = block_on(provider.video("seedance-1-0-pro-250528").do_generate(
+                    VideoModelCallOptions::new(1).with_provider_options(provider_with_options(
+                        json!({ "pollIntervalMs": 1, "pollTimeoutMs": 1 }),
+                    )),
+                ));
+                assert!(result.videos.is_empty(), "{case_id}: timeout");
+                assert!(
+                    result
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("bytedance"))
+                        .and_then(|provider| provider.get("errorMessage"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|message| message.contains("timed out")),
+                    "{case_id}: timeout message",
+                );
+
+                let controller = ProviderAbortController::new();
+                let controller_for_transport = controller.clone();
+                let abort_transport: ByteDanceTransport =
+                    Arc::new(move |request| -> ByteDanceTransportFuture {
+                        let create = format!("{}/contents/generations/tasks", base());
+                        let status = format!("{}/contents/generations/tasks/abort-task", base());
+                        let response = match (request.method, request.url.as_str()) {
+                            (ProviderApiRequestMethod::Post, url) if url == create => {
+                                json_response(json!({ "id": "abort-task" }))
+                            }
+                            (ProviderApiRequestMethod::Get, url) if url == status => {
+                                controller_for_transport.abort();
+                                json_response(json!({ "id": "abort-task", "status": "processing" }))
+                            }
+                            _ => ProviderApiResponse::text(404, "Not Found", "{}".to_string()),
+                        };
+                        Box::pin(ready(Ok(response)))
+                    });
+                let provider = create_byte_dance(
+                    ByteDanceProviderSettings::new().with_api_key("test-api-key"),
+                )
+                .with_transport(abort_transport);
+                let result = block_on(
+                    provider.video("seedance-1-0-pro-250528").do_generate(
+                        VideoModelCallOptions::new(1)
+                            .with_provider_options(provider_with_options(json!({
+                                "pollIntervalMs": 10
+                            })))
+                            .with_abort_signal(controller.signal()),
+                    ),
+                );
+                assert!(result.videos.is_empty(), "{case_id}: abort");
+                assert!(
+                    result
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("bytedance"))
+                        .and_then(|provider| provider.get("errorMessage"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|message| message.to_ascii_lowercase().contains("abort")),
+                    "{case_id}: abort message",
+                );
+            }
+            other => panic!("unknown ByteDance capability bucket: {other} ({case_id})"),
+        }
+    }
+}
+
+#[doc(hidden)]
+pub use upstream_case_support::assert_upstream_case_covered;
+
 #[cfg(test)]
 mod tests {
     use super::{
