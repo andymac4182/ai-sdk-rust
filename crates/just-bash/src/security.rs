@@ -1429,9 +1429,11 @@ pub enum UpstreamRuntimeSurface {
     CoreSecurity,
     BrowserBundle,
     NodeWorker,
+    JavaScriptNodeCompat,
     QuickJs,
     PythonWasm,
     SqliteWasm,
+    WorkerBridge,
     WasmCallback,
 }
 
@@ -1464,6 +1466,12 @@ pub fn classify_runtime_surface(surface: UpstreamRuntimeSurface) -> RuntimePorta
             reason: "Node worker protocol and AsyncLocalStorage monkey-patching are host-runtime behavior"
                 .to_string(),
         },
+        UpstreamRuntimeSurface::JavaScriptNodeCompat => RuntimePortability {
+            surface,
+            portable_to_rust_backend: false,
+            reason: "Node.js compatibility shims for js-exec require the optional JavaScript worker runtime"
+                .to_string(),
+        },
         UpstreamRuntimeSurface::QuickJs => RuntimePortability {
             surface,
             portable_to_rust_backend: false,
@@ -1482,11 +1490,42 @@ pub fn classify_runtime_surface(surface: UpstreamRuntimeSurface) -> RuntimePorta
             reason: "sql.js worker behavior is an optional WASM runtime"
                 .to_string(),
         },
+        UpstreamRuntimeSurface::WorkerBridge => RuntimePortability {
+            surface,
+            portable_to_rust_backend: false,
+            reason: "SharedArrayBuffer and Atomics worker bridge mechanics are specific to the JavaScript package"
+                .to_string(),
+        },
         UpstreamRuntimeSurface::WasmCallback => RuntimePortability {
             surface,
             portable_to_rust_backend: false,
             reason: "WASM callback bridge behavior is runtime-specific to the JavaScript package"
                 .to_string(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn just_bash_runtime_bridge_surfaces_are_classified_nonportable() {
+        let surfaces = [
+            UpstreamRuntimeSurface::JavaScriptNodeCompat,
+            UpstreamRuntimeSurface::NodeWorker,
+            UpstreamRuntimeSurface::PythonWasm,
+            UpstreamRuntimeSurface::WorkerBridge,
+        ];
+
+        for surface in surfaces {
+            let portability = classify_runtime_surface(surface);
+            assert_eq!(portability.surface, surface);
+            assert!(!portability.portable_to_rust_backend);
+            assert!(
+                portability.reason.contains("runtime")
+                    || portability.reason.contains("worker bridge")
+            );
+        }
     }
 }

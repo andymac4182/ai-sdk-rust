@@ -273,6 +273,25 @@ const jb06RuntimeOnlyTestFiles = [
   'packages/just-bash/src/security/worker-defense-in-depth.test.ts',
 ];
 
+const jbc28RuntimeOnlySourceFiles = [
+  'packages/just-bash/src/commands/js-exec/fetch-polyfill.ts',
+  'packages/just-bash/src/commands/js-exec/module-shims.ts',
+  'packages/just-bash/src/commands/js-exec/path-polyfill.ts',
+  'packages/just-bash/src/commands/worker-bridge/bridge-handler.ts',
+  'packages/just-bash/src/commands/worker-bridge/protocol.ts',
+  'packages/just-bash/src/commands/worker-bridge/sync-backend.ts',
+];
+
+const jbc28JsRuntimeOnlyTestFiles = [
+  'packages/just-bash/src/commands/js-exec/js-exec.exec.test.ts',
+  'packages/just-bash/src/commands/js-exec/js-exec.node-compat.test.ts',
+  'packages/just-bash/src/commands/python3/fs-bridge-handler.output-limit.test.ts',
+  'packages/just-bash/src/commands/worker-bridge/bridge-handler.test.ts',
+  'packages/just-bash/src/security/attacks/js-exec-exploit-regression.test.ts',
+  'packages/just-bash/src/security/attacks/js-exec-host-runtime-breakout-probes.test.ts',
+  'packages/just-bash/src/security/attacks/js-exec-recursion-guard-bypass.test.ts',
+];
+
 const jbc14JsDefenseSourceFiles = [
   'packages/just-bash/src/security/blocked-globals.ts',
   'packages/just-bash/src/security/defense-context.ts',
@@ -336,6 +355,13 @@ const jb06SourceGroups = [
     owner: 'crates/just-bash::security::runtime-classification',
     notes:
       'JB-06 classifies this optional JS/worker/WASM runtime source as not part of the portable Rust backend; portable network, limits, redaction, and diagnostics are mapped separately.',
+  },
+  {
+    files: jbc28RuntimeOnlySourceFiles,
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::security::runtime-classification',
+    notes:
+      'JBC-28 classifies JavaScript polyfill, Node compatibility, and SharedArrayBuffer worker bridge source as optional JavaScript host-runtime behavior; Rust keeps the optional runtime absent and verifies no host fallback separately.',
   },
 ];
 
@@ -1392,6 +1418,47 @@ const jbc16CaseGroups = [
   },
 ];
 
+const jbc28CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/python3/python3.optin.test.ts',
+    lines: [5, 24],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::optional-runtimes',
+    rustTest:
+      'just_bash_optional_js_python_commands_fail_closed_without_host_runtime; open_agents_just_bash_blocks_js_python_host_runtime_without_fallback',
+    notes:
+      'JBC-28 verifies python3/python remain unavailable by default in the Rust and Open Agents Just Bash backends and fail closed without invoking host Python. The python-enabled row remains pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/js-exec/js-exec.security.test.ts',
+    lines: [33, 51],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::optional-runtimes',
+    rustTest:
+      'just_bash_optional_js_python_commands_fail_closed_without_host_runtime; open_agents_just_bash_blocks_js_python_host_runtime_without_fallback',
+    notes:
+      'JBC-28 verifies js-exec/node remain unavailable in the Rust and Open Agents Just Bash backends and fail closed without invoking a host JavaScript runtime.',
+  },
+  {
+    file: 'packages/just-bash/src/security/attacks/js-exec-host-runtime-breakout-probes.test.ts',
+    lines: [76, 103],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::optional-runtimes',
+    rustTest:
+      'just_bash_optional_js_python_commands_fail_closed_without_host_runtime; open_agents_just_bash_blocks_js_python_host_runtime_without_fallback',
+    notes:
+      'JBC-28 verifies node, path-qualified node/python, and env-wrapped host runtime probes fail closed in Rust/Open Agents Just Bash without writing host markers or spawning a host shell.',
+  },
+  {
+    files: jbc28JsRuntimeOnlyTestFiles,
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::security::runtime-classification',
+    rustTest: 'just_bash_runtime_bridge_surfaces_are_classified_nonportable',
+    notes:
+      'JBC-28 classifies QuickJS child_process, Node compatibility shims, Python/worker bridge output limits, and JS worker attack-regression rows as optional JavaScript host-runtime behavior. Rust keeps the optional runtime absent; portable host-fallback probes are mapped separately.',
+  },
+];
+
 const jbc17ExecutorJsOnlySourceFiles = [
   'packages/just-bash-executor/src/create-executor.ts',
   'packages/just-bash-executor/src/executor-discovery-plugin.ts',
@@ -2306,6 +2373,7 @@ function sourceOverrideFor(relativePath) {
 
 function caseOverrideFor(testCase) {
   const group = [
+    ...jbc28CaseGroups,
     ...jb06CaseGroups,
     ...jbc07CaseGroups,
     ...jbc09CaseGroups,

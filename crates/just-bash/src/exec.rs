@@ -12907,6 +12907,36 @@ mod tests {
     }
 
     #[test]
+    fn just_bash_optional_js_python_commands_fail_closed_without_host_runtime() {
+        let bash = JustBashSession::new();
+        let optional_runtime_commands = [
+            "js-exec -c \"console.log('host-js')\"",
+            "node -e \"console.log('host-node')\"",
+            "python3 -c \"print('host-python3')\"",
+            "python -c \"print('host-python')\"",
+            "/usr/bin/node -e \"console.log('host-node')\"",
+            "/usr/bin/python3 -c \"print('host-python3')\"",
+            "/usr/bin/env node -e \"console.log('host-node')\"",
+        ];
+
+        assert!(!CommandRegistry::default_portable().contains("js-exec"));
+        assert!(!CommandRegistry::default_portable().contains("node"));
+        assert!(!CommandRegistry::default_portable().contains("python3"));
+        assert!(!CommandRegistry::default_portable().contains("python"));
+
+        for command in optional_runtime_commands {
+            let result = bash.exec(command, JustBashExecOptions::new());
+            assert_eq!(result.exit_code, 127, "{command}");
+            assert_eq!(result.stdout, "", "{command}");
+            assert!(result.stderr.contains("command not found"), "{command}");
+            assert!(!result.stderr.contains("host-js"), "{command}");
+            assert!(!result.stderr.contains("host-node"), "{command}");
+            assert!(!result.stderr.contains("host-python"), "{command}");
+            assert!(!result.metadata.external_sandbox, "{command}");
+        }
+    }
+
+    #[test]
     fn just_bash_default_metadata_reports_in_process_backend() {
         let bash = JustBashSession::new();
         let result = bash.exec("echo ok", JustBashExecOptions::new());

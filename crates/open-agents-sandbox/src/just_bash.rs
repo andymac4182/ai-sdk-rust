@@ -541,6 +541,34 @@ mod tests {
     }
 
     #[test]
+    fn open_agents_just_bash_blocks_js_python_host_runtime_without_fallback() {
+        let sandbox =
+            JustBashSandbox::new(workspace_id("host-runtime")).expect("just bash sandbox");
+        let probes = [
+            "js-exec -c \"console.log('host-js')\"",
+            "node -e \"console.log('host-node')\"",
+            "python3 -c \"print('host-python3')\"",
+            "python -c \"print('host-python')\"",
+            "/usr/bin/node -e \"console.log('host-node')\"",
+            "/usr/bin/python3 -c \"print('host-python3')\"",
+            "/usr/bin/env node -e \"console.log('host-node')\"",
+        ];
+
+        for probe in probes {
+            let result = sandbox
+                .exec(SandboxExecOptions::new(probe))
+                .expect("host runtime probe");
+            assert!(!result.success, "{probe}");
+            assert_eq!(result.exit_code, Some(127), "{probe}");
+            assert_eq!(result.stdout, "", "{probe}");
+            assert!(result.stderr.contains("command not found"), "{probe}");
+            assert!(!result.stderr.contains("host-js"), "{probe}");
+            assert!(!result.stderr.contains("host-node"), "{probe}");
+            assert!(!result.stderr.contains("host-python"), "{probe}");
+        }
+    }
+
+    #[test]
     fn just_bash_persists_virtual_files_across_exec_calls() {
         let sandbox = JustBashSandbox::new(workspace_id("persistence")).expect("just bash sandbox");
 
