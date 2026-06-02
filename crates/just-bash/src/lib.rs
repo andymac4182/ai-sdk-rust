@@ -50,8 +50,8 @@ pub use fs::{
 };
 pub use glob::{GlobOptions, glob_paths, match_glob};
 pub use path::{
-    MAX_SYMLINK_DEPTH, dirname, is_path_within_root, join_path, normalize_path, resolve_path,
-    resolve_symlink_target, validate_path,
+    MAX_SYMLINK_DEPTH, SanitizedSymlinkTarget, dirname, is_path_within_root, join_path,
+    normalize_path, resolve_path, resolve_symlink_target, sanitize_symlink_target, validate_path,
 };
 pub use runtime::{Bash, BashOptions};
 pub use sanitize::{sanitize_error_message, sanitize_host_error_message};

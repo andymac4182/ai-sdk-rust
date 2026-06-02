@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 fn utf8(text: &str) -> Vec<u8> {
     text.as_bytes().to_vec()
@@ -190,6 +191,54 @@ fn upstream_real_fs_utils_validate_path_cases() {
 }
 
 #[test]
+fn jbc45_real_fs_symlink_target_sanitizer_cases() {
+    use SanitizedSymlinkTarget::{OutsideRoot, WithinRoot};
+
+    assert_eq!(
+        sanitize_symlink_target("../foo.txt", "/sandbox"),
+        WithinRoot {
+            relative_path: "../foo.txt".to_string()
+        }
+    );
+    assert_eq!(
+        sanitize_symlink_target("/sandbox/file.txt", "/sandbox"),
+        WithinRoot {
+            relative_path: "/file.txt".to_string()
+        }
+    );
+    assert_eq!(
+        sanitize_symlink_target("/sandbox", "/sandbox"),
+        WithinRoot {
+            relative_path: "/".to_string()
+        }
+    );
+    assert_eq!(
+        sanitize_symlink_target("/etc/passwd", "/sandbox"),
+        OutsideRoot {
+            safe_name: "passwd".to_string()
+        }
+    );
+    assert_eq!(
+        sanitize_symlink_target("/very/deep/secret/path/to/file.txt", "/sandbox"),
+        OutsideRoot {
+            safe_name: "file.txt".to_string()
+        }
+    );
+    assert_eq!(
+        sanitize_symlink_target("/sandbox/nonexistent.txt", "/sandbox"),
+        WithinRoot {
+            relative_path: "/nonexistent.txt".to_string()
+        }
+    );
+    assert_eq!(
+        sanitize_symlink_target("/sandboxevil/file.txt", "/sandbox"),
+        OutsideRoot {
+            safe_name: "file.txt".to_string()
+        }
+    );
+}
+
+#[test]
 fn upstream_interface_contract_symlinks_keep_absolute_targets_virtual() {
     let mut fs = VirtualFileSystem::new();
     fs.write_file("/target.txt", "target").unwrap();
@@ -359,6 +408,45 @@ fn upstream_in_memory_symlink_path_resolution_cases() {
 }
 
 #[test]
+fn jbc45_in_memory_symlink_concurrency_and_device_path_rows() {
+    let mut fs = VirtualFileSystem::new();
+    fs.write_file("/target.txt", "content").unwrap();
+    fs.symlink("/target.txt", "/link").unwrap();
+    let fs = Arc::new(fs);
+    let reads = (0..50)
+        .map(|_| {
+            let fs = Arc::clone(&fs);
+            std::thread::spawn(move || fs.read_file("/link").unwrap())
+        })
+        .collect::<Vec<_>>();
+    for read in reads {
+        assert_eq!(read.join().unwrap(), "content");
+    }
+
+    let mut looped = VirtualFileSystem::new();
+    looped.symlink("/b", "/a").unwrap();
+    looped.symlink("/a", "/b").unwrap();
+    let looped = Arc::new(looped);
+    let blocked = (0..20)
+        .map(|_| {
+            let fs = Arc::clone(&looped);
+            std::thread::spawn(move || fs.read_file("/a").unwrap_err().kind().clone())
+        })
+        .collect::<Vec<_>>();
+    for error in blocked {
+        assert_eq!(error.join().unwrap(), JustBashErrorKind::SymlinkLoop);
+    }
+
+    let bash = Bash::with_options(BashOptions {
+        files: BTreeMap::from([("/fake/dev/null".to_string(), "not a device".to_string())]),
+        ..BashOptions::default()
+    });
+    let result = bash.exec("test -c /fake/dev/null && echo yes || echo no");
+    assert_eq!(result.stdout, "no\n");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
 fn upstream_in_memory_lstat_stat_realpath_symlink_cases() {
     let mut fs = VirtualFileSystem::new();
     fs.write_file("/target.txt", "content").unwrap();
@@ -492,6 +580,58 @@ fn upstream_virtual_fs_copy_move_remove_list_stat_cases() {
     assert_eq!(stat.size, 3);
     assert_eq!(stat.mode, 0o755);
     assert_eq!(fs.readdir("/dest").unwrap(), vec!["moved.txt"]);
+}
+
+#[test]
+fn jbc45_core_exec_escaped_quotes_and_concurrency_rows() {
+    let bash = JustBashSession::with_options(
+        JustBashSessionOptions::new().with_env("ORIGINAL", "unchanged"),
+    );
+    assert_eq!(
+        bash.exec("echo \"say \\\"hello\\\"\"", JustBashExecOptions::new())
+            .stdout,
+        "say \"hello\"\n"
+    );
+
+    let mut handles = Vec::new();
+    for index in 0..20 {
+        let cloned = bash.clone();
+        handles.push(std::thread::spawn(move || {
+            cloned.exec(
+                &format!("export NEW_VAR_{index}=value; sleep 0.001; echo $ORIGINAL:$INDEX"),
+                JustBashExecOptions::new().with_env("INDEX", index.to_string()),
+            )
+        }));
+    }
+    for (index, handle) in handles.into_iter().enumerate() {
+        let result = handle.join().unwrap();
+        assert_eq!(result.stdout, format!("unchanged:{index}\n"));
+        assert_eq!(result.exit_code, 0);
+    }
+    assert_eq!(
+        bash.get_env().get("ORIGINAL").map(String::as_str),
+        Some("unchanged")
+    );
+    assert!(!bash.get_env().keys().any(|key| key.starts_with("NEW_VAR_")));
+
+    let first_session = bash.clone();
+    let second_session = bash.clone();
+    let first = std::thread::spawn(move || {
+        first_session.exec(
+            "myfunc() { echo from_p1; }; sleep 0.001; myfunc",
+            JustBashExecOptions::new(),
+        )
+    });
+    let second = std::thread::spawn(move || {
+        second_session.exec(
+            "sleep 0.002; myfunc || echo not_found",
+            JustBashExecOptions::new(),
+        )
+    });
+    assert_eq!(first.join().unwrap().stdout, "from_p1\n");
+    let second = second.join().unwrap();
+    assert_eq!(second.stdout, "not_found\n");
+    assert!(second.stderr.contains("myfunc: command not found"));
 }
 
 #[test]

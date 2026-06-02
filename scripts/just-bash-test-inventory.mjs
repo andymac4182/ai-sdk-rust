@@ -3486,6 +3486,45 @@ const jbc43CaseGroups = [
   },
 ];
 
+const jbc45CaseGroups = [
+  {
+    file: 'packages/just-bash/src/Bash.general.test.ts',
+    lines: [492],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::jbc45-core-leftovers',
+    rustTest: 'jbc45_core_exec_escaped_quotes_and_concurrency_rows',
+    notes:
+      'JBC-45 verifies the escaped double-quote core exec row through the Rust shell tokenizer without host shell fallback.',
+  },
+  {
+    file: 'packages/just-bash/src/Bash.exec-options.test.ts',
+    lines: [481, 584, 661],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::jbc45-core-leftovers',
+    rustTest: 'jbc45_core_exec_escaped_quotes_and_concurrency_rows',
+    notes:
+      'JBC-45 verifies high-concurrency env isolation, concurrent function-scope non-leakage, and race-condition state isolation through cloned Rust virtual sessions. Logger-option rows remain pending because Rust has no logger option surface.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/real-fs-utils.test.ts',
+    lines: [331, 339, 351, 359, 367, 380, 398],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::path::jbc45-symlink-target-sanitizer',
+    rustTest: 'jbc45_real_fs_symlink_target_sanitizer_cases',
+    notes:
+      'JBC-45 verifies portable symlink-target presentation for relative targets, absolute in-root targets, basename-only outside-root targets, non-existent in-root targets, and root-prefix boundary attacks without host realpath access.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/in-memory-fs/in-memory-fs.security.test.ts',
+    lines: [322, 337, 432],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::fs::jbc45-in-memory-leftovers',
+    rustTest: 'jbc45_in_memory_symlink_concurrency_and_device_path_rows',
+    notes:
+      'JBC-45 verifies concurrent virtual symlink reads, concurrent circular-symlink fail-closed behavior, and that virtual test -c does not mistake /fake/dev/null for a character device.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -3546,6 +3585,7 @@ function caseOverrideFor(testCase) {
     ...jbc38CaseGroups,
     ...jbc41CaseGroups,
     ...jbc43CaseGroups,
+    ...jbc45CaseGroups,
     ...jbc27CaseGroups,
     ...jbc30AgentExampleCaseGroups,
     ...jbc33CaseGroups,

@@ -56,6 +56,150 @@ const jbc21SmallCommandComparisonCaseIds = [
   'comparison:basename-dirname:f5d9cb2f39b2f952',
 ];
 
+const jbc45RustRunnerComparisonCaseIds = [
+  'comparison:column-join:0524985c8beefde3',
+  'comparison:column-join:2f59c89728536647',
+  'comparison:column-join:2ff081cd7851ca57',
+  'comparison:column-join:3a7789d02b09547c',
+  'comparison:column-join:4d0490f433ee62c2',
+  'comparison:column-join:63fae6fd2eee8db5',
+  'comparison:column-join:82a79335873131ff',
+  'comparison:column-join:8467ada46417268e',
+  'comparison:column-join:8ec225a20118589e',
+  'comparison:column-join:8ee4bfe255d1d78c',
+  'comparison:column-join:9271dbf528b40e0b',
+  'comparison:column-join:af7a9f54e7595751',
+  'comparison:column-join:bcbfc8bea3165e36',
+  'comparison:column-join:f8c3bb2cceb3dfb6',
+  'comparison:echo:9f29fc77bf0e0ee5',
+  'comparison:export:4a2f700bead98b5a',
+  'comparison:export:f0b31788fc824515',
+  'comparison:find:086e8ae1736b66f7',
+  'comparison:find:0c8920741bddf603',
+  'comparison:find:232fae9317361b52',
+  'comparison:find:3182ebfbe74e11eb',
+  'comparison:find:3be126e17474f81d',
+  'comparison:find:438d5293f370820a',
+  'comparison:find:455d3fa3cfc7a08c',
+  'comparison:find:46270a1ca6e475f9',
+  'comparison:find:472ef4e0c007908d',
+  'comparison:find:62d55c904989e7c0',
+  'comparison:find:68bf3db628040ce3',
+  'comparison:find:93740bb5956cc41f',
+  'comparison:find:a0769ee2798250e4',
+  'comparison:find:aa6ce7e0988957a0',
+  'comparison:find:ad51ad70b8844f82',
+  'comparison:find:bea27b7d4d4a9d70',
+  'comparison:find:cf4a32d064363ac4',
+  'comparison:find:d2bda1dc6224020d',
+  'comparison:find:d9fbc6fd5b3d1bdd',
+  'comparison:find:f6a1f2b584efa25a',
+  'comparison:find:f9d3770010e8e205',
+  'comparison:find:fd92013eb16908f1',
+  'comparison:grep:08c5cca4c0651e81',
+  'comparison:grep:36f9ac8925c0108b',
+  'comparison:grep:406fd22c6934415f',
+  'comparison:grep:7c10aa0a80b826a4',
+  'comparison:grep:bd0c258c0ab3c71b',
+  'comparison:jq:b8e1ebdad148a952',
+  'comparison:paste:06b1074e4b8b949e',
+  'comparison:paste:41372e0b75018c1e',
+  'comparison:paste:5f4a5c7ef6f558da',
+  'comparison:paste:69c1839508fc87cd',
+  'comparison:paste:6a678644b82e8ec0',
+  'comparison:paste:7ef3bcfe33c9aeb8',
+  'comparison:paste:805bea3cf126ac8d',
+  'comparison:paste:84eeee2f0f0d686d',
+  'comparison:paste:8cc97dd70107dd78',
+  'comparison:paste:a5e2148668c47c1f',
+  'comparison:paste:ae7d8e57d074fdb8',
+  'comparison:paste:b747fc649d9281b7',
+  'comparison:paste:ba1ff50043a8ac98',
+  'comparison:paste:bf09bb9a3eef82d5',
+  'comparison:paste:c45a0ab4a6aaec31',
+  'comparison:paste:c45eb2b68824ef70',
+  'comparison:paste:e5f70ad0bf646f27',
+  'comparison:paste:ff37127b8bf82876',
+  'comparison:strings-split:178886a259dcce51',
+  'comparison:strings-split:31e4f21777c03a4c',
+  'comparison:strings-split:40725d32be75a856',
+  'comparison:strings-split:75c89a5f8b50e573',
+  'comparison:strings-split:89796601f0abcc5f',
+  'comparison:strings-split:899bac38cd056fb1',
+  'comparison:strings-split:98f5ea03a4827540',
+  'comparison:strings-split:ce1a3c68c8be39ff',
+  'comparison:strings-split:d5aa452734b08d3f',
+  'comparison:strings-split:e40f769b12974c79',
+  'comparison:strings-split:f71fa7029dbebaf8',
+  'comparison:test:07ecf5d06aae1d01',
+  'comparison:test:142b3be2490b21d9',
+  'comparison:test:2a3886087954312e',
+  'comparison:test:2b1ca9a19ec4652d',
+  'comparison:test:2bf51f02f0d8319b',
+  'comparison:test:3806c4e0bb27fc8a',
+  'comparison:test:3bc0563368211125',
+  'comparison:test:40d7a6d3001fa4df',
+  'comparison:test:45a90c59ab9f56a7',
+  'comparison:test:477d1feb1d665e03',
+  'comparison:test:4bb9ae673513f981',
+  'comparison:test:4bfdda5779eb22aa',
+  'comparison:test:4e936e4cb3221fa0',
+  'comparison:test:559d18b007565907',
+  'comparison:test:59e6197f30e2c6f9',
+  'comparison:test:64e1d835faf934fd',
+  'comparison:test:7d3cfdb988f34f1f',
+  'comparison:test:8ff8e6ec3f4f9aa5',
+  'comparison:test:9645cc27f0443e75',
+  'comparison:test:9897cd58b4c36e89',
+  'comparison:test:999638a8d4a7e5f3',
+  'comparison:test:9b4d17ccee3c3959',
+  'comparison:test:9f128e60a6c2032e',
+  'comparison:test:b96acf39a07f04fc',
+  'comparison:test:be851b706cc0a780',
+  'comparison:test:c0bd6d6e23f92c4d',
+  'comparison:test:cc25be4d71e0e788',
+  'comparison:test:cee2a2252e72be35',
+  'comparison:test:d51751d648290898',
+  'comparison:test:d7090ed20fb46e42',
+  'comparison:test:dab99a504d50a7a0',
+  'comparison:test:e242b0275b3369a6',
+  'comparison:test:e3524ab9bf872049',
+  'comparison:test:e87af379741409a8',
+  'comparison:test:ed94aed584f0e297',
+  'comparison:test:f7b39a0f7cb047a2',
+  'comparison:test:ff9e0673004daf1a',
+  'comparison:text-processing:0cfefbef7bf4267f',
+  'comparison:text-processing:0f396624a5b2b29c',
+  'comparison:text-processing:15702cf2412cbcc3',
+  'comparison:text-processing:1a4e936cd929caf5',
+  'comparison:text-processing:3651d6faa9e80653',
+  'comparison:text-processing:3de1ee32396abc0e',
+  'comparison:text-processing:48dd3be4c49723be',
+  'comparison:text-processing:584e1b15ac3ed9aa',
+  'comparison:text-processing:5d9f552f3cc612ea',
+  'comparison:text-processing:66aa74e407fbbdcc',
+  'comparison:text-processing:6e61839db2810b92',
+  'comparison:text-processing:72406a722f214749',
+  'comparison:text-processing:724584ed73f472ff',
+  'comparison:text-processing:7a14e885fabc92c7',
+  'comparison:text-processing:8831689a8d5430a4',
+  'comparison:text-processing:8a585e752e20d3d4',
+  'comparison:text-processing:8d27daf615a55f3b',
+  'comparison:text-processing:90784bbe93f4ce8e',
+  'comparison:text-processing:90964b06e217425d',
+  'comparison:text-processing:9fbb4426ebfe4dca',
+  'comparison:text-processing:a054cde6fbd7cfc0',
+  'comparison:text-processing:a9809e9702814446',
+  'comparison:text-processing:b559afb3b984f7ed',
+  'comparison:text-processing:bf352979f91a2354',
+  'comparison:text-processing:c2062183ce068c73',
+  'comparison:text-processing:c213b401b3ff4612',
+  'comparison:text-processing:c875af8a344da85e',
+  'comparison:text-processing:c8afd3988b088a74',
+  'comparison:text-processing:cfa173ca06ac324b',
+  'comparison:text-processing:e94e9ea341c95519',
+];
+
 const rustRunnerComparisonCaseIds = [
   ...jbc21SmallCommandComparisonCaseIds,
   'comparison:awk:5fb5a4d01bc7c720',
@@ -257,6 +401,7 @@ const rustRunnerComparisonCaseIds = [
   'comparison:uniq:e6ed6da7f4f2d8dd',
   'comparison:uniq:f116fef97f175cad',
   'comparison:wc:fbae9795c34391b6',
+  ...jbc45RustRunnerComparisonCaseIds,
 ];
 const rustRunnerComparisonCaseIdSet = new Set(rustRunnerComparisonCaseIds);
 const jbc21SmallCommandComparisonCaseIdSet = new Set(jbc21SmallCommandComparisonCaseIds);
@@ -284,6 +429,7 @@ const jbc35RustRunnerComparisonCaseIdSet = new Set([
   'comparison:awk:cc47f33e4cb2516a',
   'comparison:awk:d3e5d71775cfd1e6',
 ]);
+const jbc45RustRunnerComparisonCaseIdSet = new Set(jbc45RustRunnerComparisonCaseIds);
 
 const unitSourceFiles = [
   'packages/just-bash/src/commands/printf/printf.test.ts',
@@ -463,13 +609,16 @@ function rustRunnerProofFor(testCase) {
   const isJbc21 = jbc21SmallCommandComparisonCaseIdSet.has(testCase.id);
   const isJbc29 = jbc29RustRunnerComparisonCaseIdSet.has(testCase.id);
   const isJbc35 = jbc35RustRunnerComparisonCaseIdSet.has(testCase.id);
+  const isJbc45 = jbc45RustRunnerComparisonCaseIdSet.has(testCase.id);
   const source = isJbc21
     ? 'JBC-21'
     : isJbc29
       ? 'JBC-29'
       : isJbc35
         ? 'JBC-35'
-        : 'JBC-11';
+        : isJbc45
+          ? 'JBC-45'
+          : 'JBC-11';
   return {
     status: 'portable-verified',
     owner: isJbc21
@@ -478,6 +627,8 @@ function rustRunnerProofFor(testCase) {
     rustTest: rustRunnerCaseName(testCase.id),
     notes: isJbc21
       ? 'JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.'
+      : isJbc45
+        ? 'JBC-45 Rust corpus runner exact match for generated comparison fixture stdout, stderr, exit code, and fixture setup; mismatching command-family rows stay pending.'
       : `${source} Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.`,
     source,
   };
@@ -2192,13 +2343,13 @@ corpus proofs, leaves ${formatSummaryCount(
   )} generated cases pending.
 
 The remaining closeout is intentionally multi-threaded: JBC-32 coordinates the
-strict parity burn-down, the landed JBC-33 through JBC-40 wave split large
+strict parity burn-down, and the landed JBC-33 through JBC-45 wave split large
 parser/runtime, text/search, AWK/comparison, filesystem/core runtime,
 structured-data, small POSIX, host-runtime, and final dual-engine proof rows
-without claiming the still-pending ledger rows, and the active JBC-41 through
-JBC-46 wave now owns the next exact-row slices from the remaining generated
-\`portable-pending\` rows. The goal is to run the same upstream cases against both
-the TypeScript implementation and the Rust implementation exposed through
+without claiming the still-pending ledger rows. JBC-46 and JBC-47 through
+JBC-52 own the next exact-row and dual-engine slices from the remaining generated
+\`portable-pending\` rows. The goal is to run the same upstream cases against
+both the TypeScript implementation and the Rust implementation exposed through
 \`napi-rs\`, then use those results to close ledger rows one by one.
 
 JBC-40 proof status: the JavaScript harness isolates generated Vitest suites per
@@ -2274,11 +2425,11 @@ proof all agree on zero portable unmapped rows.
 | JBC-38 | POSIX, archive, and small command family closeout | Landed bounded small POSIX/path/stream/table rows for virtual gzip/base64/date/diff/file inspection, column/join/comm, expand/unexpand/fold/nl/paste/seq/split, strings/test/xargs, path utilities, permissions/stat/link helpers, and size/tree reporting. \`tar\`, checksum/digest rows, binary magic/byte fixtures, and host-script compatibility remain pending. | Focused command-family tests; \`cargo test -p just-bash jbc38 -- --nocapture\`; inventory/corpus checks; shared fmt/clippy/naming/diff gates. |
 | JBC-39 | Host-runtime boundary and optional language commands | Closed the remaining optional-language command boundary rows with explicit fake-runtime providers, kept Open Agents fail-closed with no host fallback, and documented real QuickJS/CPython/worker/package-runtime rows as JS-only host-runtime behavior. | \`cargo test -p just-bash just_bash_optional_language_commands\`; \`cargo test -p just-bash just_bash_host_runtime_custom_command_defense_rows_are_classified_nonportable\`; \`cargo test -p open-agents-sandbox open_agents_just_bash_blocks_js_python_host_runtime_without_fallback\`; \`cargo test -p just-bash -p open-agents-sandbox\`; inventory checks; shared fmt/clippy/naming/diff gates. |
 | JBC-40 | Dual-engine NAPI conformance finalization and strict gate | Landed JavaScript harness isolation for concurrent TypeScript/Rust runs, verified-corpus mode for either engine, and strict proof reporting without row overclaims. After JBC-38 regeneration, the strict report still has 3,297 gaps from remaining sibling-owned rows. | \`JUST_BASH_ENGINE=typescript node scripts/just-bash-conformance.mjs\`; \`JUST_BASH_ENGINE=rust node scripts/just-bash-conformance.mjs\`; \`JUST_BASH_ENGINE=typescript node scripts/just-bash-conformance.mjs --verified-corpus\`; \`JUST_BASH_ENGINE=rust node scripts/just-bash-conformance.mjs --verified-corpus\`; \`node scripts/just-bash-test-inventory.mjs --strict\` (expected report: 3,297 strict gaps until the next JBC-32 closeout slices land); \`node scripts/just-bash-conformance-corpus.mjs --check\`; \`cargo test -p just-bash -p just-bash-napi\`; \`npm test --prefix crates/just-bash-napi\`; \`scripts/master-parity-gate.sh --check\`. |
-| JBC-41 | Parser, interpreter, syntax, and transform strict gaps | Active thread \`019e8764-0c31-7102-8239-4404d1d0e863\` closes remaining parser/interpreter/syntax/transform rows with named Rust shell/parser tests or exact corpus proofs. It must leave command-family and structured-data rows to their sibling owners. | Fresh upstream fetch; focused parser/interpreter/shell tests; \`cargo test -p just-bash\`; inventory/corpus checks; fmt/naming/diff gates. |
-| JBC-42 | AWK strict gaps | Active thread \`019e8764-fb04-7921-af38-44e60e512ab5\` closes remaining portable AWK parser, expression, function, control-flow, field, array, and comparison-corpus rows without host command fallback. | Focused AWK tests; AWK conformance subsets where available; \`cargo test -p just-bash\`; inventory/corpus checks; fmt/naming/diff gates. |
-| JBC-43 | Text and search strict gaps | Active thread \`019e8764-fb3a-7901-a5eb-90fe639f71a9\` closes remaining \`grep\`, \`rg\`, \`sed\`, search-engine, shared regex/text-stream, and adjacent UTF-8 rows with exact stdout/stderr/status expectations. | Focused text/search tests; dual-engine conformance subsets where available; \`cargo test -p just-bash\`; inventory/corpus checks; fmt/naming/diff gates. |
-| JBC-44 | Structured data and query strict gaps | Active thread \`019e8764-fc8b-7420-bb7a-7d924a799795\` closes remaining \`jq\`, \`yq\`, \`xan\`, \`sqlite3\`, query-engine, search-engine-helper, and adjacent structured-data rows with deterministic in-memory fixtures. | Focused structured/data tests; generated corpus structured subsets; \`cargo test -p just-bash\`; inventory/corpus checks; fmt/naming/diff gates. |
-| JBC-45 | Core, filesystem, and comparison strict gaps | Active thread \`019e8765-0604-73a1-a61b-f33d95b957a3\` closes remaining core runtime, virtual filesystem/path, source/comparison-fixture, and exact-pass corpus rows not covered by command-family owners. | Core/fs tests; raw TypeScript/Rust conformance runs for promoted comparison rows; \`cargo test -p just-bash --test conformance_corpus\`; inventory/corpus checks; fmt/naming/diff gates. |
+| JBC-41 | Parser, interpreter, syntax, and transform strict gaps | Landed additional parser/interpreter/syntax/transform rows with named Rust shell/parser tests while leaving command-family and structured-data rows to their sibling owners. | Fresh upstream fetch; focused parser/interpreter/shell tests; \`cargo test -p just-bash\`; inventory/corpus checks; fmt/naming/diff gates. |
+| JBC-42 | AWK strict gaps | Landed 44 exact portable AWK parser, function, conditional-flow, and adjacent rows without host command fallback. | Focused AWK tests; \`cargo test -p just-bash awk -- --nocapture\`; \`cargo test -p just-bash\`; inventory/corpus checks; fmt/naming/diff gates. |
+| JBC-43 | Text and search strict gaps | Landed 25 exact portable \`grep\` BRE/include/real-world search rows with exact stdout/stderr/status expectations. | Focused text/search tests; \`cargo test -p just-bash text_search -- --nocapture\`; \`cargo test -p just-bash\`; inventory/corpus checks; fmt/naming/diff gates. |
+| JBC-44 | Structured data and query strict gaps | Landed the remaining query-engine safe-object helper rows with deterministic Rust map fixtures and exact JS object-prototype exceptions. | \`cargo test -p just-bash structured_data_jbc44 -- --nocapture\`; \`cargo test -p just-bash\`; inventory/corpus checks; fmt/naming/diff gates. |
+| JBC-45 | Core, filesystem leftovers, and comparison corpus strict gaps | Closed exact core escaped-quote/high-concurrency/function-isolation rows, 10 virtual filesystem sanitizer/symlink/device rows, and 141 exact-pass comparison fixtures for find, paste, column/join, text-processing, strings/split, test, selected grep/export, jq, and escaped echo. Alias, glob expansion, head/tail byte/header formatting, path-prefix formatting, redirection syntax, sort modes, tar, uniq spacing, wc formatting, and other command-family mismatches remain pending. | \`cargo test -p just-bash jbc45 -- --nocapture\`; \`cargo test -p just-bash --test conformance_corpus\`; inventory/corpus checks; shared fmt/naming/diff gates. |
 | JBC-46 | Archive, digest, and small-command leftovers | Active thread \`019e8765-056a-7cd0-8a2d-a8e47b06c5ac\` closes remaining small command rows such as \`tar\`, digest/checksum, \`md5sum\`, \`touch\`, \`pwd\`, \`true\`, \`sleep\`, and adjacent archive/file-inspection behavior against the virtual filesystem. | Focused archive/digest/small-command tests; conformance corpus command subsets; \`cargo test -p just-bash\`; inventory/corpus checks; fmt/naming/diff gates. |
 | JBC-47 | Full dual-engine upstream runner expansion | Expand the JS harness so every still-portable upstream row that can be materialized as an executable case can run under both \`JUST_BASH_ENGINE=typescript\` and \`JUST_BASH_ENGINE=rust\`, with stable row ids and normalized stdout/stderr/status comparison. | Fresh Just Bash upstream fetch; TypeScript-engine full-materialized run; Rust-engine full-materialized run through NAPI; \`node scripts/just-bash-test-inventory.mjs --check\`; \`node scripts/just-bash-conformance-corpus.mjs --check\`; naming/diff gates. |
 | JBC-48 | NAPI session and filesystem parity hardening | Fill any missing \`crates/just-bash-napi\` surface needed by upstream tests: session lifecycle, cwd/env/stdin/args/options, virtual filesystem fixture seeding, command discovery, error/result serialization, and deterministic cancellation/time-limit behavior. | \`cargo test -p just-bash-napi\`; \`npm test --prefix crates/just-bash-napi\`; Rust-engine conformance smoke; inventory/corpus checks; fmt/clippy/naming/diff gates. |

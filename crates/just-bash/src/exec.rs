@@ -16607,7 +16607,7 @@ fn eval_test_expr(state: &ExecState<'_>, args: &[String]) -> Result<bool, String
     }
     match args {
         [single] => Ok(!single.is_empty()),
-        [op, path] if matches!(op.as_str(), "-e" | "-f" | "-d" | "-s") => {
+        [op, path] if matches!(op.as_str(), "-e" | "-f" | "-d" | "-s" | "-c") => {
             let resolved = resolve_path(&state.cwd, path);
             let fs = state
                 .session
@@ -16621,6 +16621,7 @@ fn eval_test_expr(state: &ExecState<'_>, args: &[String]) -> Result<bool, String
                 "-f" => stat.is_ok_and(|stat| stat.is_file),
                 "-d" => stat.is_ok_and(|stat| stat.is_directory),
                 "-s" => stat.is_ok_and(|stat| stat.size > 0),
+                "-c" => false,
                 _ => false,
             })
         }
@@ -17308,6 +17309,19 @@ fn tokenize(input: &str, env: &BTreeMap<String, String>) -> Result<Vec<String>, 
             None | Some('"') if ch == '$' => {
                 started = true;
                 current.push_str(&read_variable(&chars, &mut index, env));
+            }
+            Some('"') if ch == '\\' => {
+                started = true;
+                match chars.get(index + 1).copied() {
+                    Some(next @ ('"' | '\\' | '$' | '`')) => {
+                        current.push(next);
+                        index += 1;
+                    }
+                    Some('\n') => {
+                        index += 1;
+                    }
+                    _ => current.push(ch),
+                }
             }
             Some(q) if ch == q => quote = None,
             _ => {

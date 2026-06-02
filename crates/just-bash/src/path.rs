@@ -46,6 +46,38 @@ pub fn validate_path(path: &str, operation: &'static str) -> JustBashResult<()> 
     Ok(())
 }
 
+/// Sanitized presentation of an upstream symlink target.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SanitizedSymlinkTarget {
+    /// The target stays within the virtual root and may be shown as a relative path.
+    WithinRoot { relative_path: String },
+    /// The target escapes the virtual root and must be reduced to a basename.
+    OutsideRoot { safe_name: String },
+}
+
+/// Converts symlink targets to virtual, non-leaking display paths.
+pub fn sanitize_symlink_target(raw_target: &str, canonical_root: &str) -> SanitizedSymlinkTarget {
+    if !is_absolute_path(raw_target) {
+        return SanitizedSymlinkTarget::WithinRoot {
+            relative_path: raw_target.to_string(),
+        };
+    }
+
+    let resolved = normalize_absolute_display_path(raw_target);
+    if is_path_within_root(&resolved, canonical_root) {
+        let relative_path = resolved
+            .strip_prefix(canonical_root)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("/")
+            .replace('\\', "/");
+        SanitizedSymlinkTarget::WithinRoot { relative_path }
+    } else {
+        SanitizedSymlinkTarget::OutsideRoot {
+            safe_name: basename(raw_target),
+        }
+    }
+}
+
 /// Returns a normalized path resolved relative to `base`.
 pub fn resolve_path(base: &str, path: &str) -> String {
     if path.starts_with('/') {
@@ -96,4 +128,24 @@ pub fn resolve_symlink_target(symlink_path: &str, target: &str) -> String {
     } else {
         normalize_path(&join_path(&dirname(symlink_path), target))
     }
+}
+
+fn is_absolute_path(path: &str) -> bool {
+    path.starts_with('/') || path.starts_with('\\') || path.as_bytes().get(1) == Some(&b':')
+}
+
+fn normalize_absolute_display_path(path: &str) -> String {
+    if path.starts_with('/') {
+        normalize_path(path)
+    } else {
+        path.replace('\\', "/")
+    }
+}
+
+fn basename(path: &str) -> String {
+    path.replace('\\', "/")
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or("")
+        .to_string()
 }
