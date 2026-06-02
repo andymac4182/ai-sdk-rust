@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     JustBashExecOptions, JustBashExecResult, JustBashResult, JustBashSession,
-    JustBashSessionOptions, path::resolve_path,
+    JustBashSessionOptions, NetworkPolicy, NetworkResponse, path::resolve_path,
 };
 
 /// Construction options for the upstream-style [`Bash`] facade.
@@ -18,6 +18,11 @@ pub struct BashOptions {
     pub env: BTreeMap<String, String>,
     /// Base working directory.
     pub cwd: Option<String>,
+    /// Optional network policy. When present, upstream-style `curl` is
+    /// registered and backed by fake responses.
+    pub network_policy: Option<NetworkPolicy>,
+    /// Fake HTTP responses for deterministic network command execution.
+    pub network_responses: BTreeMap<String, NetworkResponse>,
 }
 
 /// Portable `Bash` facade for Just Bash command-registry parity tests.
@@ -47,6 +52,8 @@ impl Bash {
         });
         session_options.commands = options.commands;
         session_options.create_default_layout = create_default_layout;
+        session_options.network_policy = options.network_policy;
+        session_options.network_responses = options.network_responses;
         Self {
             session: JustBashSession::with_options(session_options),
         }
@@ -69,6 +76,11 @@ impl Bash {
     /// Reads a UTF-8 virtual file.
     pub fn read_file(&self, path: &str) -> JustBashResult<String> {
         self.session.read_file(&resolve_path(&self.get_cwd(), path))
+    }
+
+    /// Reads raw bytes from a virtual file.
+    pub fn read_file_buffer(&self, path: &str) -> JustBashResult<Vec<u8>> {
+        self.session.read_file_buffer(path)
     }
 
     /// Writes a UTF-8 virtual file.

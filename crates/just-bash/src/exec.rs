@@ -20,10 +20,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::commands::CommandRegistry;
-use crate::encoding::OutputPayload;
+use crate::encoding::{BufferEncoding, OutputPayload, bytes_to_string};
 use crate::error::{JustBashError, JustBashErrorKind, JustBashResult};
 use crate::fs::{CpOptions, DirentEntry, FileStat, MkdirOptions, RmOptions, VirtualFileSystem};
 use crate::path::resolve_path;
+use crate::security::{
+    HttpMethod, NetworkPolicy, NetworkRequest, NetworkResponse, StaticNetworkTransport,
+    execute_network_request,
+};
 
 /// Stable metadata label for the Rust in-process backend.
 pub const JUST_BASH_BACKEND: &str = "rust-just-bash";
@@ -324,6 +328,11 @@ pub struct JustBashSessionOptions {
     pub commands: Option<Vec<String>>,
     /// Whether to create the upstream default `/home/user` layout.
     pub create_default_layout: bool,
+    /// Optional network policy. When present, `curl` is registered and routed
+    /// through the fake responses below.
+    pub network_policy: Option<NetworkPolicy>,
+    /// Fake HTTP responses keyed by URL for deterministic `curl` execution.
+    pub network_responses: BTreeMap<String, NetworkResponse>,
 }
 
 impl Default for JustBashSessionOptions {
@@ -338,6 +347,8 @@ impl Default for JustBashSessionOptions {
             executor: None,
             commands: None,
             create_default_layout: true,
+            network_policy: None,
+            network_responses: BTreeMap::new(),
         }
     }
 }
@@ -405,6 +416,19 @@ impl JustBashSessionOptions {
         self.create_default_layout = create;
         self
     }
+
+    /// Sets the opt-in network policy used by deterministic `curl`.
+    pub fn with_network_policy(mut self, policy: NetworkPolicy) -> Self {
+        self.network_policy = Some(policy);
+        self
+    }
+
+    /// Adds a fake network response used by deterministic `curl`.
+    pub fn with_network_response(mut self, response: NetworkResponse) -> Self {
+        self.network_responses
+            .insert(response.url.clone(), response);
+        self
+    }
 }
 
 /// In-process shell session with a persistent virtual filesystem and fresh
@@ -424,6 +448,8 @@ struct JustBashSessionInner {
     max_command_count: usize,
     executor: Option<JustBashExecutor>,
     commands: CommandRegistry,
+    network_policy: Option<NetworkPolicy>,
+    network_responses: BTreeMap<String, NetworkResponse>,
 }
 
 impl JustBashSession {
@@ -441,11 +467,19 @@ impl JustBashSession {
                 "/".to_string()
             }
         });
+        let network_enabled = options.network_policy.is_some();
         let commands = options
             .commands
             .as_deref()
-            .map(CommandRegistry::filtered)
-            .unwrap_or_default();
+            .map(|commands| CommandRegistry::filtered_with_network(commands, network_enabled))
+            .unwrap_or_else(|| {
+                let registry = CommandRegistry::default_portable();
+                if network_enabled {
+                    registry.with_network_commands()
+                } else {
+                    registry
+                }
+            });
         let mut fs = VirtualFileSystem::new();
         fs.mkdir("/bin", MkdirOptions { recursive: true })
             .expect("default Just Bash /bin directory is valid");
@@ -485,6 +519,8 @@ impl JustBashSession {
                 max_command_count: options.max_command_count.unwrap_or(10_000),
                 executor: options.executor,
                 commands,
+                network_policy: options.network_policy,
+                network_responses: options.network_responses,
             }),
         }
     }
@@ -856,6 +892,7 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
         "cp" => command_cp(state, &tokens[1..]),
         "mv" => command_mv(state, &tokens[1..]),
         "find" => command_find(state, &tokens[1..]),
+        "curl" => command_curl(state, &tokens[1..]),
         "read" => command_read(state, &tokens[1..], &stdin),
         "jq" => command_jq(state, &tokens[1..], &stdin),
         "yq" => command_yq(state, &tokens[1..], &stdin),
@@ -2103,50 +2140,1639 @@ fn display_mv_dest(dest_arg: &str, target: &str, dest_is_dir: bool) -> String {
     }
 }
 
-fn command_find(state: &ExecState<'_>, args: &[String]) -> CommandResult {
-    let root_arg = args
-        .iter()
-        .find(|arg| !arg.starts_with('-') && arg.as_str() != "f")
-        .map(String::as_str)
-        .unwrap_or(".");
-    let root = resolve_path(&state.cwd, root_arg);
-    let name_pattern = args
-        .windows(2)
-        .find_map(|window| (window[0] == "-name").then_some(window[1].as_str()));
-    let type_filter = args
-        .windows(2)
-        .find_map(|window| (window[0] == "-type").then_some(window[1].as_str()));
-    let fs = match state.session.inner.fs.lock() {
-        Ok(fs) => fs,
-        Err(_) => return stderr_result(1, "find: filesystem lock poisoned\n"),
+fn command_find(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        return stdout_result(
+            "Usage: find [path...] [expression]\n  -name PATTERN\n  -type f|d\n  -maxdepth N\n  -mindepth N\n  -print\n  -print0\n  -printf FORMAT\n  -delete\n  -exec CMD {} ;\n",
+        );
+    }
+    let query = match parse_find_query(args) {
+        Ok(query) => query,
+        Err(result) => return result,
     };
-    let mut paths = fs
-        .get_all_paths()
-        .into_iter()
-        .filter(|path| path == &root || path.starts_with(&format!("{root}/")))
-        .filter(|path| {
-            let Ok(stat) = fs.stat(path) else {
-                return false;
-            };
-            match type_filter {
-                Some("f") => stat.is_file,
-                Some("d") => stat.is_directory,
-                _ => true,
+    let has_explicit_action = find_expr_has_action(&query.expression);
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut exit_code = 0;
+    let mut matched_entries = Vec::new();
+    {
+        let fs = match state.session.inner.fs.lock() {
+            Ok(fs) => fs,
+            Err(_) => return stderr_result(1, "find: filesystem lock poisoned\n"),
+        };
+        for (root_index, root) in query.roots.iter().enumerate() {
+            let absolute_root = resolve_path(&state.cwd, root);
+            if fs.stat(&absolute_root).is_err() {
+                stderr.push_str(&format!("find: {root}: No such file or directory\n"));
+                exit_code = 1;
+                continue;
             }
-        })
-        .filter(|path| {
-            name_pattern.is_none_or(|pattern| {
-                wildcard_match(pattern, path.rsplit('/').next().unwrap_or(path))
+            let mut root_entries = fs
+                .get_all_paths()
+                .into_iter()
+                .filter(|path| {
+                    path == &absolute_root || path.starts_with(&format!("{absolute_root}/"))
+                })
+                .filter_map(|path| {
+                    let stat = fs.stat(&path).ok()?;
+                    let depth = find_depth(&absolute_root, &path);
+                    if query.options.max_depth.is_some_and(|max| depth > max)
+                        || depth < query.options.min_depth
+                    {
+                        return None;
+                    }
+                    Some(FindEntry {
+                        path: path.clone(),
+                        display_path: display_find_path(root, &absolute_root, &path),
+                        root_path: absolute_root.clone(),
+                        root_display: normalize_find_root_display(root),
+                        stat,
+                        depth,
+                        root_index,
+                    })
+                })
+                .collect::<Vec<_>>();
+            if query.options.depth_first {
+                root_entries.sort_by(|left, right| {
+                    right
+                        .depth
+                        .cmp(&left.depth)
+                        .then_with(|| left.path.cmp(&right.path))
+                });
+            } else {
+                root_entries.sort_by(|left, right| left.path.cmp(&right.path));
+            }
+
+            let mut pruned_prefixes = Vec::<String>::new();
+            for entry in root_entries {
+                if pruned_prefixes
+                    .iter()
+                    .any(|prefix| entry.path.starts_with(&format!("{prefix}/")))
+                {
+                    continue;
+                }
+                let evaluation = evaluate_find_expr(&query.expression, &entry, &fs);
+                if evaluation.prune && entry.stat.is_directory {
+                    pruned_prefixes.push(entry.path.clone());
+                }
+                if !evaluation.matched {
+                    continue;
+                }
+                matched_entries.push((entry.clone(), evaluation.actions));
+            }
+            if root_index + 1 < query.roots.len() {
+                matched_entries.sort_by(|left, right| {
+                    left.0
+                        .root_index
+                        .cmp(&right.0.root_index)
+                        .then_with(|| left.0.path.cmp(&right.0.path))
+                });
+            }
+        }
+    }
+
+    let mut batch_execs = Vec::<(Vec<String>, Vec<String>)>::new();
+    for (entry, actions) in matched_entries {
+        if has_explicit_action {
+            for action in actions {
+                if let FindAction::Exec {
+                    command,
+                    batch_mode: true,
+                } = &action
+                {
+                    if let Some((_, paths)) = batch_execs
+                        .iter_mut()
+                        .find(|(candidate, _)| candidate == command)
+                    {
+                        paths.push(entry.display_path.clone());
+                    } else {
+                        batch_execs.push((command.clone(), vec![entry.display_path.clone()]));
+                    }
+                    continue;
+                }
+                let result = run_find_action(state, &entry, &action);
+                stdout.push_str(&result.stdout);
+                stderr.push_str(&result.stderr);
+                if result.exit_code != 0 {
+                    exit_code = result.exit_code;
+                }
+            }
+        } else {
+            stdout.push_str(&entry.display_path);
+            stdout.push('\n');
+        }
+    }
+    for (command, paths) in batch_execs {
+        let result = run_find_batch_exec(state, &command, &paths);
+        stdout.push_str(&result.stdout);
+        stderr.push_str(&result.stderr);
+        if result.exit_code != 0 {
+            exit_code = result.exit_code;
+        }
+    }
+
+    CommandResult {
+        stdout,
+        stderr,
+        exit_code,
+        exit_requested: false,
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FindQuery {
+    roots: Vec<String>,
+    expression: FindExpr,
+    options: FindOptions,
+}
+
+#[derive(Clone, Debug, Default)]
+struct FindOptions {
+    max_depth: Option<usize>,
+    min_depth: usize,
+    depth_first: bool,
+}
+
+#[derive(Clone, Debug)]
+struct FindEntry {
+    path: String,
+    display_path: String,
+    root_path: String,
+    root_display: String,
+    stat: FileStat,
+    depth: usize,
+    root_index: usize,
+}
+
+#[derive(Clone, Debug)]
+enum FindExpr {
+    True,
+    Name { pattern: String, ignore_case: bool },
+    Path { pattern: String, ignore_case: bool },
+    Regex { pattern: String, ignore_case: bool },
+    Type(char),
+    Empty,
+    Size(FindComparison),
+    Perm { mode: u32, kind: FindPermKind },
+    Mtime(FindComparison),
+    Newer(String),
+    Prune,
+    Action(FindAction),
+    Not(Box<FindExpr>),
+    And(Box<FindExpr>, Box<FindExpr>),
+    Or(Box<FindExpr>, Box<FindExpr>),
+}
+
+#[derive(Clone, Debug)]
+struct FindComparison {
+    value: i64,
+    unit: FindSizeUnit,
+    ordering: FindOrdering,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FindSizeUnit {
+    Blocks,
+    Bytes,
+    Kilobytes,
+    Megabytes,
+    Gigabytes,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FindOrdering {
+    Exact,
+    More,
+    Less,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FindPermKind {
+    Exact,
+    All,
+    Any,
+}
+
+#[derive(Clone, Debug)]
+enum FindAction {
+    Print,
+    Print0,
+    Printf(String),
+    Delete,
+    Exec {
+        command: Vec<String>,
+        batch_mode: bool,
+    },
+}
+
+#[derive(Clone, Debug, Default)]
+struct FindEval {
+    matched: bool,
+    prune: bool,
+    actions: Vec<FindAction>,
+}
+
+fn parse_find_query(args: &[String]) -> Result<FindQuery, CommandResult> {
+    let mut roots = Vec::new();
+    let mut expression_args = Vec::new();
+    let mut expressions_started = false;
+    for arg in args {
+        if !expressions_started && !is_find_expression_start(arg) {
+            roots.push(arg.clone());
+            continue;
+        }
+        expressions_started = true;
+        expression_args.push(arg.clone());
+    }
+    if roots.is_empty() {
+        roots.push(".".to_string());
+    }
+
+    let mut parser = FindParser {
+        args: expression_args,
+        pos: 0,
+        options: FindOptions::default(),
+    };
+    let expression = if parser.args.is_empty() {
+        FindExpr::True
+    } else {
+        parser.parse_or()?
+    };
+    Ok(FindQuery {
+        roots,
+        expression,
+        options: parser.options,
+    })
+}
+
+fn is_find_expression_start(arg: &str) -> bool {
+    arg.starts_with('-') || matches!(arg, "!" | "(" | ")" | "\\(" | "\\)")
+}
+
+struct FindParser {
+    args: Vec<String>,
+    pos: usize,
+    options: FindOptions,
+}
+
+impl FindParser {
+    fn parse_or(&mut self) -> Result<FindExpr, CommandResult> {
+        let mut left = self.parse_and()?;
+        while self.match_any(&["-o", "-or"]) {
+            let right = self.parse_and()?;
+            left = FindExpr::Or(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_and(&mut self) -> Result<FindExpr, CommandResult> {
+        let mut left = self.parse_not()?;
+        loop {
+            if self.match_any(&["-a", "-and"]) || self.next_starts_primary() {
+                let right = self.parse_not()?;
+                left = FindExpr::And(Box::new(left), Box::new(right));
+            } else {
+                break;
+            }
+        }
+        Ok(left)
+    }
+
+    fn parse_not(&mut self) -> Result<FindExpr, CommandResult> {
+        if self.match_any(&["-not", "!"]) {
+            return Ok(FindExpr::Not(Box::new(self.parse_not()?)));
+        }
+        self.parse_primary()
+    }
+
+    fn parse_primary(&mut self) -> Result<FindExpr, CommandResult> {
+        if self.pos >= self.args.len() {
+            return Ok(FindExpr::True);
+        }
+        if self.match_any(&["(", "\\("]) {
+            let expression = self.parse_or()?;
+            self.match_any(&[")", "\\)"]);
+            return Ok(expression);
+        }
+        let arg = self.take().unwrap_or_default();
+        match arg.as_str() {
+            "-name" => Ok(FindExpr::Name {
+                pattern: self.take_value("-name")?,
+                ignore_case: false,
+            }),
+            "-iname" => Ok(FindExpr::Name {
+                pattern: self.take_value("-iname")?,
+                ignore_case: true,
+            }),
+            "-path" => Ok(FindExpr::Path {
+                pattern: self.take_value("-path")?,
+                ignore_case: false,
+            }),
+            "-ipath" => Ok(FindExpr::Path {
+                pattern: self.take_value("-ipath")?,
+                ignore_case: true,
+            }),
+            "-regex" => Ok(FindExpr::Regex {
+                pattern: self.take_value("-regex")?,
+                ignore_case: false,
+            }),
+            "-iregex" => Ok(FindExpr::Regex {
+                pattern: self.take_value("-iregex")?,
+                ignore_case: true,
+            }),
+            "-type" => {
+                let value = self.take_value("-type")?;
+                match value.as_str() {
+                    "f" => Ok(FindExpr::Type('f')),
+                    "d" => Ok(FindExpr::Type('d')),
+                    _ => Err(stderr_result(
+                        1,
+                        format!("find: Unknown argument to -type: {value}\n"),
+                    )),
+                }
+            }
+            "-empty" => Ok(FindExpr::Empty),
+            "-size" => Ok(FindExpr::Size(parse_find_size(&self.take_value("-size")?))),
+            "-perm" => parse_find_perm(&self.take_value("-perm")?),
+            "-mtime" => Ok(FindExpr::Mtime(parse_find_mtime(
+                &self.take_value("-mtime")?,
+            ))),
+            "-newer" => Ok(FindExpr::Newer(self.take_value("-newer")?)),
+            "-maxdepth" => {
+                self.options.max_depth = self.take_value("-maxdepth")?.parse().ok();
+                Ok(FindExpr::True)
+            }
+            "-mindepth" => {
+                self.options.min_depth = self.take_value("-mindepth")?.parse().unwrap_or(0);
+                Ok(FindExpr::True)
+            }
+            "-depth" => {
+                self.options.depth_first = true;
+                Ok(FindExpr::True)
+            }
+            "-prune" => Ok(FindExpr::Prune),
+            "-print" => Ok(FindExpr::Action(FindAction::Print)),
+            "-print0" => Ok(FindExpr::Action(FindAction::Print0)),
+            "-printf" => Ok(FindExpr::Action(FindAction::Printf(
+                self.take_value("-printf")?,
+            ))),
+            "-delete" => {
+                self.options.depth_first = true;
+                Ok(FindExpr::Action(FindAction::Delete))
+            }
+            "-exec" => self.parse_exec_action(),
+            ")" | "\\)" => Ok(FindExpr::True),
+            other if other.starts_with('-') => Err(stderr_result(
+                1,
+                format!("find: unknown predicate '{other}'\n"),
+            )),
+            _ => Ok(FindExpr::True),
+        }
+    }
+
+    fn parse_exec_action(&mut self) -> Result<FindExpr, CommandResult> {
+        let mut command = Vec::new();
+        while self.pos < self.args.len() {
+            let value = self.take().unwrap_or_default();
+            if value == ";" || value == "+" {
+                return Ok(FindExpr::Action(FindAction::Exec {
+                    command,
+                    batch_mode: value == "+",
+                }));
+            }
+            command.push(value);
+        }
+        Err(stderr_result(1, "find: missing argument to `-exec'\n"))
+    }
+
+    fn take_value(&mut self, predicate: &str) -> Result<String, CommandResult> {
+        self.take()
+            .ok_or_else(|| stderr_result(1, format!("find: missing argument to `{predicate}'\n")))
+    }
+
+    fn take(&mut self) -> Option<String> {
+        let value = self.args.get(self.pos).cloned()?;
+        self.pos += 1;
+        Some(value)
+    }
+
+    fn match_any(&mut self, values: &[&str]) -> bool {
+        if self
+            .args
+            .get(self.pos)
+            .is_some_and(|arg| values.contains(&arg.as_str()))
+        {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn next_starts_primary(&self) -> bool {
+        self.args
+            .get(self.pos)
+            .is_some_and(|arg| !matches!(arg.as_str(), "-o" | "-or" | ")" | "\\)"))
+    }
+}
+
+fn parse_find_size(value: &str) -> FindComparison {
+    let (ordering, rest) = parse_find_ordering(value);
+    let (number, unit) = match rest.chars().last() {
+        Some('c') => (&rest[..rest.len() - 1], FindSizeUnit::Bytes),
+        Some('k') => (&rest[..rest.len() - 1], FindSizeUnit::Kilobytes),
+        Some('M') => (&rest[..rest.len() - 1], FindSizeUnit::Megabytes),
+        Some('G') => (&rest[..rest.len() - 1], FindSizeUnit::Gigabytes),
+        Some('b') => (&rest[..rest.len() - 1], FindSizeUnit::Blocks),
+        _ => (rest, FindSizeUnit::Blocks),
+    };
+    FindComparison {
+        value: number.parse().unwrap_or(0),
+        unit,
+        ordering,
+    }
+}
+
+fn parse_find_mtime(value: &str) -> FindComparison {
+    let (ordering, rest) = parse_find_ordering(value);
+    FindComparison {
+        value: rest.parse().unwrap_or(0),
+        unit: FindSizeUnit::Bytes,
+        ordering,
+    }
+}
+
+fn parse_find_ordering(value: &str) -> (FindOrdering, &str) {
+    if let Some(rest) = value.strip_prefix('+') {
+        (FindOrdering::More, rest)
+    } else if let Some(rest) = value.strip_prefix('-') {
+        (FindOrdering::Less, rest)
+    } else {
+        (FindOrdering::Exact, value)
+    }
+}
+
+fn parse_find_perm(value: &str) -> Result<FindExpr, CommandResult> {
+    let (kind, rest) = if let Some(rest) = value.strip_prefix('-') {
+        (FindPermKind::All, rest)
+    } else if let Some(rest) = value.strip_prefix('/') {
+        (FindPermKind::Any, rest)
+    } else {
+        (FindPermKind::Exact, value)
+    };
+    let mode = u32::from_str_radix(rest, 8)
+        .map_err(|_| stderr_result(1, format!("find: invalid mode `{value}'\n")))?;
+    Ok(FindExpr::Perm { mode, kind })
+}
+
+fn evaluate_find_expr(expr: &FindExpr, entry: &FindEntry, fs: &VirtualFileSystem) -> FindEval {
+    match expr {
+        FindExpr::True => FindEval {
+            matched: true,
+            ..FindEval::default()
+        },
+        FindExpr::Name {
+            pattern,
+            ignore_case,
+        } => {
+            let name = entry
+                .display_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&entry.display_path);
+            FindEval {
+                matched: find_pattern_match(pattern, name, *ignore_case),
+                ..FindEval::default()
+            }
+        }
+        FindExpr::Path {
+            pattern,
+            ignore_case,
+        } => FindEval {
+            matched: find_pattern_match(pattern, &entry.display_path, *ignore_case)
+                || find_pattern_match(pattern, &entry.path, *ignore_case),
+            ..FindEval::default()
+        },
+        FindExpr::Regex {
+            pattern,
+            ignore_case,
+        } => {
+            let matched = RegexBuilder::new(pattern)
+                .case_insensitive(*ignore_case)
+                .build()
+                .is_ok_and(|regex| {
+                    regex.is_match(&entry.display_path) || regex.is_match(&entry.path)
+                });
+            FindEval {
+                matched,
+                ..FindEval::default()
+            }
+        }
+        FindExpr::Type(file_type) => FindEval {
+            matched: match file_type {
+                'f' => entry.stat.is_file,
+                'd' => entry.stat.is_directory,
+                _ => false,
+            },
+            ..FindEval::default()
+        },
+        FindExpr::Empty => FindEval {
+            matched: if entry.stat.is_file {
+                entry.stat.size == 0
+            } else if entry.stat.is_directory {
+                fs.readdir(&entry.path)
+                    .is_ok_and(|children| children.is_empty())
+            } else {
+                false
+            },
+            ..FindEval::default()
+        },
+        FindExpr::Size(comparison) => FindEval {
+            matched: compare_find_value(
+                entry.stat.size as i64,
+                find_size_bytes(comparison),
+                comparison.ordering,
+            ),
+            ..FindEval::default()
+        },
+        FindExpr::Perm { mode, kind } => {
+            let actual = entry.stat.mode & 0o777;
+            FindEval {
+                matched: match kind {
+                    FindPermKind::Exact => actual == *mode,
+                    FindPermKind::All => actual & *mode == *mode,
+                    FindPermKind::Any => actual & *mode != 0,
+                },
+                ..FindEval::default()
+            }
+        }
+        FindExpr::Mtime(comparison) => {
+            let age_days = 0_i64.saturating_sub(entry.stat.mtime as i64 / 86_400);
+            FindEval {
+                matched: compare_find_value(age_days, comparison.value, comparison.ordering),
+                ..FindEval::default()
+            }
+        }
+        FindExpr::Newer(path) => {
+            let resolved = resolve_path(&entry.root_path, path);
+            let matched = fs
+                .stat(&resolved)
+                .is_ok_and(|reference| entry.stat.mtime > reference.mtime);
+            FindEval {
+                matched,
+                ..FindEval::default()
+            }
+        }
+        FindExpr::Prune => FindEval {
+            matched: true,
+            prune: true,
+            actions: Vec::new(),
+        },
+        FindExpr::Action(action) => FindEval {
+            matched: true,
+            prune: false,
+            actions: vec![action.clone()],
+        },
+        FindExpr::Not(inner) => {
+            let evaluation = evaluate_find_expr(inner, entry, fs);
+            FindEval {
+                matched: !evaluation.matched,
+                prune: false,
+                actions: Vec::new(),
+            }
+        }
+        FindExpr::And(left, right) => {
+            let mut left = evaluate_find_expr(left, entry, fs);
+            if !left.matched {
+                return FindEval {
+                    matched: false,
+                    prune: left.prune,
+                    actions: left.actions,
+                };
+            }
+            let right = evaluate_find_expr(right, entry, fs);
+            left.matched = right.matched;
+            left.prune |= right.prune;
+            left.actions.extend(right.actions);
+            left
+        }
+        FindExpr::Or(left, right) => {
+            let left = evaluate_find_expr(left, entry, fs);
+            if left.matched {
+                left
+            } else {
+                let mut right = evaluate_find_expr(right, entry, fs);
+                right.prune |= left.prune;
+                right
+            }
+        }
+    }
+}
+
+fn compare_find_value(actual: i64, expected: i64, ordering: FindOrdering) -> bool {
+    match ordering {
+        FindOrdering::Exact => actual == expected,
+        FindOrdering::More => actual > expected,
+        FindOrdering::Less => actual < expected,
+    }
+}
+
+fn find_size_bytes(comparison: &FindComparison) -> i64 {
+    let multiplier = match comparison.unit {
+        FindSizeUnit::Blocks => 512,
+        FindSizeUnit::Bytes => 1,
+        FindSizeUnit::Kilobytes => 1024,
+        FindSizeUnit::Megabytes => 1024 * 1024,
+        FindSizeUnit::Gigabytes => 1024 * 1024 * 1024,
+    };
+    comparison.value.saturating_mul(multiplier)
+}
+
+fn find_pattern_match(pattern: &str, value: &str, ignore_case: bool) -> bool {
+    if ignore_case {
+        wildcard_match(&pattern.to_ascii_lowercase(), &value.to_ascii_lowercase())
+    } else {
+        wildcard_match(pattern, value)
+    }
+}
+
+fn find_expr_has_action(expr: &FindExpr) -> bool {
+    match expr {
+        FindExpr::Action(_) => true,
+        FindExpr::Not(inner) => find_expr_has_action(inner),
+        FindExpr::And(left, right) | FindExpr::Or(left, right) => {
+            find_expr_has_action(left) || find_expr_has_action(right)
+        }
+        _ => false,
+    }
+}
+
+fn run_find_action(
+    state: &mut ExecState<'_>,
+    entry: &FindEntry,
+    action: &FindAction,
+) -> CommandResult {
+    match action {
+        FindAction::Print => stdout_result(format!("{}\n", entry.display_path)),
+        FindAction::Print0 => stdout_result(format!("{}\0", entry.display_path)),
+        FindAction::Printf(format) => stdout_result(format_find_printf(format, entry)),
+        FindAction::Delete => match state.session.inner.fs.lock() {
+            Ok(mut fs) => match fs.rm(
+                &entry.path,
+                RmOptions {
+                    recursive: entry.stat.is_directory,
+                    force: false,
+                },
+            ) {
+                Ok(()) => CommandResult::default(),
+                Err(error) => stderr_result(
+                    1,
+                    format!("find: cannot delete '{}': {error}\n", entry.display_path),
+                ),
+            },
+            Err(_) => stderr_result(1, "find: filesystem lock poisoned\n"),
+        },
+        FindAction::Exec {
+            command,
+            batch_mode,
+        } => {
+            if *batch_mode {
+                run_find_batch_exec(state, command, std::slice::from_ref(&entry.display_path))
+            } else {
+                let tokens = command
+                    .iter()
+                    .map(|token| {
+                        if token == "{}" {
+                            entry.display_path.clone()
+                        } else {
+                            token.replace("{}", &entry.display_path)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                execute_tokens(state, &tokens, String::new())
+            }
+        }
+    }
+}
+
+fn run_find_batch_exec(
+    state: &mut ExecState<'_>,
+    command: &[String],
+    paths: &[String],
+) -> CommandResult {
+    let mut tokens = Vec::new();
+    let mut replaced = false;
+    let joined_paths = paths.join(" ");
+    for token in command {
+        if token == "{}" {
+            tokens.extend(paths.iter().cloned());
+            replaced = true;
+        } else if token.contains("{}") {
+            tokens.push(token.replace("{}", &joined_paths));
+            replaced = true;
+        } else {
+            tokens.push(token.clone());
+        }
+    }
+    if !replaced {
+        tokens.extend(paths.iter().cloned());
+    }
+    execute_tokens(state, &tokens, String::new())
+}
+
+fn format_find_printf(format: &str, entry: &FindEntry) -> String {
+    let mut output = String::new();
+    let mut chars = format.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('n') => output.push('\n'),
+                Some('t') => output.push('\t'),
+                Some('0') => output.push('\0'),
+                Some('e') => output.push('\x1b'),
+                Some('\\') => output.push('\\'),
+                Some(other) => {
+                    output.push('\\');
+                    output.push(other);
+                }
+                None => output.push('\\'),
+            }
+            continue;
+        }
+        if ch != '%' {
+            output.push(ch);
+            continue;
+        }
+
+        let mut left = false;
+        if chars.peek() == Some(&'-') {
+            left = true;
+            chars.next();
+        }
+        let mut width = String::new();
+        while chars.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+            width.push(chars.next().unwrap_or_default());
+        }
+        let mut precision = None;
+        if chars.peek() == Some(&'.') {
+            chars.next();
+            let mut digits = String::new();
+            while chars.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+                digits.push(chars.next().unwrap_or_default());
+            }
+            precision = digits.parse::<usize>().ok();
+        }
+
+        let directive = chars.next().unwrap_or('%');
+        let raw = match directive {
+            '%' => "%".to_string(),
+            'f' => path_basename(&entry.display_path).to_string(),
+            'h' => find_dirname(&entry.display_path),
+            'p' => entry.display_path.clone(),
+            'P' => find_relative_to_root(entry),
+            's' => entry.stat.size.to_string(),
+            'd' => entry.depth.to_string(),
+            'm' => format!("{:03o}", entry.stat.mode & 0o777),
+            'M' => find_symbolic_mode(&entry.stat),
+            't' => format!("mtime:{}", entry.stat.mtime),
+            'T' => match chars.next() {
+                Some('@') => format!("{}.0000000000", entry.stat.mtime),
+                Some('Y') => "1970".to_string(),
+                Some('m') => "01".to_string(),
+                Some('d') => "01".to_string(),
+                Some('H') => "00".to_string(),
+                Some('M') => "00".to_string(),
+                Some('S') => "00.0000000000".to_string(),
+                Some('T') => "00:00:00".to_string(),
+                Some('F') => "1970-01-01".to_string(),
+                Some(other) => format!("%T{other}"),
+                None => "%T".to_string(),
+            },
+            other => format!("%{other}"),
+        };
+        output.push_str(&apply_find_width(raw, width.parse().ok(), precision, left));
+    }
+    output
+}
+
+fn apply_find_width(
+    mut value: String,
+    width: Option<usize>,
+    precision: Option<usize>,
+    left: bool,
+) -> String {
+    if let Some(precision) = precision {
+        value = value.chars().take(precision).collect();
+    }
+    let Some(width) = width else {
+        return value;
+    };
+    let len = value.chars().count();
+    if len >= width {
+        return value;
+    }
+    let padding = " ".repeat(width - len);
+    if left {
+        format!("{value}{padding}")
+    } else {
+        format!("{padding}{value}")
+    }
+}
+
+fn find_symbolic_mode(stat: &FileStat) -> String {
+    let mut value = String::new();
+    value.push(if stat.is_directory { 'd' } else { '-' });
+    for bit in [
+        0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001,
+    ] {
+        value.push(if stat.mode & bit != 0 {
+            match bit {
+                0o400 | 0o040 | 0o004 => 'r',
+                0o200 | 0o020 | 0o002 => 'w',
+                _ => 'x',
+            }
+        } else {
+            '-'
+        });
+    }
+    value
+}
+
+fn find_depth(root: &str, path: &str) -> usize {
+    if root == path {
+        0
+    } else {
+        path.strip_prefix(&format!("{root}/"))
+            .unwrap_or("")
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .count()
+    }
+}
+
+fn display_find_path(root_arg: &str, root: &str, path: &str) -> String {
+    let normalized_root_arg = normalize_find_root_display(root_arg);
+    if normalized_root_arg == "/" {
+        return path.to_string();
+    }
+    if root_arg.starts_with('/') {
+        return path.to_string();
+    }
+    let suffix = if path == root {
+        ""
+    } else {
+        path.strip_prefix(root)
+            .unwrap_or("")
+            .trim_start_matches('/')
+    };
+    if suffix.is_empty() {
+        normalized_root_arg
+    } else if normalized_root_arg == "." {
+        format!("./{suffix}")
+    } else {
+        format!("{}/{suffix}", normalized_root_arg.trim_end_matches('/'))
+    }
+}
+
+fn normalize_find_root_display(root: &str) -> String {
+    let trimmed = root.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn find_relative_to_root(entry: &FindEntry) -> String {
+    if entry.display_path == entry.root_display {
+        String::new()
+    } else {
+        entry
+            .display_path
+            .strip_prefix(&format!("{}/", entry.root_display.trim_end_matches('/')))
+            .unwrap_or_else(|| {
+                entry
+                    .display_path
+                    .strip_prefix("./")
+                    .unwrap_or(&entry.display_path)
             })
-        })
-        .collect::<Vec<_>>();
-    paths.sort();
-    stdout_result(
-        paths
-            .into_iter()
-            .map(|path| format!("{path}\n"))
-            .collect::<String>(),
-    )
+            .to_string()
+    }
+}
+
+fn find_dirname(path: &str) -> String {
+    path.rsplit_once('/')
+        .map(|(dir, _)| if dir.is_empty() { "/" } else { dir })
+        .unwrap_or(".")
+        .to_string()
+}
+
+fn command_curl(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(
+            "Usage: curl [options...] <url>\n  -X, --request METHOD\n  -H, --header HEADER\n  -d, --data DATA\n  -o, --output FILE\n  -I, --head\n  -i, --include\n  -s, --silent\n  -f, --fail\n  -w, --write-out FORMAT\n",
+        );
+    }
+    let mut options = match parse_curl_options(args) {
+        Ok(options) => options,
+        Err(result) => return result,
+    };
+    let Some(url) = options.url.take() else {
+        return stderr_result(2, "curl: no URL specified\n");
+    };
+    let url = normalize_curl_url(&url);
+    let Some(policy) = state.session.inner.network_policy.as_ref() else {
+        return curl_error(&options, 1, "curl: network access is not configured\n");
+    };
+
+    let body = match prepare_curl_body(state, &mut options) {
+        Ok(body) => body,
+        Err(result) => return result,
+    };
+    if let Some(user) = &options.user {
+        let encoded = bytes_to_string(user.as_bytes(), BufferEncoding::Base64);
+        options
+            .headers
+            .insert("authorization".to_string(), format!("Basic {encoded}"));
+    }
+    if let Some(cookie) = &options.cookie {
+        options
+            .headers
+            .insert("cookie".to_string(), cookie.to_string());
+    }
+
+    let request = NetworkRequest {
+        url: url.clone(),
+        method: options.method,
+        headers: options.headers.clone(),
+        body,
+        timeout_ms: options.timeout_ms,
+        follow_redirects: options.follow_redirects,
+    };
+    let mut transport = StaticNetworkTransport::new();
+    for response in state.session.inner.network_responses.values().cloned() {
+        transport = transport.with_response(response);
+    }
+    let resolver = |_hostname: &str| Ok(vec![crate::security::DnsAddress::new("93.184.216.34", 4)]);
+    let response = match execute_network_request(policy, request, &resolver, &mut transport) {
+        Ok(response) => response,
+        Err(error) => {
+            return curl_error(&options, 1, format!("curl: {error}\n"));
+        }
+    };
+
+    if options.fail_silently && response.status >= 400 {
+        return curl_error(
+            &options,
+            22,
+            format!(
+                "curl: The requested URL returned error: {}\n",
+                response.status
+            ),
+        );
+    }
+
+    if let Some(cookie_jar) = &options.cookie_jar
+        && let Some(set_cookie) = response.headers.get("set-cookie")
+    {
+        let path = resolve_path(&state.cwd, cookie_jar);
+        if let Ok(mut fs) = state.session.inner.fs.lock() {
+            let _ = fs.write_file(&path, set_cookie.clone());
+        }
+    }
+
+    let output = build_curl_output(&options, &response, &url);
+    if let Some(path) = options
+        .output_file
+        .clone()
+        .or_else(|| options.use_remote_name.then(|| curl_remote_name(&url)))
+    {
+        let path = resolve_path(&state.cwd, &path);
+        return match state.session.inner.fs.lock() {
+            Ok(mut fs) => match fs.write_file(&path, response.body.clone()) {
+                Ok(()) => {
+                    let mut result = stdout_result(apply_curl_write_out(
+                        options.write_out.as_deref(),
+                        "",
+                        &response,
+                    ));
+                    result.exit_code = 0;
+                    result
+                }
+                Err(error) => stderr_result(1, format!("curl: cannot write output: {error}\n")),
+            },
+            Err(_) => stderr_result(1, "curl: filesystem lock poisoned\n"),
+        };
+    }
+
+    stdout_result(output)
+}
+
+#[derive(Clone, Debug)]
+struct CurlOptions {
+    url: Option<String>,
+    method: HttpMethod,
+    headers: BTreeMap<String, String>,
+    data: Option<String>,
+    data_file: Option<CurlDataFile>,
+    data_binary: bool,
+    urlencode_files: Vec<CurlUrlencodeFile>,
+    form_fields: Vec<CurlFormField>,
+    user: Option<String>,
+    cookie: Option<String>,
+    cookie_jar: Option<String>,
+    upload_file: Option<String>,
+    timeout_ms: Option<u64>,
+    output_file: Option<String>,
+    use_remote_name: bool,
+    head_only: bool,
+    include_headers: bool,
+    silent: bool,
+    show_error: bool,
+    fail_silently: bool,
+    follow_redirects: bool,
+    verbose: bool,
+    write_out: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct CurlDataFile {
+    path: String,
+    ascii_mode: bool,
+}
+
+#[derive(Clone, Debug)]
+struct CurlUrlencodeFile {
+    name: Option<String>,
+    path: String,
+}
+
+#[derive(Clone, Debug)]
+struct CurlFormField {
+    name: String,
+    value: String,
+    content_type: Option<String>,
+}
+
+impl Default for CurlOptions {
+    fn default() -> Self {
+        Self {
+            url: None,
+            method: HttpMethod::Get,
+            headers: BTreeMap::new(),
+            data: None,
+            data_file: None,
+            data_binary: false,
+            urlencode_files: Vec::new(),
+            form_fields: Vec::new(),
+            user: None,
+            cookie: None,
+            cookie_jar: None,
+            upload_file: None,
+            timeout_ms: None,
+            output_file: None,
+            use_remote_name: false,
+            head_only: false,
+            include_headers: false,
+            silent: false,
+            show_error: false,
+            fail_silently: false,
+            follow_redirects: true,
+            verbose: false,
+            write_out: None,
+        }
+    }
+}
+
+fn parse_curl_options(args: &[String]) -> Result<CurlOptions, CommandResult> {
+    let mut options = CurlOptions::default();
+    let mut implies_post = false;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        match arg.as_str() {
+            "-X" | "--request" => {
+                index += 1;
+                options.method = parse_curl_method(args.get(index).map_or("GET", String::as_str))?;
+            }
+            "-H" | "--header" => {
+                index += 1;
+                if let Some(header) = args.get(index) {
+                    apply_curl_header(&mut options, header);
+                }
+            }
+            "-d" | "--data" => {
+                index += 1;
+                apply_curl_data(
+                    &mut options,
+                    args.get(index).map_or("", String::as_str),
+                    false,
+                    true,
+                );
+                implies_post = true;
+            }
+            "--data-raw" => {
+                index += 1;
+                apply_curl_data(
+                    &mut options,
+                    args.get(index).map_or("", String::as_str),
+                    false,
+                    false,
+                );
+                implies_post = true;
+            }
+            "--data-binary" => {
+                index += 1;
+                apply_curl_data(
+                    &mut options,
+                    args.get(index).map_or("", String::as_str),
+                    true,
+                    true,
+                );
+                implies_post = true;
+            }
+            "--data-urlencode" => {
+                index += 1;
+                apply_curl_urlencode(&mut options, args.get(index).map_or("", String::as_str));
+                implies_post = true;
+            }
+            "-F" | "--form" => {
+                index += 1;
+                if let Some(field) = args
+                    .get(index)
+                    .and_then(|value| parse_curl_form_field(value))
+                {
+                    options.form_fields.push(field);
+                }
+                implies_post = true;
+            }
+            "-u" | "--user" => {
+                index += 1;
+                options.user = args.get(index).cloned();
+            }
+            "-A" | "--user-agent" => {
+                index += 1;
+                options.headers.insert(
+                    "user-agent".to_string(),
+                    args.get(index).cloned().unwrap_or_default(),
+                );
+            }
+            "-e" | "--referer" => {
+                index += 1;
+                options.headers.insert(
+                    "referer".to_string(),
+                    args.get(index).cloned().unwrap_or_default(),
+                );
+            }
+            "-b" | "--cookie" => {
+                index += 1;
+                options.cookie = args.get(index).cloned();
+            }
+            "-c" | "--cookie-jar" => {
+                index += 1;
+                options.cookie_jar = args.get(index).cloned();
+            }
+            "-T" | "--upload-file" => {
+                index += 1;
+                options.upload_file = args.get(index).cloned();
+                if options.method == HttpMethod::Get {
+                    options.method = HttpMethod::Put;
+                }
+            }
+            "-m" | "--max-time" | "--connect-timeout" => {
+                index += 1;
+                options.timeout_ms = args
+                    .get(index)
+                    .and_then(|value| parse_curl_seconds_ms(value));
+            }
+            "-o" | "--output" => {
+                index += 1;
+                options.output_file = args.get(index).cloned();
+            }
+            "-O" | "--remote-name" => options.use_remote_name = true,
+            "-I" | "--head" => {
+                options.head_only = true;
+                options.method = HttpMethod::Head;
+            }
+            "-i" | "--include" => options.include_headers = true,
+            "-s" | "--silent" => options.silent = true,
+            "-S" | "--show-error" => options.show_error = true,
+            "-f" | "--fail" => options.fail_silently = true,
+            "-L" | "--location" => options.follow_redirects = true,
+            "-w" | "--write-out" => {
+                index += 1;
+                options.write_out = args.get(index).cloned();
+            }
+            "-v" | "--verbose" => options.verbose = true,
+            "--max-redirs" => index += 1,
+            "--" => {}
+            _ if arg.starts_with("--request=") => {
+                options.method = parse_curl_method(&arg[10..])?;
+            }
+            _ if arg.starts_with("--header=") => apply_curl_header(&mut options, &arg[9..]),
+            _ if arg.starts_with("--data=") => {
+                apply_curl_data(&mut options, &arg[7..], false, true);
+                implies_post = true;
+            }
+            _ if arg.starts_with("--data-raw=") => {
+                apply_curl_data(&mut options, &arg[11..], false, false);
+                implies_post = true;
+            }
+            _ if arg.starts_with("--data-binary=") => {
+                apply_curl_data(&mut options, &arg[14..], true, true);
+                implies_post = true;
+            }
+            _ if arg.starts_with("--data-urlencode=") => {
+                apply_curl_urlencode(&mut options, &arg[17..]);
+                implies_post = true;
+            }
+            _ if arg.starts_with("--form=") => {
+                if let Some(field) = parse_curl_form_field(&arg[7..]) {
+                    options.form_fields.push(field);
+                }
+                implies_post = true;
+            }
+            _ if arg.starts_with("--user=") => options.user = Some(arg[7..].to_string()),
+            _ if arg.starts_with("--user-agent=") => {
+                options
+                    .headers
+                    .insert("user-agent".to_string(), arg[13..].to_string());
+            }
+            _ if arg.starts_with("--referer=") => {
+                options
+                    .headers
+                    .insert("referer".to_string(), arg[10..].to_string());
+            }
+            _ if arg.starts_with("--cookie=") => options.cookie = Some(arg[9..].to_string()),
+            _ if arg.starts_with("--cookie-jar=") => {
+                options.cookie_jar = Some(arg[13..].to_string());
+            }
+            _ if arg.starts_with("--upload-file=") => {
+                options.upload_file = Some(arg[14..].to_string());
+                if options.method == HttpMethod::Get {
+                    options.method = HttpMethod::Put;
+                }
+            }
+            _ if arg.starts_with("--max-time=") => {
+                options.timeout_ms = parse_curl_seconds_ms(&arg[11..]);
+            }
+            _ if arg.starts_with("--connect-timeout=") => {
+                options
+                    .timeout_ms
+                    .get_or_insert_with(|| parse_curl_seconds_ms(&arg[18..]).unwrap_or(0));
+            }
+            _ if arg.starts_with("--output=") => options.output_file = Some(arg[9..].to_string()),
+            _ if arg.starts_with("--write-out=") => {
+                options.write_out = Some(arg[12..].to_string());
+            }
+            _ if arg.starts_with("-X") && arg.len() > 2 => {
+                options.method = parse_curl_method(&arg[2..])?;
+            }
+            _ if arg.starts_with("-u") && arg.len() > 2 => {
+                options.user = Some(arg[2..].to_string())
+            }
+            _ if arg.starts_with("-A") && arg.len() > 2 => {
+                options
+                    .headers
+                    .insert("user-agent".to_string(), arg[2..].to_string());
+            }
+            _ if arg.starts_with("-e") && arg.len() > 2 => {
+                options
+                    .headers
+                    .insert("referer".to_string(), arg[2..].to_string());
+            }
+            _ if arg.starts_with("-b") && arg.len() > 2 => {
+                options.cookie = Some(arg[2..].to_string())
+            }
+            _ if arg.starts_with("-d") && arg.len() > 2 => {
+                apply_curl_data(&mut options, &arg[2..], false, true);
+                implies_post = true;
+            }
+            _ if arg.starts_with("--") => {
+                return Err(stderr_result(2, format!("curl: unknown option {arg}\n")));
+            }
+            _ if arg.starts_with('-') && arg != "-" => {
+                parse_curl_short_cluster(&mut options, arg)?;
+            }
+            _ => options.url = Some(arg.clone()),
+        }
+        index += 1;
+    }
+    if implies_post && options.method == HttpMethod::Get {
+        options.method = HttpMethod::Post;
+    }
+    Ok(options)
+}
+
+fn parse_curl_method(value: &str) -> Result<HttpMethod, CommandResult> {
+    value
+        .parse()
+        .map_err(|_| stderr_result(2, format!("curl: unsupported request method {value}\n")))
+}
+
+fn parse_curl_short_cluster(options: &mut CurlOptions, arg: &str) -> Result<(), CommandResult> {
+    for flag in arg[1..].chars() {
+        match flag {
+            's' => options.silent = true,
+            'S' => options.show_error = true,
+            'f' => options.fail_silently = true,
+            'L' => options.follow_redirects = true,
+            'I' => {
+                options.head_only = true;
+                options.method = HttpMethod::Head;
+            }
+            'i' => options.include_headers = true,
+            'O' => options.use_remote_name = true,
+            'v' => options.verbose = true,
+            other => return Err(stderr_result(2, format!("curl: unknown option -{other}\n"))),
+        }
+    }
+    Ok(())
+}
+
+fn apply_curl_header(options: &mut CurlOptions, header: &str) {
+    if let Some((name, value)) = header.split_once(':') {
+        let key = name.trim().to_ascii_lowercase();
+        if !key.is_empty() {
+            options.headers.insert(key, value.trim().to_string());
+        }
+    }
+}
+
+fn apply_curl_data(options: &mut CurlOptions, value: &str, binary: bool, allow_file: bool) {
+    if allow_file && value.starts_with('@') {
+        options.data_file = Some(CurlDataFile {
+            path: value.trim_start_matches('@').to_string(),
+            ascii_mode: !binary,
+        });
+        options.data = None;
+    } else {
+        options.data = Some(value.to_string());
+        options.data_file = None;
+    }
+    options.data_binary = binary;
+}
+
+fn apply_curl_urlencode(options: &mut CurlOptions, value: &str) {
+    if let Some(path) = value.strip_prefix('@') {
+        options.urlencode_files.push(CurlUrlencodeFile {
+            name: None,
+            path: path.to_string(),
+        });
+        return;
+    }
+    let at = value.find('@');
+    let eq = value.find('=');
+    if let Some(at) = at
+        && at > 0
+        && eq.is_none_or(|eq| at < eq)
+    {
+        options.urlencode_files.push(CurlUrlencodeFile {
+            name: Some(value[..at].to_string()),
+            path: value[at + 1..].to_string(),
+        });
+        return;
+    }
+    let encoded = encode_curl_form_data(value);
+    options.data = Some(match options.data.take() {
+        Some(existing) => format!("{existing}&{encoded}"),
+        None => encoded,
+    });
+}
+
+fn parse_curl_form_field(value: &str) -> Option<CurlFormField> {
+    let (name, rest) = value.split_once('=')?;
+    let (value, content_type) = rest
+        .split_once(";type=")
+        .map_or((rest, None), |(value, content_type)| {
+            (value, Some(content_type))
+        });
+    Some(CurlFormField {
+        name: name.to_string(),
+        value: value.to_string(),
+        content_type: content_type.map(str::to_string),
+    })
+}
+
+fn parse_curl_seconds_ms(value: &str) -> Option<u64> {
+    let seconds = value.parse::<f64>().ok()?;
+    (seconds > 0.0).then_some((seconds * 1000.0) as u64)
+}
+
+fn prepare_curl_body(
+    state: &ExecState<'_>,
+    options: &mut CurlOptions,
+) -> Result<Option<Vec<u8>>, CommandResult> {
+    if let Some(path) = &options.upload_file {
+        let path = resolve_path(&state.cwd, path);
+        let fs = state
+            .session
+            .inner
+            .fs
+            .lock()
+            .map_err(|_| stderr_result(1, "curl: filesystem lock poisoned\n"))?;
+        return fs
+            .read_file_buffer(&path)
+            .map(Some)
+            .map_err(|_| stderr_result(1, format!("curl: cannot read upload file {path}\n")));
+    }
+
+    if !options.form_fields.is_empty() {
+        let mut body = String::new();
+        let boundary = "----just-bash-rust-boundary";
+        let fs = state
+            .session
+            .inner
+            .fs
+            .lock()
+            .map_err(|_| stderr_result(1, "curl: filesystem lock poisoned\n"))?;
+        for field in &options.form_fields {
+            body.push_str(&format!("--{boundary}\r\n"));
+            body.push_str(&format!(
+                "Content-Disposition: form-data; name=\"{}\"",
+                field.name
+            ));
+            let mut value = field.value.clone();
+            if let Some(path) = value
+                .strip_prefix('@')
+                .or_else(|| value.strip_prefix('<'))
+                .map(str::to_string)
+            {
+                let resolved = resolve_path(&state.cwd, &path);
+                value = fs.read_file(&resolved).unwrap_or_default();
+                body.push_str(&format!("; filename=\"{}\"", path_basename(&path)));
+            }
+            body.push_str("\r\n");
+            if let Some(content_type) = &field.content_type {
+                body.push_str(&format!("Content-Type: {content_type}\r\n"));
+            }
+            body.push_str("\r\n");
+            body.push_str(&value);
+            body.push_str("\r\n");
+        }
+        body.push_str(&format!("--{boundary}--\r\n"));
+        options
+            .headers
+            .entry("content-type".to_string())
+            .or_insert_with(|| format!("multipart/form-data; boundary={boundary}"));
+        return Ok(Some(body.into_bytes()));
+    }
+
+    let mut data = if let Some(data_file) = &options.data_file {
+        let path = resolve_path(&state.cwd, &data_file.path);
+        let fs = state
+            .session
+            .inner
+            .fs
+            .lock()
+            .map_err(|_| stderr_result(1, "curl: filesystem lock poisoned\n"))?;
+        let mut content = fs
+            .read_file(&path)
+            .map_err(|_| stderr_result(1, format!("curl: cannot read data file {path}\n")))?;
+        if data_file.ascii_mode {
+            content.retain(|ch| ch != '\r' && ch != '\n');
+        }
+        Some(content)
+    } else {
+        options.data.clone()
+    };
+
+    if !options.urlencode_files.is_empty() {
+        let fs = state
+            .session
+            .inner
+            .fs
+            .lock()
+            .map_err(|_| stderr_result(1, "curl: filesystem lock poisoned\n"))?;
+        let mut parts = data.take().into_iter().collect::<Vec<_>>();
+        for entry in &options.urlencode_files {
+            let path = resolve_path(&state.cwd, &entry.path);
+            let content = fs
+                .read_file(&path)
+                .map_err(|_| stderr_result(1, format!("curl: cannot read data file {path}\n")))?;
+            let encoded = percent_encode(&content);
+            parts.push(match &entry.name {
+                Some(name) => format!("{}={encoded}", percent_encode(name)),
+                None => encoded,
+            });
+        }
+        data = Some(parts.join("&"));
+    }
+
+    Ok(data.map(String::into_bytes))
+}
+
+fn build_curl_output(
+    options: &CurlOptions,
+    response: &NetworkResponse,
+    request_url: &str,
+) -> String {
+    let mut output = String::new();
+    if options.verbose {
+        output.push_str(&format!("> {} {request_url}\n", options.method));
+        for (name, value) in &options.headers {
+            output.push_str(&format!("> {name}: {value}\n"));
+        }
+        output.push_str(">\n");
+        output.push_str(&format!(
+            "< HTTP/1.1 {} {}\n",
+            response.status, response.status_text
+        ));
+        for (name, value) in &response.headers {
+            output.push_str(&format!("< {name}: {value}\n"));
+        }
+        output.push_str("<\n");
+    } else if options.include_headers || options.head_only {
+        output.push_str(&format!(
+            "HTTP/1.1 {} {}\r\n",
+            response.status, response.status_text
+        ));
+        for (name, value) in &response.headers {
+            output.push_str(&format!("{name}: {value}\r\n"));
+        }
+        output.push_str("\r\n");
+    }
+    if !options.head_only {
+        output.push_str(&bytes_to_string(&response.body, BufferEncoding::Binary));
+    }
+    apply_curl_write_out(options.write_out.as_deref(), &output, response)
+}
+
+fn apply_curl_write_out(write_out: Option<&str>, base: &str, response: &NetworkResponse) -> String {
+    let Some(format) = write_out else {
+        return base.to_string();
+    };
+    let mut output = base.to_string();
+    let content_type = response
+        .headers
+        .get("content-type")
+        .cloned()
+        .unwrap_or_default();
+    let expanded = format
+        .replace("\\n", "\n")
+        .replace("%{http_code}", &format!("{:03}", response.status))
+        .replace("%{response_code}", &format!("{:03}", response.status))
+        .replace("%{content_type}", &content_type)
+        .replace("%{url_effective}", &response.url)
+        .replace("%{size_download}", &response.body.len().to_string());
+    output.push_str(&expanded);
+    output
+}
+
+fn curl_error(options: &CurlOptions, exit_code: i32, message: impl Into<String>) -> CommandResult {
+    let stderr = if options.silent && !options.show_error {
+        String::new()
+    } else {
+        message.into()
+    };
+    CommandResult {
+        stdout: String::new(),
+        stderr,
+        exit_code,
+        exit_requested: false,
+    }
+}
+
+fn normalize_curl_url(url: &str) -> String {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else {
+        format!("https://{url}")
+    }
+}
+
+fn curl_remote_name(url: &str) -> String {
+    url.split('?')
+        .next()
+        .unwrap_or(url)
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("index.html")
+        .to_string()
+}
+
+fn encode_curl_form_data(value: &str) -> String {
+    if let Some((name, body)) = value.split_once('=') {
+        format!("{}={}", percent_encode(name), percent_encode(body))
+    } else if let Some(body) = value.strip_prefix('=') {
+        percent_encode(body)
+    } else {
+        percent_encode(value)
+    }
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut output = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            output.push(char::from(byte));
+        } else {
+            output.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    output
 }
 
 fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
@@ -7887,37 +9513,16 @@ fn collect_text_inputs(
 }
 
 fn wildcard_match(pattern: &str, text: &str) -> bool {
-    if pattern == "*" {
-        return true;
-    }
-    let parts = pattern.split('*').collect::<Vec<_>>();
-    if parts.len() == 1 {
-        return pattern == text;
-    }
-    let mut remaining = text;
-    if let Some(first) = parts.first()
-        && !first.is_empty()
-    {
-        let Some(stripped) = remaining.strip_prefix(first) else {
-            return false;
-        };
-        remaining = stripped;
-    }
-    for part in parts.iter().skip(1).take(parts.len().saturating_sub(2)) {
-        if part.is_empty() {
-            continue;
+    let mut regex = String::from("^");
+    for ch in pattern.chars() {
+        match ch {
+            '*' => regex.push_str(".*"),
+            '?' => regex.push('.'),
+            other => regex.push_str(&regex::escape(&other.to_string())),
         }
-        let Some(index) = remaining.find(part) else {
-            return false;
-        };
-        remaining = &remaining[index + part.len()..];
     }
-    if let Some(last) = parts.last()
-        && !last.is_empty()
-    {
-        return remaining.ends_with(last);
-    }
-    true
+    regex.push('$');
+    Regex::new(&regex).is_ok_and(|regex| regex.is_match(text))
 }
 
 fn is_assignment(value: &str) -> bool {

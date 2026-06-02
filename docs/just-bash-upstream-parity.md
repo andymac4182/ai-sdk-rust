@@ -153,15 +153,18 @@ JS-only package distribution rows, JBC-19 maps 137 exact shell quoting, heredoc,
 pipeline-stderr, serializer, and transform plugin rows to named Rust tests, and
 JBC-20 closes 76 net-new core runtime/session and comparison rows while
 supporting 7 pipeline rows already owned by JBC-19. JBC-21 closes 15
-basename/dirname comparison-corpus rows. After regeneration the combined Just
-Bash ledger is `2,169` verified / `7,608` pending / `159` JS-only, with `7,619`
+basename/dirname comparison-corpus rows. JBC-22 closes 195 exact `find` rows and
+202 exact `curl` rows with deterministic in-memory filesystem behavior plus
+opt-in fake network/resource seams. After regeneration the combined Just Bash
+ledger is `2,566` verified / `7,211` pending / `159` JS-only, with `7,222`
 strict gate gaps. These slices do not claim full command, filesystem, syntax,
-transform, interpreter, security, executor, examples, or host-backed CLI parity
-until every portable row is named in the generated ledger.
+transform, interpreter, security, executor, examples, host-backed CLI, or
+source-only command-module parity until every portable row is named in the
+generated ledger.
 
 The counts below are the exact current upstream command-family case counts from
 `docs/open-agents/just-bash-parity.md` after the JB-05, JBC-06, JBC-07, JBC-09,
-JBC-10, JBC-11, JBC-13, and JBC-16 command-family row mappings. Seed smoke
+JBC-10, JBC-11, JBC-13, JBC-16, and JBC-22 command-family row mappings. Seed smoke
 coverage in these slices does not close rows outside the named verified cases.
 JBC-12 syntax/transform closure, JBC-14 security closure, JBC-15 interpreter
 closure, JBC-17 executor/example closure, JBC-18 CLI/package closure, JBC-19
@@ -184,11 +187,13 @@ per-domain tables.
 | `cut` command suite | 16 | 11 | 5 |
 | `tr` command suite | 27 | 13 | 14 |
 | `jq` command suite | 254 | 66 | 188 |
+| `curl` command suite | 202 | 202 | 0 |
+| `find` command suite | 195 | 195 | 0 |
 | Archive/compression (`gzip`, `gunzip`, `zcat`, `tar`) | 210 | 0 | 210 |
 | `yq` command suite | 215 | 28 | 187 |
 | `xan` command suite | 201 | 27 | 174 |
 | `sqlite3` command suite | 151 | 21 | 119 |
-| Remaining command utilities outside the groups above | 1,722 | 0 | 1,722 |
+| Remaining command utilities outside the groups above | 1,325 | 0 | 1,325 |
 
 `sqlite3` also has 11 JS-only worker/runtime rows documented as excluded in the generated ledger.
 

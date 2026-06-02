@@ -1456,6 +1456,83 @@ const jbc20CaseGroups = [
   },
 ];
 
+const jbc22CaseGroups = [
+  {
+    files: [
+      'packages/just-bash/src/commands/find/find.basic.test.ts',
+      'packages/just-bash/src/commands/find/find.depth.test.ts',
+      'packages/just-bash/src/commands/find/find.operators.test.ts',
+      'packages/just-bash/src/commands/find/find.patterns.test.ts',
+      'packages/just-bash/src/commands/find/find.perm.test.ts',
+      'packages/just-bash/src/commands/find/find.predicates.test.ts',
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::find',
+    rustTest:
+      'jbc22_find_command_closes_basic_pattern_depth_operator_action_rows; jbc22_find_command_closes_printf_delete_exec_and_metadata_rows',
+    notes:
+      'JBC-22 verifies portable find traversal, multiple roots, relative display paths, name/path/regex/type/empty/size/permission predicates, depth bounds, boolean operators, errors, and deterministic virtual-filesystem metadata.',
+  },
+  {
+    files: [
+      'packages/just-bash/src/commands/find/find.actions.test.ts',
+      'packages/just-bash/src/commands/find/find.exec.test.ts',
+      'packages/just-bash/src/commands/find/find.exec-command-name-quoting.test.ts',
+      'packages/just-bash/src/commands/find/find.printf.test.ts',
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::find',
+    rustTest: 'jbc22_find_command_closes_printf_delete_exec_and_metadata_rows',
+    notes:
+      'JBC-22 verifies portable find -print0, -printf metadata/directives, -delete, and -exec {} / {}+ behavior inside the Rust virtual filesystem without host shell fallback.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/find/find.perf.test.ts',
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::find',
+    rustTest:
+      'jbc22_find_command_closes_basic_pattern_depth_operator_action_rows; jbc22_find_command_closes_printf_delete_exec_and_metadata_rows',
+    notes:
+      'JBC-22 maps the portable find optimization corpus to deterministic Rust traversal, pruning, depth, filtering, metadata, and action behavior over in-memory fixtures; JS trace timing is not required for command-output parity.',
+  },
+  {
+    files: [
+      'packages/just-bash/src/commands/curl/tests/allowlist.test.ts',
+      'packages/just-bash/src/commands/curl/tests/availability.test.ts',
+      'packages/just-bash/src/commands/curl/tests/errors.test.ts',
+      'packages/just-bash/src/commands/curl/tests/methods.test.ts',
+      'packages/just-bash/src/commands/curl/tests/timeout.test.ts',
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::curl',
+    rustTest:
+      'jbc22_curl_command_uses_opt_in_fake_transport_and_resource_policy; jbc22_network_resource_seam_records_planned_fake_requests_without_live_io',
+    notes:
+      'JBC-22 verifies curl remains absent by default, is registered only with explicit network policy, allows/denies URLs and methods through the deterministic network planner, records fake requests, and never performs live network I/O.',
+  },
+  {
+    files: [
+      'packages/just-bash/src/commands/curl/curl.prototype-pollution.test.ts',
+      'packages/just-bash/src/commands/curl/tests/auth.test.ts',
+      'packages/just-bash/src/commands/curl/tests/binary.test.ts',
+      'packages/just-bash/src/commands/curl/tests/cookies.test.ts',
+      'packages/just-bash/src/commands/curl/tests/data-at-file.test.ts',
+      'packages/just-bash/src/commands/curl/tests/form.test.ts',
+      'packages/just-bash/src/commands/curl/tests/options.test.ts',
+      'packages/just-bash/src/commands/curl/tests/parse.test.ts',
+      'packages/just-bash/src/commands/curl/tests/upload.test.ts',
+      'packages/just-bash/src/commands/curl/tests/verbose.test.ts',
+      'packages/just-bash/src/commands/curl/tests/writeout.test.ts',
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::curl',
+    rustTest:
+      'jbc22_curl_command_closes_parse_body_output_cookie_and_error_rows; jbc22_curl_command_uses_opt_in_fake_transport_and_resource_policy',
+    notes:
+      'JBC-22 verifies portable curl option parsing, headers, auth, cookies, data-at-file/urlencode/form/upload bodies, binary output files, include/verbose/write-out formatting, and fail/silent errors against seeded fake responses.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -1497,6 +1574,7 @@ function caseOverrideFor(testCase) {
     ...jbc18CaseGroups,
     ...jbc19CaseGroups,
     ...jbc20CaseGroups,
+    ...jbc22CaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&

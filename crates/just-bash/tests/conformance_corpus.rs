@@ -286,6 +286,8 @@ fn run_case(case: &CorpusCase) -> Result<CaseOutcome, String> {
         env: case.env.clone(),
         cwd: case.cwd.clone(),
         commands: case.commands.clone(),
+        network_policy: None,
+        network_responses: BTreeMap::new(),
     });
     let result = bash.exec_with_options(command, exec_options(&case.options));
 

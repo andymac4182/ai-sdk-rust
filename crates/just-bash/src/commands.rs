@@ -145,6 +145,8 @@ const PORTABLE_BUILTINS: &[(&str, Builtin)] = &[
     ("whoami", Builtin::Whoami),
 ];
 
+const NETWORK_BUILTINS: &[(&str, Builtin)] = &[("curl", Builtin::Curl)];
+
 /// Built-ins implemented by the portable Rust backend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Builtin {
@@ -193,6 +195,7 @@ pub enum Builtin {
     Timeout,
     Which,
     Whoami,
+    Curl,
 }
 
 /// Registry of command names available to a session.
@@ -216,11 +219,32 @@ impl CommandRegistry {
         }
     }
 
+    /// Adds opt-in network commands. These are not part of the default
+    /// portable registry because upstream only registers them with network
+    /// configuration.
+    #[must_use]
+    pub fn with_network_commands(mut self) -> Self {
+        for (name, builtin) in NETWORK_BUILTINS {
+            self.commands.insert((*name).to_string(), *builtin);
+        }
+        self.security_policy = CommandSecurityPolicy::allow_only(self.commands.keys().cloned());
+        self
+    }
+
     /// Creates a registry restricted to the requested command names.
     pub fn filtered(names: &[String]) -> Self {
+        Self::filtered_with_network(names, false)
+    }
+
+    /// Creates a registry restricted to the requested command names, optionally
+    /// including network commands.
+    pub fn filtered_with_network(names: &[String], include_network: bool) -> Self {
         let commands = names
             .iter()
-            .filter_map(|name| builtin_for(name).map(|builtin| (normalize_name(name), builtin)))
+            .filter_map(|name| {
+                builtin_for_with_network(name, include_network)
+                    .map(|builtin| (normalize_name(name), builtin))
+            })
             .collect::<BTreeMap<_, _>>();
         let security_policy = CommandSecurityPolicy::allow_only(commands.keys().cloned());
         Self {
@@ -260,11 +284,18 @@ impl Default for CommandRegistry {
     }
 }
 
-fn builtin_for(name: &str) -> Option<Builtin> {
+fn builtin_for_with_network(name: &str, include_network: bool) -> Option<Builtin> {
     let name = normalize_name(name);
     PORTABLE_BUILTINS
         .iter()
         .find_map(|(candidate, builtin)| (*candidate == name).then_some(*builtin))
+        .or_else(|| {
+            include_network.then(|| {
+                NETWORK_BUILTINS
+                    .iter()
+                    .find_map(|(candidate, builtin)| (*candidate == name).then_some(*builtin))
+            })?
+        })
 }
 
 fn normalize_name(name: &str) -> String {
