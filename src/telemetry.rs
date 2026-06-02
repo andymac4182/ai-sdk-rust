@@ -1468,6 +1468,7 @@ mod tests {
 
         let dispatcher = create_telemetry_dispatcher(Some(
             TelemetryOptions::new()
+                .with_enabled(true)
                 .with_function_id("weather")
                 .with_record_inputs(false)
                 .with_record_outputs(true)
@@ -1479,9 +1480,91 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, TelemetryEventKind::OnStart);
         assert_eq!(events[0].event, json!({ "callId": "call-1" }));
+        assert!(events[0].event.get("isEnabled").is_none());
         assert_eq!(events[0].function_id.as_deref(), Some("weather"));
         assert_eq!(events[0].record_inputs, Some(false));
         assert_eq!(events[0].record_outputs, Some(true));
+    }
+
+    #[test]
+    fn telemetry_dispatcher_broadcasts_to_matching_integrations_and_skips_missing_callbacks() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+        let events = recorded_events();
+        let first_events = Arc::clone(&events);
+        let second_events = Arc::clone(&events);
+        let skipped_events = Arc::clone(&events);
+        let dispatcher =
+            create_telemetry_dispatcher(Some(TelemetryOptions::new().with_integrations([
+                TelemetryIntegration::new().with_callback(
+                    TelemetryEventKind::OnStart,
+                    move |event| {
+                        first_events.lock().expect("event lock").push(event);
+                    },
+                ),
+                TelemetryIntegration::new().with_callback(
+                    TelemetryEventKind::OnStart,
+                    move |event| {
+                        second_events.lock().expect("event lock").push(event);
+                    },
+                ),
+                TelemetryIntegration::new().with_callback(
+                    TelemetryEventKind::OnEnd,
+                    move |event| {
+                        skipped_events.lock().expect("event lock").push(event);
+                    },
+                ),
+            ])));
+
+        dispatcher.on_start(json!({ "callId": "call-1" }));
+
+        let events = events.lock().expect("event lock");
+        assert_eq!(events.len(), 2);
+        assert!(
+            events
+                .iter()
+                .all(|event| event.kind == TelemetryEventKind::OnStart)
+        );
+    }
+
+    #[test]
+    fn telemetry_dispatcher_noops_for_lifecycle_methods_without_registered_callbacks() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+        let events = recorded_events();
+        let captured = Arc::clone(&events);
+        let dispatcher = create_telemetry_dispatcher(Some(
+            TelemetryOptions::new().with_integration(TelemetryIntegration::new().with_callback(
+                TelemetryEventKind::OnStart,
+                move |event| {
+                    captured.lock().expect("event lock").push(event);
+                },
+            )),
+        ));
+
+        dispatcher.on_tool_execution_start(json!({ "callId": "tool" }));
+        dispatcher.on_embed_end(json!({ "callId": "embed" }));
+        assert!(events.lock().expect("event lock").is_empty());
+
+        dispatcher.on_start(json!({ "callId": "start" }));
+        assert_eq!(events.lock().expect("event lock").len(), 1);
+    }
+
+    #[test]
+    fn telemetry_dispatcher_reports_no_execute_tool_wrapper_when_integrations_do_not_implement_it()
+    {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+        let dispatcher =
+            create_telemetry_dispatcher(Some(TelemetryOptions::new().with_integration(
+                TelemetryIntegration::new().with_callback(TelemetryEventKind::OnStart, |_| {}),
+            )));
+
+        assert!(!dispatcher.has_execute_tool());
+        assert_eq!(
+            dispatcher.execute_tool("call-1", "tool-1", || json!("direct")),
+            json!("direct")
+        );
     }
 
     #[test]
@@ -1839,6 +1922,17 @@ mod tests {
         reset_telemetry_state_for_tests();
         let events = recorded_events();
         let captured = Arc::clone(&events);
+        let global_events = recorded_events();
+        let captured_global = Arc::clone(&global_events);
+        register_telemetry_integration(TelemetryIntegration::new().with_callback(
+            TelemetryEventKind::OnStart,
+            move |event| {
+                captured_global
+                    .lock()
+                    .expect("global event lock")
+                    .push(event);
+            },
+        ));
         let diagnostics = Arc::new(Mutex::new(Vec::new()));
         let captured_diagnostics = Arc::clone(&diagnostics);
         let _subscription = subscribe_telemetry_diagnostics(move |message| {
@@ -1864,6 +1958,7 @@ mod tests {
         dispatcher.on_start(json!({ "callId": "disabled" }));
 
         assert!(events.lock().expect("event lock").is_empty());
+        assert!(global_events.lock().expect("global event lock").is_empty());
         assert!(
             !diagnostics
                 .lock()
@@ -2035,6 +2130,50 @@ mod tests {
                 "local-after".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn telemetry_dispatcher_execute_tool_uses_global_wrappers_without_local_integrations() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+        let order = Arc::new(Mutex::new(Vec::<String>::new()));
+        let global_order = Arc::clone(&order);
+        register_telemetry_integration(TelemetryIntegration::new().with_execute_tool(
+            move |options| {
+                global_order
+                    .lock()
+                    .expect("order lock")
+                    .push("global-before".to_string());
+                let result = (options.execute)();
+                global_order
+                    .lock()
+                    .expect("order lock")
+                    .push("global-after".to_string());
+                result
+            },
+        ));
+
+        let dispatcher = create_telemetry_dispatcher(None);
+        assert!(dispatcher.has_execute_tool());
+        let execute_order = Arc::clone(&order);
+        let result = dispatcher.execute_tool("call-1", "tool-1", move || {
+            execute_order
+                .lock()
+                .expect("order lock")
+                .push("execute".to_string());
+            json!("done")
+        });
+
+        assert_eq!(result, json!("done"));
+        assert_eq!(
+            &*order.lock().expect("order lock"),
+            &[
+                "global-before".to_string(),
+                "execute".to_string(),
+                "global-after".to_string()
+            ]
+        );
+        reset_telemetry_state_for_tests();
     }
 
     #[test]

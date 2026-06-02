@@ -1,7 +1,6 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +16,7 @@ use crate::provider::ProviderOptions;
 use crate::provider_utils::{IdGeneratorOptions, create_id_generator, with_user_agent_suffix};
 use crate::retry::DEFAULT_MAX_RETRIES;
 use crate::telemetry::{TelemetryOptions, create_telemetry_dispatcher};
+use crate::util::{Callback, notify};
 use crate::warning::Warning;
 
 /// Embedding vector returned by high-level embed operations.
@@ -186,7 +186,7 @@ pub type EmbedOnStartCallback<'a> = EmbedOnStartFunction<'a>;
 
 /// Callback wrapper for upstream embed `experimental_onStart`.
 pub struct EmbedOnStart<'a> {
-    on_start: Rc<EmbedOnStartFunction<'a>>,
+    on_start: Callback<'a, EmbedStartEvent>,
 }
 
 impl<'a> EmbedOnStart<'a> {
@@ -197,13 +197,13 @@ impl<'a> EmbedOnStart<'a> {
         Fut: Future<Output = ()> + 'a,
     {
         Self {
-            on_start: Rc::new(move |event| Box::pin(on_start(event))),
+            on_start: Callback::infallible(on_start),
         }
     }
 
     /// Runs the embed start callback.
     pub fn start(&self, event: EmbedStartEvent) -> EmbedOnStartFuture<'a> {
-        (self.on_start)(event)
+        Box::pin(notify(event, self.on_start.clone()))
     }
 }
 
@@ -226,7 +226,7 @@ pub type EmbedOnEndCallback<'a> = EmbedOnEndFunction<'a>;
 
 /// Callback wrapper for upstream embed `experimental_onEnd`.
 pub struct EmbedOnEnd<'a> {
-    on_end: Rc<EmbedOnEndFunction<'a>>,
+    on_end: Callback<'a, EmbedEndEvent>,
 }
 
 impl<'a> EmbedOnEnd<'a> {
@@ -237,13 +237,13 @@ impl<'a> EmbedOnEnd<'a> {
         Fut: Future<Output = ()> + 'a,
     {
         Self {
-            on_end: Rc::new(move |event| Box::pin(on_end(event))),
+            on_end: Callback::infallible(on_end),
         }
     }
 
     /// Runs the embed end callback.
     pub fn end(&self, event: EmbedEndEvent) -> EmbedOnEndFuture<'a> {
-        (self.on_end)(event)
+        Box::pin(notify(event, self.on_end.clone()))
     }
 }
 
@@ -1016,6 +1016,18 @@ mod tests {
         }
     }
 
+    fn with_suppressed_panic_hook<T>(body: impl FnOnce() -> T) -> T {
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+        std::panic::set_hook(previous_hook);
+
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
     #[test]
     fn embed_calls_model_with_single_value_and_maps_result() {
         let provider_options: ProviderOptions = serde_json::from_value(json!({
@@ -1113,6 +1125,9 @@ mod tests {
             vec![
                 EmbeddingModelResult::new(vec![vec![0.1, 0.2], vec![0.3, 0.4]])
                     .with_usage(EmbeddingModelUsage::new(11))
+                    .with_warning(Warning::Other {
+                        message: "single call warning".to_string(),
+                    })
                     .with_response(response.clone()),
             ],
         );
@@ -1125,6 +1140,12 @@ mod tests {
         assert_eq!(result.values, vec!["alpha", "beta"]);
         assert_eq!(result.embeddings, vec![vec![0.1, 0.2], vec![0.3, 0.4]]);
         assert_eq!(result.usage, EmbeddingModelUsage::new(11));
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Other {
+                message: "single call warning".to_string(),
+            }]
+        );
         assert_eq!(result.responses, Some(vec![Some(response)]));
 
         let calls = model.calls();
@@ -1442,6 +1463,12 @@ mod tests {
         let events = Rc::new(RefCell::new(Vec::new()));
         let start_events = Rc::clone(&events);
         let end_events = Rc::clone(&events);
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "dimensions": 3
+            }
+        }))
+        .expect("provider options deserialize");
         let response = EmbeddingModelResponse::new().with_header("x-request-id", "embed-callback");
         let model = RecordingEmbeddingModel::new(
             None,
@@ -1455,6 +1482,7 @@ mod tests {
 
         let result = poll_ready(super::embed(
             EmbedOptions::new(&model, "sunrise")
+                .with_provider_options(provider_options.clone())
                 .with_header("User-Agent", "caller/1")
                 .with_experimental_on_start(move |event| {
                     start_events
@@ -1479,6 +1507,7 @@ mod tests {
         assert_eq!(events[0]["modelId"], "embedding-test");
         assert_eq!(events[0]["value"], "sunrise");
         assert_eq!(events[0]["maxRetries"], json!(DEFAULT_MAX_RETRIES));
+        assert_eq!(events[0]["providerOptions"], json!(provider_options));
         assert!(
             events[0]["callId"]
                 .as_str()
@@ -1491,6 +1520,9 @@ mod tests {
         );
 
         assert_eq!(events[1]["operationId"], "ai.embed");
+        assert_eq!(events[1]["provider"], "test-provider");
+        assert_eq!(events[1]["modelId"], "embedding-test");
+        assert_eq!(events[1]["callId"], events[0]["callId"]);
         assert_eq!(events[1]["value"], "sunrise");
         assert_eq!(events[1]["embedding"], json!([0.1, 0.2, 0.3]));
         assert_eq!(events[1]["usage"], json!({ "tokens": 7 }));
@@ -1505,10 +1537,44 @@ mod tests {
     }
 
     #[test]
+    fn embed_ignores_callback_panics_and_still_calls_on_end() {
+        with_suppressed_panic_hook(|| {
+            let end_called = Rc::new(RefCell::new(false));
+            let end_called_for_callback = Rc::clone(&end_called);
+            let model = RecordingEmbeddingModel::new(
+                None,
+                true,
+                vec![EmbeddingModelResult::new(vec![vec![0.1, 0.2, 0.3]])],
+            );
+
+            let result = poll_ready(super::embed(
+                EmbedOptions::new(&model, "sunrise")
+                    .with_experimental_on_start(|_| -> Ready<()> {
+                        panic!("start callback error");
+                    })
+                    .with_experimental_on_end(move |_| -> Ready<()> {
+                        *end_called_for_callback.borrow_mut() = true;
+                        panic!("end callback error");
+                    }),
+            ));
+
+            assert_eq!(result.embedding, vec![0.1, 0.2, 0.3]);
+            assert_eq!(model.calls().len(), 1);
+            assert!(*end_called.borrow());
+        });
+    }
+
+    #[test]
     fn embed_many_invokes_start_and_end_callbacks_with_array_payloads() {
         let events = Rc::new(RefCell::new(Vec::new()));
         let start_events = Rc::clone(&events);
         let end_events = Rc::clone(&events);
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": {
+                "dimensions": 2
+            }
+        }))
+        .expect("provider options deserialize");
         let response =
             EmbeddingModelResponse::new().with_header("x-request-id", "embed-many-callback");
         let model = RecordingEmbeddingModel::new(
@@ -1523,6 +1589,8 @@ mod tests {
 
         let result = poll_ready(super::embed_many(
             EmbedManyOptions::new(&model, ["alpha", "beta"])
+                .with_provider_options(provider_options.clone())
+                .with_header("x-custom", "header-value")
                 .with_on_start(move |event| {
                     start_events
                         .borrow_mut()
@@ -1542,8 +1610,15 @@ mod tests {
         let events = events.borrow();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0]["operationId"], "ai.embedMany");
+        assert_eq!(events[0]["provider"], "test-provider");
+        assert_eq!(events[0]["modelId"], "embedding-test");
         assert_eq!(events[0]["value"], json!(["alpha", "beta"]));
+        assert_eq!(events[0]["providerOptions"], json!(provider_options));
+        assert_eq!(events[0]["headers"]["x-custom"], "header-value");
         assert_eq!(events[1]["operationId"], "ai.embedMany");
+        assert_eq!(events[1]["provider"], "test-provider");
+        assert_eq!(events[1]["modelId"], "embedding-test");
+        assert_eq!(events[1]["callId"], events[0]["callId"]);
         assert_eq!(events[1]["value"], json!(["alpha", "beta"]));
         assert_eq!(events[1]["embedding"], json!([[0.1], [0.2]]));
         assert_eq!(
@@ -1556,6 +1631,46 @@ mod tests {
                 }
             ])
         );
+
+        let calls = model.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider_options, Some(provider_options));
+        assert_eq!(
+            calls[0]
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-custom"))
+                .map(String::as_str),
+            Some("header-value")
+        );
+    }
+
+    #[test]
+    fn embed_many_ignores_callback_panics_and_still_calls_on_end() {
+        with_suppressed_panic_hook(|| {
+            let end_called = Rc::new(RefCell::new(false));
+            let end_called_for_callback = Rc::clone(&end_called);
+            let model = RecordingEmbeddingModel::new(
+                None,
+                true,
+                vec![EmbeddingModelResult::new(vec![vec![0.1], vec![0.2]])],
+            );
+
+            let result = poll_ready(super::embed_many(
+                EmbedManyOptions::new(&model, ["alpha", "beta"])
+                    .with_experimental_on_start(|_| -> Ready<()> {
+                        panic!("start callback error");
+                    })
+                    .with_experimental_on_end(move |_| -> Ready<()> {
+                        *end_called_for_callback.borrow_mut() = true;
+                        panic!("end callback error");
+                    }),
+            ));
+
+            assert_eq!(result.embeddings, vec![vec![0.1], vec![0.2]]);
+            assert_eq!(model.calls().len(), 1);
+            assert!(*end_called.borrow());
+        });
     }
 
     #[test]

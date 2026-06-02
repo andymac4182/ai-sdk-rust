@@ -1,7 +1,6 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -17,6 +16,7 @@ use crate::reranking_model::{
 };
 use crate::retry::DEFAULT_MAX_RETRIES;
 use crate::telemetry::{TelemetryOptions, create_telemetry_dispatcher};
+use crate::util::{Callback, notify};
 use crate::warning::Warning;
 
 /// Document accepted by high-level `rerank`.
@@ -398,7 +398,7 @@ pub type RerankOnStartCallback<'a> = RerankOnStartFunction<'a>;
 
 /// Callback wrapper for upstream rerank `experimental_onStart`.
 pub struct RerankOnStart<'a> {
-    on_start: Rc<RerankOnStartFunction<'a>>,
+    on_start: Callback<'a, RerankStartEvent>,
 }
 
 impl<'a> RerankOnStart<'a> {
@@ -409,13 +409,13 @@ impl<'a> RerankOnStart<'a> {
         Fut: Future<Output = ()> + 'a,
     {
         Self {
-            on_start: Rc::new(move |event| Box::pin(on_start(event))),
+            on_start: Callback::infallible(on_start),
         }
     }
 
     /// Runs the rerank start callback.
     pub fn start(&self, event: RerankStartEvent) -> RerankOnStartFuture<'a> {
-        (self.on_start)(event)
+        Box::pin(notify(event, self.on_start.clone()))
     }
 }
 
@@ -438,7 +438,7 @@ pub type RerankOnEndCallback<'a> = RerankOnEndFunction<'a>;
 
 /// Callback wrapper for upstream rerank `experimental_onEnd`.
 pub struct RerankOnEnd<'a> {
-    on_end: Rc<RerankOnEndFunction<'a>>,
+    on_end: Callback<'a, RerankEndEvent>,
 }
 
 impl<'a> RerankOnEnd<'a> {
@@ -449,13 +449,13 @@ impl<'a> RerankOnEnd<'a> {
         Fut: Future<Output = ()> + 'a,
     {
         Self {
-            on_end: Rc::new(move |event| Box::pin(on_end(event))),
+            on_end: Callback::infallible(on_end),
         }
     }
 
     /// Runs the rerank end callback.
     pub fn end(&self, event: RerankEndEvent) -> RerankOnEndFuture<'a> {
-        (self.on_end)(event)
+        Box::pin(notify(event, self.on_end.clone()))
     }
 }
 
@@ -846,6 +846,18 @@ mod tests {
         }
     }
 
+    fn with_suppressed_panic_hook<T>(body: impl FnOnce() -> T) -> T {
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+        std::panic::set_hook(previous_hook);
+
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
     fn object(value: serde_json::Value) -> JsonObject {
         serde_json::from_value(value).expect("object deserializes")
     }
@@ -999,27 +1011,88 @@ mod tests {
         let first = object(json!({ "id": "123", "name": "sunny day at the beach" }));
         let second = object(json!({ "id": "456", "name": "rainy day in the city" }));
         let third = object(json!({ "id": "789", "name": "cloudy day in the mountains" }));
-        let model = RecordingRerankingModel::new(vec![RerankingModelResult::new(vec![
-            RerankingModelRanking::new(2, 0.9),
-            RerankingModelRanking::new(0, 0.8),
-        ])]);
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "cohere": {
+                "returnDocuments": true
+            }
+        }))
+        .expect("provider options deserialize");
+        let provider_metadata: ProviderMetadata = serde_json::from_value(json!({
+            "cohere": {
+                "searchUnits": 1
+            }
+        }))
+        .expect("provider metadata deserialize");
+        let response = RerankingModelResponse::new()
+            .with_id("object-rerank-response-id")
+            .with_timestamp(timestamp())
+            .with_model_id("provider-object-rerank-model")
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "id": "raw-object-rerank-response" }));
+        let model = RecordingRerankingModel::new(vec![
+            RerankingModelResult::new(vec![
+                RerankingModelRanking::new(2, 0.9),
+                RerankingModelRanking::new(0, 0.8),
+                RerankingModelRanking::new(1, 0.7),
+            ])
+            .with_provider_metadata(provider_metadata.clone())
+            .with_response(response.clone()),
+        ]);
 
-        let result = poll_ready(super::rerank(RerankOptions::new(
-            &model,
-            RerankDocuments::object([first.clone(), second.clone(), third.clone()]),
-            "rainy day",
-        )));
+        let result = poll_ready(super::rerank(
+            RerankOptions::new(
+                &model,
+                RerankDocuments::object([first.clone(), second.clone(), third.clone()]),
+                "rainy day",
+            )
+            .with_top_n(3)
+            .with_provider_options(provider_options.clone()),
+        ));
 
+        assert_eq!(
+            result.original_documents,
+            vec![
+                RerankDocument::object(first.clone()),
+                RerankDocument::object(second.clone()),
+                RerankDocument::object(third.clone()),
+            ]
+        );
         assert_eq!(
             result.reranked_documents,
             vec![
                 RerankDocument::object(third.clone()),
                 RerankDocument::object(first.clone()),
+                RerankDocument::object(second.clone()),
             ]
+        );
+        assert_eq!(
+            result.ranking,
+            vec![
+                RerankRanking::new(2, 0.9, RerankDocument::object(third.clone())),
+                RerankRanking::new(0, 0.8, RerankDocument::object(first.clone())),
+                RerankRanking::new(1, 0.7, RerankDocument::object(second.clone())),
+            ]
+        );
+        assert_eq!(result.provider_metadata, Some(provider_metadata));
+        assert_eq!(
+            result.response,
+            RerankResponse {
+                id: Some("object-rerank-response-id".to_string()),
+                timestamp: timestamp(),
+                model_id: "provider-object-rerank-model".to_string(),
+                headers: Some(Headers::from([(
+                    "content-type".to_string(),
+                    "application/json".to_string()
+                )])),
+                body: Some(json!({ "id": "raw-object-rerank-response" })),
+            }
         );
 
         let calls = model.calls();
         assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].query, "rainy day");
+        assert_eq!(calls[0].top_n, Some(3));
+        assert_eq!(calls[0].provider_options, Some(provider_options));
         assert_eq!(
             calls[0].documents,
             crate::reranking_model::RerankingModelDocuments::object(vec![first, second, third])
@@ -1074,6 +1147,12 @@ mod tests {
         let events = Rc::new(RefCell::new(Vec::new()));
         let start_events = Rc::clone(&events);
         let end_events = Rc::clone(&events);
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "cohere": {
+                "returnDocuments": true
+            }
+        }))
+        .expect("provider options deserialize");
         let provider_metadata: ProviderMetadata = serde_json::from_value(json!({
             "cohere": {
                 "searchUnits": 1
@@ -1102,6 +1181,8 @@ mod tests {
             )
             .with_top_n(1)
             .with_max_retries(4)
+            .with_provider_options(provider_options.clone())
+            .with_header("x-custom", "header-value")
             .with_on_start(move |event| {
                 start_events
                     .borrow_mut()
@@ -1130,6 +1211,8 @@ mod tests {
         assert_eq!(events[0]["query"], "rainy day");
         assert_eq!(events[0]["topN"], json!(1));
         assert_eq!(events[0]["maxRetries"], json!(4));
+        assert_eq!(events[0]["providerOptions"], json!(provider_options));
+        assert_eq!(events[0]["headers"]["x-custom"], "header-value");
         assert!(
             events[0]["callId"]
                 .as_str()
@@ -1138,6 +1221,9 @@ mod tests {
         );
 
         assert_eq!(events[1]["operationId"], "ai.rerank");
+        assert_eq!(events[1]["provider"], "test-provider");
+        assert_eq!(events[1]["modelId"], "rerank-test");
+        assert_eq!(events[1]["callId"], events[0]["callId"]);
         assert_eq!(
             events[1]["ranking"],
             json!([
@@ -1175,6 +1261,39 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn rerank_ignores_callback_panics_and_still_calls_on_end() {
+        with_suppressed_panic_hook(|| {
+            let end_called = Rc::new(RefCell::new(false));
+            let end_called_for_callback = Rc::clone(&end_called);
+            let model = RecordingRerankingModel::new(vec![RerankingModelResult::new(vec![
+                RerankingModelRanking::new(1, 0.95),
+            ])]);
+
+            let result = poll_ready(super::rerank(
+                RerankOptions::new(
+                    &model,
+                    RerankDocuments::text(["sunny day", "rainy day"]),
+                    "rainy day",
+                )
+                .with_experimental_on_start(|_| -> Ready<()> {
+                    panic!("start callback error");
+                })
+                .with_experimental_on_end(move |_| -> Ready<()> {
+                    *end_called_for_callback.borrow_mut() = true;
+                    panic!("end callback error");
+                }),
+            ));
+
+            assert_eq!(
+                result.reranked_documents,
+                vec![RerankDocument::text("rainy day")]
+            );
+            assert_eq!(model.calls().len(), 1);
+            assert!(*end_called.borrow());
+        });
     }
 
     #[test]
