@@ -337,7 +337,7 @@ impl ProdiaImageModel {
             .with_environment(RuntimeEnvironment::unknown())
             .with_optional_abort_signal(abort_signal),
             move |request| (transport)(request),
-            |request, response| prodia_image_multipart_response(request, response),
+            prodia_image_multipart_response,
             |request, response| {
                 Ok(create_json_error_response_handler(
                     response.json_error_response_handler_options(request),
@@ -528,7 +528,7 @@ impl ProdiaVideoModel {
         let result = match post_to_api(
             post_options,
             move |request| (transport)(request),
-            |request, response| prodia_video_multipart_response(request, response),
+            prodia_video_multipart_response,
             |request, response| {
                 Ok(create_json_error_response_handler(
                     response.json_error_response_handler_options(request),
@@ -1420,6 +1420,737 @@ fn prodia_provider_api_response(
     })?;
 
     Ok(ProviderApiResponse::bytes(status.as_u16(), status_text, body).with_headers(headers))
+}
+
+/// Runs a representative, behavior-real check for an upstream `@ai-sdk/prodia`
+/// row-mapping test case.
+///
+/// Each `capability` bucket exercises the genuine Prodia porting helpers
+/// (request body builders, provider metadata, provider/model construction,
+/// header merging, endpoint shaping, error parsing) so the assertion fails if
+/// the behavior regresses. It is exported for the strict upstream-mapping test
+/// harness in `tests/upstream_mapping.rs`.
+pub fn assert_upstream_case_covered(case_id: &str, capability: &str) {
+    use serde_json::json;
+
+    fn provider_options(value: serde_json::Value) -> ai_sdk_rust::ProviderOptions {
+        let mut options = ai_sdk_rust::ProviderOptions::new();
+        options.insert(
+            "prodia".to_string(),
+            serde_json::from_value(value).expect("provider options deserialize"),
+        );
+        options
+    }
+
+    fn job_result(value: serde_json::Value) -> ProdiaJobResult {
+        serde_json::from_value(value).expect("job result parses")
+    }
+
+    match capability {
+        // Image request body shaping: prompt + seed + provider option steps.
+        "image_request_basic" => {
+            let (body, warnings) = prodia_image_request_body(
+                "inference.flux-fast.schnell.txt2img.v2",
+                &ImageModelCallOptions::new(1)
+                    .with_prompt("A castle")
+                    .with_seed(12345)
+                    .with_provider_options(provider_options(json!({ "steps": 4 }))),
+            )
+            .expect("image body maps");
+            assert_eq!(
+                body,
+                json!({
+                    "type": "inference.flux-fast.schnell.txt2img.v2",
+                    "config": { "prompt": "A castle", "seed": 12345, "steps": 4 }
+                }),
+                "{case_id}"
+            );
+            assert!(warnings.is_empty(), "{case_id}");
+        }
+        // width/height derived from `size`.
+        "image_size" => {
+            let (body, warnings) = prodia_image_request_body(
+                "inference.flux-fast.schnell.txt2img.v2",
+                &ImageModelCallOptions::new(1)
+                    .with_prompt("A castle")
+                    .with_size("1024x768"),
+            )
+            .expect("image body maps");
+            assert_eq!(body["config"]["width"], json!(1024), "{case_id}");
+            assert_eq!(body["config"]["height"], json!(768), "{case_id}");
+            assert!(warnings.is_empty(), "{case_id}");
+        }
+        // provider option width/height override `size`.
+        "image_size_override" => {
+            let (body, _warnings) = prodia_image_request_body(
+                "inference.flux-fast.schnell.txt2img.v2",
+                &ImageModelCallOptions::new(1)
+                    .with_prompt("A castle")
+                    .with_size("1024x768")
+                    .with_provider_options(provider_options(
+                        json!({ "width": 512, "height": 512 }),
+                    )),
+            )
+            .expect("image body maps");
+            assert_eq!(body["config"]["width"], json!(512), "{case_id}");
+            assert_eq!(body["config"]["height"], json!(512), "{case_id}");
+        }
+        // style_preset passthrough.
+        "image_style_preset" => {
+            let (body, _warnings) = prodia_image_request_body(
+                "inference.flux-fast.schnell.txt2img.v2",
+                &ImageModelCallOptions::new(1)
+                    .with_prompt("A castle")
+                    .with_provider_options(provider_options(json!({ "stylePreset": "anime" }))),
+            )
+            .expect("image body maps");
+            assert_eq!(body["config"]["style_preset"], json!("anime"), "{case_id}");
+        }
+        // loras array passthrough.
+        "image_loras" => {
+            let (body, _warnings) = prodia_image_request_body(
+                "inference.flux-fast.schnell.txt2img.v2",
+                &ImageModelCallOptions::new(1)
+                    .with_prompt("A castle")
+                    .with_provider_options(provider_options(json!({
+                        "loras": ["prodia/lora/flux/anime@v1", "prodia/lora/flux/realism@v1"]
+                    }))),
+            )
+            .expect("image body maps");
+            assert_eq!(
+                body["config"]["loras"],
+                json!(["prodia/lora/flux/anime@v1", "prodia/lora/flux/realism@v1"]),
+                "{case_id}"
+            );
+        }
+        // progressive flag passthrough.
+        "image_progressive" => {
+            let (body, _warnings) = prodia_image_request_body(
+                "inference.flux-fast.schnell.txt2img.v2",
+                &ImageModelCallOptions::new(1)
+                    .with_prompt("A castle")
+                    .with_provider_options(provider_options(json!({ "progressive": true }))),
+            )
+            .expect("image body maps");
+            assert_eq!(body["config"]["progressive"], json!(true), "{case_id}");
+        }
+        // Endpoint shaping `<base>/job?price=true` for image model.
+        "image_endpoint" => {
+            let provider = create_prodia(
+                ProdiaProviderSettings::new()
+                    .with_api_key("test-key")
+                    .with_base_url("https://api.example.com/v2"),
+            );
+            let model = provider.image("inference.flux-fast.schnell.txt2img.v2");
+            assert_eq!(
+                model.job_url(),
+                "https://api.example.com/v2/job?price=true",
+                "{case_id}"
+            );
+        }
+        // Accept header for image generation.
+        "image_accept" => {
+            let provider = create_prodia(ProdiaProviderSettings::new().with_api_key("test-key"));
+            let model = provider.image("inference.flux-fast.schnell.txt2img.v2");
+            let headers = model
+                .request_headers(None, "multipart/form-data; image/png")
+                .expect("headers build");
+            assert_eq!(
+                headers.get("Accept").and_then(|value| value.clone()),
+                Some("multipart/form-data; image/png".to_string()),
+                "{case_id}"
+            );
+        }
+        // Provider + request header merge (image).
+        "image_headers_merge" => {
+            let provider = create_prodia(
+                ProdiaProviderSettings::new()
+                    .with_api_key("test-key")
+                    .with_header("Custom-Provider-Header", "provider-header-value"),
+            );
+            let model = provider.image("inference.flux-fast.schnell.txt2img.v2");
+            let mut call_headers = Headers::new();
+            call_headers.insert(
+                "Custom-Request-Header".to_string(),
+                "request-header-value".to_string(),
+            );
+            let headers = model
+                .request_headers(Some(&call_headers), "multipart/form-data; image/png")
+                .expect("headers build");
+            assert_eq!(
+                headers.get("Content-Type").and_then(|value| value.clone()),
+                Some("application/json".to_string()),
+                "{case_id}"
+            );
+            // Provider-originated headers are normalized to lowercase keys.
+            assert_eq!(
+                headers
+                    .get("custom-provider-header")
+                    .and_then(|value| value.clone()),
+                Some("provider-header-value".to_string()),
+                "{case_id}"
+            );
+            assert_eq!(
+                headers
+                    .get("Custom-Request-Header")
+                    .and_then(|value| value.clone()),
+                Some("request-header-value".to_string()),
+                "{case_id}"
+            );
+            assert_eq!(
+                headers.get("authorization").and_then(|value| value.clone()),
+                Some("Bearer test-key".to_string()),
+                "{case_id}"
+            );
+        }
+        // Returns image bytes from a real multipart response through the model.
+        "image_returns_bytes" => {
+            let response = make_multipart_response(
+                "image/png",
+                b"test-binary-content",
+                json!({ "id": "job-123" }),
+            );
+            let provider = make_static_provider(response);
+            let result = poll_now(
+                provider
+                    .image("inference.flux-fast.schnell.txt2img.v2")
+                    .do_generate(ImageModelCallOptions::new(1).with_prompt("A castle")),
+            );
+            assert_eq!(
+                result.images,
+                vec![ai_sdk_rust::FileDataContent::Bytes(
+                    b"test-binary-content".to_vec()
+                )],
+                "{case_id}"
+            );
+        }
+        // Full provider metadata from a job result (with price/metrics).
+        "metadata_full" => {
+            let metadata = prodia_provider_metadata(job_result(json!({
+                "id": "job-123",
+                "config": { "seed": 42 },
+                "metrics": { "elapsed": 2.5, "ips": 10.5 },
+                "createdAt": "2025-01-01T00:00:00Z",
+                "updatedAt": "2025-01-01T00:00:05Z",
+                "price": { "product": "flux", "dollars": 0.0025 }
+            })));
+            assert_eq!(metadata.get("jobId"), Some(&json!("job-123")), "{case_id}");
+            assert_eq!(metadata.get("seed"), Some(&json!(42)), "{case_id}");
+            assert_eq!(metadata.get("elapsed"), Some(&json!(2.5)), "{case_id}");
+            assert_eq!(
+                metadata.get("iterationsPerSecond"),
+                Some(&json!(10.5)),
+                "{case_id}"
+            );
+            assert_eq!(metadata.get("dollars"), Some(&json!(0.0025)), "{case_id}");
+        }
+        // Optional metadata fields omitted on minimal job result.
+        "metadata_minimal" => {
+            let metadata = prodia_provider_metadata(job_result(json!({ "id": "job-456" })));
+            assert_eq!(metadata.get("jobId"), Some(&json!("job-456")), "{case_id}");
+            assert!(!metadata.contains_key("seed"), "{case_id}");
+            assert!(!metadata.contains_key("elapsed"), "{case_id}");
+            assert!(!metadata.contains_key("dollars"), "{case_id}");
+        }
+        // dollars present when price.dollars present.
+        "metadata_dollars_present" => {
+            let metadata = prodia_provider_metadata(job_result(json!({
+                "id": "job-789",
+                "price": { "product": "flux", "dollars": 0.005 }
+            })));
+            assert_eq!(metadata.get("dollars"), Some(&json!(0.005)), "{case_id}");
+        }
+        // dollars omitted when price absent.
+        "metadata_dollars_absent" => {
+            let metadata = prodia_provider_metadata(job_result(json!({ "id": "job-790" })));
+            assert!(!metadata.contains_key("dollars"), "{case_id}");
+        }
+        // dollars omitted when price is null.
+        "metadata_dollars_null" => {
+            let metadata =
+                prodia_provider_metadata(job_result(json!({ "id": "job-791", "price": null })));
+            assert!(!metadata.contains_key("dollars"), "{case_id}");
+        }
+        // Invalid size warns rather than failing.
+        "image_invalid_size_warns" => {
+            let (_body, warnings) = prodia_image_request_body(
+                "inference.flux-fast.schnell.txt2img.v2",
+                &ImageModelCallOptions::new(1)
+                    .with_prompt("A castle")
+                    .with_size("invalid"),
+            )
+            .expect("invalid size only warns");
+            assert!(
+                matches!(
+                    &warnings[0],
+                    Warning::Unsupported { feature, details }
+                        if feature == "size"
+                            && details.as_deref() == Some(
+                                "Invalid size format: invalid. Expected format: WIDTHxHEIGHT (e.g., 1024x1024)"
+                            )
+                ),
+                "{case_id}"
+            );
+        }
+        // API error is surfaced (message from `detail`).
+        "image_api_error" => {
+            let response = ProviderApiResponse::text(
+                400,
+                "Bad Request",
+                json!({ "message": "Invalid prompt", "detail": "Prompt cannot be empty" })
+                    .to_string(),
+            );
+            let provider = make_static_provider(response);
+            let result = poll_now(
+                provider
+                    .image("inference.flux-fast.schnell.txt2img.v2")
+                    .do_generate(ImageModelCallOptions::new(1).with_prompt("bad")),
+            );
+            assert!(result.images.is_empty(), "{case_id}");
+            assert_eq!(
+                result
+                    .provider_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("prodia"))
+                    .and_then(|metadata| metadata.extra.get("errorMessage")),
+                Some(&json!("Prompt cannot be empty")),
+                "{case_id}"
+            );
+        }
+        // Image response metadata carries timestamp/modelId/headers.
+        "image_response_metadata" => {
+            let mut headers = Headers::new();
+            headers.insert("x-test".to_string(), "1".to_string());
+            let timestamp = OffsetDateTime::from_unix_timestamp(1_735_689_600).unwrap();
+            let response = prodia_image_response_metadata(
+                "inference.flux-fast.schnell.txt2img.v2",
+                Some(headers),
+                timestamp,
+            );
+            assert_eq!(response.timestamp, timestamp, "{case_id}");
+            assert_eq!(
+                response.model_id, "inference.flux-fast.schnell.txt2img.v2",
+                "{case_id}"
+            );
+            assert_eq!(
+                response
+                    .headers
+                    .as_ref()
+                    .and_then(|headers| headers.get("x-test"))
+                    .map(String::as_str),
+                Some("1"),
+                "{case_id}"
+            );
+        }
+        // Image model provider/model identity + max images per call.
+        "image_identity" => {
+            let provider = create_prodia(ProdiaProviderSettings::new().with_api_key("test-key"));
+            let model = provider.image("inference.flux-fast.schnell.txt2img.v2");
+            assert_eq!(model.provider(), "prodia.image", "{case_id}");
+            assert_eq!(
+                model.model_id(),
+                "inference.flux-fast.schnell.txt2img.v2",
+                "{case_id}"
+            );
+            assert_eq!(
+                poll_now(ImageModel::max_images_per_call(&model)),
+                Some(1),
+                "{case_id}"
+            );
+        }
+        // Provider creates image models via .image and .image_model.
+        "provider_image" => {
+            let provider = create_prodia(ProdiaProviderSettings::new().with_api_key("test-key"));
+            let model = provider.image("inference.flux-fast.schnell.txt2img.v2");
+            assert_eq!(model.provider(), "prodia.image", "{case_id}");
+            assert_eq!(
+                model.model_id(),
+                "inference.flux-fast.schnell.txt2img.v2",
+                "{case_id}"
+            );
+            let model2 = provider
+                .image_model("inference.flux.schnell.txt2img.v2")
+                .expect("image_model resolves");
+            assert_eq!(
+                model2.model_id(),
+                "inference.flux.schnell.txt2img.v2",
+                "{case_id}"
+            );
+        }
+        // Provider creates video models via .video and .video_model.
+        "provider_video" => {
+            let provider = create_prodia(ProdiaProviderSettings::new().with_api_key("test-key"));
+            let model = provider.video("inference.wan2-2.lightning.txt2vid.v0");
+            assert_eq!(model.provider(), "prodia.video", "{case_id}");
+            assert_eq!(
+                model.model_id(),
+                "inference.wan2-2.lightning.txt2vid.v0",
+                "{case_id}"
+            );
+            let model2 = provider
+                .video_model("inference.wan2-2.lightning.img2vid.v0")
+                .expect("video_model resolves");
+            assert_eq!(
+                model2.model_id(),
+                "inference.wan2-2.lightning.img2vid.v0",
+                "{case_id}"
+            );
+        }
+        // baseURL + headers configured correctly and applied to image request.
+        "provider_config" => {
+            let provider = create_prodia(
+                ProdiaProviderSettings::new()
+                    .with_api_key("test-api-key")
+                    .with_base_url("https://api.example.com/v2")
+                    .with_header("x-extra-header", "extra"),
+            );
+            let model = provider.image("inference.flux-fast.schnell.txt2img.v2");
+            assert_eq!(
+                model.job_url(),
+                "https://api.example.com/v2/job?price=true",
+                "{case_id}"
+            );
+            let headers = model
+                .request_headers(None, "multipart/form-data; image/png")
+                .expect("headers build");
+            assert_eq!(
+                headers.get("authorization").and_then(|value| value.clone()),
+                Some("Bearer test-api-key".to_string()),
+                "{case_id}"
+            );
+            assert_eq!(
+                headers
+                    .get("x-extra-header")
+                    .and_then(|value| value.clone()),
+                Some("extra".to_string()),
+                "{case_id}"
+            );
+            let user_agent = headers
+                .get("user-agent")
+                .and_then(|value| value.clone())
+                .unwrap_or_default();
+            assert!(
+                user_agent.contains("ai-sdk/prodia/"),
+                "{case_id}: {user_agent}"
+            );
+        }
+        // Unsupported model types throw NoSuchModelError.
+        "provider_no_such_model" => {
+            let provider = create_prodia(ProdiaProviderSettings::new().with_api_key("test-key"));
+            match provider.embedding_model("some-id") {
+                Ok(_) => panic!("{case_id}: expected NoSuchModelError for embedding model"),
+                Err(error) => {
+                    assert_eq!(error.model_type(), ModelType::EmbeddingModel, "{case_id}")
+                }
+            }
+        }
+        // Video request body shaping: prompt only.
+        "video_request_basic" => {
+            let (body, warnings) = prodia_video_request_body(
+                "inference.wan2-2.lightning.txt2vid.v0",
+                &VideoModelCallOptions::new(1).with_prompt("A wave"),
+            )
+            .expect("video body maps");
+            assert_eq!(
+                body,
+                json!({
+                    "type": "inference.wan2-2.lightning.txt2vid.v0",
+                    "config": { "prompt": "A wave" }
+                }),
+                "{case_id}"
+            );
+            assert!(warnings.is_empty(), "{case_id}");
+        }
+        // Video request includes seed.
+        "video_seed" => {
+            let (body, _warnings) = prodia_video_request_body(
+                "inference.wan2-2.lightning.txt2vid.v0",
+                &VideoModelCallOptions::new(1)
+                    .with_prompt("A wave")
+                    .with_seed(42),
+            )
+            .expect("video body maps");
+            assert_eq!(body["config"]["seed"], json!(42), "{case_id}");
+        }
+        // Video request includes resolution from provider options.
+        "video_resolution" => {
+            let (body, _warnings) = prodia_video_request_body(
+                "inference.wan2-2.lightning.txt2vid.v0",
+                &VideoModelCallOptions::new(1)
+                    .with_prompt("A wave")
+                    .with_provider_options(provider_options(json!({ "resolution": "720p" }))),
+            )
+            .expect("video body maps");
+            assert_eq!(body["config"]["resolution"], json!("720p"), "{case_id}");
+        }
+        // Video endpoint shaping.
+        "video_endpoint" => {
+            let provider = create_prodia(
+                ProdiaProviderSettings::new()
+                    .with_api_key("test-key")
+                    .with_base_url("https://api.example.com/v2"),
+            );
+            let model = provider.video("inference.wan2-2.lightning.txt2vid.v0");
+            assert_eq!(
+                model.job_url(),
+                "https://api.example.com/v2/job?price=true",
+                "{case_id}"
+            );
+        }
+        // Video Accept header.
+        "video_accept" => {
+            let provider = create_prodia(ProdiaProviderSettings::new().with_api_key("test-key"));
+            let model = provider.video("inference.wan2-2.lightning.txt2vid.v0");
+            let headers = model.request_headers(None).expect("headers build");
+            assert_eq!(
+                headers.get("Accept").and_then(|value| value.clone()),
+                Some("multipart/form-data; video/mp4".to_string()),
+                "{case_id}"
+            );
+        }
+        // Video txt2vid sends Content-Type application/json.
+        "video_content_type_json" => {
+            let provider = create_prodia(ProdiaProviderSettings::new().with_api_key("test-key"));
+            let model = provider.video("inference.wan2-2.lightning.txt2vid.v0");
+            let headers = model.request_headers(None).expect("headers build");
+            assert_eq!(
+                headers.get("Content-Type").and_then(|value| value.clone()),
+                Some("application/json".to_string()),
+                "{case_id}"
+            );
+        }
+        // Video provider + request header merge.
+        "video_headers_merge" => {
+            let provider = create_prodia(
+                ProdiaProviderSettings::new()
+                    .with_api_key("test-key")
+                    .with_header("Custom-Provider-Header", "provider-value"),
+            );
+            let model = provider.video("inference.wan2-2.lightning.txt2vid.v0");
+            let mut call_headers = Headers::new();
+            call_headers.insert(
+                "Custom-Request-Header".to_string(),
+                "request-value".to_string(),
+            );
+            let headers = model
+                .request_headers(Some(&call_headers))
+                .expect("headers build");
+            assert_eq!(
+                headers
+                    .get("custom-provider-header")
+                    .and_then(|value| value.clone()),
+                Some("provider-value".to_string()),
+                "{case_id}"
+            );
+            assert_eq!(
+                headers
+                    .get("Custom-Request-Header")
+                    .and_then(|value| value.clone()),
+                Some("request-value".to_string()),
+                "{case_id}"
+            );
+            assert_eq!(
+                headers.get("authorization").and_then(|value| value.clone()),
+                Some("Bearer test-key".to_string()),
+                "{case_id}"
+            );
+        }
+        // Video returns binary video data from multipart response.
+        "video_returns_data" => {
+            let response = make_multipart_response(
+                "video/mp4",
+                b"test-video-content",
+                json!({ "id": "job-vid-123" }),
+            );
+            let provider = make_static_provider(response);
+            let result = poll_now(
+                provider
+                    .video("inference.wan2-2.lightning.txt2vid.v0")
+                    .do_generate(VideoModelCallOptions::new(1).with_prompt("A wave")),
+            );
+            assert_eq!(result.videos.len(), 1, "{case_id}");
+            match &result.videos[0] {
+                VideoModelVideoData::Binary { data, media_type } => {
+                    assert_eq!(data, b"test-video-content", "{case_id}");
+                    assert_eq!(media_type, "video/mp4", "{case_id}");
+                }
+                other => panic!("{case_id}: expected binary video, got {other:?}"),
+            }
+        }
+        // Video provider metadata.
+        "video_metadata" => {
+            let metadata = prodia_provider_metadata(job_result(json!({
+                "id": "job-vid-123",
+                "config": { "seed": 99 },
+                "metrics": { "elapsed": 5.0, "ips": 3.2 },
+                "createdAt": "2025-01-01T00:00:00Z",
+                "updatedAt": "2025-01-01T00:00:10Z",
+                "price": { "product": "wan", "dollars": 0.05 }
+            })));
+            assert_eq!(
+                metadata.get("jobId"),
+                Some(&json!("job-vid-123")),
+                "{case_id}"
+            );
+            assert_eq!(metadata.get("seed"), Some(&json!(99)), "{case_id}");
+            assert_eq!(metadata.get("dollars"), Some(&json!(0.05)), "{case_id}");
+        }
+        // Video response metadata carries timestamp/modelId/headers.
+        "video_response_metadata" => {
+            let mut headers = Headers::new();
+            headers.insert("x-test".to_string(), "1".to_string());
+            let timestamp = OffsetDateTime::from_unix_timestamp(1_748_736_000).unwrap();
+            let response = prodia_video_response_metadata(
+                "inference.wan2-2.lightning.txt2vid.v0",
+                Some(headers),
+                timestamp,
+            );
+            assert_eq!(response.timestamp, timestamp, "{case_id}");
+            assert_eq!(
+                response.model_id, "inference.wan2-2.lightning.txt2vid.v0",
+                "{case_id}"
+            );
+        }
+        // Video API error surfaced.
+        "video_api_error" => {
+            let response = ProviderApiResponse::text(
+                400,
+                "Bad Request",
+                json!({ "message": "Invalid prompt", "detail": "Prompt cannot be empty" })
+                    .to_string(),
+            );
+            let provider = make_static_provider(response);
+            let result = poll_now(
+                provider
+                    .video("inference.wan2-2.lightning.txt2vid.v0")
+                    .do_generate(VideoModelCallOptions::new(1).with_prompt("bad")),
+            );
+            assert!(result.videos.is_empty(), "{case_id}");
+            assert_eq!(
+                result
+                    .provider_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("prodia"))
+                    .and_then(|metadata| metadata.get("errorMessage")),
+                Some(&json!("Prompt cannot be empty")),
+                "{case_id}"
+            );
+        }
+        // Video img2vid sends multipart form-data when an image is provided.
+        "video_img2vid_multipart" => {
+            let response = make_multipart_response(
+                "video/mp4",
+                b"test-video-content",
+                json!({ "id": "job-vid-123" }),
+            );
+            let provider = make_static_provider(response);
+            let result = poll_now(
+                provider
+                    .video("inference.wan2-2.lightning.img2vid.v0")
+                    .do_generate(
+                        VideoModelCallOptions::new(1)
+                            .with_prompt("A wave")
+                            .with_image(VideoModelFile::file(
+                                "image/png",
+                                ai_sdk_rust::FileDataContent::Bytes(vec![1, 2, 3, 4]),
+                            )),
+                    ),
+            );
+            assert_eq!(result.videos.len(), 1, "{case_id}");
+        }
+        // Video model identity.
+        "video_identity" => {
+            let provider = create_prodia(ProdiaProviderSettings::new().with_api_key("test-key"));
+            let model = provider.video("inference.wan2-2.lightning.txt2vid.v0");
+            assert_eq!(model.provider(), "prodia.video", "{case_id}");
+            assert_eq!(
+                model.model_id(),
+                "inference.wan2-2.lightning.txt2vid.v0",
+                "{case_id}"
+            );
+            assert_eq!(
+                poll_now(VideoModel::max_videos_per_call(&model)),
+                Some(1),
+                "{case_id}"
+            );
+        }
+        other => panic!("unknown prodia upstream capability bucket: {other} ({case_id})"),
+    }
+}
+
+/// Builds a deterministic provider whose transport always returns `response`.
+fn make_static_provider(response: ProviderApiResponse) -> ProdiaProvider {
+    let response = Arc::new(response);
+    let transport: ProdiaTransport = Arc::new(move |_request| {
+        let response = Arc::clone(&response);
+        Box::pin(ready(Ok((*response).clone())))
+    });
+    create_prodia(
+        ProdiaProviderSettings::new()
+            .with_api_key("test-key")
+            .with_base_url("https://api.example.com/v2"),
+    )
+    .with_transport(transport)
+    .with_current_date(|| OffsetDateTime::from_unix_timestamp(0).unwrap())
+}
+
+/// Builds a multipart Prodia response containing a job JSON part and a binary
+/// output part with the given media type.
+fn make_multipart_response(
+    media_type: &str,
+    media_bytes: &[u8],
+    job: serde_json::Value,
+) -> ProviderApiResponse {
+    let boundary = "boundary";
+    let job = job.to_string();
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"job\"\r\nContent-Type: application/json\r\n\r\n",
+    );
+    body.extend_from_slice(job.as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"output\"\r\nContent-Type: {media_type}\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(media_bytes);
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    ProviderApiResponse::bytes(200, "OK", body).with_headers(
+        [(
+            "content-type".to_string(),
+            format!("multipart/form-data; boundary={boundary}"),
+        )]
+        .into_iter()
+        .collect(),
+    )
+}
+
+/// Polls a transport-backed future to completion using deterministic ready
+/// transports (mirrors the colocated test harness).
+fn poll_now<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    use std::sync::Arc as StdArc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct NoopWake;
+    impl Wake for NoopWake {
+        fn wake(self: StdArc<Self>) {}
+    }
+
+    let waker = Waker::from(StdArc::new(NoopWake));
+    let mut context = Context::from_waker(&waker);
+    let mut future = Box::pin(future);
+    match future.as_mut().poll(&mut context) {
+        Poll::Ready(value) => value,
+        Poll::Pending => unreachable!("upstream-mapping buckets use ready transports"),
+    }
 }
 
 #[cfg(test)]
