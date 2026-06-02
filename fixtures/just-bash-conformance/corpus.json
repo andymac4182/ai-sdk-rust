@@ -57,8 +57,8 @@
       "comparison-tests": 15
     },
     "byStatus": {
-      "portable-pending": 1322,
-      "portable-verified": 349
+      "portable-pending": 1288,
+      "portable-verified": 383
     },
     "byClassification": {
       "comparison-golden": 457,
@@ -79360,13 +79360,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:104:it:should handle -f for non-existent file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [
@@ -79411,13 +79411,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:123:it:should copy a file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [],
@@ -79457,13 +79457,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:135:it:should copy file to directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [],
@@ -79503,13 +79503,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:147:it:should copy directory with -r",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [],
@@ -79549,13 +79549,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:147:it:should copy directory with -r",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [
@@ -79607,13 +79607,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:160:it:should copy multiple files to directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [],
@@ -79654,13 +79654,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:160:it:should copy multiple files to directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [
@@ -79710,13 +79710,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:186:it:should rename a file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [],
@@ -79755,13 +79755,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:186:it:should rename a file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [
@@ -79812,13 +79812,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:198:it:should move file to directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [],
@@ -79858,13 +79858,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:198:it:should move file to directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [
@@ -79910,13 +79910,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:198:it:should move file to directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [
@@ -79959,13 +79959,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:21:it:should create a single directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [],
@@ -80002,13 +80002,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:21:it:should create a single directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [
@@ -80053,13 +80053,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:212:it:should rename a directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [],
@@ -80098,13 +80098,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:212:it:should rename a directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [
@@ -80156,13 +80156,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:224:it:should move multiple files to directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [],
@@ -80203,13 +80203,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:224:it:should move multiple files to directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [
@@ -80261,13 +80261,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:224:it:should move multiple files to directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [
@@ -80315,13 +80315,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:253:it:should create an empty file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [],
@@ -80358,13 +80358,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:253:it:should create an empty file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [
@@ -80407,13 +80407,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:265:it:should create multiple files",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [],
@@ -80450,13 +80450,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:265:it:should create multiple files",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [
@@ -80511,13 +80511,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:276:it:should not modify existing file content",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [],
@@ -80554,13 +80554,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:299:it:should output current working directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [
@@ -80603,13 +80603,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:34:it:should create nested directories with -p",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [],
@@ -80646,13 +80646,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:34:it:should create nested directories with -p",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [],
@@ -80691,13 +80691,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:46:it:should not fail with -p on existing directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [
@@ -80742,13 +80742,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:67:it:should remove a file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [],
@@ -80787,13 +80787,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:67:it:should remove a file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [
@@ -80840,13 +80840,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:78:it:should remove multiple files",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [],
@@ -80887,13 +80887,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:78:it:should remove multiple files",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [
@@ -80948,13 +80948,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:93:it:should remove directory with -r",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [],
@@ -80993,13 +80993,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts:93:it:should remove directory with -r",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-spec-comparison",
-        "rustTest": "pending:just-bash-spec-comparison",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::file-ops",
+        "rustTest": "jbc26_file_operation_comparison_rows_are_virtual_and_stateful",
+        "notes": "JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.",
         "found": true
       },
       "assertions": [

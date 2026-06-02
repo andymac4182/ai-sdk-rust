@@ -121,6 +121,8 @@ pub struct CpOptions {
 pub enum SymlinkPolicy {
     #[default]
     AllowVirtual,
+    /// Blocks symlink creation and traversal while still allowing lstat/readlink
+    /// on existing virtual symlink entries.
     DenyCreation,
 }
 
@@ -219,6 +221,7 @@ impl VirtualFileSystem {
     ) -> JustBashResult<()> {
         validate_path(path, "write")?;
         let normalized = normalize_path(path);
+        self.reject_denied_symlink_components(&normalized, true, "write", path)?;
         let bytes = content_to_bytes(content, encoding)?;
         self.ensure_parent_dirs(&normalized);
         let mtime = self.tick();
@@ -251,6 +254,7 @@ impl VirtualFileSystem {
     ) -> JustBashResult<()> {
         validate_path(path, "append")?;
         let normalized = normalize_path(path);
+        self.reject_denied_symlink_components(&normalized, true, "append", path)?;
         if matches!(self.data.get(&normalized), Some(FsEntry::Directory(_))) {
             return Err(JustBashError::new(
                 JustBashErrorKind::IsDirectory,
@@ -360,6 +364,7 @@ impl VirtualFileSystem {
     pub fn mkdir(&mut self, path: &str, options: MkdirOptions) -> JustBashResult<()> {
         validate_path(path, "mkdir")?;
         let normalized = normalize_path(path);
+        self.reject_denied_symlink_components(&normalized, true, "mkdir", path)?;
         if let Some(entry) = self.data.get(&normalized) {
             if options.recursive && matches!(entry, FsEntry::Directory(_)) {
                 return Ok(());
@@ -468,6 +473,7 @@ impl VirtualFileSystem {
     pub fn rm(&mut self, path: &str, options: RmOptions) -> JustBashResult<()> {
         validate_path(path, "rm")?;
         let normalized = normalize_path(path);
+        self.reject_denied_symlink_components(&normalized, true, "rm", path)?;
         let Some(entry) = self.data.get(&normalized) else {
             if options.force {
                 return Ok(());
@@ -504,6 +510,8 @@ impl VirtualFileSystem {
         validate_path(dest, "cp")?;
         let src_normalized = normalize_path(src);
         let dest_normalized = normalize_path(dest);
+        self.reject_denied_symlink_components(&src_normalized, true, "cp", src)?;
+        self.reject_denied_symlink_components(&dest_normalized, true, "cp", dest)?;
         let Some(src_entry) = self.data.get(&src_normalized).cloned() else {
             return Err(JustBashError::new(
                 JustBashErrorKind::NotFound,
@@ -574,6 +582,7 @@ impl VirtualFileSystem {
     pub fn chmod(&mut self, path: &str, mode: u32) -> JustBashResult<()> {
         validate_path(path, "chmod")?;
         let normalized = normalize_path(path);
+        self.reject_denied_symlink_components(&normalized, true, "chmod", path)?;
         let mtime = self.tick();
         let Some(entry) = self.data.get_mut(&normalized) else {
             return Err(JustBashError::new(
@@ -628,6 +637,8 @@ impl VirtualFileSystem {
         validate_path(new_path, "link")?;
         let existing_normalized = normalize_path(existing_path);
         let new_normalized = normalize_path(new_path);
+        self.reject_denied_symlink_components(&existing_normalized, true, "link", existing_path)?;
+        self.reject_denied_symlink_components(&new_normalized, true, "link", new_path)?;
         let Some(entry) = self.data.get(&existing_normalized).cloned() else {
             return Err(JustBashError::new(
                 JustBashErrorKind::NotFound,
@@ -662,6 +673,7 @@ impl VirtualFileSystem {
     pub fn readlink(&self, path: &str) -> JustBashResult<String> {
         validate_path(path, "readlink")?;
         let normalized = normalize_path(path);
+        self.reject_denied_symlink_components(&normalized, false, "readlink", path)?;
         let Some(entry) = self.data.get(&normalized) else {
             return Err(JustBashError::new(
                 JustBashErrorKind::NotFound,
@@ -700,6 +712,7 @@ impl VirtualFileSystem {
     pub fn utimes(&mut self, path: &str, mtime: u64) -> JustBashResult<()> {
         validate_path(path, "utimes")?;
         let normalized = normalize_path(path);
+        self.reject_denied_symlink_components(&normalized, true, "utimes", path)?;
         let Some(entry) = self.data.get_mut(&normalized) else {
             return Err(JustBashError::new(
                 JustBashErrorKind::NotFound,
@@ -784,6 +797,14 @@ impl VirtualFileSystem {
             let Some(FsEntry::Symlink(symlink)) = self.data.get(&resolved) else {
                 continue;
             };
+            if self.symlink_policy == SymlinkPolicy::DenyCreation {
+                return Err(JustBashError::new(
+                    JustBashErrorKind::PermissionDenied,
+                    operation,
+                    normalized,
+                    "operation not permitted",
+                ));
+            }
             if seen.len() >= MAX_SYMLINK_DEPTH || !seen.insert(resolved.clone()) {
                 return Err(JustBashError::new(
                     JustBashErrorKind::SymlinkLoop,
@@ -811,6 +832,43 @@ impl VirtualFileSystem {
         } else {
             resolved
         })
+    }
+
+    fn reject_denied_symlink_components(
+        &self,
+        normalized: &str,
+        include_final: bool,
+        operation: &'static str,
+        path: &str,
+    ) -> JustBashResult<()> {
+        if self.symlink_policy != SymlinkPolicy::DenyCreation || normalized == "/" {
+            return Ok(());
+        }
+
+        let parts = normalized
+            .trim_start_matches('/')
+            .split('/')
+            .collect::<Vec<_>>();
+        let mut current = String::new();
+        for (index, part) in parts.iter().enumerate() {
+            current = if current.is_empty() {
+                format!("/{part}")
+            } else {
+                join_path(&current, part)
+            };
+            if index == parts.len() - 1 && !include_final {
+                break;
+            }
+            if matches!(self.data.get(&current), Some(FsEntry::Symlink(_))) {
+                return Err(JustBashError::new(
+                    JustBashErrorKind::PermissionDenied,
+                    operation,
+                    path,
+                    "operation not permitted",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -936,6 +994,14 @@ impl OverlayFileSystem {
 
     /// Reads raw file bytes, using the upper layer before the lower layer.
     pub fn read_file_buffer(&self, path: &str) -> JustBashResult<Vec<u8>> {
+        self.read_file_buffer_inner(path, &mut BTreeSet::new())
+    }
+
+    fn read_file_buffer_inner(
+        &self,
+        path: &str,
+        seen: &mut BTreeSet<String>,
+    ) -> JustBashResult<Vec<u8>> {
         validate_path(path, "open")?;
         let normalized = normalize_path(path);
         if self.is_deleted(&normalized) {
@@ -945,6 +1011,9 @@ impl OverlayFileSystem {
                 path,
                 "no such file or directory",
             ));
+        }
+        if let Some(target) = self.upper_symlink_target(&normalized, "open", seen)? {
+            return self.read_file_buffer_inner(&target, seen);
         }
         if self.upper.exists(&normalized) {
             return self.upper.read_file_buffer(&normalized);
@@ -1021,22 +1090,22 @@ impl OverlayFileSystem {
         if path.contains('\0') {
             return false;
         }
-        let normalized = normalize_path(path);
-        if self.is_deleted(&normalized) {
-            return false;
-        }
-        self.upper.exists(&normalized)
-            || self
-                .lower_path_for(&normalized)
-                .is_some_and(|lower_path| self.lower.exists(&lower_path))
+        self.stat(path).is_ok()
     }
 
     /// Stats a path, following final symlinks.
     pub fn stat(&self, path: &str) -> JustBashResult<FileStat> {
+        self.stat_inner(path, &mut BTreeSet::new())
+    }
+
+    fn stat_inner(&self, path: &str, seen: &mut BTreeSet<String>) -> JustBashResult<FileStat> {
         validate_path(path, "stat")?;
         let normalized = normalize_path(path);
         if self.is_deleted(&normalized) {
             return Err(not_found("stat", path));
+        }
+        if let Some(target) = self.upper_symlink_target(&normalized, "stat", seen)? {
+            return self.stat_inner(&target, seen);
         }
         if self.upper.exists(&normalized) {
             return self.upper.stat(&normalized);
@@ -1328,7 +1397,14 @@ impl OverlayFileSystem {
 
     /// Resolves a path in the merged overlay view.
     pub fn realpath(&self, path: &str) -> JustBashResult<String> {
+        self.realpath_inner(path, &mut BTreeSet::new())
+    }
+
+    fn realpath_inner(&self, path: &str, seen: &mut BTreeSet<String>) -> JustBashResult<String> {
         let normalized = normalize_path(path);
+        if let Some(target) = self.upper_symlink_target(&normalized, "realpath", seen)? {
+            return self.realpath_inner(&target, seen);
+        }
         if self.upper.exists(&normalized) {
             return self.upper.realpath(&normalized);
         }
@@ -1425,6 +1501,31 @@ impl OverlayFileSystem {
                 })
             })
             .collect()
+    }
+
+    fn upper_symlink_target(
+        &self,
+        normalized: &str,
+        operation: &'static str,
+        seen: &mut BTreeSet<String>,
+    ) -> JustBashResult<Option<String>> {
+        if !self
+            .upper
+            .lstat(normalized)
+            .is_ok_and(|stat| stat.is_symbolic_link)
+        {
+            return Ok(None);
+        }
+        if seen.len() >= MAX_SYMLINK_DEPTH || !seen.insert(normalized.to_string()) {
+            return Err(JustBashError::new(
+                JustBashErrorKind::SymlinkLoop,
+                operation,
+                normalized,
+                "too many levels of symbolic links",
+            ));
+        }
+        let target = self.upper.readlink(normalized)?;
+        Ok(Some(resolve_symlink_target(normalized, &target)))
     }
 }
 

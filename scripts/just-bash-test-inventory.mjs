@@ -875,6 +875,132 @@ const jbc13CaseGroups = [
   },
 ];
 
+const jbc26SourceGroups = [
+  {
+    files: [
+      'packages/just-bash/src/fs/encoding.ts',
+      'packages/just-bash/src/fs/path-utils.ts',
+      'packages/just-bash/src/fs/sanitize-error.ts',
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::fs::path-encoding-sanitize',
+    notes:
+      'JBC-26 verifies portable virtual path normalization, encoding conversion, large base64 rendering, and host-path error sanitization in Rust without host filesystem access.',
+  },
+];
+
+const jbc26CaseGroups = [
+  {
+    file: 'packages/just-bash/src/comparison-tests/file-operations.comparison.test.ts',
+    lines: [21, 34, 46, 67, 78, 93, 104, 123, 135, 147, 160, 186, 198, 212, 224, 253, 265, 276, 299],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::file-ops',
+    rustTest: 'jbc26_file_operation_comparison_rows_are_virtual_and_stateful',
+    notes:
+      'JBC-26 verifies exact mkdir/rm/cp/mv/touch/pwd comparison rows against the stateful Rust virtual filesystem command layer.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/cross-fs-no-symlinks.test.ts',
+    lines: [
+      95, 106, 127, 133, 142, 146, 157, 161, 172, 176, 182, 192, 198, 209,
+      215, 226, 239, 244, 249, 254, 259, 302, 317, 342, 357, 374, 386, 403,
+      409, 423, 429, 443, 456, 473, 483, 526, 532, 537, 580, 586, 592, 597,
+      607, 613, 617, 627, 637, 643, 652, 656, 662, 671, 679, 687, 704, 711,
+      728, 736, 747, 756, 799, 807, 812, 836, 846, 856, 868, 877, 883, 890,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::fs::symlink-policy',
+    rustTest:
+      'jbc26_symlink_policy_mount_routing_and_overlay_precedence_rows_are_virtual; jbc26_virtual_fs_path_security_encoding_and_error_shape_rows_are_sanitized',
+    notes:
+      'JBC-26 verifies default-deny symlink creation/traversal/mutation, lstat/readlink visibility, no-host path traversal behavior, null-byte rejection, Unicode/special-name handling, and normal file access through Rust virtual filesystems.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/cross-fs-security.test.ts',
+    lines: [
+      77, 83, 89, 95, 101, 107, 113, 117, 123, 129, 138, 144, 150, 157,
+      166, 171, 177, 188, 194, 199, 205, 217, 226, 243, 262, 282, 308, 313,
+      318, 323, 333, 345, 360, 364, 373, 387, 421, 427, 431, 454, 462, 470,
+      478, 486, 499, 510, 529, 551, 560, 577, 591, 642, 658, 745, 751, 761,
+      776, 794, 801, 813, 840, 867, 881, 899, 909, 922, 931, 946, 951, 956,
+      966, 972, 983, 1001, 1007, 1018, 1039, 1051, 1075, 1094, 1113, 1135,
+      1169, 1181, 1195, 1220, 1242, 1267, 1305, 1393, 1407, 1418, 1438, 1454,
+      1467, 1484, 1493, 1516, 1540, 1559, 1574, 1603, 1622, 1651, 1679, 1709,
+      1725, 1745, 1779,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::fs::path-security',
+    rustTest:
+      'jbc26_virtual_fs_path_security_encoding_and_error_shape_rows_are_sanitized; jbc26_symlink_policy_mount_routing_and_overlay_precedence_rows_are_virtual',
+    notes:
+      'JBC-26 verifies portable null-byte, traversal clamp, special path, symlink-loop, no-host-mutation, error-shape, read-only, overlay, and virtual mount safety rows. Real host permission and OS-symlink rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/read-write-fs/read-write-fs.security.test.ts',
+    lines: [
+      52, 58, 65, 71, 79, 84, 89, 95, 105, 113, 120, 132, 140, 154, 158,
+      169, 173, 191, 195, 203, 207, 211, 220, 232, 247, 263, 277, 290, 309,
+      313, 317, 324, 330, 338, 344, 351, 356, 361, 366, 373, 388, 401, 420,
+      424, 430, 438, 445, 449, 455, 554, 573, 616, 654, 659, 936, 941, 953,
+      963, 972, 984, 990, 997, 1005, 1009, 1034, 1174, 1191, 1201, 1211,
+      1220, 1230, 1239, 1254, 1265, 1277, 1288, 1301, 1314, 1368, 1413, 1459,
+      1477,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::fs::read-write-security',
+    rustTest:
+      'jbc26_virtual_fs_path_security_encoding_and_error_shape_rows_are_sanitized; jbc26_symlink_policy_mount_routing_and_overlay_precedence_rows_are_virtual',
+    notes:
+      'JBC-26 maps portable ReadWriteFs path, symlink, traversal, encoding, and sanitized-error semantics to deterministic Rust virtual filesystem tests. Rows requiring real OS symlink or permission setup stay pending.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/read-write-fs/read-write-fs.test.ts',
+    lines: [398],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::fs::read-write',
+    rustTest: 'upstream_read_write_fs_virtual_backend_reads_writes_stats_and_mutates_paths',
+    notes:
+      'JBC-26 keeps the remaining existing-path EEXIST row mapped to the read/write virtual backend mutation test.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/mountable-fs/mountable-fs.security.test.ts',
+    lines: [20, 33, 44, 54, 71, 88, 105, 122, 137, 358, 366, 376, 384, 398, 409, 419, 432, 441],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::fs::mountable-security',
+    rustTest: 'jbc26_symlink_policy_mount_routing_and_overlay_precedence_rows_are_virtual',
+    notes:
+      'JBC-26 verifies mount-local symlink resolution, loops, broken links, traversal normalization, cross-mount isolation, busy mount mutations, cross-device links, readlink, and realpath over virtual mounts. Real-FS mounted backend rows stay pending.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/overlay-fs/overlay-fs.security.test.ts',
+    lines: [
+      53, 57, 63, 69, 75, 79, 83, 89, 95, 99, 103, 109, 115, 123, 127, 131,
+      135, 142, 147, 152, 158, 180, 186, 193, 202, 208, 218, 226, 235, 249,
+      257, 267, 277, 285, 293, 314, 318, 322, 326, 330, 337, 343, 349, 356,
+      362, 371, 377, 383, 391, 397, 404, 410, 415, 419, 426, 435, 444, 448,
+      455, 459, 463, 467, 477, 484, 490, 494, 499, 504, 508, 516, 535, 546,
+      553, 561, 568, 581, 593, 608, 615, 620, 625, 744, 753, 762, 774, 791,
+      930, 949, 1140, 1155, 1166, 1183, 1326, 1339, 1350, 1365, 1562, 1568,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::fs::overlay-security',
+    rustTest:
+      'jbc26_virtual_fs_path_security_encoding_and_error_shape_rows_are_sanitized; jbc26_symlink_policy_mount_routing_and_overlay_precedence_rows_are_virtual',
+    notes:
+      'JBC-26 verifies overlay path normalization, no-host traversal, special path handling, hard-link copy semantics, read-only/write/delete precedence, upper symlink overwrite/append behavior, base64 large reads, and /dev/null as a virtual file. Real OS symlink and BashEnv-overlay e2e rows stay pending.',
+  },
+  {
+    file: 'packages/just-bash/src/fs/overlay-fs/overlay-fs.test.ts',
+    lines: [773, 795, 816, 833, 851, 868, 884, 896],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::fs::overlay',
+    rustTest:
+      'upstream_overlay_fs_virtual_backend_mount_copy_on_write_deletion_and_read_only_cases; jbc26_symlink_policy_mount_routing_and_overlay_precedence_rows_are_virtual',
+    notes:
+      'JBC-26 verifies overlay merged directory entries, type metadata, deletion hiding, case-sensitive sorting, memory symlink entries, and non-existent directory errors through Rust overlay tests.',
+  },
+];
+
 const jbc15CaseGroups = [
   {
     file: 'packages/just-bash/src/interpreter/arithmetic.test.ts',
@@ -1978,6 +2104,7 @@ function sourceOverrideFor(relativePath) {
     ...jbc17SourceGroups,
     ...jbc18SourceGroups,
     ...jbc19SourceGroups,
+    ...jbc26SourceGroups,
   ].find((entry) => groupMatchesFile(entry, relativePath));
   return group ? rowOverrideFromGroup(group) : undefined;
 }
@@ -1990,6 +2117,7 @@ function caseOverrideFor(testCase) {
     ...jbc10CaseGroups,
     ...jbc12CaseGroups,
     ...jbc13CaseGroups,
+    ...jbc26CaseGroups,
     ...jbc15CaseGroups,
     ...jbc16CaseGroups,
     ...jbc17CaseGroups,

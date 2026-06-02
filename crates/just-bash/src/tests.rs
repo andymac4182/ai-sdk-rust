@@ -5,6 +5,21 @@ fn utf8(text: &str) -> Vec<u8> {
     text.as_bytes().to_vec()
 }
 
+fn jbc26_bash_with_files(files: &[(&str, &str)]) -> Bash {
+    Bash::with_options(BashOptions {
+        cwd: Some("/home/user".to_string()),
+        files: files
+            .iter()
+            .map(|(path, content)| ((*path).to_string(), (*content).to_string()))
+            .collect::<BTreeMap<_, _>>(),
+        ..BashOptions::default()
+    })
+}
+
+fn assert_exec_success(result: &JustBashExecResult) {
+    assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
+}
+
 #[test]
 fn upstream_interface_contract_reads_writes_appends_stats_lists_and_removes_files() {
     let mut fs = VirtualFileSystem::new();
@@ -1314,6 +1329,397 @@ fn upstream_mountable_fs_routes_mounts_cross_mount_ops_and_virtual_dirs() {
         "content"
     );
     assert_eq!(edge.readdir("/mnt").unwrap(), vec!["data"]);
+}
+
+#[test]
+fn jbc26_file_operation_comparison_rows_are_virtual_and_stateful() {
+    let bash = jbc26_bash_with_files(&[]);
+    let mkdir = bash.exec("mkdir newdir && mkdir -p a/b/c && mkdir -p a/b/c");
+    assert_exec_success(&mkdir);
+    assert!(bash.file_exists("/home/user/newdir"));
+    assert!(bash.file_exists("/home/user/a/b/c"));
+
+    let bash = jbc26_bash_with_files(&[
+        ("/home/user/file.txt", "content"),
+        ("/home/user/a.txt", ""),
+        ("/home/user/b.txt", ""),
+        ("/home/user/c.txt", ""),
+        ("/home/user/dir/file.txt", "content"),
+    ]);
+    assert_exec_success(&bash.exec("rm file.txt"));
+    assert!(!bash.file_exists("/home/user/file.txt"));
+    assert_exec_success(&bash.exec("rm a.txt b.txt"));
+    assert!(!bash.file_exists("/home/user/a.txt"));
+    assert!(!bash.file_exists("/home/user/b.txt"));
+    assert!(bash.file_exists("/home/user/c.txt"));
+    assert_exec_success(&bash.exec("rm -r dir"));
+    assert!(!bash.file_exists("/home/user/dir/file.txt"));
+    assert_exec_success(&bash.exec("rm -f nonexistent.txt"));
+
+    let bash = jbc26_bash_with_files(&[
+        ("/home/user/source.txt", "hello world\n"),
+        ("/home/user/file.txt", "content\n"),
+        ("/home/user/dir/.gitkeep", ""),
+        ("/home/user/src/a.txt", "a content\n"),
+        ("/home/user/src/b.txt", "b content\n"),
+        ("/home/user/a.txt", "a\n"),
+        ("/home/user/b.txt", "b\n"),
+    ]);
+    assert_exec_success(&bash.exec("cp source.txt dest.txt"));
+    assert_eq!(
+        bash.read_file("/home/user/dest.txt").unwrap(),
+        bash.read_file("/home/user/source.txt").unwrap()
+    );
+    assert_exec_success(&bash.exec("cp file.txt dir/"));
+    assert_eq!(
+        bash.read_file("/home/user/dir/file.txt").unwrap(),
+        "content\n"
+    );
+    assert_exec_success(&bash.exec("cp -r src dest"));
+    assert!(bash.file_exists("/home/user/dest/a.txt"));
+    assert!(bash.file_exists("/home/user/dest/b.txt"));
+    assert_exec_success(&bash.exec("cp a.txt b.txt dir/"));
+    assert_eq!(bash.read_file("/home/user/dir/a.txt").unwrap(), "a\n");
+    assert_eq!(bash.read_file("/home/user/dir/b.txt").unwrap(), "b\n");
+
+    let bash = jbc26_bash_with_files(&[
+        ("/home/user/old.txt", "content\n"),
+        ("/home/user/file.txt", "content\n"),
+        ("/home/user/dir/.gitkeep", ""),
+        ("/home/user/olddir/file.txt", "content\n"),
+        ("/home/user/a.txt", "a\n"),
+        ("/home/user/b.txt", "b\n"),
+    ]);
+    assert_exec_success(&bash.exec("mv old.txt new.txt"));
+    assert!(!bash.file_exists("/home/user/old.txt"));
+    assert_eq!(bash.read_file("/home/user/new.txt").unwrap(), "content\n");
+    assert_exec_success(&bash.exec("mv file.txt dir/"));
+    assert!(!bash.file_exists("/home/user/file.txt"));
+    assert_eq!(
+        bash.read_file("/home/user/dir/file.txt").unwrap(),
+        "content\n"
+    );
+    assert_exec_success(&bash.exec("mv olddir newdir"));
+    assert!(!bash.file_exists("/home/user/olddir/file.txt"));
+    assert_eq!(
+        bash.read_file("/home/user/newdir/file.txt").unwrap(),
+        "content\n"
+    );
+    assert_exec_success(&bash.exec("mv a.txt b.txt dir/"));
+    assert!(!bash.file_exists("/home/user/a.txt"));
+    assert!(!bash.file_exists("/home/user/b.txt"));
+    assert_eq!(bash.read_file("/home/user/dir/a.txt").unwrap(), "a\n");
+    assert_eq!(bash.read_file("/home/user/dir/b.txt").unwrap(), "b\n");
+
+    let bash = jbc26_bash_with_files(&[("/home/user/existing.txt", "original content\n")]);
+    assert_exec_success(&bash.exec("touch newfile.txt"));
+    assert_eq!(bash.read_file("/home/user/newfile.txt").unwrap(), "");
+    assert_exec_success(&bash.exec("touch a.txt b.txt c.txt"));
+    assert!(bash.file_exists("/home/user/a.txt"));
+    assert!(bash.file_exists("/home/user/b.txt"));
+    assert!(bash.file_exists("/home/user/c.txt"));
+    assert_exec_success(&bash.exec("touch existing.txt"));
+    assert_eq!(
+        bash.read_file("/home/user/existing.txt").unwrap(),
+        "original content\n"
+    );
+
+    let pwd = bash.exec("pwd");
+    assert_exec_success(&pwd);
+    assert_eq!(pwd.stdout.trim(), "/home/user");
+}
+
+#[test]
+fn jbc26_virtual_fs_path_security_encoding_and_error_shape_rows_are_sanitized() {
+    let mut fs = VirtualFileSystem::new();
+    fs.write_file("/file.txt", "safe content").unwrap();
+    fs.write_file("/root.txt", "root").unwrap();
+
+    assert_eq!(fs.read_file("/../file.txt").unwrap(), "safe content");
+    assert_eq!(
+        fs.read_file("/a/b/c/../../../file.txt").unwrap(),
+        "safe content"
+    );
+    assert_eq!(fs.read_file("//file.txt").unwrap(), "safe content");
+    assert_eq!(fs.read_file("/./file.txt").unwrap(), "safe content");
+    assert_eq!(fs.read_file("/../../../root.txt").unwrap(), "root");
+    assert!(
+        fs.readdir("/../../")
+            .unwrap()
+            .contains(&"file.txt".to_string())
+    );
+    assert!(!fs.readdir("/../../").unwrap().contains(&"etc".to_string()));
+
+    for name in [
+        "..foo",
+        "foo..",
+        "...",
+        "a..b",
+        "%2e%2e",
+        "%2f",
+        ".hidden",
+        "..hidden",
+        "with spaces",
+        "quote'file",
+        "carriage\rreturn",
+        "tab\tfile",
+        "cafe\u{301}.txt",
+        "caf\u{e9}.txt",
+        "emoji-file",
+    ] {
+        let path = format!("/{name}");
+        fs.write_file(&path, name).unwrap();
+        assert_eq!(fs.read_file(&path).unwrap(), name);
+    }
+    let long_path = format!("/{}.txt", "a".repeat(250));
+    fs.write_file(&long_path, "long").unwrap();
+    assert_eq!(fs.read_file(&long_path).unwrap(), "long");
+
+    fs.write_file_with_encoding("/large-b64.txt", "x".repeat(200_000), BufferEncoding::Utf8)
+        .unwrap();
+    assert!(
+        !fs.read_file_with_encoding("/large-b64.txt", BufferEncoding::Base64)
+            .unwrap()
+            .is_empty()
+    );
+    fs.write_file_with_encoding("/binary.bin", vec![0x00, 0x80, 0xff], BufferEncoding::Utf8)
+        .unwrap();
+    assert_eq!(
+        fs.read_file_buffer("/binary.bin").unwrap(),
+        vec![0x00, 0x80, 0xff]
+    );
+
+    assert_eq!(
+        fs.read_file("/bad\0path").unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(
+        fs.write_file("/bad\0path", "data").unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(
+        fs.append_file("/bad\0path", "data").unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(
+        fs.stat("/bad\0path").unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(
+        fs.lstat("/bad\0path").unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(
+        fs.mkdir("/bad\0path", MkdirOptions::default())
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(
+        fs.rm("/bad\0path", RmOptions::default())
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(
+        fs.chmod("/bad\0path", 0o755).unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(
+        fs.symlink("/target", "/bad\0link").unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(
+        fs.link("/file.txt", "/bad\0link").unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(
+        fs.readlink("/bad\0link").unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(
+        fs.realpath("/bad\0path").unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(
+        fs.utimes("/bad\0path", 42).unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(
+        fs.cp("/file.txt", "/bad\0copy", CpOptions::default())
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert!(!fs.exists("/bad\0path"));
+
+    let missing = fs.read_file("/missing").unwrap_err().to_string();
+    assert!(missing.contains("ENOENT"));
+    assert!(!missing.contains("/private/tmp"));
+    assert!(!missing.contains("/Users/"));
+    assert_eq!(
+        sanitize_host_error_message(
+            "open /private/tmp/root/secret failed at file:///Users/alice/project"
+        ),
+        "open <path> failed at <path>"
+    );
+}
+
+#[test]
+fn jbc26_symlink_policy_mount_routing_and_overlay_precedence_rows_are_virtual() {
+    let mut deny = VirtualFileSystem::new();
+    deny.write_file("/target.txt", "target").unwrap();
+    deny.symlink("/target.txt", "/link").unwrap();
+    let mut deny = deny.with_symlink_policy(SymlinkPolicy::DenyCreation);
+    assert_eq!(
+        deny.symlink("/target.txt", "/new-link").unwrap_err().kind(),
+        &JustBashErrorKind::PermissionDenied
+    );
+    assert_eq!(deny.readlink("/link").unwrap(), "/target.txt");
+    assert!(deny.lstat("/link").unwrap().is_symbolic_link);
+    assert_eq!(
+        deny.read_file("/link").unwrap_err().kind(),
+        &JustBashErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        deny.stat("/link").unwrap_err().kind(),
+        &JustBashErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        deny.write_file("/link", "pwned").unwrap_err().kind(),
+        &JustBashErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        deny.append_file("/link", "pwned").unwrap_err().kind(),
+        &JustBashErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        deny.rm("/link", RmOptions::default()).unwrap_err().kind(),
+        &JustBashErrorKind::PermissionDenied
+    );
+    assert_eq!(deny.read_file("/target.txt").unwrap(), "target");
+    assert!(!deny.exists("/link"));
+
+    let mut overlay = OverlayFileSystem::with_mount_point(
+        VirtualFileSystem::with_text_files([
+            ("/real.txt", "real"),
+            ("/delete.txt", "delete"),
+            ("/dir/file.txt", "lower"),
+            ("/af-target.txt", "base"),
+            ("/dev/null", "device"),
+        ]),
+        "/",
+    )
+    .unwrap();
+    overlay.write_file("/real.txt", "upper").unwrap();
+    assert_eq!(overlay.read_file("/real.txt").unwrap(), "upper");
+    overlay.rm("/delete.txt", RmOptions::default()).unwrap();
+    assert!(!overlay.exists("/delete.txt"));
+    assert!(overlay.is_deleted("/delete.txt"));
+    overlay.write_file("/delete.txt", "recreated").unwrap();
+    assert_eq!(overlay.read_file("/delete.txt").unwrap(), "recreated");
+    overlay.symlink("/af-target.txt", "/af-link").unwrap();
+    overlay.append_file("/af-link", " appended").unwrap();
+    assert_eq!(overlay.read_file("/af-link").unwrap(), "base appended");
+    assert_eq!(overlay.read_file("/af-target.txt").unwrap(), "base");
+    overlay.write_file("/dev/null", "injected").unwrap();
+    assert_eq!(overlay.read_file("/dev/null").unwrap(), "injected");
+    let entries = overlay.readdir_with_file_types("/").unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.name == "real.txt" && entry.is_file)
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.name == "dir" && entry.is_directory)
+    );
+
+    let mut read_only = OverlayFileSystem::with_mount_point(
+        VirtualFileSystem::with_text_files([("/existing.txt", "content")]),
+        "/",
+    )
+    .unwrap()
+    .with_read_only(true);
+    assert_eq!(
+        read_only
+            .write_file("/blocked.txt", "nope")
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::ReadOnly
+    );
+    assert_eq!(read_only.read_file("/existing.txt").unwrap(), "content");
+
+    let mut mountable =
+        MountableFileSystem::with_base(VirtualFileSystem::with_text_files([("/base.txt", "base")]));
+    mountable
+        .mount(
+            "/mnt/a/",
+            VirtualFileSystem::with_text_files([("/target.txt", "target")]),
+        )
+        .unwrap();
+    mountable.mount("/mnt/b", VirtualFileSystem::new()).unwrap();
+    assert!(mountable.is_mount_point("/mnt/a"));
+    assert_eq!(mountable.readdir("/mnt").unwrap(), vec!["a", "b"]);
+    assert_eq!(mountable.read_file("/mnt/a/target.txt").unwrap(), "target");
+    mountable.symlink("/target.txt", "/mnt/a/link.txt").unwrap();
+    assert_eq!(mountable.read_file("/mnt/a/link.txt").unwrap(), "target");
+    assert_eq!(
+        mountable.readlink("/mnt/a/link.txt").unwrap(),
+        "/target.txt"
+    );
+    mountable.symlink("/loop", "/mnt/a/loop").unwrap();
+    assert_eq!(
+        mountable.read_file("/mnt/a/loop").unwrap_err().kind(),
+        &JustBashErrorKind::SymlinkLoop
+    );
+    mountable.symlink("/missing", "/mnt/a/broken").unwrap();
+    assert_eq!(
+        mountable.realpath("/mnt/a/broken").unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+    mountable.write_file("/mnt/b/secret.txt", "secret").unwrap();
+    mountable
+        .symlink("/mnt/b/secret.txt", "/mnt/a/cross.txt")
+        .unwrap();
+    assert_eq!(
+        mountable.read_file("/mnt/a/cross.txt").unwrap_err().kind(),
+        &JustBashErrorKind::NotFound
+    );
+    assert_eq!(mountable.realpath("/mnt/a").unwrap(), "/mnt/a");
+    assert_eq!(
+        mountable.readlink("/mnt/a/target.txt").unwrap_err().kind(),
+        &JustBashErrorKind::InvalidInput
+    );
+    assert_eq!(
+        mountable
+            .link("/mnt/a/target.txt", "/mnt/b/hardlink.txt")
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::CrossDevice
+    );
+    assert_eq!(
+        mountable
+            .rm(
+                "/mnt",
+                RmOptions {
+                    recursive: true,
+                    force: false,
+                },
+            )
+            .unwrap_err()
+            .kind(),
+        &JustBashErrorKind::Busy
+    );
+    assert_eq!(
+        mountable.read_file("/mnt/a/../../base.txt").unwrap(),
+        "base"
+    );
+    let paths = mountable.get_all_paths();
+    assert!(paths.contains(&"/mnt".to_string()));
+    assert!(paths.contains(&"/mnt/a".to_string()));
+    assert!(paths.contains(&"/mnt/a/target.txt".to_string()));
 }
 
 #[test]
