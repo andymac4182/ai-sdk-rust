@@ -2145,6 +2145,291 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn awk_jbc25_scalar_expression_operator_and_ternary_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/values.txt".to_string(), "2\n3\n4\n".to_string()),
+                ("/levels.txt".to_string(), "10\n25\n5\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { print 5 + 3, 10 - 4, 6 * 7, 20 / 4, 17 % 5 }'"#)
+                .stdout,
+            "8 6 42 5 2\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { print 2 ^ 8, 3 ** 3, -5, +"42" }'"#)
+                .stdout,
+            "256 27 -5 42\n"
+        );
+        let logical = env.exec(
+            r#"awk 'BEGIN { print (5 == 5), (5 != 5), (3 < 5), (5 >= 5), (1 && 0), (1 || 0), !0 }'"#,
+        );
+        assert_eq!(logical.stderr, "");
+        assert_eq!(logical.stdout, "1 0 1 1 0 1 1\n");
+        assert_eq!(
+            env.exec(r#"echo "hello world" | awk '{ print ($0 ~ /world/), ($0 !~ /foo/) }'"#)
+                .stdout,
+            "1 1\n"
+        );
+        assert_eq!(
+            env.exec(
+                r#"awk 'BEGIN{sum=0; prod=1; n=0}{sum+=$1; prod*=$1; n++}END{print sum, prod, n}' /values.txt"#
+            )
+            .stdout,
+            "9 24 3\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN{val=100}{val-=$1}END{print val}' /values.txt"#)
+                .stdout,
+            "91\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN{val=120}{val/=$1}END{print val}' /values.txt"#)
+                .stdout,
+            "5\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { x=5; print x++, x, ++x, x--, --x }'"#)
+                .stdout,
+            "5 6 7 7 5\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { x=17; x%=5; y=2; y^=4; print x, y }'"#)
+                .stdout,
+            "2 16\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk '{ print $1 > 15 ? "high" : "low" }' /levels.txt"#)
+                .stdout,
+            "low\nhigh\nlow\n"
+        );
+    }
+
+    #[test]
+    fn awk_jbc25_pattern_and_range_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/data.txt".to_string(),
+                    "apple 10\nbanana 20\napricot 5\ncherry 30\n".to_string(),
+                ),
+                (
+                    "/range.txt".to_string(),
+                    "before\nSTART\nline1\nline2\nEND\nafter\n".to_string(),
+                ),
+                (
+                    "/multi-range.txt".to_string(),
+                    "before\nBEGIN\na\nEND\nmiddle\nBEGIN\nb\nEND\nafter\n".to_string(),
+                ),
+                (
+                    "/single-range.txt".to_string(),
+                    "before\nSTART END\nafter\n".to_string(),
+                ),
+                (
+                    "/open-range.txt".to_string(),
+                    "before\nSTART\nline1\nline2\n".to_string(),
+                ),
+                (
+                    "/header-footer.txt".to_string(),
+                    "line1\nheader: foo\ndata1\ndata2\nfooter: bar\nline2\n".to_string(),
+                ),
+                (
+                    "/line-range.txt".to_string(),
+                    "line1\nline2\nline3\nline4\nline5\n".to_string(),
+                ),
+                ("/repeat.txt".to_string(), "a\naa\naaa\naaaa\n".to_string()),
+                ("/numbers.txt".to_string(), "1\n2\n3\n4\n5\n6\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(
+            env.exec("awk '/a{2,3}/' /repeat.txt").stdout,
+            "aa\naaa\naaaa\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk '$1 > 1 && $1 < 5' /numbers.txt"#).stdout,
+            "2\n3\n4\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk '$1 == 1 || $1 == 6' /numbers.txt"#).stdout,
+            "1\n6\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk '!($1 == 2)' /numbers.txt"#).stdout,
+            "1\n3\n4\n5\n6\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk '/^a/ && $2 > 5' /data.txt"#).stdout,
+            "apple 10\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk '$1 % 2 == 1' /numbers.txt"#).stdout,
+            "1\n3\n5\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk '/START/,/END/' /range.txt"#).stdout,
+            "START\nline1\nline2\nEND\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk '/START/,/END/ { print ">> " $0 }' /range.txt"#)
+                .stdout,
+            ">> START\n>> line1\n>> line2\n>> END\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk '/BEGIN/,/END/' /multi-range.txt"#).stdout,
+            "BEGIN\na\nEND\nBEGIN\nb\nEND\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk '/START/,/END/' /single-range.txt"#).stdout,
+            "START END\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk '/START/,/END/' /open-range.txt"#).stdout,
+            "START\nline1\nline2\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk '/^header:/,/^footer:/' /header-footer.txt"#)
+                .stdout,
+            "header: foo\ndata1\ndata2\nfooter: bar\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk '/line2/,/line4/' /line-range.txt"#).stdout,
+            "line2\nline3\nline4\n"
+        );
+    }
+
+    #[test]
+    fn awk_jbc25_builtin_math_string_match_and_substitution_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "hello foo world\n".to_string())]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(
+            env.exec(
+                r#"echo "3 4" | awk '{ print int(3.7), int(-3.7), sqrt($1*$1 + $2*$2), exp(0), log(1), sin(0), cos(0) }'"#
+            )
+            .stdout,
+            "3 -4 5 1 0 0 1\n"
+        );
+        let atan = env.exec(r#"echo "1 1" | awk '{ print atan2($1, $2) }'"#);
+        let atan_value = atan.stdout.trim().parse::<f64>().unwrap();
+        assert!((atan_value - std::f64::consts::FRAC_PI_4).abs() < 0.00001);
+        assert_eq!(
+            env.exec(
+                r#"awk 'BEGIN { print length("hello"), substr("hello world", 7), index("abcabc", "bc"), tolower("HeLLo"), toupper("yes") }'"#
+            )
+            .stdout,
+            "5 world 2 hello YES\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "abcdefg" | awk '{ print length(), length(""), length(12345) }'"#)
+                .stdout,
+            "7 0 5\n"
+        );
+        assert_eq!(
+            env.exec(
+                r#"awk 'BEGIN { print substr("hello world", 1, 5), "[" substr("abc", 10) "]", substr("hello", 0, 3), index("hello", "xyz"), index("hello", "") }'"#
+            )
+            .stdout,
+            "hello [] hel 0 1\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { print sprintf("%s: %d (%.1f%%)", "Score", 85, 85.0) }'"#)
+                .stdout,
+            "Score: 85 (85.0%)\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk '{print match($0, /foo/), RSTART, RLENGTH}' /data.txt"#)
+                .stdout,
+            "7 7 3\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk '{print gensub(/o/, "0", "g")}' /data.txt"#)
+                .stdout,
+            "hell0 f00 w0rld\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "hello hello" | awk '{ sub(/hello/, "hi"); print }'"#)
+                .stdout,
+            "hi hello\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "ababa" | awk '{ n = gsub(/a/, "X"); print n, $0 }'"#)
+                .stdout,
+            "3 XbXbX\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "aaa bbb aaa" | awk '{ gsub(/a/, "X", $1); print }'"#)
+                .stdout,
+            "XXX bbb aaa\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "hello" | awk '{ sub(/ll/, "[&]"); print }'"#)
+                .stdout,
+            "he[ll]o\n"
+        );
+    }
+
+    #[test]
+    fn awk_jbc25_array_and_computed_field_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/fruit.txt".to_string(),
+                    "apple\nbanana\napple\ncherry\napple\n".to_string(),
+                ),
+                (
+                    "/sales.csv".to_string(),
+                    "fruit,10\nveg,20\nfruit,15\nveg,5\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        assert_eq!(
+            env.exec(
+                r#"awk 'BEGIN { a["foo"] = 42; a["x"] = 1; a["x"] = 2; a[2] = "two"; i=5; a[i*2] = "ten"; a["key" "1"] = "value"; print a["foo"], a["x"], a[2], a[10], a["key1"], "[" a["missing"] "]" }'"#
+            )
+            .stdout,
+            "42 2 two ten value []\n"
+        );
+        assert_eq!(
+            env.exec(
+                r#"awk '{ count[$1]++ } END { print count["apple"], count["banana"] }' /fruit.txt"#
+            )
+            .stdout,
+            "3 1\n"
+        );
+        assert_eq!(
+            env.exec(
+                r#"awk -F, '{ sum[$1]+=$2 } END { print sum["fruit"], sum["veg"] }' /sales.csv"#
+            )
+            .stdout,
+            "25 25\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { a[1,2] = "val"; print a[1,2] }'"#)
+                .stdout,
+            "val\n"
+        );
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { arr[1] = 100; arr[1] %= 30; print arr[1] }'"#)
+                .stdout,
+            "10\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "10 20 30" | awk '{ print $(NF-1), $1 + $3 }'"#)
+                .stdout,
+            "20 40\n"
+        );
+    }
+
+    #[test]
     fn rg_upstream_basic_rows_are_portable() {
         assert_home_exec(
             &[("file.txt", "hello world\nfoo bar\n")],

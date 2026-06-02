@@ -1850,6 +1850,111 @@ const jbc24CaseGroups = [
   },
 ];
 
+const jbc25CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.test.ts',
+    lines: [
+      264, 275, 286, 297, 308, 319, 332, 343, 354, 365, 462, 486, 510,
+      519,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest:
+      'awk_jbc25_scalar_expression_operator_and_ternary_rows; awk_jbc25_builtin_math_string_match_and_substitution_rows',
+    notes:
+      'JBC-25 verifies portable AWK scalar arithmetic, compound assignment, prefix/postfix increments, match state, gensub, and power operators; full control flow, user functions, getline, output redirection, and format variants remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.operators.test.ts',
+    lines: [
+      6, 13, 20, 27, 34, 41, 48, 55, 62, 71, 89, 98, 107, 134, 145,
+      154, 163, 192, 201, 210, 248, 257, 284, 306, 315, 324, 333, 342,
+      351, 360, 371, 380, 389, 398,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc25_scalar_expression_operator_and_ternary_rows',
+    notes:
+      'JBC-25 verifies portable AWK scalar arithmetic, comparison, logical, regex-match, ternary, assignment, compound assignment, and prefix/postfix increment rows; short-circuit assignment side effects and unary/exponent precedence edge cases remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.patterns.test.ts',
+    lines: [60, 89, 98, 127, 136, 145, 154],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc25_pattern_and_range_rows',
+    notes:
+      'JBC-25 verifies portable AWK regex quantifier patterns plus scalar greater-than, less-than, AND, OR, NOT, and combined regex/expression patterns.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.range.test.ts',
+    lines: [5, 21, 40, 58, 71, 85, 101],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc25_pattern_and_range_rows',
+    notes:
+      'JBC-25 verifies portable AWK range patterns, repeated ranges, action ranges, single-line ranges, ranges through EOF, regex start/end ranges, and numbered-content ranges.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.math.test.ts',
+    lines: [6, 12, 18, 24, 30, 38, 44, 50, 89],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc25_builtin_math_string_match_and_substitution_rows',
+    notes:
+      'JBC-25 verifies portable AWK int, sqrt, exp, log, sin, cos, atan2, and combined sqrt arithmetic rows; random seeding and additional atan2 variants remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.strings.test.ts',
+    lines: [
+      6, 15, 24, 33, 44, 53, 62, 71, 91, 100, 127, 138, 156, 176, 205,
+      241, 253, 262, 280, 300, 309, 318, 354,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc25_builtin_math_string_match_and_substitution_rows',
+    notes:
+      'JBC-25 verifies portable AWK length, substr, index, case conversion, sub/gsub including matched-text replacement and field targets, and bounded sprintf rows; wider formatting and remaining substitution variants stay pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.modulo.test.ts',
+    lines: [6, 36, 54, 74],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest:
+      'awk_jbc25_scalar_expression_operator_and_ternary_rows; awk_jbc25_array_and_computed_field_rows',
+    notes:
+      'JBC-25 verifies portable AWK modulo expressions, scalar modulo assignment, array-element modulo assignment, and odd-number filters; loop modulo and additional numeric edge variants remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.ternary.test.ts',
+    lines: [126, 137],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc25_scalar_expression_operator_and_ternary_rows',
+    notes:
+      'JBC-25 verifies portable AWK ternary field conditions and field branches; nested, function-heavy, truthiness, and getline ternaries remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.arrays.test.ts',
+    lines: [6, 15, 24, 33, 42, 51, 196, 218, 231, 306],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc25_array_and_computed_field_rows',
+    notes:
+      'JBC-25 verifies portable AWK array element creation, numeric and expression indices, missing elements, overwrite, concatenated keys, counting, grouped sums, SUBSEP-style two-dimensional keys, and compound assignment; in/delete/for-in iteration and split-array rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.fields.test.ts',
+    lines: [38, 52, 281],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc25_array_and_computed_field_rows',
+    notes:
+      'JBC-25 verifies portable AWK computed field access and field arithmetic; field mutation, iteration, and rebuild edge rows remain pending.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -1894,6 +1999,7 @@ function caseOverrideFor(testCase) {
     ...jbc22CaseGroups,
     ...jbc23CaseGroups,
     ...jbc24CaseGroups,
+    ...jbc25CaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&
