@@ -3384,6 +3384,21 @@ const jbc38CaseGroups = [
   },
 ];
 
+const jbc41CaseGroups = [
+  {
+    file: 'packages/just-bash/src/interpreter/helpers/xtrace.test.ts',
+    lines: [
+      6, 17, 28, 45, 55, 66, 78, 88, 102, 115, 126, 138, 150, 164, 178,
+      194, 213, 224, 239, 268, 283,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbc41_interpreter_xtrace_set_x_ps4_and_execution_rows',
+    notes:
+      'JBC-41 verifies portable set -x/+x tracing, PS4 literal and variable prefixes, argument quoting, assignments, loops, branches, subshell restoration, pipelines, and function call/body traces. Command-substitution stderr tracing remains pending.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -3441,6 +3456,7 @@ function caseOverrideFor(testCase) {
     ...jbc25CaseGroups,
     ...jbc35CaseGroups,
     ...jbc38CaseGroups,
+    ...jbc41CaseGroups,
     ...jbc27CaseGroups,
     ...jbc30AgentExampleCaseGroups,
     ...jbc33CaseGroups,

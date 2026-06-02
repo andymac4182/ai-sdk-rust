@@ -2801,6 +2801,7 @@ pub struct ShellState {
     local_scopes: Vec<BTreeMap<String, Option<String>>>,
     last_status: i32,
     pipefail: bool,
+    xtrace: bool,
     exited: Option<i32>,
     command_count: usize,
     alias_depth: usize,
@@ -3036,9 +3037,11 @@ impl<D: CommandDispatcher> Interpreter<D> {
             Command::Subshell(body) => {
                 let saved_env = self.state.env.clone();
                 let saved_arrays = self.state.arrays.clone();
+                let saved_xtrace = self.state.xtrace;
                 let output = self.execute_statements(body);
                 self.state.env = saved_env;
                 self.state.arrays = saved_arrays;
+                self.state.xtrace = saved_xtrace;
                 output
             }
             Command::Group(body) => self.execute_statements(body),
@@ -3059,10 +3062,11 @@ impl<D: CommandDispatcher> Interpreter<D> {
     fn execute_simple_command(&mut self, command: &SimpleCommand, stdin: String) -> ExecOutput {
         let assignments = self.expand_assignments(&command.assignments);
         let Some(name_word) = &command.name else {
+            let trace = self.trace_simple_command(&assignments, None);
             for assignment in assignments {
                 self.apply_assignment(assignment);
             }
-            return ExecOutput::default();
+            return prepend_trace(ExecOutput::default(), trace);
         };
 
         let Some(name) = self.expand_word(name_word, true).into_iter().next() else {
@@ -3083,6 +3087,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 here_doc: redirection.here_doc.clone(),
             })
             .collect::<Vec<_>>();
+        let trace = self.trace_simple_command(&assignments, Some((&name, &args)));
 
         if let Some(alias) = self.state.aliases.get(&name).cloned()
             && self.state.alias_depth < 20
@@ -3098,15 +3103,15 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 },
             };
             self.state.alias_depth -= 1;
-            return output;
+            return prepend_trace(output, trace);
         }
 
         if let Some(function) = self.state.functions.get(&name).cloned() {
-            return self.call_function(function, args);
+            return prepend_trace(self.call_function(function, args), trace);
         }
 
         if let Some(output) = self.execute_builtin(&name, &args) {
-            return self.apply_redirections(output, &redirections);
+            return prepend_trace(self.apply_redirections(output, &redirections), trace);
         }
 
         let mut env = self.state.env.clone();
@@ -3128,14 +3133,66 @@ impl<D: CommandDispatcher> Interpreter<D> {
             redirections: redirections.clone(),
         };
         let result = self.dispatcher.dispatch(invocation, &mut self.files);
-        self.apply_redirections(
-            ExecOutput {
-                stdout: result.stdout,
-                stderr: result.stderr,
-                exit_code: result.exit_code,
-            },
-            &redirections,
+        prepend_trace(
+            self.apply_redirections(
+                ExecOutput {
+                    stdout: result.stdout,
+                    stderr: result.stderr,
+                    exit_code: result.exit_code,
+                },
+                &redirections,
+            ),
+            trace,
         )
+    }
+
+    fn trace_simple_command(
+        &self,
+        assignments: &[ExpandedAssignment],
+        command: Option<(&str, &[String])>,
+    ) -> Option<String> {
+        if !self.state.xtrace {
+            return None;
+        }
+
+        let mut parts = assignments
+            .iter()
+            .filter_map(format_expanded_assignment)
+            .collect::<Vec<_>>();
+        if let Some((name, args)) = command {
+            parts.push(trace_quote_arg(name));
+            parts.extend(args.iter().map(|arg| trace_quote_arg(arg)));
+        }
+        if parts.is_empty() {
+            return None;
+        }
+
+        Some(format!("{}{}\n", self.trace_prefix(), parts.join(" ")))
+    }
+
+    fn trace_prefix(&self) -> String {
+        let raw = self.state.lookup_var("PS4").unwrap_or("+ ");
+        expand_trace_prefix(raw, &self.state)
+    }
+
+    fn apply_set_options(&mut self, args: &[String]) {
+        if args == ["-o", "pipefail"] {
+            self.state.pipefail = true;
+            return;
+        }
+        if args == ["+o", "pipefail"] {
+            self.state.pipefail = false;
+            return;
+        }
+
+        for arg in args {
+            match arg.as_str() {
+                "-x" => self.state.xtrace = true,
+                "+x" => self.state.xtrace = false,
+                "-o" | "+o" | "pipefail" => {}
+                _ => {}
+            }
+        }
     }
 
     fn expand_assignments(&mut self, assignments: &[Assignment]) -> Vec<ExpandedAssignment> {
@@ -3224,11 +3281,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
             "local" => Some(self.execute_local(args)),
             "declare" | "typeset" => Some(self.execute_declare(args)),
             "set" => {
-                if args == ["-o", "pipefail"] {
-                    self.state.pipefail = true;
-                } else if args == ["+o", "pipefail"] {
-                    self.state.pipefail = false;
-                }
+                self.apply_set_options(args);
                 Some(ExecOutput::default())
             }
             "alias" => {
@@ -3875,6 +3928,112 @@ enum ExpandedAssignment {
     },
 }
 
+fn prepend_trace(mut output: ExecOutput, trace: Option<String>) -> ExecOutput {
+    if let Some(mut trace) = trace {
+        trace.push_str(&output.stderr);
+        output.stderr = trace;
+    }
+    output
+}
+
+fn format_expanded_assignment(assignment: &ExpandedAssignment) -> Option<String> {
+    match assignment {
+        ExpandedAssignment::Scalar {
+            name,
+            value,
+            append,
+        } => Some(format!(
+            "{name}{}{value}",
+            if *append { "+=" } else { "=" },
+            value = trace_quote_arg(value)
+        )),
+        ExpandedAssignment::Array { name, values } => Some(format!(
+            "{name}=({})",
+            values
+                .iter()
+                .map(|value| trace_quote_arg(value))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )),
+        ExpandedAssignment::ArrayElement {
+            name,
+            index,
+            value,
+            append,
+        } => Some(format!(
+            "{name}[{index}]{}{value}",
+            if *append { "+=" } else { "=" },
+            value = trace_quote_arg(value)
+        )),
+    }
+}
+
+fn trace_quote_arg(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    if value.chars().all(|character| {
+        character.is_ascii_alphanumeric()
+            || matches!(character, '_' | '-' | '+' | '/' | '.' | ':' | '=')
+    }) {
+        value.to_string()
+    } else {
+        shell_quote_arg(value)
+    }
+}
+
+fn expand_trace_prefix(raw: &str, state: &ShellState) -> String {
+    let chars = raw.chars().collect::<Vec<_>>();
+    let mut output = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] != '$' {
+            output.push(chars[index]);
+            index += 1;
+            continue;
+        }
+
+        if chars.get(index + 1) == Some(&'{')
+            && let Some(end) = chars[index + 2..]
+                .iter()
+                .position(|character| *character == '}')
+        {
+            let name = chars[index + 2..index + 2 + end].iter().collect::<String>();
+            output.push_str(&lookup_trace_parameter(&name, state));
+            index += end + 3;
+            continue;
+        }
+
+        if chars
+            .get(index + 1)
+            .is_some_and(|character| is_name_start(*character))
+        {
+            let mut end = index + 2;
+            while chars
+                .get(end)
+                .is_some_and(|character| is_name_continue(*character))
+            {
+                end += 1;
+            }
+            let name = chars[index + 1..end].iter().collect::<String>();
+            output.push_str(&lookup_trace_parameter(&name, state));
+            index = end;
+            continue;
+        }
+
+        output.push('$');
+        index += 1;
+    }
+    output
+}
+
+fn lookup_trace_parameter(name: &str, state: &ShellState) -> String {
+    if name == "LINENO" {
+        return state.command_count.to_string();
+    }
+    state.lookup_var(name).unwrap_or_default().to_string()
+}
+
 fn append_expanded_values(prefixes: Vec<String>, suffixes: Vec<String>) -> Vec<String> {
     let mut output = Vec::new();
     for prefix in prefixes {
@@ -4426,6 +4585,7 @@ mod tests {
                 "cat" => fake_cat(&invocation, files),
                 "grep" => fake_grep(&invocation, files),
                 "sort" => fake_sort(&invocation),
+                "[" | "test" => fake_test(&invocation.args),
                 "wc" if invocation.args.first().map(String::as_str) == Some("-l") => {
                     let count = invocation.stdin.lines().count();
                     CommandResult::success(format!("{count}\n"))
@@ -4488,7 +4648,12 @@ mod tests {
                     .collect::<String>(),
             );
         }
-        CommandResult::success(args.join(""))
+        CommandResult::success(
+            args.join("")
+                .replace("\\n", "\n")
+                .replace("\\t", "\t")
+                .replace("\\\\", "\\"),
+        )
     }
 
     fn fake_cat(invocation: &CommandInvocation, files: &ShellVirtualFileSystem) -> CommandResult {
@@ -4541,6 +4706,32 @@ mod tests {
                 stderr: String::new(),
                 exit_code: 1,
             }
+        }
+    }
+
+    fn fake_test(args: &[String]) -> CommandResult {
+        let args = args.strip_suffix(&["]".to_string()]).unwrap_or(args);
+        let matched = match args {
+            [left, operator, right] => {
+                let left = left.parse::<i64>().unwrap_or(0);
+                let right = right.parse::<i64>().unwrap_or(0);
+                match operator.as_str() {
+                    "-lt" => left < right,
+                    "-le" => left <= right,
+                    "-gt" => left > right,
+                    "-ge" => left >= right,
+                    "-eq" => left == right,
+                    "-ne" => left != right,
+                    _ => false,
+                }
+            }
+            [value] => !value.is_empty(),
+            _ => false,
+        };
+        CommandResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: i32::from(!matched),
         }
     }
 
@@ -6150,6 +6341,129 @@ esac"#,
             assert_eq!(result.exit_code, 0, "{source}");
             assert_eq!(result.stdout, expected_stdout, "{source}");
         }
+    }
+
+    #[test]
+    fn jbc41_interpreter_xtrace_set_x_ps4_and_execution_rows() {
+        let mut basic = shell();
+        let result = basic.exec(
+            "set -x
+echo hello
+echo one two three
+set +x
+echo not traced",
+        );
+        assert_eq!(result.stdout, "hello\none two three\nnot traced\n");
+        assert!(result.stderr.contains("+ echo hello"));
+        assert!(result.stderr.contains("+ echo one two three"));
+        assert!(result.stderr.contains("+ set +x"));
+        assert!(!result.stderr.contains("+ echo not traced"));
+        assert_eq!(result.exit_code, 0);
+
+        let mut ps4 = shell();
+        let result = ps4.exec(
+            "PS4='>>> '
+set -x
+echo test",
+        );
+        assert!(result.stderr.contains(">>> echo test"));
+
+        let mut ps4_vars = shell();
+        let result = ps4_vars.exec(
+            "MYVAR=DEBUG
+PS4='[$MYVAR] '
+set -x
+echo test",
+        );
+        assert!(result.stderr.contains("[DEBUG] echo test"));
+
+        let mut ps4_lineno = shell();
+        let result = ps4_lineno.exec(
+            "PS4='+$LINENO: '
+set -x
+echo line1",
+        );
+        assert!(result.stderr.contains(": echo line1"));
+
+        let mut empty_ps4 = shell();
+        let result = empty_ps4.exec(
+            "PS4=''
+set -x
+echo test",
+        );
+        assert!(result.stderr.contains("echo test"));
+
+        let mut quoting = shell();
+        let result = quoting.exec(
+            "set -x
+echo \"hello world\"
+echo \"\"
+printf 'a\\nb'
+x=5
+echo $x
+FOO=bar echo hello",
+        );
+        assert_eq!(result.stdout, "hello world\n\na\nb5\nhello\n");
+        assert!(result.stderr.contains("hello world"));
+        assert!(result.stderr.contains("+ echo ''"));
+        assert!(result.stderr.contains("+ printf"));
+        assert!(result.stderr.contains("+ x=5"));
+        assert!(result.stderr.contains("+ FOO=bar echo hello"));
+
+        let mut control = shell();
+        let result = control.exec(
+            "set -x
+for i in 1 2; do echo $i; done
+x=0
+while [ $x -lt 2 ]; do echo $x; x=$((x + 1)); done
+if true; then echo yes; else echo no; fi",
+        );
+        assert_eq!(result.stdout, "1\n2\n0\n1\nyes\n");
+        assert!(result.stderr.contains("+ echo 1"));
+        assert!(result.stderr.contains("+ echo 2"));
+        assert!(result.stderr.contains("+ '[' 0 -lt 2 ']'"));
+        assert!(result.stderr.contains("+ echo 0"));
+        assert!(result.stderr.contains("+ true"));
+        assert!(result.stderr.contains("+ echo yes"));
+        assert!(!result.stderr.contains("+ echo no"));
+
+        let mut traced_subshell = shell();
+        let result = traced_subshell.exec(
+            "set -x
+(echo subshell)",
+        );
+        assert_eq!(result.stdout, "subshell\n");
+        assert!(result.stderr.contains("+ echo subshell"));
+
+        let mut subshell = shell();
+        let result = subshell.exec(
+            "set -x
+(set +x; echo subshell)
+echo after",
+        );
+        assert_eq!(result.stdout, "subshell\nafter\n");
+        assert!(result.stderr.contains("+ set +x"));
+        assert!(result.stderr.contains("+ echo after"));
+        assert!(!result.stderr.contains("+ echo subshell"));
+
+        let mut pipeline = shell();
+        let result = pipeline.exec(
+            "set -x
+echo hello | cat",
+        );
+        assert_eq!(result.stdout, "hello\n");
+        assert!(result.stderr.contains("+ echo hello"));
+        assert!(result.stderr.contains("+ cat"));
+
+        let mut functions = shell();
+        let result = functions.exec(
+            "greet() { echo \"Hello $1\"; }
+set -x
+greet World",
+        );
+        assert_eq!(result.stdout, "Hello World\n");
+        assert!(result.stderr.contains("+ greet World"));
+        assert!(result.stderr.contains("+ echo 'Hello World'"));
     }
 
     #[test]
