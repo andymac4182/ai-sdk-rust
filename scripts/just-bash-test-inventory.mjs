@@ -2507,6 +2507,170 @@ const jbc25CaseGroups = [
   },
 ];
 
+const jbc33SourceGroups = [
+  {
+    files: [
+      'packages/just-bash/src/ast/types.ts',
+      'packages/just-bash/src/parser/arithmetic-parser.ts',
+      'packages/just-bash/src/parser/arithmetic-primaries.ts',
+      'packages/just-bash/src/parser/command-parser.ts',
+      'packages/just-bash/src/parser/compound-parser.ts',
+      'packages/just-bash/src/parser/conditional-parser.ts',
+      'packages/just-bash/src/parser/expansion-parser.ts',
+      'packages/just-bash/src/parser/lexer.ts',
+      'packages/just-bash/src/parser/parser-substitution.ts',
+      'packages/just-bash/src/parser/parser.ts',
+      'packages/just-bash/src/parser/types.ts',
+      'packages/just-bash/src/parser/word-parser.ts',
+      'packages/just-bash/src/interpreter/arithmetic.ts',
+      'packages/just-bash/src/interpreter/assignment-expansion.ts',
+      'packages/just-bash/src/interpreter/conditionals.ts',
+      'packages/just-bash/src/interpreter/control-flow.ts',
+      'packages/just-bash/src/interpreter/expansion.ts',
+      'packages/just-bash/src/interpreter/functions.ts',
+      'packages/just-bash/src/interpreter/interpreter.ts',
+      'packages/just-bash/src/interpreter/simple-command-assignments.ts',
+      'packages/just-bash/src/interpreter/subshell-group.ts',
+      'packages/just-bash/src/interpreter/types.ts',
+      'packages/just-bash/src/interpreter/expansion/arith-text-expansion.ts',
+      'packages/just-bash/src/interpreter/expansion/brace-range.ts',
+      'packages/just-bash/src/interpreter/expansion/command-substitution.ts',
+      'packages/just-bash/src/interpreter/expansion/parameter-ops.ts',
+      'packages/just-bash/src/interpreter/expansion/quoting.ts',
+      'packages/just-bash/src/interpreter/expansion/tilde.ts',
+      'packages/just-bash/src/interpreter/expansion/unquoted-expansion.ts',
+      'packages/just-bash/src/interpreter/expansion/variable.ts',
+      'packages/just-bash/src/interpreter/expansion/word-split.ts',
+      'packages/just-bash/src/interpreter/helpers/condition.ts',
+      'packages/just-bash/src/interpreter/helpers/errors.ts',
+      'packages/just-bash/src/interpreter/helpers/ifs.ts',
+      'packages/just-bash/src/interpreter/helpers/loop.ts',
+      'packages/just-bash/src/interpreter/helpers/quoting.ts',
+      'packages/just-bash/src/interpreter/helpers/result.ts',
+      'packages/just-bash/src/interpreter/helpers/statements.ts',
+      'packages/just-bash/src/interpreter/helpers/string-compare.ts',
+      'packages/just-bash/src/interpreter/helpers/string-tests.ts',
+      'packages/just-bash/src/interpreter/helpers/variable-tests.ts',
+      'packages/just-bash/src/interpreter/helpers/word-matching.ts',
+      'packages/just-bash/src/interpreter/helpers/word-parts.ts',
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    notes:
+      'JBC-33 verifies the Rust parser/interpreter AST, variable, operator, loop, control-flow, function, local-scope, command-substitution, arithmetic, quoting, and prototype-key data rows covered by the named shell tests.',
+  },
+  {
+    files: [
+      'packages/just-bash/src/regex/index.ts',
+      'packages/just-bash/src/regex/user-regex.ts',
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::regex',
+    notes:
+      'JBC-33 verifies portable user-regex matching, captures, replacement, split, search, Unicode, dotAll, anchors, and group behavior with Rust regex tests; JavaScript RegExp wrapper rows are documented separately.',
+  },
+];
+
+const jbc33RegexJsOnlyLines = [
+  46, 69, 97, 121, 127, 135, 191, 208, 217, 228, 239, 252, 265, 278, 284,
+  312, 330, 337, 346, 353, 367, 418, 439,
+];
+
+const jbc33CaseGroups = [
+  {
+    file: 'packages/just-bash/src/syntax/variables.test.ts',
+    lines: [
+      6, 12, 18, 24, 30, 36, 42, 48, 54, 60, 69, 75, 81, 89, 95, 101,
+      107, 113, 119, 125, 139, 145, 151, 165, 173, 179, 185, 193, 200,
+      208, 215, 221, 227, 233, 241, 247, 253, 260, 267, 273, 279,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbc33_syntax_variables_operators_and_loop_rows_match_upstream',
+    notes:
+      'JBC-33 verifies variable/default expansion, quoting, echo escape rows except the byte-level backslash row, exit/unknown/whitespace behavior, and simple assignment/export rows through the Rust shell interpreter.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/operators.test.ts',
+    lines: [
+      6, 13, 20, 27, 52, 59, 68, 75, 82, 118, 129, 135, 141, 154, 161,
+      169, 177, 213, 223, 229, 235, 281, 287, 297, 303, 311, 319, 325,
+      333, 347, 353,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbc33_syntax_variables_operators_and_loop_rows_match_upstream',
+    notes:
+      'JBC-33 verifies portable &&, ||, semicolon, pipe, grep-pipeline, and redirection syntax rows through the Rust shell. Rows that require command-family head/tail/wc/mkdir/rm behavior stay pending with command owners.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/loops.test.ts',
+    lines: [7, 14, 20, 26, 33, 41, 54, 163],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbc33_syntax_variables_operators_and_loop_rows_match_upstream',
+    notes:
+      'JBC-33 verifies portable for-loop parsing/execution, file operands, exit status, and nested for loops through the Rust shell. While/until/protection rows remain pending until separately proven.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/control-flow.test.ts',
+    lines: [
+      6, 13, 20, 29, 39, 47, 55, 65, 80, 87, 95, 103, 112, 120, 132,
+      138, 144, 150, 156, 162, 170, 178, 185, 214, 246, 253,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbc33_syntax_control_flow_functions_and_local_rows_match_upstream',
+    notes:
+      'JBC-33 verifies portable if/elif/nesting, function definition/calls/args/status, builtin override, and selected local variable rows through the Rust shell. File-count, negation, and deeper local-scope rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/prototype-pollution.test.ts',
+    lines: [
+      36, 43, 50, 57, 64, 71, 80, 87, 94, 101, 112, 119, 126, 155, 162,
+      178, 187, 196, 203, 212, 219, 279, 288, 299, 314, 321, 328, 335,
+      545, 558, 571, 578, 614, 776, 907, 916,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbc33_interpreter_prototype_keywords_remain_plain_shell_data',
+    notes:
+      'JBC-33 verifies prototype-like keywords remain plain Rust shell data across echo, variable assignment, unset, functions, command substitution, arithmetic, loops, case, literal punctuation, heredocs, brace expansion, export, and subshell rows.',
+  },
+  {
+    file: 'packages/just-bash/src/transform/transform.test.ts',
+    lines: [254, 263, 279, 286],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::transform::pipeline',
+    rustTest: 'jbc33_transform_exec_metadata_rows_are_portable',
+    notes:
+      'JBC-33 verifies transform exec integration via Rust transform pipeline metadata, rewrite, no-plugin, and metadata-merge proof cases.',
+  },
+  {
+    file: 'packages/just-bash/src/regex/user-regex.test.ts',
+    lines: [
+      11, 17, 25, 31, 36, 41, 55, 64, 79, 86, 92, 106, 111, 116, 143,
+      148, 153, 158, 165, 170, 177, 185, 247, 260, 273, 292, 299, 306,
+      321, 389, 424, 430, 451, 456, 461, 469, 474, 481, 486, 493, 498,
+      505, 511, 520,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::regex',
+    rustTest: 'jbc33_user_regex_portable_match_search_split_and_replace_rows',
+    notes:
+      'JBC-33 verifies portable regex construction, matching, capture, replacement, split, search, iteration, Unicode, dotAll, anchors, named groups, nested groups, and non-capturing groups with Rust regex.',
+  },
+  {
+    file: 'packages/just-bash/src/regex/user-regex.test.ts',
+    lines: jbc33RegexJsOnlyLines,
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::regex::js-wrapper-exception',
+    rustTest: 'js-only:user-regex-regexp-wrapper-callback-and-lastindex-api',
+    notes:
+      'JBC-33 classifies JavaScript RegExp wrapper identity, callback replacement, lastIndex state, native RegExp access, factory instance checks, and TypeScript RegexLike interface rows as JS-only API behavior; portable regex semantics are verified separately.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -2532,6 +2696,7 @@ function sourceOverrideFor(relativePath) {
     ...jbc18SourceGroups,
     ...jbc19SourceGroups,
     ...jbc26SourceGroups,
+    ...jbc33SourceGroups,
   ].find((entry) => groupMatchesFile(entry, relativePath));
   return group ? rowOverrideFromGroup(group) : undefined;
 }
@@ -2559,6 +2724,7 @@ function caseOverrideFor(testCase) {
     ...jbc25CaseGroups,
     ...jbc27CaseGroups,
     ...jbc30AgentExampleCaseGroups,
+    ...jbc33CaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&
