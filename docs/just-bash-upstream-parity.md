@@ -14,6 +14,8 @@ JB-05 owns the portable command registry and earlier high-risk built-ins/coreuti
 
 JBC-07 extends that command slice with exact upstream row closures for portable text/search/structured-data commands. JBC-09 through JBC-31 progressively close AWK, ripgrep, comparison-corpus, syntax/transform, filesystem, sandbox/security, interpreter, executor/package, CLI, shell/transform, runtime/session, basename/dirname, `find`, fake-transport `curl`, deeper text/structured-data/query-engine/AWK rows, Open Agents command integration, and docs/examples API rows. JBC-33 closes additional parser/interpreter/syntax/transform/regex rows, JBC-34 closes additional `grep`, `rg`, `sed`, UTF-8, and adjacent text-stream rows, JBC-35 closes additional AWK field rebuild/printf/BEGIN/END and AWK arithmetic comparison fixture rows, JBC-37 closes additional structured data/query rows for HTML-to-Markdown, `jq`, `yq`, `sqlite3`, `xan`, and query-engine sanitizer behavior, and JBC-39 adds explicit optional language runtime providers for `js-exec`/`node` and `python3`/`python`, maps portable fail-closed and fake-backend opt-in rows, and classifies real QuickJS/CPython worker/package runtime rows as JS-only. These slices do not claim upstream `fs/**`, remaining filesystem rows beyond the JBC-13/JBC-26 mappings, host-backed ReadWriteFs/OverlayFs constructors, real OS symlink/canonicalization/permission probes, lazy JavaScript file providers, remaining parser/syntax/transform rows beyond the JBC-12/JBC-19/JBC-33 mappings, command-family security-shaped rows outside their command owners, remaining interpreter rows beyond the JBC-15/JBC-19/JBC-20/JBC-33 mappings, full AWK/JQ/YQ languages, full ripgrep compatibility, full CSV/SQL engines, search-engine internals, binary tests, UTF-8 byte-level tests not named in the ledger, remaining AWK control-flow/function/getline/redirection/parser/error rows, PCRE/stats/replace/vimgrep/multiline/passthru behavior, host OverlayFS write policy/root existence, CLI errexit runtime behavior, bundled binary runtime execution rows, interactive readline shell semantics, remaining mock-clock/logger/PIPESTATUS behavior, broad `test`/`tee` comparison suites, remaining small POSIX command rows beyond the generated basename/dirname corpus subset, TeePlugin exec/file-capture rows, real QuickJS/CPython language execution, or host runtime/process fallback. Rows are closed only when `docs/open-agents/just-bash-parity.md` names a Rust test, NAPI JS proof, generated corpus proof, or explicit exception below.
 
+JBC-36 supersedes the older pending notes for its owned filesystem/core/CLI/session closeout rows. It maps exact Bash facade, shell env/cwd/status, CLI errexit, NAPI bundle execution, read/write piping, mountable routing, encoding-pipeline byte-count, and pure root-boundary rows to named Rust/NAPI proofs, and documents exact host-backed OverlayFS/ReadWriteFs/MountableFs, OS symlink, realpath, lazy JavaScript provider, package encoding-helper, and CLI host-root rows as JS-only exceptions. The remaining strict gaps are still intentional and live in sibling parser, command-family, structured-data, host-runtime, and final dual-engine closeout rows.
+
 Mapped Rust/NAPI proofs:
 
 | Upstream file/case | Rust test | Status | Notes |
@@ -65,6 +67,8 @@ Mapped Rust/NAPI proofs:
 | 113 additional exact rows across `packages/just-bash/src/commands/awk/{awk.test.ts,awk.operators.test.ts,awk.patterns.test.ts,awk.range.test.ts,awk.math.test.ts,awk.strings.test.ts,awk.modulo.test.ts,awk.ternary.test.ts,awk.arrays.test.ts,awk.fields.test.ts}` | `awk_jbc25_scalar_expression_operator_and_ternary_rows`; `awk_jbc25_builtin_math_string_match_and_substitution_rows`; `awk_jbc25_pattern_and_range_rows`; `awk_jbc25_array_and_computed_field_rows` | portable-mapped | JBC-25 covers AWK scalar expressions, operators, ternaries, regex/expression patterns, ranges, math/string builtins, arrays, computed fields, and modulo behavior; full AWK control flow, user functions, getline, redirection, and remaining formatting variants stay pending. |
 | 35 additional exact rows across `packages/just-bash/src/commands/awk/{awk.fields.test.ts,awk.output.test.ts,awk.edge-cases.test.ts}` | `awk_jbc35_field_rebuild_printf_and_edge_rows` | portable-mapped | JBC-35 covers variable field indexes, field assignment, NF/OFS record rebuilds, computed fields, printf length and dynamic width modifiers, print/BEGIN/END edge rows, and string-number coercion while leaving loops, delete/split, getline, redirection, parser/error rows, and broader AWK language cases pending. |
 | 3 exact AWK arithmetic comparison fixtures in `packages/just-bash/src/comparison-tests/awk.comparison.test.ts` | `just_bash_runs_shared_conformance_corpus::comparison_awk_12b6b6d5b72e83c0`; `just_bash_runs_shared_conformance_corpus::comparison_awk_cc47f33e4cb2516a`; `just_bash_runs_shared_conformance_corpus::comparison_awk_d3e5d71775cfd1e6` | portable-mapped | JBC-35 promotes only exact-pass addition, multiplication, and subtraction fixtures after the raw Rust-engine AWK comparison run matched upstream stdout, stderr, exit status, and fixture setup. |
+| JBC-36 exact rows across `Bash.general`, `Bash.exec-options`, `encoding-pipeline`, `cli/{shell,just-bash,just-bash.bundle}`, `read-write-fs.piping`, `mountable-fs`, and root-boundary helper suites | `jbc36_core_runtime_shell_session_rows_are_virtual_and_stateful`; `jbc36_exec_errexit_concurrent_env_cwd_and_file_rows_are_isolated`; `jbc36_utf8_redirection_and_text_stdin_rows_are_byte_safe`; `jbc36_cli_errexit_executes_runtime_stop_and_json_rows`; `jbc36_napi_cli_bundle_virtual_execution_and_errexit_rows`; `jbc36_read_write_piping_large_virtual_data_rows`; `jbc36_mountable_construction_time_mount_rows_are_virtual`; root-boundary JBC-36 Rust proof | portable-mapped | JBC-36 closes virtual FS/core/session/CLI rows while keeping parser-heavy, command-family, logger/mock-clock, and byte-provider rows pending unless separately mapped. |
+| JBC-36 host-backed filesystem/CLI adapter rows | `js-only:upstream-host-backed-overlayfs-e2e-real-file-fixtures`; `js-only:upstream-host-backed-readwritefs-os-symlink-and-realpath-security`; `js-only:upstream-host-backed-cli-overlay-root-and-allow-write` | js-only-documented | Documents exact TypeScript host adapter behaviors for real roots, OS symlinks, realpath/canonicalization, lazy JS providers, package encoding exports, and CLI host root validation instead of claiming virtual Rust execution covers host side effects. |
 
 ## JBC-12 Syntax and Transform Slice
 
@@ -243,11 +247,12 @@ exact-pass `jq` comparison fixture rows, JBC-30 closes 231 Open Agents
 agent-example command integration rows, JBC-31 closes 25 docs/examples public
 API rows, JBC-33 closes additional parser/interpreter/regex rows, JBC-34 closes
 147 additional text/search and UTF-8 command rows, JBC-35 closes 35 additional
-exact AWK rows plus three AWK arithmetic comparison fixtures, JBC-37 closes
-additional structured-data/query rows, and JBC-39 closes optional language
-boundary rows while documenting host-runtime/package runtime exceptions. After
-regeneration the combined Just Bash ledger is `4,850` verified / `4,218`
-pending / `868` JS-only, with `4,229` strict gate gaps. These slices
+exact AWK rows plus three AWK arithmetic comparison fixtures, JBC-36 closes the
+owned filesystem/core runtime/CLI/session child slice, JBC-37 closes additional
+structured-data/query rows, and JBC-39 closes optional language boundary rows
+while documenting host-runtime/package runtime exceptions. After regeneration
+the combined Just Bash ledger is `4,961` verified / `3,894` pending / `1,081`
+JS-only, with `3,894` strict gate gaps. These slices
 do not claim full command, filesystem, syntax, transform, interpreter, security,
 executor, examples, host-backed CLI, or source-only command-module parity until
 every portable row is named in the generated ledger.
@@ -262,8 +267,8 @@ executor/example closure, JBC-18 CLI/package closure, JBC-19 shell/transform
 closure, JBC-20 core runtime/session closure, and JBC-21 basename/dirname
 comparison closure are tracked above and in the generated per-domain tables.
 JBC-26 filesystem/path closure is tracked in the filesystem table below. JBC-31
-docs/examples closure is tracked in the mapped proof table above and in the
-generated source/test-case tables.
+docs/examples closure and JBC-36 filesystem/core/CLI/session closeout are tracked
+in the mapped proof table above and in the generated source/test-case tables.
 
 | Family | Exact upstream command cases | Verified exact rows | Pending |
 | --- | ---: | ---: | ---: |

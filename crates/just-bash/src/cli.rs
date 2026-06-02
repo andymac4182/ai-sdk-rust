@@ -647,6 +647,50 @@ mod tests {
     }
 
     #[test]
+    fn jbc36_cli_errexit_executes_runtime_stop_and_json_rows() {
+        for args in [
+            ["-e", "-c", "false; echo should_not_print"].as_slice(),
+            ["--errexit", "-c", "false; echo should_not_print"].as_slice(),
+            ["-ec", "false; echo should_not_print"].as_slice(),
+        ] {
+            let plan = plan(args);
+            let result = execute_plan(
+                &plan,
+                plan.options.script.as_deref().expect("inline script"),
+                &[],
+            );
+            assert_eq!(result.stdout, "");
+            assert_eq!(result.stderr, "");
+            assert_eq!(result.exit_code, 1);
+        }
+
+        let continued_plan = plan(&["-c", "false; echo should_print"]);
+        let continued = execute_plan(
+            &continued_plan,
+            continued_plan
+                .options
+                .script
+                .as_deref()
+                .expect("inline script"),
+            &[],
+        );
+        assert_eq!(continued.stdout, "should_print\n");
+        assert_eq!(continued.exit_code, 0);
+
+        let json_plan = plan(&["--json", "-e", "-c", "false; echo should_not_print"]);
+        let json_result = execute_plan(
+            &json_plan,
+            json_plan.options.script.as_deref().expect("inline script"),
+            &[],
+        );
+        let value: Value = serde_json::from_str(&format_just_bash_cli_json_result(&json_result))
+            .expect("CLI JSON parses");
+        assert_eq!(value["stdout"], "");
+        assert_eq!(value["stderr"], "");
+        assert_eq!(value["exitCode"], 1);
+    }
+
+    #[test]
     fn jbc18_cli_source_rows_keep_execution_wiring_host_agnostic() {
         let no_script = plan_just_bash_cli_args(Vec::<String>::new(), "/repo", true).unwrap();
         assert_eq!(no_script.action, JustBashCliAction::Help);

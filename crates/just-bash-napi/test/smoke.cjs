@@ -151,10 +151,41 @@ function jbc18_napi_cli_planner_matches_upstream_help_version_and_argument_rows(
   );
 }
 
+function jbc36_napi_cli_bundle_virtual_execution_and_errexit_rows() {
+  const bash = new Bash({
+    files: {
+      "/tmp/input.txt": "one\ntwo\nthree\n",
+    },
+    cwd: "/tmp",
+  });
+
+  let result = bash.exec("echo hello world");
+  assert.equal(result.stdout, "hello world\n");
+  assert.equal(result.stderr, "");
+  assert.equal(result.exitCode, 0);
+
+  result = bash.exec("cat input.txt | wc -l");
+  assert.equal(result.stdout.trim(), "3");
+
+  result = bash.exec("echo test > output.txt && cat output.txt");
+  assert.equal(result.stdout, "test\n");
+  assert.equal(bash.readFile("output.txt"), "test\n");
+
+  result = bash.exec("set -e\nfalse; echo should_not_print");
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "");
+  assert.equal(result.exitCode, 1);
+
+  const plan = planCliInvocation(["-ec", "false; echo should_not_print"], "/repo/project", true);
+  assert.equal(plan.errexit, true);
+  assert.equal(plan.script, "false; echo should_not_print");
+}
+
 async function main() {
   jbc18_napi_cjs_entrypoint_requires_and_executes_basic_commands();
   await jbc18_napi_esm_entrypoint_imports_and_executes_basic_commands();
   jbc18_napi_cli_planner_matches_upstream_help_version_and_argument_rows();
+  jbc36_napi_cli_bundle_virtual_execution_and_errexit_rows();
 }
 
 main().catch((error) => {

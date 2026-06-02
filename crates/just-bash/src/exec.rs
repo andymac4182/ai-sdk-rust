@@ -938,6 +938,7 @@ impl JustBashSession {
             cancel_token: options.cancel_token,
             command_count: 0,
             max_command_count: self.inner.max_command_count,
+            errexit: false,
         };
         let mut script = script.as_ref().to_string();
         extract_function_definitions(&mut script, &mut state.functions);
@@ -1047,6 +1048,7 @@ struct ExecState<'a> {
     cancel_token: Option<JustBashCancelToken>,
     command_count: usize,
     max_command_count: usize,
+    errexit: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1060,7 +1062,8 @@ struct CommandResult {
 fn execute_control_script(state: &mut ExecState<'_>, script: &str) -> CommandResult {
     let mut combined = CommandResult::default();
     let mut last_exit = 0;
-    for (op, command) in split_control(script) {
+    let controls = split_control(script);
+    for (index, (op, command)) in controls.iter().enumerate() {
         let run = match op {
             ControlOp::Always => true,
             ControlOp::And => last_exit == 0,
@@ -1069,13 +1072,19 @@ fn execute_control_script(state: &mut ExecState<'_>, script: &str) -> CommandRes
         if !run {
             continue;
         }
-        let result = execute_pipeline(state, &command);
+        let result = execute_pipeline(state, command);
         combined.stdout.push_str(&result.stdout);
         combined.stderr.push_str(&result.stderr);
         combined.exit_code = result.exit_code;
         last_exit = result.exit_code;
         if result.exit_requested {
             combined.exit_requested = true;
+            break;
+        }
+        let next_op = controls.get(index + 1).map(|(op, _)| *op);
+        let part_of_and_or_list = matches!(op, ControlOp::And | ControlOp::Or)
+            || matches!(next_op, Some(ControlOp::And | ControlOp::Or));
+        if state.errexit && result.exit_code != 0 && !part_of_and_or_list {
             break;
         }
     }
@@ -1217,6 +1226,12 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
     if let Some(result) = execute_language_runtime(state, command, &tokens[1..], &stdin) {
         return result;
     }
+    if command == ":" {
+        return CommandResult::default();
+    }
+    if command == "set" {
+        return command_set(state, &tokens[1..]);
+    }
     if !state.session.inner.commands.contains(command) {
         return stderr_result(127, format!("bash: {}: command not found\n", tokens[0]));
     }
@@ -1292,6 +1307,35 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
         "bash" | "sh" => command_bash(command, state, &tokens[1..], stdin),
         _ => stderr_result(127, format!("bash: {}: command not found\n", tokens[0])),
     }
+}
+
+fn command_set(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
+    if args.is_empty() {
+        return CommandResult::default();
+    }
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-e" | "-o" if args.get(index + 1).is_some_and(|value| value == "errexit") => {
+                state.errexit = true;
+                if arg == "-o" {
+                    index += 1;
+                }
+            }
+            "+e" | "+o" if args.get(index + 1).is_some_and(|value| value == "errexit") => {
+                state.errexit = false;
+                if arg == "+o" {
+                    index += 1;
+                }
+            }
+            "-e" => state.errexit = true,
+            "+e" => state.errexit = false,
+            "-o" | "+o" => {}
+            _ => {}
+        }
+        index += 1;
+    }
+    CommandResult::default()
 }
 
 fn command_echo(args: &[String]) -> CommandResult {
@@ -14028,6 +14072,404 @@ mod tests {
         bash.exec("echo hello > /output.txt", JustBashExecOptions::new());
         bash.exec("echo again >> /output.txt", JustBashExecOptions::new());
         assert_eq!(bash.read_file("/output.txt").unwrap(), "hello\nagain\n");
+    }
+
+    #[test]
+    fn jbc36_core_runtime_shell_session_rows_are_virtual_and_stateful() {
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_env("NAME", "world")
+                .with_env("PREFIX", "pre")
+                .with_env("HOME", "/home/user")
+                .with_file("/home/user/file.txt", "content")
+                .with_file("/dir/file.txt", "")
+                .with_file("/dir/file.md", "")
+                .with_file("/dir/other.js", "")
+                .with_file("/parent/child/.keep", "")
+                .with_file("/a/b/c/d/.keep", "")
+                .with_file("/test.txt", "line1\nline2\nline3\nline4\nline5\n"),
+        );
+
+        assert_eq!(
+            bash.exec(
+                "cat /test.txt | head -n 3 | tail -n 1",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "line3\n"
+        );
+        assert_eq!(
+            bash.exec(
+                "echo -e \"foo\\nbar\\nfoo\" | grep foo",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "foo\nfoo\n"
+        );
+        assert_eq!(
+            bash.exec(
+                "echo -e \"one\\ntwo\\nthree\" | wc -l",
+                JustBashExecOptions::new()
+            )
+            .stdout
+            .trim(),
+            "3"
+        );
+        let listed = bash.exec("ls /dir | grep file", JustBashExecOptions::new());
+        assert!(listed.stdout.contains("file.txt"));
+        assert!(listed.stdout.contains("file.md"));
+        assert!(!listed.stdout.contains("other.js"));
+        assert_eq!(
+            bash.exec(
+                "echo \"hello world\" | cat | cat | cat",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "hello world\n"
+        );
+        assert_eq!(
+            bash.exec("cat /test.txt | grep missing", JustBashExecOptions::new())
+                .exit_code,
+            1
+        );
+
+        bash.exec("echo old > /output.txt", JustBashExecOptions::new());
+        bash.exec("echo new > /output.txt", JustBashExecOptions::new());
+        assert_eq!(bash.read_file("/output.txt").unwrap(), "new\n");
+        bash.exec("echo first >> /append.txt", JustBashExecOptions::new());
+        assert_eq!(bash.read_file("/append.txt").unwrap(), "first\n");
+        bash.exec(
+            "cat /home/user/file.txt > /copy.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(bash.read_file("/copy.txt").unwrap(), "content");
+        bash.exec("echo \"line 1\" > /lines.txt", JustBashExecOptions::new());
+        bash.exec("echo \"line 2\" >> /lines.txt", JustBashExecOptions::new());
+        assert_eq!(bash.read_file("/lines.txt").unwrap(), "line 1\nline 2\n");
+        bash.exec("echo test   >   /spaced.txt", JustBashExecOptions::new());
+        assert_eq!(bash.read_file("/spaced.txt").unwrap(), "test\n");
+
+        assert_eq!(
+            bash.exec(
+                "echo hello $NAME; echo ${NAME}; echo ${PREFIX}fix; echo ${MISSING:-default}; echo ${SET:-default}; echo \"value:$UNSET:\"",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "hello world\nworld\nprefix\ndefault\ndefault\nvalue::\n"
+        );
+        let default_set =
+            JustBashSession::with_options(JustBashSessionOptions::new().with_env("SET", "value"));
+        assert_eq!(
+            default_set
+                .exec("echo ${SET:-default}", JustBashExecOptions::new())
+                .stdout,
+            "value\n"
+        );
+        assert_eq!(
+            bash.exec(
+                "export A=1 B=2 C=3; echo $A $B $C; unset A B; echo \"$A$B\"; echo $HOME; cat $HOME/file.txt",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "1 2 3\n\n/home/user\ncontent"
+        );
+
+        assert_eq!(
+            bash.exec("echo first && echo second", JustBashExecOptions::new())
+                .stdout,
+            "first\nsecond\n"
+        );
+        let short_circuit = bash.exec("cat /missing && echo second", JustBashExecOptions::new());
+        assert!(!short_circuit.stdout.contains("second"));
+        assert_eq!(
+            bash.exec("cat /missing || echo fallback", JustBashExecOptions::new())
+                .stdout,
+            "fallback\n"
+        );
+        bash.exec("echo marker > /marker.txt", JustBashExecOptions::new());
+        bash.exec("echo ok || rm /marker.txt", JustBashExecOptions::new());
+        assert_eq!(
+            bash.exec("cat /marker.txt", JustBashExecOptions::new())
+                .stdout,
+            "marker\n"
+        );
+        assert_eq!(
+            bash.exec("echo first ; echo second", JustBashExecOptions::new())
+                .stdout,
+            "first\nsecond\n"
+        );
+        assert!(
+            bash.exec("cat /missing ; echo second", JustBashExecOptions::new())
+                .stdout
+                .contains("second")
+        );
+        assert_eq!(
+            bash.exec(
+                "cat /missing || cat /missing2 || echo fallback",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "fallback\n"
+        );
+        assert_eq!(
+            bash.exec("echo a && echo b && echo c", JustBashExecOptions::new())
+                .stdout,
+            "a\nb\nc\n"
+        );
+        let mixed = bash.exec(
+            "cat /missing && echo success || echo failure",
+            JustBashExecOptions::new(),
+        );
+        assert!(mixed.stdout.contains("failure"));
+        assert!(!mixed.stdout.contains("success"));
+
+        assert_eq!(
+            bash.exec("echo hello", JustBashExecOptions::new())
+                .exit_code,
+            0
+        );
+        assert_eq!(bash.exec("exit 0", JustBashExecOptions::new()).exit_code, 0);
+        assert_eq!(
+            bash.exec("exit 42", JustBashExecOptions::new()).exit_code,
+            42
+        );
+        assert_eq!(
+            bash.exec("echo test | grep missing", JustBashExecOptions::new())
+                .exit_code,
+            1
+        );
+
+        assert_eq!(
+            bash.exec("cd /home/user; pwd", JustBashExecOptions::new())
+                .stdout,
+            "/home/user\n"
+        );
+        assert_eq!(bash.get_cwd(), "/home/user");
+        assert_eq!(
+            bash.exec("pwd", JustBashExecOptions::new()).stdout,
+            "/home/user\n"
+        );
+        let root_cwd = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_cwd("/")
+                .with_file("/home/user/.keep", ""),
+        );
+        root_cwd.exec("cd /home/user", JustBashExecOptions::new());
+        assert_eq!(root_cwd.get_cwd(), "/");
+        assert_eq!(
+            root_cwd.exec("pwd", JustBashExecOptions::new()).stdout,
+            "/\n"
+        );
+        assert_eq!(
+            bash.exec("cd /tmp; cd; pwd", JustBashExecOptions::new())
+                .stdout,
+            "/home/user\n"
+        );
+        assert_eq!(
+            bash.exec("cd /tmp; cd ~; pwd", JustBashExecOptions::new())
+                .stdout,
+            "/home/user\n"
+        );
+        assert_eq!(
+            bash.exec("cd /parent/child; cd ..; pwd", JustBashExecOptions::new())
+                .stdout,
+            "/parent\n"
+        );
+        assert_eq!(
+            bash.exec("cd /a/b/c/d; cd ../..; pwd", JustBashExecOptions::new())
+                .stdout,
+            "/a/b\n"
+        );
+        assert_eq!(
+            bash.exec("cd /home/user; cd ..; pwd", JustBashExecOptions::new())
+                .stdout,
+            "/home\n"
+        );
+        assert_eq!(
+            bash.exec("cd /parent; cd /tmp; cd -; pwd", JustBashExecOptions::new())
+                .stdout,
+            "/parent\n"
+        );
+        assert_eq!(
+            bash.exec("cd /missing", JustBashExecOptions::new())
+                .exit_code,
+            1
+        );
+        assert_eq!(
+            bash.exec("cd /home/user/file.txt", JustBashExecOptions::new())
+                .exit_code,
+            1
+        );
+
+        assert_eq!(
+            bash.exec(
+                "echo \"hello   world\"; echo 'hello   world'; echo \"it's working\"; echo \"\"",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "hello   world\nhello   world\nit's working\n\n"
+        );
+        assert_eq!(bash.exec("", JustBashExecOptions::new()).exit_code, 0);
+        assert_eq!(bash.exec("   ", JustBashExecOptions::new()).exit_code, 0);
+        assert_eq!(
+            bash.exec("   echo   hello   world   ", JustBashExecOptions::new())
+                .stdout,
+            "hello world\n"
+        );
+        assert_eq!(
+            bash.exec("echo\thello\tworld", JustBashExecOptions::new())
+                .stdout,
+            "hello world\n"
+        );
+    }
+
+    #[test]
+    fn jbc36_exec_errexit_concurrent_env_cwd_and_file_rows_are_isolated() {
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_env("SHARED", "original")
+                .with_env("COUNTER", "0")
+                .with_file("/home/file.txt", "home")
+                .with_file("/tmp/file.txt", "tmp")
+                .with_file("/var/file.txt", "var")
+                .with_file("/data/base.txt", "base"),
+        );
+
+        assert_eq!(
+            bash.exec(
+                "set -e\nfalse; echo should_not_print",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            ""
+        );
+        assert_eq!(
+            bash.exec(
+                "set +e\nfalse; echo should_print",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "should_print\n"
+        );
+
+        let plain_left = bash.clone();
+        let plain_right = bash.clone();
+        let first =
+            std::thread::spawn(move || plain_left.exec("echo start", JustBashExecOptions::new()));
+        let second =
+            std::thread::spawn(move || plain_right.exec("echo end", JustBashExecOptions::new()));
+        assert_eq!(first.join().unwrap().stdout.trim(), "start");
+        assert_eq!(second.join().unwrap().stdout.trim(), "end");
+
+        let mut handles = Vec::new();
+        for (id, cwd, expected) in [
+            ("one", "/home", "/home\nhome"),
+            ("two", "/tmp", "/tmp\ntmp"),
+            ("three", "/var", "/var\nvar"),
+        ] {
+            let cloned = bash.clone();
+            handles.push(std::thread::spawn(move || {
+                let result = cloned.exec(
+                    "sleep 0.001; pwd; cat file.txt; export LEAK=value; echo $SHARED:$ID",
+                    JustBashExecOptions::new().with_cwd(cwd).with_env("ID", id),
+                );
+                (result, expected)
+            }));
+        }
+        for handle in handles {
+            let (result, expected) = handle.join().unwrap();
+            assert!(result.stdout.starts_with(expected), "{}", result.stdout);
+            assert!(result.stdout.contains("original:"));
+        }
+        assert!(!bash.get_env().contains_key("ID"));
+        assert!(!bash.get_env().contains_key("LEAK"));
+        assert_eq!(bash.get_cwd(), "/home/user");
+
+        let writer_left = bash.clone();
+        let writer_right = bash.clone();
+        let left = std::thread::spawn(move || {
+            writer_left.exec(
+                "echo from_left > /data/left.txt; sleep 0.001; cat /data/left.txt",
+                JustBashExecOptions::new(),
+            )
+        });
+        let right = std::thread::spawn(move || {
+            writer_right.exec(
+                "echo from_right > /data/right.txt; sleep 0.001; cat /data/right.txt",
+                JustBashExecOptions::new(),
+            )
+        });
+        assert_eq!(left.join().unwrap().stdout, "from_left\n");
+        assert_eq!(right.join().unwrap().stdout, "from_right\n");
+        assert_eq!(
+            bash.exec(
+                "cat /data/left.txt; cat /data/right.txt",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "from_left\nfrom_right\n"
+        );
+
+        let state_left = bash.clone();
+        let state_right = bash.clone();
+        let modifies_state = std::thread::spawn(move || {
+            state_left.exec(
+                "export COUNTER=from_left; sleep 0.001; echo done",
+                JustBashExecOptions::new(),
+            )
+        });
+        let observes_state = std::thread::spawn(move || {
+            state_right.exec("sleep 0.002; echo $COUNTER", JustBashExecOptions::new())
+        });
+        assert_eq!(modifies_state.join().unwrap().stdout, "done\n");
+        assert_eq!(observes_state.join().unwrap().stdout, "0\n");
+        assert_eq!(bash.get_env().get("COUNTER").map(String::as_str), Some("0"));
+    }
+
+    #[test]
+    fn jbc36_utf8_redirection_and_text_stdin_rows_are_byte_safe() {
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/utf8", "café\n漢字\n")
+                .with_file("/prefix.txt", "ASCII\ncafé\n"),
+        );
+
+        assert_eq!(
+            bash.exec("echo 한 | wc -c", JustBashExecOptions::new())
+                .stdout
+                .trim(),
+            "4"
+        );
+        assert_eq!(
+            bash.exec("echo Ü | wc -c", JustBashExecOptions::new())
+                .stdout
+                .trim(),
+            "3"
+        );
+        assert_eq!(
+            bash.exec("echo abc | wc -c", JustBashExecOptions::new())
+                .stdout
+                .trim(),
+            "4"
+        );
+        assert_eq!(
+            bash.exec("cat /utf8 | wc -c", JustBashExecOptions::new())
+                .stdout
+                .trim(),
+            "13"
+        );
+        bash.exec("echo café > /out", JustBashExecOptions::new());
+        assert_eq!(bash.read_file("/out").unwrap(), "café\n");
+        bash.exec("cat /utf8 > /copy", JustBashExecOptions::new());
+        assert_eq!(bash.read_file("/copy").unwrap(), "café\n漢字\n");
+        bash.exec("cat /prefix.txt > /prefix-copy", JustBashExecOptions::new());
+        assert_eq!(bash.read_file("/prefix-copy").unwrap(), "ASCII\ncafé\n");
+
+        let stdin = bash.exec(
+            "cat | wc -c",
+            JustBashExecOptions::new().with_stdin("café\n漢字\n"),
+        );
+        assert_eq!(stdin.stdout.trim(), "13");
     }
 
     #[test]
