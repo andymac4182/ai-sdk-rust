@@ -58,7 +58,7 @@ pub use security::{
     DnsLookupError, DnsResolver, HttpMethod, NetworkPolicy, NetworkRequest, NetworkResponse,
     NetworkTransport, PlannedNetworkRequest, RedactionPolicy, ResourceObservation,
     RuntimePortability, SecurityDiagnostic, SecurityDiagnosticCode, SecurityResult,
-    StaticNetworkTransport, UpstreamRuntimeSurface, classify_runtime_surface,
+    SecurityViolationLog, StaticNetworkTransport, UpstreamRuntimeSurface, classify_runtime_surface,
     execute_network_request, is_private_hostname, is_url_allowed, matches_allow_list_entry,
     plan_network_request, validate_allow_list_entry, validate_workspace_path,
 };

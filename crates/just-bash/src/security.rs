@@ -123,6 +123,93 @@ impl fmt::Display for SecurityDiagnostic {
 
 impl std::error::Error for SecurityDiagnostic {}
 
+/// Bounded in-memory security violation log used by deterministic policy tests.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SecurityViolationLog {
+    max_per_code: usize,
+    entries: Vec<SecurityDiagnostic>,
+}
+
+impl Default for SecurityViolationLog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SecurityViolationLog {
+    /// Creates a log that keeps the latest 100 diagnostics per code.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_max_per_code(100)
+    }
+
+    /// Creates a log with a per-diagnostic-code retention cap.
+    #[must_use]
+    pub const fn with_max_per_code(max_per_code: usize) -> Self {
+        Self {
+            max_per_code,
+            entries: Vec::new(),
+        }
+    }
+
+    /// Records a diagnostic and evicts older entries for that code past the cap.
+    pub fn record(&mut self, diagnostic: SecurityDiagnostic) {
+        let code = diagnostic.code;
+        self.entries.push(diagnostic);
+        if self.max_per_code == 0 {
+            self.entries.retain(|entry| entry.code != code);
+            return;
+        }
+
+        let mut seen = 0;
+        let mut keep = vec![true; self.entries.len()];
+        for (index, entry) in self.entries.iter().enumerate().rev() {
+            if entry.code != code {
+                continue;
+            }
+            seen += 1;
+            if seen > self.max_per_code {
+                keep[index] = false;
+            }
+        }
+        let mut keep_iter = keep.into_iter();
+        self.entries.retain(|_| keep_iter.next().unwrap_or(false));
+    }
+
+    /// Returns entries from most recent to oldest.
+    #[must_use]
+    pub fn entries_most_recent_first(&self) -> Vec<&SecurityDiagnostic> {
+        self.entries.iter().rev().collect()
+    }
+
+    /// Counts entries by diagnostic code.
+    #[must_use]
+    pub fn counts_by_code(&self) -> BTreeMap<SecurityDiagnosticCode, usize> {
+        let mut counts = BTreeMap::new();
+        for entry in &self.entries {
+            *counts.entry(entry.code).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    /// Removes all recorded entries.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Returns the retained entry count.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns true when no entries are retained.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 /// Command policy with explicit allow and deny lists.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandSecurityPolicy {

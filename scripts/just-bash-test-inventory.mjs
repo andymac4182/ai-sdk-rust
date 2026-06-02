@@ -221,6 +221,37 @@ const jb06LimitTestFiles = [
   'packages/just-bash/src/security/limits/security-hardening.test.ts',
 ];
 
+const jbc27SandboxSourceFiles = [
+  'packages/just-bash/src/sandbox/Command.ts',
+  'packages/just-bash/src/sandbox/Sandbox.ts',
+  'packages/just-bash/src/sandbox/index.ts',
+];
+
+const jbc27SecurityPolicySourceFiles = [
+  'packages/just-bash/src/security/index.ts',
+  'packages/just-bash/src/security/security-violation-logger.ts',
+  'packages/just-bash/src/security/types.ts',
+];
+
+const jbc27FuzzingSourceFiles = [
+  'packages/just-bash/src/security/fuzzing/config.ts',
+  'packages/just-bash/src/security/fuzzing/corpus/known-attacks.ts',
+  'packages/just-bash/src/security/fuzzing/coverage/coverage-tracker.ts',
+  'packages/just-bash/src/security/fuzzing/coverage/feature-coverage.ts',
+  'packages/just-bash/src/security/fuzzing/coverage/index.ts',
+  'packages/just-bash/src/security/fuzzing/coverage/known-features.ts',
+  'packages/just-bash/src/security/fuzzing/generators/coverage-boost-generator.ts',
+  'packages/just-bash/src/security/fuzzing/generators/flag-driven-generator.ts',
+  'packages/just-bash/src/security/fuzzing/generators/grammar-generator.ts',
+  'packages/just-bash/src/security/fuzzing/generators/index.ts',
+  'packages/just-bash/src/security/fuzzing/generators/malformed-generator.ts',
+  'packages/just-bash/src/security/fuzzing/index.ts',
+  'packages/just-bash/src/security/fuzzing/oracles/assertions.ts',
+  'packages/just-bash/src/security/fuzzing/oracles/dos-oracle.ts',
+  'packages/just-bash/src/security/fuzzing/oracles/sandbox-oracle.ts',
+  'packages/just-bash/src/security/fuzzing/runners/fuzz-runner.ts',
+];
+
 const jb06RuntimeOnlySourceFiles = [
   'packages/just-bash/src/commands/js-exec/js-exec-worker.ts',
   'packages/just-bash/src/commands/python3/worker.ts',
@@ -264,6 +295,27 @@ const jbc14InformationDisclosurePortableLines = [
 ];
 
 const jb06SourceGroups = [
+  {
+    files: jbc27SandboxSourceFiles,
+    status: 'portable-verified',
+    owner: 'crates/just-bash::security::sandbox-facade',
+    notes:
+      'JBC-27 maps the portable Sandbox facade contract to JustBashSession virtual cwd/env/files, command metadata, scoped env restoration, and timeout side-effect tests.',
+  },
+  {
+    files: jbc27SecurityPolicySourceFiles,
+    status: 'portable-verified',
+    owner: 'crates/just-bash::security::policy',
+    notes:
+      'JBC-27 maps the security policy/type/logger surface to deterministic Rust diagnostics, redaction, command policy, and bounded violation log tests.',
+  },
+  {
+    files: jbc27FuzzingSourceFiles,
+    status: 'portable-verified',
+    owner: 'crates/just-bash::security::fuzzing',
+    notes:
+      'JBC-27 maps the portable fuzz corpus and oracle surface to deterministic Rust malformed-input, known-attack, numeric-edge, and no-host-leak probes.',
+  },
   {
     files: jbc14JsDefenseSourceFiles,
     status: 'js-only-documented',
@@ -347,9 +399,9 @@ const jb06CaseGroups = [
     status: 'portable-verified',
     owner: 'crates/just-bash::security::limits',
     rustTest:
-      'just_bash_security_resource_limits_match_upstream_limit_diagnostics; just_bash_security_timeout_and_abort_share_cancellation_contract; just_bash_security_allow_deny_policy_blocks_denied_and_unknown_commands',
+      'just_bash_security_resource_limits_match_upstream_limit_diagnostics; just_bash_security_timeout_and_abort_share_cancellation_contract; just_bash_security_allow_deny_policy_blocks_denied_and_unknown_commands; just_bash_security_jbc27_sandbox_facade_rows_use_virtual_session_contract',
     notes:
-      'JB-06 verifies deterministic resource, timeout, cancellation, command-limit, and diagnostic seams without executing a host shell.',
+      'JB-06/JBC-27 verifies deterministic resource, timeout, cancellation, command-limit, timeout side-effect, and diagnostic seams without executing a host shell.',
   },
   {
     file: 'packages/just-bash/src/sandbox/Sandbox.security.test.ts',
@@ -432,6 +484,149 @@ const jb06CaseGroups = [
     rustTest: 'just_bash_optional_runtime_security_cases_are_classified_nonportable',
     notes:
       'JB-06 classifies browser bundle, QuickJS, Node worker, Python WASM, SQLite WASM, and WASM callback bridge behavior as not portable to this Rust backend; portable security behavior is mapped in separate JB-06 rows.',
+  },
+];
+
+const jbc27AttackPortableTestFiles = [
+  'packages/just-bash/src/security/attacks/awk-getline-piping-security.test.ts',
+  'packages/just-bash/src/security/attacks/filename-attacks.test.ts',
+  'packages/just-bash/src/security/attacks/find-exec-quoting-injection.test.ts',
+  'packages/just-bash/src/security/attacks/fuzz-discovered-attacks.test.ts',
+  'packages/just-bash/src/security/attacks/injection-attacks.test.ts',
+  'packages/just-bash/src/security/attacks/nested-exec-command-injection.test.ts',
+  'packages/just-bash/src/security/attacks/numeric-edge-cases.test.ts',
+  'packages/just-bash/src/security/attacks/query-engine-defense-violation-probes.test.ts',
+  'packages/just-bash/src/security/attacks/query-engine-js-rce-format-variants.test.ts',
+  'packages/just-bash/src/security/attacks/query-engine-js-rce-variants.test.ts',
+  'packages/just-bash/src/security/attacks/tar-hostile-codecs.test.ts',
+  'packages/just-bash/src/security/attacks/timeout-post-timeout-side-effect.test.ts',
+  'packages/just-bash/src/security/attacks/timeout-signal-propagation-gaps.test.ts',
+  'packages/just-bash/src/security/attacks/timeout-stdin-forwarding.test.ts',
+  'packages/just-bash/src/security/attacks/yq-js-tag-function-probe.test.ts',
+];
+
+const jbc27JsRuntimeAttackTestFiles = [
+  'packages/just-bash/src/security/attacks/defense-context-invariant.test.ts',
+  'packages/just-bash/src/security/attacks/defense-dynamic-import-builtin.test.ts',
+  'packages/just-bash/src/security/attacks/defense-in-depth-bypass-hypotheses.test.ts',
+  'packages/just-bash/src/security/attacks/defense-in-depth-combined-chain.test.ts',
+  'packages/just-bash/src/security/attacks/defense-in-depth-independence.test.ts',
+  'packages/just-bash/src/security/attacks/defense-in-depth-timing-confusion.test.ts',
+  'packages/just-bash/src/security/attacks/js-exec-exploit-regression.test.ts',
+  'packages/just-bash/src/security/attacks/js-exec-host-runtime-breakout-probes.test.ts',
+  'packages/just-bash/src/security/attacks/js-exec-recursion-guard-bypass.test.ts',
+  'packages/just-bash/src/security/attacks/proxy-trap-completeness.test.ts',
+  'packages/just-bash/src/security/defense-in-depth-box-concurrent.test.ts',
+  'packages/just-bash/src/security/defense-in-depth-box.test.ts',
+  'packages/just-bash/src/security/defense-in-depth-exploit-regression.test.ts',
+  'packages/just-bash/src/security/defense-in-depth-hardening.test.ts',
+  'packages/just-bash/src/security/symbol-locking.test.ts',
+];
+
+const jbc27PrototypePollutionTestFiles = [
+  'packages/just-bash/src/security/prototype-pollution/prototype-pollution-awk.test.ts',
+  'packages/just-bash/src/security/prototype-pollution/prototype-pollution-bash-extended.test.ts',
+  'packages/just-bash/src/security/prototype-pollution/prototype-pollution-comprehensive.test.ts',
+  'packages/just-bash/src/security/prototype-pollution/prototype-pollution-edge-cases.test.ts',
+  'packages/just-bash/src/security/prototype-pollution/prototype-pollution-sed.test.ts',
+  'packages/just-bash/src/security/prototype-pollution/prototype-pollution-syntax-features.test.ts',
+];
+
+const jbc27FuzzingTestFiles = [
+  'packages/just-bash/src/security/fuzzing/__tests__/fuzz-coverage.test.ts',
+  'packages/just-bash/src/security/fuzzing/__tests__/fuzz-dos.test.ts',
+  'packages/just-bash/src/security/fuzzing/__tests__/fuzz-malformed.test.ts',
+  'packages/just-bash/src/security/fuzzing/__tests__/fuzz-sandbox.test.ts',
+  'packages/just-bash/src/security/fuzzing/generators/grammar-generator.test.ts',
+];
+
+const jbc27SandboxPortableTestFiles = [
+  'packages/just-bash/src/sandbox/Sandbox.test.ts',
+  'packages/just-bash/src/security/sandbox/command-security.test.ts',
+  'packages/just-bash/src/security/sandbox/dynamic-execution.test.ts',
+  'packages/just-bash/src/security/sandbox/information-disclosure.test.ts',
+  'packages/just-bash/src/security/sandbox/sandbox-escape.test.ts',
+];
+
+const jbc27CaseGroups = [
+  {
+    files: jbc27AttackPortableTestFiles,
+    status: 'portable-verified',
+    owner: 'crates/just-bash::security::attack-corpus',
+    rustTest:
+      'just_bash_security_jbc27_attack_corpus_paths_and_injection_rows_are_virtualized; just_bash_security_jbc27_fuzz_oracle_malformed_inputs_never_leak_host_state; just_bash_security_jbc27_prototype_pollution_keywords_remain_plain_data; just_bash_security_jbc27_sandbox_facade_rows_use_virtual_session_contract',
+    notes:
+      'JBC-27 maps these portable attack rows to Rust virtual filesystem, command-injection, malformed-input, numeric-edge, timeout side-effect, structured-query, and no-host-leak probes.',
+  },
+  {
+    file: 'packages/just-bash/src/security/attacks/code-exec-exploit-regression.test.ts',
+    lines: [18, 36, 53],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::security::attack-corpus',
+    rustTest:
+      'just_bash_security_jbc27_attack_corpus_paths_and_injection_rows_are_virtualized; just_bash_security_jbc27_prototype_pollution_keywords_remain_plain_data',
+    notes:
+      'JBC-27 maps the portable AWK, SQLite, and structured-query code-exec regression rows to fail-closed Rust command execution and structured-data prototype-key probes.',
+  },
+  {
+    file: 'packages/just-bash/src/security/attacks/code-exec-exploit-regression.test.ts',
+    lines: [73],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::security::runtime-classification',
+    rustTest: 'just_bash_optional_runtime_security_cases_are_classified_nonportable',
+    notes:
+      'JBC-27 classifies the Python worker escape row as JavaScript/WASM worker hardening; the Rust backend has no Python worker bridge.',
+  },
+  {
+    files: jbc27JsRuntimeAttackTestFiles,
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::security::runtime-classification',
+    rustTest: 'just_bash_optional_runtime_security_cases_are_classified_nonportable',
+    notes:
+      'JBC-27 classifies these Node/JavaScript defense-in-depth, AsyncLocalStorage, dynamic import, process/global monkey-patch, symbol-locking, and js-exec worker rows as host-runtime hardening outside the portable Rust backend.',
+  },
+  {
+    files: jbc27PrototypePollutionTestFiles,
+    status: 'portable-verified',
+    owner: 'crates/just-bash::security::prototype-pollution',
+    rustTest: 'just_bash_security_jbc27_prototype_pollution_keywords_remain_plain_data',
+    notes:
+      'JBC-27 verifies prototype-like keys remain plain Rust map/data keys across env, export, structured query, and AWK variable seams; no JavaScript prototype object exists in the Rust backend.',
+  },
+  {
+    files: jbc27FuzzingTestFiles,
+    status: 'portable-verified',
+    owner: 'crates/just-bash::security::fuzzing',
+    rustTest:
+      'just_bash_security_jbc27_fuzz_oracle_malformed_inputs_never_leak_host_state; just_bash_security_jbc27_attack_corpus_paths_and_injection_rows_are_virtualized; just_bash_security_jbc27_prototype_pollution_keywords_remain_plain_data',
+    notes:
+      'JBC-27 maps fuzz generator, oracle, malformed-input, DOS, sandbox, and known-attack rows to deterministic Rust probes that assert no panic, no host leakage, and bounded output.',
+  },
+  {
+    files: jbc27SandboxPortableTestFiles,
+    status: 'portable-verified',
+    owner: 'crates/just-bash::security::sandbox',
+    rustTest:
+      'just_bash_security_jbc27_sandbox_facade_rows_use_virtual_session_contract; just_bash_security_jbc27_attack_corpus_paths_and_injection_rows_are_virtualized; just_bash_security_sandbox_command_rows_are_virtual_and_registry_bound; just_bash_security_sandbox_dynamic_rows_fail_closed_or_stay_in_process; just_bash_security_sandbox_information_disclosure_rows_do_not_expose_host_state',
+    notes:
+      'JBC-27 maps remaining portable sandbox rows to Rust session facade, registry-bound commands, dynamic execution fail-closed behavior, virtual files, scoped env, timeout side-effect, and non-disclosure probes.',
+  },
+  {
+    file: 'packages/just-bash/src/security/sandbox/error-forwarding-runtime-leak-probe.test.ts',
+    lines: [23],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::security::sandbox',
+    rustTest: 'just_bash_security_sandbox_information_disclosure_rows_do_not_expose_host_state',
+    notes:
+      'JBC-27 maps the portable hard-link error leak probe to Rust no-host-marker information-disclosure checks; Python/SQLite worker leak rows stay JS-only.',
+  },
+  {
+    file: 'packages/just-bash/src/security/security-violation-logger.test.ts',
+    status: 'portable-verified',
+    owner: 'crates/just-bash::security::policy',
+    rustTest: 'just_bash_security_jbc27_policy_and_violation_rows_are_deterministic',
+    notes:
+      'JBC-27 verifies deterministic violation recording, reverse chronological listing, grouping, retention caps, and clearing with SecurityViolationLog.',
   },
 ];
 
@@ -2128,6 +2323,7 @@ function caseOverrideFor(testCase) {
     ...jbc23CaseGroups,
     ...jbc24CaseGroups,
     ...jbc25CaseGroups,
+    ...jbc27CaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&

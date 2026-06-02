@@ -4,11 +4,12 @@ use std::collections::BTreeMap;
 use just_bash::security::ExecutionLimits;
 use just_bash::{
     AllowedUrlEntry, Bash, BashOptions, CancellationState, CommandSecurityPolicy, DnsAddress,
-    DnsLookupError, HttpMethod, JustBashExecOptions, JustBashSession, JustBashSessionOptions,
-    NetworkPolicy, NetworkRequest, NetworkResponse, ResourceObservation, SecurityDiagnosticCode,
-    StaticNetworkTransport, UpstreamRuntimeSurface, classify_runtime_surface,
-    execute_network_request, is_private_hostname, is_url_allowed, matches_allow_list_entry,
-    plan_network_request, validate_allow_list_entry, validate_workspace_path,
+    DnsLookupError, HttpMethod, JUST_BASH_BACKEND, JustBashExecOptions, JustBashSession,
+    JustBashSessionOptions, NetworkPolicy, NetworkRequest, NetworkResponse, ResourceObservation,
+    SecurityDiagnostic, SecurityDiagnosticCode, SecurityViolationLog, StaticNetworkTransport,
+    UpstreamRuntimeSurface, classify_runtime_surface, execute_network_request, is_private_hostname,
+    is_url_allowed, matches_allow_list_entry, plan_network_request, validate_allow_list_entry,
+    validate_workspace_path,
 };
 use url::Url;
 
@@ -317,6 +318,218 @@ fn just_bash_security_fuzzing_attack_oracles_are_ported_to_rust() {
             .code,
         SecurityDiagnosticCode::CommandDenied
     );
+}
+
+#[test]
+fn just_bash_security_jbc27_attack_corpus_paths_and_injection_rows_are_virtualized() {
+    let bash = Bash::new();
+
+    let scripts = [
+        r#"
+        touch '/tmp/file with spaces.txt'
+        cat '/tmp/file with spaces.txt'
+        rm '/tmp/file with spaces.txt'
+        "#,
+        r#"
+        touch '/tmp/`echo pwned`.txt'
+        cat '/tmp/`echo pwned`.txt'
+        rm '/tmp/`echo pwned`.txt'
+        "#,
+        r#"
+        touch '/tmp/$(echo pwned).txt'
+        cat '/tmp/$(echo pwned).txt'
+        rm '/tmp/$(echo pwned).txt'
+        "#,
+        r#"
+        mkdir -p /tmp/a/b/c
+        cd /tmp/a/b/c
+        ls ../../../..
+        "#,
+        "cat /etc/passwd 2>&1 || true",
+        "cat ../../../etc/passwd 2>&1 || true",
+        "echo '$HOME; cat /etc/passwd'",
+        "env 'bad;echo pwned' 2>&1 || echo env-literal",
+        "timeout 1 echo safe 2>&1 || echo timeout-unavailable",
+    ];
+
+    for script in scripts {
+        let result = bash.exec(script);
+        assert_no_host_or_secret_markers(&combined_output(&result));
+        assert!(
+            !result.stdout.lines().any(|line| line == "pwned"),
+            "script unexpectedly executed injected payload: {script:?} -> {result:?}"
+        );
+    }
+
+    let nul = bash.exec("cat \"/etc\0/passwd\" 2>&1 || true");
+    assert_no_host_or_secret_markers(&combined_output(&nul));
+    assert!(!nul.stdout.contains("root:x:"));
+}
+
+#[test]
+fn just_bash_security_jbc27_prototype_pollution_keywords_remain_plain_data() {
+    let dangerous_keys = [
+        "__proto__",
+        "constructor",
+        "prototype",
+        "hasOwnProperty",
+        "toString",
+        "valueOf",
+        "__defineGetter__",
+        "__defineSetter__",
+        "__lookupGetter__",
+        "__lookupSetter__",
+    ];
+
+    let base = Bash::with_options(BashOptions {
+        env: dangerous_keys
+            .iter()
+            .map(|key| ((*key).to_string(), format!("value-for-{key}")))
+            .collect(),
+        ..BashOptions::default()
+    });
+
+    for key in dangerous_keys {
+        let result = base.exec(format!("printenv {key}"));
+        assert_eq!(result.exit_code, 0, "{key}");
+        assert_eq!(result.stdout, format!("value-for-{key}\n"), "{key}");
+        assert_no_host_or_secret_markers(&combined_output(&result));
+    }
+
+    let assignment = Bash::new().exec(
+        r#"
+        export __proto__=plain
+        export constructor=ctor
+        printenv __proto__
+        printenv constructor
+        "#,
+    );
+    assert_eq!(assignment.exit_code, 0);
+    assert_eq!(assignment.stdout, "plain\nctor\n");
+    assert_no_host_or_secret_markers(&combined_output(&assignment));
+
+    let jq = Bash::new().exec(
+        r#"echo '{"__proto__":{"polluted":true},"constructor":"plain"}' | jq '.__proto__.polluted, .constructor'"#,
+    );
+    assert_eq!(jq.exit_code, 0);
+    assert!(jq.stdout.contains("true"));
+    assert!(jq.stdout.contains("\"plain\""));
+    assert_no_host_or_secret_markers(&combined_output(&jq));
+
+    let awk = Bash::new().exec(r#"echo "row" | awk -v constructor=data '{ print constructor }'"#);
+    assert_eq!(awk.exit_code, 0);
+    assert_eq!(awk.stdout, "data\n");
+    assert_no_host_or_secret_markers(&combined_output(&awk));
+}
+
+#[test]
+fn just_bash_security_jbc27_fuzz_oracle_malformed_inputs_never_leak_host_state() {
+    let bash = Bash::new();
+    let probes = [
+        "echo ${#__defineGetter__}",
+        "echo ${#__proto__[@]}",
+        "__lookupGetter__=safe; constructor=plain; echo $__lookupGetter__ $constructor",
+        "echo '{} ' | jq '.__defineGetter__'",
+        "echo '{\"a\":{\"__proto__\":1}}' | jq '.. | objects | .__proto__? // empty'",
+        "awk -F, '{ XW4pCI93-- }' .. 2>&1 || true",
+        "if then",
+        "'unterminated",
+        "$((1 / 0))",
+        "echo $((2147483647))",
+        "echo $((-2147483648))",
+        "echo $((2147483647 + 1))",
+        "echo $((-2147483648 - 1))",
+        "echo $((999999999 * 999999999))",
+        "echo $((10 % 0))",
+        "cat <(echo unsafe) 2>&1 || echo process-substitution-blocked",
+    ];
+
+    for probe in probes {
+        let result = bash.exec(probe);
+        assert_no_host_or_secret_markers(&combined_output(&result));
+        assert!(
+            !combined_output(&result).contains("[native code]"),
+            "probe leaked native code marker: {probe:?} -> {result:?}"
+        );
+    }
+}
+
+#[test]
+fn just_bash_security_jbc27_sandbox_facade_rows_use_virtual_session_contract() {
+    let session = JustBashSession::with_options(
+        JustBashSessionOptions::new()
+            .with_cwd("/app")
+            .with_env("TOKEN", "sandbox-token")
+            .with_file("/app/input.txt", "hello\n"),
+    );
+
+    let result = session.exec(
+        "pwd; printenv TOKEN; cat input.txt; mkdir -p logs; echo done > logs/out.txt",
+        JustBashExecOptions::new(),
+    );
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout, "/app\nsandbox-token\nhello\n");
+    assert_eq!(result.metadata.backend, JUST_BASH_BACKEND);
+    assert!(!result.metadata.external_sandbox);
+    assert_eq!(session.read_file("/app/logs/out.txt").unwrap(), "done\n");
+    assert!(session.file_exists("/app/input.txt"));
+    assert!(
+        session
+            .registered_command_names()
+            .contains(&"echo".to_string())
+    );
+
+    let scoped = session.exec(
+        "export TOKEN=changed; printenv TOKEN",
+        JustBashExecOptions::new(),
+    );
+    assert_eq!(scoped.stdout, "changed\n");
+    let restored = session.exec("printenv TOKEN", JustBashExecOptions::new());
+    assert_eq!(restored.stdout, "sandbox-token\n");
+
+    let timed = JustBashSession::with_options(
+        JustBashSessionOptions::new()
+            .with_default_timeout_ms(1)
+            .with_file("/tmp/before.txt", "before"),
+    );
+    let timeout = timed.exec(
+        "sleep 50; echo late > /tmp/late.txt",
+        JustBashExecOptions::new(),
+    );
+    assert_eq!(timeout.exit_code, just_bash::JUST_BASH_TIMEOUT_EXIT_CODE);
+    assert!(!timed.file_exists("/tmp/late.txt"));
+    assert_eq!(timed.read_file("/tmp/before.txt").unwrap(), "before");
+}
+
+#[test]
+fn just_bash_security_jbc27_policy_and_violation_rows_are_deterministic() {
+    let mut log = SecurityViolationLog::with_max_per_code(2);
+    for message in ["first", "second", "third"] {
+        log.record(SecurityDiagnostic::error(
+            SecurityDiagnosticCode::CommandDenied,
+            "command",
+            message,
+        ));
+    }
+    log.record(SecurityDiagnostic::warning(
+        SecurityDiagnosticCode::SensitiveValueRedacted,
+        "env",
+        "redacted",
+    ));
+
+    assert_eq!(log.len(), 3);
+    assert_eq!(
+        log.counts_by_code()[&SecurityDiagnosticCode::CommandDenied],
+        2
+    );
+    let messages = log
+        .entries_most_recent_first()
+        .into_iter()
+        .map(|entry| entry.message.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(messages, ["redacted", "third", "second"]);
+    log.clear();
+    assert!(log.is_empty());
 }
 
 #[test]
