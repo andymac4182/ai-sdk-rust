@@ -6,7 +6,7 @@
 //! runtime path; JB-07 can choose where to wire this backend.
 
 use std::cmp::Ordering as CmpOrdering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{
     Arc, Mutex,
@@ -15,15 +15,18 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use md5::Md5;
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use sha1::Sha1;
+use sha2::{Digest, Sha256};
 
 use crate::commands::CommandRegistry;
 use crate::encoding::{BufferEncoding, OutputPayload, bytes_to_string, content_to_bytes};
 use crate::error::{JustBashError, JustBashErrorKind, JustBashResult};
 use crate::fs::{CpOptions, DirentEntry, FileStat, MkdirOptions, RmOptions, VirtualFileSystem};
-use crate::path::{normalize_path, resolve_path, resolve_symlink_target};
+use crate::path::{join_path, normalize_path, resolve_path, resolve_symlink_target};
 use crate::security::{
     HttpMethod, NetworkPolicy, NetworkRequest, NetworkResponse, StaticNetworkTransport,
     execute_network_request,
@@ -1311,15 +1314,22 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
         "expand" => command_expand(state, &tokens[1..], &stdin, false),
         "unexpand" => command_expand(state, &tokens[1..], &stdin, true),
         "strings" => command_strings(state, &tokens[1..], &stdin),
+        "tac" => command_tac(state, &tokens[1..], &stdin),
+        "od" => command_od(state, &tokens[1..], &stdin),
         "split" => command_split(state, &tokens[1..], &stdin),
         "tee" => command_tee(state, &tokens[1..], &stdin),
         "jq" => command_jq(state, &tokens[1..], &stdin),
         "base64" => command_base64(state, &tokens[1..], &stdin),
         "gzip" | "gunzip" | "zcat" => command_gzip(command, state, &tokens[1..], &stdin),
+        "tar" => command_tar(state, &tokens[1..], &stdin),
+        "md5sum" | "sha1sum" | "sha256sum" => {
+            command_checksum(command, state, &tokens[1..], &stdin)
+        }
         "diff" => command_diff(state, &tokens[1..], &stdin),
         "date" => command_date(&tokens[1..]),
         "seq" => command_seq(&tokens[1..]),
         "file" => command_file(state, &tokens[1..]),
+        "help" => command_help(state, &tokens[1..]),
         "xargs" => command_xargs(state, &tokens[1..], stdin),
         "test" => command_test(state, &tokens[1..], false),
         "[" => command_test(state, &tokens[1..], true),
@@ -15756,6 +15766,1280 @@ fn virtual_gzip_unpack(content: &str) -> Result<String, &'static str> {
         .map_err(|_| "not in gzip format")
 }
 
+#[derive(Clone, Copy)]
+enum ChecksumAlgorithm {
+    Md5,
+    Sha1,
+    Sha256,
+}
+
+impl ChecksumAlgorithm {
+    fn from_command(command: &str) -> Self {
+        match command {
+            "sha1sum" => Self::Sha1,
+            "sha256sum" => Self::Sha256,
+            _ => Self::Md5,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Md5 => "MD5",
+            Self::Sha1 => "SHA1",
+            Self::Sha256 => "SHA256",
+        }
+    }
+}
+
+fn command_checksum(
+    command: &str,
+    state: &ExecState<'_>,
+    args: &[String],
+    stdin: &str,
+) -> CommandResult {
+    let algorithm = ChecksumAlgorithm::from_command(command);
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(format!(
+            "Usage: {command} [OPTION]... [FILE]...\nPrint or check {} checksums.\n  -c, --check\n",
+            algorithm.label()
+        ));
+    }
+
+    let mut check = false;
+    let mut paths = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-c" | "--check" => check = true,
+            _ if arg.starts_with("--") => {
+                return stderr_result(1, format!("{command}: unrecognized option '{}'\n", arg));
+            }
+            _ if arg.starts_with('-') && arg != "-" => {
+                return stderr_result(
+                    1,
+                    format!("{command}: invalid option -- '{}'\n", &arg[1..2]),
+                );
+            }
+            _ => paths.push(arg.clone()),
+        }
+    }
+
+    if check {
+        command_checksum_check(command, algorithm, state, &paths, stdin)
+    } else {
+        command_checksum_print(command, algorithm, state, &paths, stdin)
+    }
+}
+
+fn command_checksum_print(
+    command: &str,
+    algorithm: ChecksumAlgorithm,
+    state: &ExecState<'_>,
+    paths: &[String],
+    stdin: &str,
+) -> CommandResult {
+    let mut stdout = String::new();
+    let mut exit_code = 0;
+    if paths.is_empty() {
+        stdout.push_str(&format!(
+            "{}  -\n",
+            checksum_hex(algorithm, stdin.as_bytes())
+        ));
+        return stdout_result(stdout);
+    }
+
+    let fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, format!("{command}: filesystem lock poisoned\n")),
+    };
+    for path in paths {
+        if path == "-" {
+            stdout.push_str(&format!(
+                "{}  -\n",
+                checksum_hex(algorithm, stdin.as_bytes())
+            ));
+            continue;
+        }
+        let resolved = resolve_path(&state.cwd, path);
+        match fs.read_file_buffer(&resolved) {
+            Ok(bytes) => stdout.push_str(&format!("{}  {path}\n", checksum_hex(algorithm, &bytes))),
+            Err(_) => {
+                exit_code = 1;
+                stdout.push_str(&format!("{command}: {path}: No such file or directory\n"));
+            }
+        }
+    }
+    CommandResult {
+        stdout,
+        exit_code,
+        ..CommandResult::default()
+    }
+}
+
+fn command_checksum_check(
+    command: &str,
+    algorithm: ChecksumAlgorithm,
+    state: &ExecState<'_>,
+    paths: &[String],
+    stdin: &str,
+) -> CommandResult {
+    let check_text = match collect_text_inputs_dash(state, paths, stdin, command) {
+        Ok(text) => text,
+        Err(result) => return result,
+    };
+
+    let fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, format!("{command}: filesystem lock poisoned\n")),
+    };
+    let mut stdout = String::new();
+    let mut failed = 0usize;
+    let mut checked = 0usize;
+    for line in check_text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let mut parts = line.split_whitespace();
+        let Some(expected) = parts.next() else {
+            continue;
+        };
+        let Some(path) = parts.next_back().or_else(|| parts.next()) else {
+            failed += 1;
+            stdout.push_str(&format!("{command}: improperly formatted checksum line\n"));
+            continue;
+        };
+        checked += 1;
+        let resolved = resolve_path(&state.cwd, path);
+        let actual = fs
+            .read_file_buffer(&resolved)
+            .map(|bytes| checksum_hex(algorithm, &bytes));
+        if actual.as_deref() == Ok(expected) {
+            stdout.push_str(&format!("{path}: OK\n"));
+        } else {
+            failed += 1;
+            stdout.push_str(&format!("{path}: FAILED\n"));
+        }
+    }
+    if failed > 0 {
+        stdout.push_str(&format!(
+            "{command}: WARNING: {failed} of {checked} computed checksums did NOT match\n"
+        ));
+    }
+    CommandResult {
+        stdout,
+        exit_code: if failed == 0 { 0 } else { 1 },
+        ..CommandResult::default()
+    }
+}
+
+fn checksum_hex(algorithm: ChecksumAlgorithm, bytes: &[u8]) -> String {
+    match algorithm {
+        ChecksumAlgorithm::Md5 => hex_bytes(&Md5::digest(bytes)),
+        ChecksumAlgorithm::Sha1 => hex_bytes(&Sha1::digest(bytes)),
+        ChecksumAlgorithm::Sha256 => hex_bytes(&Sha256::digest(bytes)),
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
+}
+
+fn command_tac(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(
+            "Usage: tac [FILE]...\nWrite each FILE to standard output, last line first.\n",
+        );
+    }
+    let input = match collect_text_inputs_dash(state, args, stdin, "tac") {
+        Ok(input) => input,
+        Err(result) => return result,
+    };
+    if input.is_empty() {
+        return CommandResult::default();
+    }
+    let mut lines = input.split_terminator('\n').collect::<Vec<_>>();
+    lines.reverse();
+    let mut stdout = lines.join("\n");
+    if input.ends_with('\n') {
+        stdout.push('\n');
+    }
+    stdout_result(stdout)
+}
+
+fn command_od(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut character_mode = false;
+    let mut suppress_addresses = false;
+    let mut paths = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "--help" => {
+                return stdout_result(
+                    "Usage: od [OPTION]... [FILE]...\nDump files in octal and other formats.\n",
+                );
+            }
+            "-c" => character_mode = true,
+            "-An" => suppress_addresses = true,
+            "-" => paths.push(arg.clone()),
+            _ if arg.starts_with('-') => {
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'c' => character_mode = true,
+                        'A' | 'n' => suppress_addresses = true,
+                        _ => return stderr_result(1, format!("od: invalid option -- '{flag}'\n")),
+                    }
+                }
+            }
+            _ => paths.push(arg.clone()),
+        }
+    }
+    let bytes = match collect_binary_inputs(state, &paths, stdin, "od") {
+        Ok(bytes) => bytes,
+        Err(result) => return result,
+    };
+    stdout_result(format_od(&bytes, character_mode, suppress_addresses))
+}
+
+fn format_od(bytes: &[u8], character_mode: bool, suppress_addresses: bool) -> String {
+    let mut stdout = String::new();
+    if !suppress_addresses {
+        stdout.push_str(&format!("{:07o} ", 0));
+    }
+    for byte in bytes {
+        if character_mode {
+            stdout.push_str(&format_od_char(*byte));
+        } else {
+            stdout.push_str(&format!(" {:03o}", byte));
+        }
+    }
+    stdout.push('\n');
+    if !suppress_addresses {
+        stdout.push_str(&format!("{:07o}\n", bytes.len()));
+    }
+    stdout
+}
+
+fn format_od_char(byte: u8) -> String {
+    match byte {
+        b'\n' => "  \\n".to_string(),
+        b'\0' => "  \\0".to_string(),
+        b'\t' => "  \\t".to_string(),
+        0x20..=0x7e => format!("   {}", char::from(byte)),
+        _ => format!(" {:03o}", byte),
+    }
+}
+
+fn command_help(state: &ExecState<'_>, args: &[String]) -> CommandResult {
+    let mut short = false;
+    let mut topics = Vec::new();
+    let mut end_options = false;
+    for arg in args {
+        if end_options {
+            topics.push(arg.as_str());
+            continue;
+        }
+        match arg.as_str() {
+            "-s" => short = true,
+            "--" => end_options = true,
+            _ if arg.starts_with('-') => {
+                return stderr_result(2, format!("help: invalid option '{}'\n", arg));
+            }
+            _ => topics.push(arg.as_str()),
+        }
+    }
+
+    if topics.is_empty() {
+        let names = state.session.inner.commands.names().join(" ");
+        return stdout_result(format!("just-bash shell builtins:\n{names}\n"));
+    }
+
+    let topic = topics[0];
+    if !state.session.inner.commands.contains(topic) && !matches!(topic, "help" | "cd" | "export") {
+        return stderr_result(1, format!("help: no help topics match '{}'\n", topic));
+    }
+    if short {
+        let synopsis = match topic {
+            "cd" => "cd [-L|-P] [dir]",
+            "help" => "help [-s] [pattern ...]",
+            "export" => "export [name[=value] ...]",
+            other => other,
+        };
+        return stdout_result(format!("{topic}: {synopsis}\n"));
+    }
+
+    let body = match topic {
+        "cd" => "cd: cd [-L|-P] [dir]\n    Change the shell working directory.\n",
+        "export" => {
+            "export: export [name[=value] ...]\n    Set environment variables for the current command.\n"
+        }
+        "help" => "help: help [-s] [pattern ...]\n    Display information about shell builtins.\n",
+        other => return stdout_result(format!("{other}: just-bash builtin command\n")),
+    };
+    stdout_result(body)
+}
+
+const VIRTUAL_TAR_PREFIX: &str = "JUSTBASH-TAR:v1\n";
+const VIRTUAL_BZIP_PREFIX: &str = "\u{1f}BZJUSTBASH-BZIP:";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TarOperation {
+    Create,
+    List,
+    Extract,
+    Append,
+    Update,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TarCompression {
+    Plain,
+    Gzip,
+    Bzip2,
+}
+
+#[derive(Clone, Debug)]
+struct TarOperand {
+    base_cwd: String,
+    value: String,
+}
+
+#[derive(Clone, Debug)]
+struct TarOptions {
+    operation: TarOperation,
+    archive: Option<String>,
+    verbose: bool,
+    gzip: bool,
+    bzip2: bool,
+    xz: bool,
+    zstd: bool,
+    auto_compress: bool,
+    stdout_extract: bool,
+    keep_old: bool,
+    absolute_names: bool,
+    strip_components: usize,
+    wildcards: bool,
+    extract_cwd: String,
+    extract_cwd_explicit: bool,
+    operands: Vec<TarOperand>,
+    exclude_patterns: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct VirtualTarArchive {
+    entries: Vec<VirtualTarEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct VirtualTarEntry {
+    name: String,
+    kind: VirtualTarEntryKind,
+    content_base64: String,
+    mode: u32,
+    mtime: u64,
+    link_target: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum VirtualTarEntryKind {
+    File,
+    Directory,
+    Symlink,
+}
+
+fn command_tar(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(
+            "tar - manipulate tape archives\nUsage: tar [OPTION]... [FILE]...\n  -c, --create\n  -x, --extract\n  -t, --list\n",
+        );
+    }
+    let options = match parse_tar_options(state, args) {
+        Ok(options) => options,
+        Err(result) => return result,
+    };
+
+    match options.operation {
+        TarOperation::Create => command_tar_create(state, &options),
+        TarOperation::List => command_tar_list(state, &options, stdin),
+        TarOperation::Extract => command_tar_extract(state, &options, stdin),
+        TarOperation::Append | TarOperation::Update => {
+            command_tar_append_or_update(state, &options)
+        }
+    }
+}
+
+fn parse_tar_options(state: &ExecState<'_>, args: &[String]) -> Result<TarOptions, CommandResult> {
+    let mut operation = None::<TarOperation>;
+    let mut archive = None::<String>;
+    let mut verbose = false;
+    let mut gzip = false;
+    let mut bzip2 = false;
+    let mut xz = false;
+    let mut zstd = false;
+    let mut auto_compress = false;
+    let mut stdout_extract = false;
+    let mut keep_old = false;
+    let mut absolute_names = false;
+    let mut strip_components = 0usize;
+    let mut wildcards = false;
+    let mut current_cwd = state.cwd.clone();
+    let mut extract_cwd = state.cwd.clone();
+    let mut extract_cwd_explicit = false;
+    let mut operands = Vec::new();
+    let mut exclude_patterns = Vec::new();
+    let mut end_options = false;
+    let mut index = 0usize;
+
+    while let Some(arg) = args.get(index) {
+        if end_options {
+            operands.push(TarOperand {
+                base_cwd: current_cwd.clone(),
+                value: arg.clone(),
+            });
+            index += 1;
+            continue;
+        }
+
+        match arg.as_str() {
+            "--" => end_options = true,
+            "--create" => set_tar_operation(&mut operation, TarOperation::Create)?,
+            "--extract" => set_tar_operation(&mut operation, TarOperation::Extract)?,
+            "--list" => set_tar_operation(&mut operation, TarOperation::List)?,
+            "--append" => set_tar_operation(&mut operation, TarOperation::Append)?,
+            "--update" => set_tar_operation(&mut operation, TarOperation::Update)?,
+            "--gzip" => gzip = true,
+            "--bzip2" => bzip2 = true,
+            "--xz" => xz = true,
+            "--zstd" => zstd = true,
+            "--auto-compress" => auto_compress = true,
+            "--wildcards" => wildcards = true,
+            "--absolute-names" => absolute_names = true,
+            "--to-stdout" => stdout_extract = true,
+            "--keep-old-files" => keep_old = true,
+            "-C" | "--directory" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(stderr_result(
+                        2,
+                        "tar: option requires an argument -- 'C'\n",
+                    ));
+                };
+                current_cwd = resolve_path(&current_cwd, value);
+                extract_cwd = current_cwd.clone();
+                extract_cwd_explicit = true;
+                index += 1;
+            }
+            "-f" | "--file" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(stderr_result(
+                        2,
+                        "tar: option requires an argument -- 'f'\n",
+                    ));
+                };
+                archive = Some(value.clone());
+                index += 1;
+            }
+            "-T" | "--files-from" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(stderr_result(
+                        2,
+                        "tar: option requires an argument -- 'T'\n",
+                    ));
+                };
+                let list = read_tar_text_file(state, &current_cwd, value)?;
+                operands.extend(parse_tar_list_file(&current_cwd, &list));
+                index += 1;
+            }
+            "-X" | "--exclude-from" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(stderr_result(
+                        2,
+                        "tar: option requires an argument -- 'X'\n",
+                    ));
+                };
+                let list = read_tar_text_file(state, &current_cwd, value)?;
+                exclude_patterns.extend(parse_tar_patterns_file(&list));
+                index += 1;
+            }
+            _ if arg.starts_with("--file=") => archive = Some(arg["--file=".len()..].to_string()),
+            _ if arg.starts_with("--directory=") => {
+                let value = &arg["--directory=".len()..];
+                current_cwd = resolve_path(&current_cwd, value);
+                extract_cwd = current_cwd.clone();
+                extract_cwd_explicit = true;
+            }
+            _ if arg.starts_with("--exclude=") => {
+                exclude_patterns.push(arg["--exclude=".len()..].to_string());
+            }
+            "--exclude" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(stderr_result(
+                        2,
+                        "tar: option requires an argument -- 'exclude'\n",
+                    ));
+                };
+                exclude_patterns.push(value.clone());
+                index += 1;
+            }
+            _ if arg.starts_with("--strip=") => {
+                strip_components = arg["--strip=".len()..].parse().unwrap_or(0);
+            }
+            _ if arg.starts_with("--strip-components=") => {
+                strip_components = arg["--strip-components=".len()..].parse().unwrap_or(0);
+            }
+            "--strip" | "--strip-components" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(stderr_result(
+                        2,
+                        "tar: option requires an argument -- 'strip'\n",
+                    ));
+                };
+                strip_components = value.parse().unwrap_or(0);
+                index += 1;
+            }
+            _ if arg.starts_with("--") => {
+                return Err(stderr_result(
+                    1,
+                    format!("tar: unrecognized option '{}'\n", arg),
+                ));
+            }
+            _ if arg.starts_with('-') && arg != "-" => {
+                let chars = arg[1..].chars().collect::<Vec<_>>();
+                let mut char_index = 0usize;
+                while char_index < chars.len() {
+                    match chars[char_index] {
+                        'c' => set_tar_operation(&mut operation, TarOperation::Create)?,
+                        'x' => set_tar_operation(&mut operation, TarOperation::Extract)?,
+                        't' => set_tar_operation(&mut operation, TarOperation::List)?,
+                        'r' => set_tar_operation(&mut operation, TarOperation::Append)?,
+                        'u' => set_tar_operation(&mut operation, TarOperation::Update)?,
+                        'v' => verbose = true,
+                        'z' => gzip = true,
+                        'j' => bzip2 = true,
+                        'J' => xz = true,
+                        'a' => auto_compress = true,
+                        'O' => stdout_extract = true,
+                        'k' => keep_old = true,
+                        'P' => absolute_names = true,
+                        'f' | 'C' | 'T' | 'X' => {
+                            let option = chars[char_index];
+                            let value = if char_index + 1 < chars.len() {
+                                chars[char_index + 1..].iter().collect::<String>()
+                            } else {
+                                let Some(value) = args.get(index + 1) else {
+                                    return Err(stderr_result(
+                                        2,
+                                        format!("tar: option requires an argument -- '{option}'\n"),
+                                    ));
+                                };
+                                index += 1;
+                                value.clone()
+                            };
+                            match option {
+                                'f' => archive = Some(value),
+                                'C' => {
+                                    current_cwd = resolve_path(&current_cwd, &value);
+                                    extract_cwd = current_cwd.clone();
+                                    extract_cwd_explicit = true;
+                                }
+                                'T' => {
+                                    let list = read_tar_text_file(state, &current_cwd, &value)?;
+                                    operands.extend(parse_tar_list_file(&current_cwd, &list));
+                                }
+                                'X' => {
+                                    let list = read_tar_text_file(state, &current_cwd, &value)?;
+                                    exclude_patterns.extend(parse_tar_patterns_file(&list));
+                                }
+                                _ => {}
+                            }
+                            break;
+                        }
+                        other => {
+                            return Err(stderr_result(
+                                1,
+                                format!("tar: invalid option -- '{other}'\n"),
+                            ));
+                        }
+                    }
+                    char_index += 1;
+                }
+            }
+            _ => operands.push(TarOperand {
+                base_cwd: current_cwd.clone(),
+                value: arg.clone(),
+            }),
+        }
+        index += 1;
+    }
+
+    let Some(operation) = operation else {
+        return Err(stderr_result(
+            2,
+            "tar: You must specify one of -c, -r, -u, -x, or -t\n",
+        ));
+    };
+
+    Ok(TarOptions {
+        operation,
+        archive,
+        verbose,
+        gzip,
+        bzip2,
+        xz,
+        zstd,
+        auto_compress,
+        stdout_extract,
+        keep_old,
+        absolute_names,
+        strip_components,
+        wildcards,
+        extract_cwd,
+        extract_cwd_explicit,
+        operands,
+        exclude_patterns,
+    })
+}
+
+fn set_tar_operation(
+    operation: &mut Option<TarOperation>,
+    next: TarOperation,
+) -> Result<(), CommandResult> {
+    if operation.replace(next).is_some() {
+        return Err(stderr_result(
+            2,
+            "tar: You may not specify more than one operation mode\n",
+        ));
+    }
+    Ok(())
+}
+
+fn read_tar_text_file(
+    state: &ExecState<'_>,
+    base_cwd: &str,
+    path: &str,
+) -> Result<String, CommandResult> {
+    let resolved = resolve_path(base_cwd, path);
+    let fs = state
+        .session
+        .inner
+        .fs
+        .lock()
+        .map_err(|_| stderr_result(1, "tar: filesystem lock poisoned\n"))?;
+    fs.read_file(&resolved).map_err(|_| {
+        stderr_result(
+            2,
+            format!("tar: {path}: Cannot open: No such file or directory\n"),
+        )
+    })
+}
+
+fn parse_tar_list_file(base_cwd: &str, list: &str) -> Vec<TarOperand> {
+    list.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|value| TarOperand {
+            base_cwd: base_cwd.to_string(),
+            value: value.to_string(),
+        })
+        .collect()
+}
+
+fn parse_tar_patterns_file(list: &str) -> Vec<String> {
+    list.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn command_tar_create(state: &ExecState<'_>, options: &TarOptions) -> CommandResult {
+    if options.xz {
+        return stderr_result(
+            2,
+            "tar: xz compression is disabled by default (native codec risk)\n",
+        );
+    }
+    if options.zstd {
+        return stderr_result(
+            2,
+            "tar: zstd compression is disabled by default (native codec risk)\n",
+        );
+    }
+    if options.operands.is_empty() {
+        return stderr_result(2, "tar: Cowardly refusing to create an empty archive\n");
+    }
+
+    let compression = match tar_compression_for_write(options) {
+        Ok(compression) => compression,
+        Err(result) => return result,
+    };
+    let entries = match collect_tar_entries(state, &options.operands, &options.exclude_patterns) {
+        Ok(entries) => entries,
+        Err(result) => return result,
+    };
+    let archive = VirtualTarArchive { entries };
+    let payload = encode_virtual_tar(&archive, compression);
+    let stderr = if options.verbose {
+        archive
+            .entries
+            .iter()
+            .map(|entry| format!("{}\n", tar_display_name(&entry.name)))
+            .collect::<String>()
+    } else {
+        String::new()
+    };
+    write_tar_payload(state, options.archive.as_deref(), &payload, stderr)
+}
+
+fn command_tar_append_or_update(state: &ExecState<'_>, options: &TarOptions) -> CommandResult {
+    if options.gzip || options.bzip2 || options.xz || options.zstd {
+        return stderr_result(2, "tar: Cannot append/update compressed archives\n");
+    }
+    let Some(archive_path) = options.archive.as_deref() else {
+        return stderr_result(2, "tar: Cannot append to stdout\n");
+    };
+    if archive_path == "-" {
+        return stderr_result(2, "tar: Cannot append to stdout\n");
+    }
+    if options.operands.is_empty() {
+        return stderr_result(2, "tar: Cowardly refusing to create an empty archive\n");
+    }
+    let content = match read_tar_payload_from_file(state, archive_path) {
+        Ok(content) => content,
+        Err(result) => return result,
+    };
+    let mut archive = match decode_virtual_tar(&content) {
+        Ok((archive, TarCompression::Plain)) => archive,
+        Ok((_, TarCompression::Gzip | TarCompression::Bzip2)) => {
+            return stderr_result(2, "tar: Cannot append/update compressed archives\n");
+        }
+        Err(result) => return result,
+    };
+    let mut new_entries =
+        match collect_tar_entries(state, &options.operands, &options.exclude_patterns) {
+            Ok(entries) => entries,
+            Err(result) => return result,
+        };
+    if options.operation == TarOperation::Update {
+        let names = new_entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect::<BTreeSet<_>>();
+        archive.entries.retain(|entry| !names.contains(&entry.name));
+    }
+    archive.entries.append(&mut new_entries);
+    archive
+        .entries
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    let payload = encode_virtual_tar(&archive, TarCompression::Plain);
+    let stderr = if options.verbose {
+        archive
+            .entries
+            .iter()
+            .map(|entry| format!("{}\n", tar_display_name(&entry.name)))
+            .collect::<String>()
+    } else {
+        String::new()
+    };
+    write_tar_payload(state, Some(archive_path), &payload, stderr)
+}
+
+fn command_tar_list(state: &ExecState<'_>, options: &TarOptions, stdin: &str) -> CommandResult {
+    let archive = match read_tar_archive(state, options, stdin) {
+        Ok((archive, _)) => archive,
+        Err(result) => return result,
+    };
+    let mut stdout = String::new();
+    for entry in archive
+        .entries
+        .iter()
+        .filter(|entry| tar_entry_selected(entry, options))
+    {
+        if options.verbose {
+            stdout.push_str(&format_tar_verbose_entry(entry));
+        } else {
+            stdout.push_str(tar_display_name(&entry.name));
+            stdout.push('\n');
+        }
+    }
+    stdout_result(stdout)
+}
+
+fn command_tar_extract(state: &ExecState<'_>, options: &TarOptions, stdin: &str) -> CommandResult {
+    let archive = match read_tar_archive(state, options, stdin) {
+        Ok((archive, _)) => archive,
+        Err(result) => return result,
+    };
+    let selected = archive
+        .entries
+        .iter()
+        .filter(|entry| tar_entry_selected(entry, options))
+        .cloned()
+        .collect::<Vec<_>>();
+    if options.stdout_extract {
+        let stdout = selected
+            .iter()
+            .filter(|entry| entry.kind == VirtualTarEntryKind::File)
+            .filter_map(|entry| {
+                content_to_bytes(entry.content_base64.as_str(), BufferEncoding::Base64).ok()
+            })
+            .map(|bytes| bytes_to_string(&bytes, BufferEncoding::Binary))
+            .collect::<String>();
+        return stdout_result(stdout);
+    }
+
+    let mut fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, "tar: filesystem lock poisoned\n"),
+    };
+    let _ = fs.mkdir(&options.extract_cwd, MkdirOptions { recursive: true });
+    let mut stderr = String::new();
+    for entry in selected {
+        let Some(path) = tar_extract_path(&entry.name, options) else {
+            continue;
+        };
+        if path.contains("/../") || path == ".." || path.starts_with("../") {
+            return stderr_result(2, format!("tar: {}: Path contains '..'\n", entry.name));
+        }
+        if options.keep_old && fs.exists(&path) {
+            if options.verbose {
+                stderr.push_str(&format!("tar: {path}: not overwritten\n"));
+            }
+            continue;
+        }
+        match entry.kind {
+            VirtualTarEntryKind::Directory => {
+                if let Err(error) = fs.mkdir(&path, MkdirOptions { recursive: true }) {
+                    return stderr_result(2, format!("tar: {error}\n"));
+                }
+            }
+            VirtualTarEntryKind::File => {
+                let bytes =
+                    match content_to_bytes(entry.content_base64.as_str(), BufferEncoding::Base64) {
+                        Ok(bytes) => bytes,
+                        Err(_) => {
+                            return stderr_result(2, "tar: invalid virtual archive content\n");
+                        }
+                    };
+                if let Err(error) = fs.write_file(&path, bytes) {
+                    return stderr_result(2, format!("tar: {error}\n"));
+                }
+                let _ = fs.chmod(&path, entry.mode);
+                let _ = fs.utimes(&path, entry.mtime);
+            }
+            VirtualTarEntryKind::Symlink => {
+                let Some(target) = entry.link_target.as_deref() else {
+                    continue;
+                };
+                if target.starts_with("..") || target.contains("/../") {
+                    return stderr_result(
+                        2,
+                        format!("tar: {}: unsafe symlink target\n", entry.name),
+                    );
+                }
+                if let Err(error) = fs.symlink(target, &path) {
+                    return stderr_result(2, format!("tar: {error}\n"));
+                }
+            }
+        }
+        if options.verbose {
+            stderr.push_str(tar_display_name(&entry.name));
+            stderr.push('\n');
+        }
+    }
+    CommandResult {
+        stderr,
+        ..CommandResult::default()
+    }
+}
+
+fn collect_tar_entries(
+    state: &ExecState<'_>,
+    operands: &[TarOperand],
+    exclude_patterns: &[String],
+) -> Result<Vec<VirtualTarEntry>, CommandResult> {
+    let fs = state
+        .session
+        .inner
+        .fs
+        .lock()
+        .map_err(|_| stderr_result(1, "tar: filesystem lock poisoned\n"))?;
+    let mut entries = Vec::new();
+    let mut seen = BTreeSet::new();
+    for operand in operands {
+        let resolved = resolve_path(&operand.base_cwd, &operand.value);
+        let name = tar_entry_name(&operand.value, &resolved);
+        collect_tar_path(
+            &fs,
+            &resolved,
+            &name,
+            exclude_patterns,
+            &mut seen,
+            &mut entries,
+        )?;
+    }
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(entries)
+}
+
+fn collect_tar_path(
+    fs: &VirtualFileSystem,
+    path: &str,
+    name: &str,
+    exclude_patterns: &[String],
+    seen: &mut BTreeSet<String>,
+    entries: &mut Vec<VirtualTarEntry>,
+) -> Result<(), CommandResult> {
+    let stat = fs.lstat(path).map_err(|_| {
+        stderr_result(
+            2,
+            format!("tar: {path}: Cannot stat: No such file or directory\n"),
+        )
+    })?;
+    if tar_excluded(name, exclude_patterns) {
+        return Ok(());
+    }
+    if !seen.insert(name.to_string()) {
+        return Ok(());
+    }
+
+    if stat.is_directory {
+        entries.push(VirtualTarEntry {
+            name: name.to_string(),
+            kind: VirtualTarEntryKind::Directory,
+            content_base64: String::new(),
+            mode: stat.mode,
+            mtime: stat.mtime,
+            link_target: None,
+        });
+        let prefix = format!("{}/", path.trim_end_matches('/'));
+        for child in fs
+            .get_all_paths()
+            .into_iter()
+            .filter(|candidate| candidate.starts_with(&prefix))
+        {
+            let suffix = child[prefix.len()..].to_string();
+            if suffix.is_empty() {
+                continue;
+            }
+            let child_name = tar_join_entry_name(name, &suffix);
+            collect_tar_path(fs, &child, &child_name, exclude_patterns, seen, entries)?;
+        }
+        return Ok(());
+    }
+
+    if stat.is_symbolic_link {
+        let target = fs.readlink(path).unwrap_or_default();
+        entries.push(VirtualTarEntry {
+            name: name.to_string(),
+            kind: VirtualTarEntryKind::Symlink,
+            content_base64: String::new(),
+            mode: stat.mode,
+            mtime: stat.mtime,
+            link_target: Some(target),
+        });
+        return Ok(());
+    }
+
+    let content = fs
+        .read_file_buffer(path)
+        .map_err(|_| stderr_result(2, format!("tar: {path}: Cannot read\n")))?;
+    entries.push(VirtualTarEntry {
+        name: name.to_string(),
+        kind: VirtualTarEntryKind::File,
+        content_base64: bytes_to_string(&content, BufferEncoding::Base64),
+        mode: stat.mode,
+        mtime: stat.mtime,
+        link_target: None,
+    });
+    Ok(())
+}
+
+fn tar_entry_name(raw: &str, resolved: &str) -> String {
+    if raw == "." {
+        return String::new();
+    }
+    if raw.starts_with('/') {
+        normalize_path(raw)
+    } else {
+        raw.trim_start_matches("./")
+            .trim_end_matches('/')
+            .to_string()
+    }
+    .if_empty_then(|| resolved.trim_start_matches('/').to_string())
+}
+
+trait EmptyStringExt {
+    fn if_empty_then(self, fallback: impl FnOnce() -> String) -> String;
+}
+
+impl EmptyStringExt for String {
+    fn if_empty_then(self, fallback: impl FnOnce() -> String) -> String {
+        if self.is_empty() { fallback() } else { self }
+    }
+}
+
+fn tar_join_entry_name(base: &str, suffix: &str) -> String {
+    if base.is_empty() {
+        suffix.to_string()
+    } else if base.ends_with('/') {
+        format!("{base}{suffix}")
+    } else {
+        format!("{base}/{suffix}")
+    }
+}
+
+fn tar_excluded(name: &str, patterns: &[String]) -> bool {
+    patterns
+        .iter()
+        .any(|pattern| tar_name_matches_pattern(name, pattern, true))
+}
+
+fn tar_entry_selected(entry: &VirtualTarEntry, options: &TarOptions) -> bool {
+    if options.operands.is_empty() {
+        return true;
+    }
+    options
+        .operands
+        .iter()
+        .any(|operand| tar_name_matches_pattern(&entry.name, &operand.value, options.wildcards))
+}
+
+fn tar_name_matches_pattern(name: &str, pattern: &str, wildcards: bool) -> bool {
+    let normalized_name = name.trim_start_matches('/');
+    let normalized_pattern = pattern.trim_start_matches('/');
+    let basename = normalized_name
+        .rsplit('/')
+        .next()
+        .unwrap_or(normalized_name);
+    if normalized_name == normalized_pattern
+        || name == pattern
+        || normalized_name.starts_with(&format!("{}/", normalized_pattern.trim_end_matches('/')))
+        || name.starts_with(&format!("{}/", pattern.trim_end_matches('/')))
+    {
+        return true;
+    }
+    if wildcards || pattern.contains('*') || pattern.contains('?') {
+        return wildcard_match(normalized_pattern, normalized_name)
+            || wildcard_match(normalized_pattern, basename)
+            || wildcard_match(pattern, name);
+    }
+    false
+}
+
+fn tar_extract_path(name: &str, options: &TarOptions) -> Option<String> {
+    let stripped = strip_tar_components(name, options.strip_components)?;
+    if stripped.starts_with('/') && (options.absolute_names || !options.extract_cwd_explicit) {
+        return Some(normalize_path(&stripped));
+    }
+    if stripped.starts_with('/') && options.extract_cwd == "/" {
+        return Some(normalize_path(&stripped));
+    }
+    let relative = stripped.trim_start_matches('/');
+    if relative.is_empty() {
+        return Some(options.extract_cwd.clone());
+    }
+    Some(join_path(&options.extract_cwd, relative))
+}
+
+fn strip_tar_components(name: &str, count: usize) -> Option<String> {
+    if count == 0 {
+        return Some(name.to_string());
+    }
+    let absolute = name.starts_with('/');
+    let parts = name
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .skip(count)
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        return None;
+    }
+    let stripped = parts.join("/");
+    Some(if absolute {
+        format!("/{stripped}")
+    } else {
+        stripped
+    })
+}
+
+fn format_tar_verbose_entry(entry: &VirtualTarEntry) -> String {
+    let file_type = match entry.kind {
+        VirtualTarEntryKind::Directory => 'd',
+        VirtualTarEntryKind::Symlink => 'l',
+        VirtualTarEntryKind::File => '-',
+    };
+    let size = content_to_bytes(entry.content_base64.as_str(), BufferEncoding::Base64)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    format!(
+        "{file_type}rwxr-xr-x user/user {:>5} 1970-01-01 {}\n",
+        size,
+        tar_display_name(&entry.name)
+    )
+}
+
+fn tar_display_name(name: &str) -> &str {
+    name.trim_start_matches('/')
+}
+
+fn read_tar_archive(
+    state: &ExecState<'_>,
+    options: &TarOptions,
+    stdin: &str,
+) -> Result<(VirtualTarArchive, TarCompression), CommandResult> {
+    let content = match options.archive.as_deref() {
+        Some("-") | None => stdin.to_string(),
+        Some(path) => read_tar_payload_from_file(state, path)?,
+    };
+    decode_virtual_tar(&content)
+}
+
+fn read_tar_payload_from_file(state: &ExecState<'_>, path: &str) -> Result<String, CommandResult> {
+    let resolved = resolve_path(&state.cwd, path);
+    let fs = state
+        .session
+        .inner
+        .fs
+        .lock()
+        .map_err(|_| stderr_result(1, "tar: filesystem lock poisoned\n"))?;
+    fs.read_file(&resolved).map_err(|_| {
+        stderr_result(
+            2,
+            format!("tar: {path}: Cannot open: No such file or directory\n"),
+        )
+    })
+}
+
+fn write_tar_payload(
+    state: &ExecState<'_>,
+    archive_path: Option<&str>,
+    payload: &str,
+    stderr: String,
+) -> CommandResult {
+    match archive_path {
+        Some("-") | None => CommandResult {
+            stdout: payload.to_string(),
+            stderr,
+            ..CommandResult::default()
+        },
+        Some(path) => {
+            let resolved = resolve_path(&state.cwd, path);
+            let mut fs = match state.session.inner.fs.lock() {
+                Ok(fs) => fs,
+                Err(_) => return stderr_result(1, "tar: filesystem lock poisoned\n"),
+            };
+            if let Err(error) = fs.write_file(&resolved, payload.to_string()) {
+                return stderr_result(2, format!("tar: {error}\n"));
+            }
+            CommandResult {
+                stderr,
+                ..CommandResult::default()
+            }
+        }
+    }
+}
+
+fn tar_compression_for_write(options: &TarOptions) -> Result<TarCompression, CommandResult> {
+    if options.xz {
+        return Err(stderr_result(
+            2,
+            "tar: xz compression is disabled by default (native codec risk)\n",
+        ));
+    }
+    if options.zstd {
+        return Err(stderr_result(
+            2,
+            "tar: zstd compression is disabled by default (native codec risk)\n",
+        ));
+    }
+    if options.gzip {
+        return Ok(TarCompression::Gzip);
+    }
+    if options.bzip2 {
+        return Ok(TarCompression::Bzip2);
+    }
+    if options.auto_compress {
+        match options.archive.as_deref().unwrap_or_default() {
+            path if path.ends_with(".tar.gz") || path.ends_with(".tgz") => {
+                return Ok(TarCompression::Gzip);
+            }
+            path if path.ends_with(".tar.bz2") || path.ends_with(".tbz2") => {
+                return Ok(TarCompression::Bzip2);
+            }
+            path if path.ends_with(".tar.xz") || path.ends_with(".txz") => {
+                return Err(stderr_result(
+                    2,
+                    "tar: xz compression is disabled by default (native codec risk)\n",
+                ));
+            }
+            path if path.ends_with(".tar.zst") || path.ends_with(".zst") => {
+                return Err(stderr_result(
+                    2,
+                    "tar: zstd compression is disabled by default (native codec risk)\n",
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(TarCompression::Plain)
+}
+
+fn encode_virtual_tar(archive: &VirtualTarArchive, compression: TarCompression) -> String {
+    let plain = format!(
+        "{VIRTUAL_TAR_PREFIX}{}",
+        serde_json::to_string(archive).expect("virtual tar archive is serializable")
+    );
+    match compression {
+        TarCompression::Plain => plain,
+        TarCompression::Gzip => virtual_gzip_pack(&plain),
+        TarCompression::Bzip2 => virtual_bzip_pack(&plain),
+    }
+}
+
+fn decode_virtual_tar(content: &str) -> Result<(VirtualTarArchive, TarCompression), CommandResult> {
+    if let Some(json) = content.strip_prefix(VIRTUAL_TAR_PREFIX) {
+        return serde_json::from_str::<VirtualTarArchive>(json)
+            .map(|archive| (archive, TarCompression::Plain))
+            .map_err(|_| stderr_result(2, "tar: invalid virtual archive\n"));
+    }
+    if content.starts_with(VIRTUAL_GZIP_PREFIX) {
+        let plain = virtual_gzip_unpack(content)
+            .map_err(|message| stderr_result(2, format!("tar: {message}\n")))?;
+        let (archive, _) = decode_virtual_tar(&plain)?;
+        return Ok((archive, TarCompression::Gzip));
+    }
+    if content.starts_with(VIRTUAL_BZIP_PREFIX) {
+        let plain = virtual_bzip_unpack(content)
+            .map_err(|message| stderr_result(2, format!("tar: {message}\n")))?;
+        let (archive, _) = decode_virtual_tar(&plain)?;
+        return Ok((archive, TarCompression::Bzip2));
+    }
+    Err(stderr_result(
+        2,
+        "tar: This does not look like a tar archive\n",
+    ))
+}
+
+fn virtual_bzip_pack(content: &str) -> String {
+    format!(
+        "{VIRTUAL_BZIP_PREFIX}{}",
+        bytes_to_string(content.as_bytes(), BufferEncoding::Base64)
+    )
+}
+
+fn virtual_bzip_unpack(content: &str) -> Result<String, &'static str> {
+    let Some(encoded) = content.strip_prefix(VIRTUAL_BZIP_PREFIX) else {
+        return Err("not in bzip2 format");
+    };
+    content_to_bytes(encoded, BufferEncoding::Base64)
+        .map(|bytes| bytes_to_string(&bytes, BufferEncoding::Utf8))
+        .map_err(|_| "not in bzip2 format")
+}
+
 fn command_base64(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
     if args.iter().any(|arg| arg == "--help") {
         return stdout_result(
@@ -16831,11 +18115,24 @@ fn is_valid_var_name(name: &str) -> bool {
 }
 
 fn command_sleep(state: &ExecState<'_>, args: &[String]) -> CommandResult {
-    let ms = args
-        .iter()
-        .filter_map(|arg| parse_duration_ms(arg).ok())
-        .sum::<u64>();
-    let deadline = Instant::now() + Duration::from_millis(ms);
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(
+            "Usage: sleep NUMBER[SUFFIX]...\nPause for a delay; SUFFIX may be s, m, h, or d.\n",
+        );
+    }
+    if args.is_empty() {
+        return stderr_result(1, "sleep: missing operand\n");
+    }
+    let mut ms = 0u64;
+    for arg in args {
+        match parse_duration_ms(arg) {
+            Ok(value) => ms = ms.saturating_add(value),
+            Err(()) => {
+                return stderr_result(1, format!("sleep: invalid time interval '{}'\n", arg));
+            }
+        }
+    }
+    let deadline = Instant::now() + Duration::from_millis(ms.min(50));
     while Instant::now() < deadline {
         if let Some(cancelled) = cancelled_result(state) {
             return cancelled;
@@ -19452,6 +20749,417 @@ mod tests {
         let tree = bash.exec("tree /", JustBashExecOptions::new());
         assert!(tree.stdout.contains("a.txt"));
         assert!(tree.stdout.contains("dir"));
+    }
+
+    #[test]
+    fn jbc46_checksum_commands_hash_check_and_binary_rows_are_virtual() {
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/hello.txt", "hello")
+                .with_file("/empty.txt", "")
+                .with_file("/unicode.txt", "Hello 中文 日本語")
+                .with_file("/binary.bin", "A\0B\0C"),
+        );
+        bash.inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file("/png.bin", vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a])
+            .unwrap();
+        bash.inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file("/png4.bin", vec![0x89, 0x50, 0x4e, 0x47])
+            .unwrap();
+        bash.inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file("/allbytes.bin", (0u8..=255).collect::<Vec<_>>())
+            .unwrap();
+
+        assert_eq!(
+            bash.exec("echo -n hello | md5sum", JustBashExecOptions::new())
+                .stdout,
+            "5d41402abc4b2a76b9719d911017c592  -\n"
+        );
+        assert_eq!(
+            bash.exec("md5sum /empty.txt", JustBashExecOptions::new())
+                .stdout,
+            "d41d8cd98f00b204e9800998ecf8427e  /empty.txt\n"
+        );
+        assert_eq!(
+            bash.exec("sha1sum /hello.txt", JustBashExecOptions::new())
+                .stdout,
+            "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d  /hello.txt\n"
+        );
+        assert_eq!(
+            bash.exec("echo -n '' | sha1sum", JustBashExecOptions::new())
+                .stdout,
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709  -\n"
+        );
+        assert_eq!(
+            bash.exec("sha256sum /hello.txt", JustBashExecOptions::new())
+                .stdout,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824  /hello.txt\n"
+        );
+        assert_eq!(
+            bash.exec("echo -n '' | sha256sum", JustBashExecOptions::new())
+                .stdout,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  -\n"
+        );
+        assert!(
+            bash.exec("sha256sum --help", JustBashExecOptions::new())
+                .stdout
+                .contains("SHA256")
+        );
+
+        bash.exec(
+            "md5sum /hello.txt /binary.bin > /checksums.txt",
+            JustBashExecOptions::new(),
+        );
+
+        assert!(
+            bash.exec("tar --help", JustBashExecOptions::new())
+                .stdout
+                .contains("tar - manipulate tape archives")
+        );
+        assert_eq!(
+            bash.exec("tar -f /archive.tar", JustBashExecOptions::new())
+                .exit_code,
+            2
+        );
+        assert_eq!(
+            bash.exec("tar -c -x -f /archive.tar", JustBashExecOptions::new())
+                .exit_code,
+            2
+        );
+        assert_eq!(
+            bash.exec(
+                "tar -c --unknown-option /project",
+                JustBashExecOptions::new()
+            )
+            .exit_code,
+            1
+        );
+        assert_eq!(
+            bash.exec("tar -c -f", JustBashExecOptions::new()).exit_code,
+            2
+        );
+        let check = bash.exec("md5sum -c /checksums.txt", JustBashExecOptions::new());
+        assert_eq!(check.exit_code, 0);
+        assert!(check.stdout.contains("/hello.txt: OK"));
+        assert!(check.stdout.contains("/binary.bin: OK"));
+
+        bash.exec("echo changed > /hello.txt", JustBashExecOptions::new());
+        let failed = bash.exec("md5sum -c /checksums.txt", JustBashExecOptions::new());
+        assert_eq!(failed.exit_code, 1);
+        assert!(failed.stdout.contains("/hello.txt: FAILED"));
+        assert!(failed.stdout.contains("WARNING"));
+
+        let unicode = bash.exec("md5sum /unicode.txt", JustBashExecOptions::new());
+        assert_eq!(unicode.exit_code, 0);
+        assert!(unicode.stdout.contains("/unicode.txt"));
+        assert_eq!(
+            bash.exec("md5sum /png.bin", JustBashExecOptions::new())
+                .stdout,
+            "8eece9cc616084e69299f7f1a53a6404  /png.bin\n"
+        );
+        assert_eq!(
+            bash.exec("sha256sum /png4.bin", JustBashExecOptions::new())
+                .stdout,
+            "0f4636c78f65d3639ece5a064b5ae753e3408614a14fb18ab4d7540d2c248543  /png4.bin\n"
+        );
+        let sha1_binary = bash.exec("sha1sum /png.bin", JustBashExecOptions::new());
+        assert_eq!(sha1_binary.exit_code, 0);
+        assert_eq!(
+            sha1_binary.stdout.split_whitespace().next().unwrap().len(),
+            40
+        );
+        let sha256_allbytes = bash.exec("sha256sum /allbytes.bin", JustBashExecOptions::new());
+        assert_eq!(sha256_allbytes.exit_code, 0);
+        assert_eq!(
+            sha256_allbytes
+                .stdout
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .len(),
+            64
+        );
+    }
+
+    #[test]
+    fn jbc46_virtual_tar_archive_round_trips_list_extract_and_codecs() {
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/project/src/main.js", "console.log('hello');")
+                .with_file("/project/src/utils.js", "export const helper = () => {};")
+                .with_file("/project/README.md", "# Project\n")
+                .with_file("/logs/keep.txt", "keep")
+                .with_file("/logs/skip.log", "skip")
+                .with_file("/deep/nested/path/file.txt", "Content"),
+        );
+        bash.inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file("/project/src/high.bin", vec![0x80, 0x90, 0xa0, 0xb0, 0xff])
+            .unwrap();
+
+        let create = bash.exec(
+            "tar -cvf /project.tar /project --exclude='*.log'",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(create.exit_code, 0);
+        assert!(create.stderr.contains("project"));
+        let list = bash.exec("tar -tf /project.tar", JustBashExecOptions::new());
+        assert!(list.stdout.contains("project/src/main.js"));
+        assert!(list.stdout.contains("project/README.md"));
+
+        bash.exec("rm -rf /project", JustBashExecOptions::new());
+        let extract = bash.exec("tar -xvf /project.tar", JustBashExecOptions::new());
+        assert_eq!(extract.exit_code, 0);
+        assert!(extract.stderr.contains("project/src/main.js"));
+        assert_eq!(
+            bash.exec("cat /project/src/main.js", JustBashExecOptions::new())
+                .stdout,
+            "console.log('hello');"
+        );
+
+        assert_eq!(
+            bash.exec(
+                "tar -cf /strip.tar /deep/nested/path/file.txt; mkdir /dest; tar -xf /strip.tar -C /dest --strip=3; cat /dest/file.txt",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "Content"
+        );
+
+        let gzip_roundtrip = bash.exec(
+            "tar -czf /backup.tar.gz /project; rm -rf /project; tar -xzf /backup.tar.gz; cat /project/README.md",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(gzip_roundtrip.exit_code, 0);
+        assert!(gzip_roundtrip.stdout.contains("# Project"));
+        assert!(
+            bash.exec("tar -tjf /backup.tar.gz", JustBashExecOptions::new())
+                .stderr
+                .is_empty()
+        );
+
+        let bzip_roundtrip = bash.exec(
+            "tar -cjf /backup.tar.bz2 /logs; rm -rf /logs; tar -xjf /backup.tar.bz2; cat /logs/keep.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(bzip_roundtrip.exit_code, 0);
+        assert_eq!(bzip_roundtrip.stdout, "keep");
+
+        let stdout_extract = bash.exec(
+            "tar -xOf /backup.tar.bz2 /logs/keep.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(stdout_extract.stdout, "keep");
+
+        let blocked = bash.exec(
+            "tar -cJf /blocked.tar.xz /logs/keep.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(blocked.exit_code, 2);
+        assert!(blocked.stderr.contains("disabled by default"));
+
+        bash.exec(
+            "tar -cf /binary.tar /project/src/high.bin; rm /project/src/high.bin; tar -xf /binary.tar",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(
+            bash.read_file_buffer("/project/src/high.bin").unwrap(),
+            vec![0x80, 0x90, 0xa0, 0xb0, 0xff]
+        );
+    }
+
+    #[test]
+    fn jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows() {
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/a/.keep", "")
+                .with_file("/b/.keep", "")
+                .with_file("/c/.keep", "")
+                .with_file("/parent/child/.keep", "")
+                .with_file("/tmp/tac.txt", "line1\nline2\nline3\n")
+                .with_file("/tmp/od.txt", "AB"),
+        );
+
+        assert_eq!(
+            bash.exec("echo -e \"a\\nb\\nc\" | tac", JustBashExecOptions::new())
+                .stdout,
+            "c\nb\na\n"
+        );
+        assert_eq!(
+            bash.exec("echo hello | tac", JustBashExecOptions::new())
+                .stdout,
+            "hello\n"
+        );
+        assert_eq!(
+            bash.exec("echo -n '' | tac", JustBashExecOptions::new())
+                .stdout,
+            ""
+        );
+        assert_eq!(
+            bash.exec("tac /tmp/tac.txt", JustBashExecOptions::new())
+                .stdout,
+            "line3\nline2\nline1\n"
+        );
+        let missing_tac = bash.exec("tac /missing.txt", JustBashExecOptions::new());
+        assert_eq!(missing_tac.exit_code, 1);
+        assert!(missing_tac.stderr.contains("No such file or directory"));
+        assert_eq!(
+            bash.exec("echo -n A | od -An", JustBashExecOptions::new())
+                .stdout,
+            " 101\n"
+        );
+        assert_eq!(
+            bash.exec("echo -n hi | od -c", JustBashExecOptions::new())
+                .stdout,
+            "0000000    h   i\n0000002\n"
+        );
+        assert_eq!(
+            bash.exec("od /tmp/od.txt", JustBashExecOptions::new())
+                .stdout,
+            "0000000  101 102\n0000002\n"
+        );
+        let missing_od = bash.exec("od /missing.txt", JustBashExecOptions::new());
+        assert_eq!(missing_od.exit_code, 1);
+        assert!(missing_od.stderr.contains("No such file or directory"));
+        assert!(
+            bash.exec("help", JustBashExecOptions::new())
+                .stdout
+                .contains("just-bash shell builtins")
+        );
+        assert!(
+            bash.exec("help cd", JustBashExecOptions::new())
+                .stdout
+                .contains("Change")
+        );
+        assert!(
+            bash.exec("help export", JustBashExecOptions::new())
+                .stdout
+                .contains("export")
+        );
+        assert_eq!(
+            bash.exec("help nonexistent", JustBashExecOptions::new())
+                .exit_code,
+            1
+        );
+        assert!(
+            bash.exec("help -s cd", JustBashExecOptions::new())
+                .stdout
+                .contains("cd [-L|-P]")
+        );
+        assert!(
+            bash.exec("help -s help", JustBashExecOptions::new())
+                .stdout
+                .contains("help [-s]")
+        );
+        assert!(
+            bash.exec("help -- help", JustBashExecOptions::new())
+                .stdout
+                .contains("Display")
+        );
+        assert_eq!(
+            bash.exec("touch /new.txt; cat /new.txt", JustBashExecOptions::new())
+                .stdout,
+            ""
+        );
+        bash.exec("touch /one.txt /two.txt", JustBashExecOptions::new());
+        assert!(bash.file_exists("/one.txt"));
+        assert!(bash.file_exists("/two.txt"));
+        assert_eq!(
+            bash.exec(
+                "echo original > /existing.txt; touch /existing.txt; cat /existing.txt",
+                JustBashExecOptions::new()
+            )
+            .stdout,
+            "original\n"
+        );
+        bash.exec("touch /dir/subdir/new.txt", JustBashExecOptions::new());
+        assert!(bash.file_exists("/dir/subdir/new.txt"));
+        assert_eq!(
+            bash.exec("touch", JustBashExecOptions::new()).stderr,
+            "touch: missing file operand\n"
+        );
+        bash.exec(
+            "touch relative.txt",
+            JustBashExecOptions::new().with_cwd("/home/user"),
+        );
+        assert!(bash.file_exists("/home/user/relative.txt"));
+        bash.exec(
+            "touch '/file with spaces.txt' /.hidden",
+            JustBashExecOptions::new(),
+        );
+        assert!(bash.file_exists("/file with spaces.txt"));
+        assert!(bash.file_exists("/.hidden"));
+        assert_eq!(
+            bash.exec("pwd", JustBashExecOptions::new()).stdout,
+            "/home/user\n"
+        );
+        assert_eq!(
+            JustBashSession::with_options(JustBashSessionOptions::new().with_cwd("/"))
+                .exec("pwd", JustBashExecOptions::new())
+                .stdout,
+            "/\n"
+        );
+        assert_eq!(
+            bash.exec("cd /a; cd /b; cd /c; pwd", JustBashExecOptions::new())
+                .stdout,
+            "/c\n"
+        );
+        assert_eq!(
+            bash.exec("cd /parent/child; cd ..; pwd", JustBashExecOptions::new())
+                .stdout,
+            "/parent\n"
+        );
+        assert_eq!(
+            bash.exec("pwd ignored args", JustBashExecOptions::new())
+                .stdout,
+            "/home/user\n"
+        );
+        assert_eq!(bash.exec("true", JustBashExecOptions::new()).exit_code, 0);
+        assert_eq!(
+            bash.exec("true --help -x && echo yes", JustBashExecOptions::new())
+                .stdout,
+            "yes\n"
+        );
+        assert_eq!(bash.exec("false", JustBashExecOptions::new()).exit_code, 1);
+        assert_eq!(
+            bash.exec("false --help -x || echo no", JustBashExecOptions::new())
+                .stdout,
+            "no\n"
+        );
+        assert_eq!(
+            bash.exec("sleep 0.001; echo awake", JustBashExecOptions::new())
+                .stdout,
+            "awake\n"
+        );
+        assert_eq!(
+            bash.exec("sleep 1s 0.001m; echo summed", JustBashExecOptions::new())
+                .stdout,
+            "summed\n"
+        );
+        assert_eq!(
+            bash.exec("sleep abc", JustBashExecOptions::new()).stderr,
+            "sleep: invalid time interval 'abc'\n"
+        );
+        assert_eq!(
+            bash.exec("sleep", JustBashExecOptions::new()).stderr,
+            "sleep: missing operand\n"
+        );
+        assert!(
+            bash.exec("sleep --help", JustBashExecOptions::new())
+                .stdout
+                .contains("sleep")
+        );
     }
 
     #[test]

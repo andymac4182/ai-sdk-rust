@@ -3525,6 +3525,148 @@ const jbc45CaseGroups = [
   },
 ];
 
+const jbc46SourceGroups = [
+  {
+    files: [
+      'packages/just-bash/src/commands/md5sum/checksum.ts',
+      'packages/just-bash/src/commands/md5sum/md5sum.ts',
+      'packages/just-bash/src/commands/md5sum/sha1sum.ts',
+      'packages/just-bash/src/commands/md5sum/sha256sum.ts',
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::checksums',
+    notes:
+      'JBC-46 verifies md5sum, sha1sum, and sha256sum hashing, file/stdin text input, file-backed binary bytes, check mode, Unicode files, help, and missing-file diagnostics over the Rust virtual filesystem. Binary stdin corruption rows remain pending.',
+  },
+  {
+    files: ['packages/just-bash/src/commands/tar/tar.ts'],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::virtual-archive',
+    notes:
+      'JBC-46 verifies deterministic Just Bash virtual tar create/list/extract, gzip/bzip2 virtual wrappers, -C, strip, stdout extract, xz/zstd fail-closed gates, and high-byte virtual file round trips. Host-compatible tar byte parsing remains pending.',
+  },
+  {
+    files: [
+      'packages/just-bash/src/commands/help/help.ts',
+      'packages/just-bash/src/commands/od/od.ts',
+      'packages/just-bash/src/commands/sleep/sleep.ts',
+      'packages/just-bash/src/commands/tac/tac.ts',
+      'packages/just-bash/src/commands/touch/touch.ts',
+      'packages/just-bash/src/commands/true/true.ts',
+      'packages/just-bash/src/commands/pwd/pwd.ts',
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::small-command-leftovers',
+    notes:
+      'JBC-46 verifies the remaining portable help, od, tac, touch, true/false, pwd, and sleep parse/error/help rows through in-process Rust command execution. Sleep callback-duration injection rows remain pending.',
+  },
+];
+
+const jbc46CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/md5sum/md5sum.test.ts',
+    lines: [6, 14, 22, 33, 49, 60, 74, 83, 94, 102, 112, 128, 142, 158, 168, 179],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::checksums',
+    rustTest: 'jbc46_checksum_commands_hash_check_and_binary_rows_are_virtual',
+    notes:
+      'JBC-46 verifies md5sum, sha1sum, and sha256sum text/file hashing, check mode, help, missing-file handling, Unicode files, and high-byte/null virtual file bytes without host digest binaries.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/md5sum/checksum.binary.test.ts',
+    lines: [6, 20, 63, 88, 105, 132, 175],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::checksums',
+    rustTest: 'jbc46_checksum_commands_hash_check_and_binary_rows_are_virtual',
+    notes:
+      'JBC-46 verifies file-backed binary checksum rows for md5sum, sha1sum, and sha256sum plus Unicode and binary check mode. Binary stdin and mutation/same-content rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tar/tar.test.ts',
+    lines: [
+      6, 16, 25, 32, 39, 91, 143, 161, 173, 186, 224, 240, 269, 307, 322,
+      391, 406, 422, 510, 557, 601, 989,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::virtual-archive',
+    rustTest: 'jbc46_virtual_tar_archive_round_trips_list_extract_and_codecs',
+    notes:
+      'JBC-46 verifies these tar rows against a deterministic Rust virtual archive format created and consumed in-process, including help/errors, directory create/list/extract, exclude, strip, gzip virtual wrapper, stdout extract, high-byte file round trip, and xz fail-closed behavior. Host-compatible archive parsing and untested append/update/pattern rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tar/tar.binary.test.ts',
+    lines: [6],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::virtual-archive',
+    rustTest: 'jbc46_virtual_tar_archive_round_trips_list_extract_and_codecs',
+    notes:
+      'JBC-46 verifies high-byte virtual file content survives a Rust-created tar archive round trip. Binary stdin archive rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/help/help.test.ts',
+    lines: [6, 13, 23, 31, 38, 47, 55, 65],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::small-command-leftovers',
+    rustTest: 'jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows',
+    notes:
+      'JBC-46 verifies help listing, topic lookup, unknown topic errors, short synopsis output, and -- terminator handling in the Rust built-in registry.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/od/od.test.ts',
+    lines: [5, 13, 29, 37, 46],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::small-command-leftovers',
+    rustTest: 'jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows',
+    notes:
+      'JBC-46 verifies portable od stdin/file octal output, -c character mode, -An address suppression, and missing-file diagnostics. Additional binary dump rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tac/tac.test.ts',
+    lines: [5, 12, 19, 26, 34],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::small-command-leftovers',
+    rustTest: 'jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows',
+    notes:
+      'JBC-46 verifies tac stdin reversal, single-line and empty inputs, file input, and missing-file diagnostics. Relative path rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/touch/touch.test.ts',
+    lines: [5, 13, 21, 30, 39, 46, 56, 63],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::small-command-leftovers',
+    rustTest: 'jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows',
+    notes:
+      'JBC-46 verifies touch creates one or many virtual files, preserves existing content, creates nested/relative/space/hidden paths, and errors on missing operands.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/pwd/pwd.test.ts',
+    lines: [5, 12, 19, 25, 34, 46, 55],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::small-command-leftovers',
+    rustTest: 'jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows',
+    notes:
+      'JBC-46 verifies pwd default/root/current directory output, same-exec cd changes, parent traversal, repeated cd changes, and ignored arguments.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/true/true.test.ts',
+    lines: [5, 13, 19, 27, 35, 41],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::small-command-leftovers',
+    rustTest: 'jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows',
+    notes:
+      'JBC-46 verifies true and false exit status, ignored arguments, and conditional execution without host shell fallback.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sleep/sleep.test.ts',
+    lines: [115, 130, 138, 146, 156, 167],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::small-command-leftovers',
+    rustTest: 'jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows',
+    notes:
+      'JBC-46 verifies sleep mixed-suffix parsing, missing/invalid operand errors, help, and short-duration in-process completion. Upstream callback duration-capture rows remain pending.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -3552,6 +3694,7 @@ function sourceOverrideFor(relativePath) {
     ...jbc19SourceGroups,
     ...jbc26SourceGroups,
     ...jbc33SourceGroups,
+    ...jbc46SourceGroups,
   ].find((entry) => groupMatchesFile(entry, relativePath));
   return group ? rowOverrideFromGroup(group) : undefined;
 }
@@ -3586,6 +3729,7 @@ function caseOverrideFor(testCase) {
     ...jbc41CaseGroups,
     ...jbc43CaseGroups,
     ...jbc45CaseGroups,
+    ...jbc46CaseGroups,
     ...jbc27CaseGroups,
     ...jbc30AgentExampleCaseGroups,
     ...jbc33CaseGroups,

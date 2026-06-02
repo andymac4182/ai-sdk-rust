@@ -57,8 +57,8 @@
       "comparison-tests": 15
     },
     "byStatus": {
-      "portable-pending": 1142,
-      "portable-verified": 529
+      "portable-pending": 1127,
+      "portable-verified": 544
     },
     "byClassification": {
       "comparison-golden": 457,
@@ -77748,13 +77748,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/pwd/pwd.test.ts:12:it:should show root directory when cwd is /",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-pwd",
-        "rustTest": "pending:just-bash-command-pwd",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-command-leftovers",
+        "rustTest": "jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows",
+        "notes": "JBC-46 verifies pwd default/root/current directory output, same-exec cd changes, parent traversal, repeated cd changes, and ignored arguments.",
         "found": true
       },
       "assertions": [
@@ -77802,13 +77802,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/pwd/pwd.test.ts:19:it:should show current directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-pwd",
-        "rustTest": "pending:just-bash-command-pwd",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-command-leftovers",
+        "rustTest": "jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows",
+        "notes": "JBC-46 verifies pwd default/root/current directory output, same-exec cd changes, parent traversal, repeated cd changes, and ignored arguments.",
         "found": true
       },
       "assertions": [
@@ -77853,13 +77853,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/pwd/pwd.test.ts:25:it:should reflect cd changes within same exec",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-pwd",
-        "rustTest": "pending:just-bash-command-pwd",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-command-leftovers",
+        "rustTest": "jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows",
+        "notes": "JBC-46 verifies pwd default/root/current directory output, same-exec cd changes, parent traversal, repeated cd changes, and ignored arguments.",
         "found": true
       },
       "assertions": [
@@ -77906,13 +77906,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/pwd/pwd.test.ts:34:it:should work after multiple cd commands within same exec",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-pwd",
-        "rustTest": "pending:just-bash-command-pwd",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-command-leftovers",
+        "rustTest": "jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows",
+        "notes": "JBC-46 verifies pwd default/root/current directory output, same-exec cd changes, parent traversal, repeated cd changes, and ignored arguments.",
         "found": true
       },
       "assertions": [
@@ -77957,13 +77957,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/pwd/pwd.test.ts:46:it:should work after cd ..",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-pwd",
-        "rustTest": "pending:just-bash-command-pwd",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-command-leftovers",
+        "rustTest": "jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows",
+        "notes": "JBC-46 verifies pwd default/root/current directory output, same-exec cd changes, parent traversal, repeated cd changes, and ignored arguments.",
         "found": true
       },
       "assertions": [
@@ -78006,13 +78006,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/pwd/pwd.test.ts:5:it:should show default home directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-pwd",
-        "rustTest": "pending:just-bash-command-pwd",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-command-leftovers",
+        "rustTest": "jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows",
+        "notes": "JBC-46 verifies pwd default/root/current directory output, same-exec cd changes, parent traversal, repeated cd changes, and ignored arguments.",
         "found": true
       },
       "assertions": [
@@ -78060,13 +78060,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/pwd/pwd.test.ts:55:it:should ignore arguments",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-pwd",
-        "rustTest": "pending:just-bash-command-pwd",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-command-leftovers",
+        "rustTest": "jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows",
+        "notes": "JBC-46 verifies pwd default/root/current directory output, same-exec cd changes, parent traversal, repeated cd changes, and ignored arguments.",
         "found": true
       },
       "assertions": [
@@ -79368,13 +79368,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/touch/touch.test.ts:13:it:should create multiple files",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-touch",
-        "rustTest": "pending:just-bash-command-touch",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-command-leftovers",
+        "rustTest": "jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows",
+        "notes": "JBC-46 verifies touch creates one or many virtual files, preserves existing content, creates nested/relative/space/hidden paths, and errors on missing operands.",
         "found": true
       },
       "assertions": [],
@@ -79413,13 +79413,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/touch/touch.test.ts:21:it:should not modify existing file content",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-touch",
-        "rustTest": "pending:just-bash-command-touch",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-command-leftovers",
+        "rustTest": "jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows",
+        "notes": "JBC-46 verifies touch creates one or many virtual files, preserves existing content, creates nested/relative/space/hidden paths, and errors on missing operands.",
         "found": true
       },
       "assertions": [],
@@ -79458,13 +79458,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/touch/touch.test.ts:30:it:should create file in nested directory",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-touch",
-        "rustTest": "pending:just-bash-command-touch",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-command-leftovers",
+        "rustTest": "jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows",
+        "notes": "JBC-46 verifies touch creates one or many virtual files, preserves existing content, creates nested/relative/space/hidden paths, and errors on missing operands.",
         "found": true
       },
       "assertions": [],
@@ -79501,13 +79501,13 @@
         "stderr": null,
         "exitCode": 1
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/touch/touch.test.ts:39:it:should error with no arguments",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-touch",
-        "rustTest": "pending:just-bash-command-touch",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-command-leftovers",
+        "rustTest": "jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows",
+        "notes": "JBC-46 verifies touch creates one or many virtual files, preserves existing content, creates nested/relative/space/hidden paths, and errors on missing operands.",
         "found": true
       },
       "assertions": [
@@ -79557,13 +79557,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/touch/touch.test.ts:46:it:should create file with relative path",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-touch",
-        "rustTest": "pending:just-bash-command-touch",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-command-leftovers",
+        "rustTest": "jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows",
+        "notes": "JBC-46 verifies touch creates one or many virtual files, preserves existing content, creates nested/relative/space/hidden paths, and errors on missing operands.",
         "found": true
       },
       "assertions": [],
@@ -79600,13 +79600,13 @@
         "stderr": null,
         "exitCode": 0
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/touch/touch.test.ts:5:it:should create empty file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-touch",
-        "rustTest": "pending:just-bash-command-touch",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-command-leftovers",
+        "rustTest": "jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows",
+        "notes": "JBC-46 verifies touch creates one or many virtual files, preserves existing content, creates nested/relative/space/hidden paths, and errors on missing operands.",
         "found": true
       },
       "assertions": [
@@ -79649,13 +79649,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/touch/touch.test.ts:56:it:should handle file with spaces in name",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-touch",
-        "rustTest": "pending:just-bash-command-touch",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-command-leftovers",
+        "rustTest": "jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows",
+        "notes": "JBC-46 verifies touch creates one or many virtual files, preserves existing content, creates nested/relative/space/hidden paths, and errors on missing operands.",
         "found": true
       },
       "assertions": [],
@@ -79692,13 +79692,13 @@
         "stderr": null,
         "exitCode": null
       },
-      "status": "portable-pending",
+      "status": "portable-verified",
       "parity": {
         "ledgerKey": "packages/just-bash/src/commands/touch/touch.test.ts:63:it:should create hidden file",
-        "status": "portable-pending",
-        "owner": "pending:just-bash-command-touch",
-        "rustTest": "pending:just-bash-command-touch",
-        "notes": "Inventory-only pending row; do not execute host shell commands as a Just Bash fallback.",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::runtime::small-command-leftovers",
+        "rustTest": "jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows",
+        "notes": "JBC-46 verifies touch creates one or many virtual files, preserves existing content, creates nested/relative/space/hidden paths, and errors on missing operands.",
         "found": true
       },
       "assertions": [],
