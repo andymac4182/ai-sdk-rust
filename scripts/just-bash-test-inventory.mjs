@@ -3700,7 +3700,7 @@ function renderMarkdown(inventory, rustTests, gaps) {
     '- `--check` is the non-blocking inventory gate. It fails for upstream drift, stale generated markdown, invalid statuses, missing owners, or undocumented exceptions.',
     '- `--strict` is the implementation gate. It additionally fails when any `portable-pending` test case remains or when a `portable-verified` row names a Rust test or generated corpus-case proof that does not exist in the workspace.',
     '- Extra Rust tests are additive. They do not close an upstream row unless the row names the Rust test.',
-    '- `scripts/master-parity-gate.sh --check` runs this ledger in non-strict mode now; set `JUST_BASH_STRICT_GATE=1` only after JBC-08 closes every portable row.',
+    '- `scripts/master-parity-gate.sh --check` runs this ledger in non-strict mode now; set `JUST_BASH_STRICT_GATE=1` only after the JBC-32/JBC-40 closeout wave closes every portable row.',
     '',
     '## Conformance Harness Contract',
     '',
