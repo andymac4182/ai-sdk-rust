@@ -1050,6 +1050,147 @@ const jbc16CaseGroups = [
   },
 ];
 
+const jbc17ExecutorJsOnlySourceFiles = [
+  'packages/just-bash-executor/src/create-executor.ts',
+  'packages/just-bash-executor/src/executor-discovery-plugin.ts',
+  'packages/just-bash-executor/src/executor-init.ts',
+  'packages/just-bash-executor/src/index.ts',
+  'packages/just-bash-executor/src/parse-tool-args.ts',
+  'packages/just-bash-executor/src/types.ts',
+  'packages/just-bash-executor/vitest.config.ts',
+];
+
+const jbc17JsOnlyExampleSourceFiles = [
+  'examples/bash-agent/agent.ts',
+  'examples/bash-agent/main.ts',
+  'examples/bash-agent/shell.ts',
+  'examples/custom-command/commands.ts',
+  'examples/custom-command/main.ts',
+  'examples/executor-tools/inline-tools.ts',
+  'examples/executor-tools/main.ts',
+  'examples/executor-tools/multi-api-agent.ts',
+  'examples/website/app/api/agent/route.ts',
+  'examples/website/app/api/fs/route.ts',
+  'examples/website/app/components/Terminal.tsx',
+  'examples/website/app/components/TerminalData.tsx',
+  'examples/website/app/components/lite-terminal/LiteTerminal.ts',
+  'examples/website/app/components/lite-terminal/ansi-parser.ts',
+  'examples/website/app/components/lite-terminal/index.ts',
+  'examples/website/app/components/lite-terminal/input-handler.ts',
+  'examples/website/app/components/lite-terminal/types.ts',
+  'examples/website/app/components/terminal-content.ts',
+  'examples/website/app/components/terminal-parts/agent-command.ts',
+  'examples/website/app/components/terminal-parts/commands.ts',
+  'examples/website/app/components/terminal-parts/constants.ts',
+  'examples/website/app/components/terminal-parts/index.ts',
+  'examples/website/app/components/terminal-parts/input-handler.ts',
+  'examples/website/app/components/terminal-parts/markdown.ts',
+  'examples/website/app/components/terminal-parts/welcome.ts',
+  'examples/website/app/layout.tsx',
+  'examples/website/app/md/[[...path]]/route.ts',
+  'examples/website/app/opengraph-image.tsx',
+  'examples/website/app/page.tsx',
+  'examples/website/next.config.ts',
+];
+
+const jbc17SourceGroups = [
+  {
+    file: 'packages/just-bash-executor/src/tool-command.ts',
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::executor',
+    notes:
+      'JBC-17 verifies the portable executor CLI bridge with Rust tests for camel/kebab names, JSON/flag/stdin argument parsing, help, errors, aliases, namespaces, jq pipelines, and hidden command exposure.',
+  },
+  {
+    files: jbc17ExecutorJsOnlySourceFiles,
+    status: 'js-only-documented',
+    owner: 'js-only:just-bash-executor-sdk-runtime',
+    notes:
+      'JBC-17 classifies these @executor-js SDK loader, plugin, package-export, and TypeScript config sources as JavaScript package-runtime behavior; the portable Rust executor CLI/session surface is mapped separately.',
+  },
+  {
+    file: 'examples/cjs-consumer/index.ts',
+    status: 'portable-verified',
+    owner: 'crates/just-bash-napi::smoke',
+    notes:
+      'JBC-17 verifies the portable consumer shape with the NAPI CommonJS smoke: Bash alias construction, exec result stdout/exitCode, fixture seeding, cwd, and virtual file persistence.',
+  },
+  {
+    file: 'examples/executor-tools/multi-turn-discovery.ts',
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::executor',
+    notes:
+      'JBC-17 verifies the portable custom-source example behavior with an in-process countries executor, argument filtering, jq composition, and virtual filesystem writes without network or host shell fallback.',
+  },
+  {
+    files: jbc17JsOnlyExampleSourceFiles,
+    status: 'js-only-documented',
+    owner: 'js-only:just-bash-examples',
+    notes:
+      'JBC-17 classifies the remaining example source files as JavaScript/browser/Next.js/AI-provider/network/custom-TypeScript-command scaffolding; portable Bash/session/executor behavior is mapped by the named Rust and NAPI tests.',
+  },
+];
+
+const jbc17CaseGroups = [
+  {
+    file: 'packages/just-bash-executor/src/tool-command.test.ts',
+    lines: [
+      20, 26, 31, 36, 44, 49, 54, 59, 64, 69, 75, 81, 86, 91, 96, 101,
+      106, 111, 116, 121, 127, 132, 137, 142, 147, 152, 157,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::executor',
+    rustTest: 'just_bash_executor_cli_helpers_match_upstream_tool_command_rows',
+    notes:
+      'JBC-17 verifies executor CLI helper behavior for camel/kebab names, key/value and flag parsing, JSON coercion, stdin JSON precedence, malformed JSON diagnostics, boolean flags, and command-dispatch help handling.',
+  },
+  {
+    file: 'packages/just-bash-executor/src/tool-command.test.ts',
+    lines: [201, 208, 215, 222, 229, 236, 243, 250, 261, 268, 279, 287, 300, 318, 334, 352],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::executor',
+    rustTest: 'just_bash_executor_tool_command_parses_flags_json_stdin_and_errors',
+    notes:
+      'JBC-17 verifies namespace command invocation, jq pipelines, help output, unknown subcommands, tool failures, multiple namespaces, hidden exposure, and camelCase aliases through the Rust executor bridge.',
+  },
+  {
+    file: 'packages/just-bash-executor/src/executor-examples.test.ts',
+    lines: [150, 162, 175, 188, 211],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::executor',
+    rustTest: 'just_bash_executor_custom_source_example_rows_use_virtual_session_state',
+    notes:
+      'JBC-17 maps the portable custom-source example rows to a seeded in-memory countries executor that proves calls, list filtering, chained detail lookup, jq composition, and virtual filesystem persistence with no network or host shell.',
+  },
+  {
+    file: 'packages/just-bash-executor/src/docs.test.ts',
+    lines: [76, 83, 88, 93, 113, 118, 128, 136, 143, 148],
+    status: 'js-only-documented',
+    owner: 'js-only:just-bash-executor-docs',
+    rustTest: 'js-only-documented',
+    notes:
+      'JBC-17 classifies README/SKILL markdown and TypeScript snippet syntax validation as documentation/package QA for the JavaScript executor package, not a portable Rust runtime behavior.',
+  },
+  {
+    file: 'packages/just-bash-executor/src/executor-examples.test.ts',
+    lines: [236, 259, 287, 339, 381, 424, 512, 548],
+    status: 'js-only-documented',
+    owner: 'js-only:just-bash-executor-sdk-runtime',
+    rustTest: 'js-only-documented',
+    notes:
+      'JBC-17 classifies approval callbacks, executor-js discovery plugins, GraphQL/OpenAPI loader behavior, and Node fetch/package integration as JavaScript SDK runtime behavior; portable custom-source execution is verified separately.',
+  },
+  {
+    file: 'packages/just-bash-executor/src/node-esm-smoke.test.ts',
+    lines: [63, 88, 129, 170],
+    status: 'js-only-documented',
+    owner: 'js-only:just-bash-executor-node-esm',
+    rustTest: 'js-only-documented',
+    notes:
+      'JBC-17 classifies plain Node ESM plugin loading and @just-bash/executor package-resolution smoke tests as JavaScript packaging behavior; Rust/NAPI consumer behavior is covered by the NAPI smoke.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -1066,9 +1207,12 @@ function rowOverrideFromGroup(group) {
 }
 
 function sourceOverrideFor(relativePath) {
-  const group = [...jb06SourceGroups, ...jbc12SourceGroups, ...jbc13SourceGroups].find((entry) =>
-    groupMatchesFile(entry, relativePath)
-  );
+  const group = [
+    ...jb06SourceGroups,
+    ...jbc12SourceGroups,
+    ...jbc13SourceGroups,
+    ...jbc17SourceGroups,
+  ].find((entry) => groupMatchesFile(entry, relativePath));
   return group ? rowOverrideFromGroup(group) : undefined;
 }
 
@@ -1082,6 +1226,7 @@ function caseOverrideFor(testCase) {
     ...jbc13CaseGroups,
     ...jbc15CaseGroups,
     ...jbc16CaseGroups,
+    ...jbc17CaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&

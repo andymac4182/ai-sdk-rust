@@ -7929,7 +7929,13 @@ fn parse_tool_cli_args(args: &[String], stdin: &str) -> Result<JsonValue, String
             result.insert(key.to_string(), coerce_json_value(value));
             index += 1;
         } else if args.len() == 1 && arg.starts_with('{') {
-            merge_json_object(&mut result, arg)?;
+            match serde_json::from_str::<JsonValue>(arg) {
+                Ok(JsonValue::Object(object)) => {
+                    result.extend(object);
+                }
+                Ok(_) => return Err("positional JSON must be a JSON object".to_string()),
+                Err(error) => return Err(format!("Invalid positional JSON: {error}")),
+            }
             index += 1;
         } else {
             index += 1;
@@ -8350,10 +8356,18 @@ fn stderr_result(exit_code: i32, stderr: impl Into<String>) -> CommandResult {
 }
 
 fn camel_to_kebab(value: &str) -> String {
+    let chars = value.chars().collect::<Vec<_>>();
     let mut output = String::new();
-    for (index, ch) in value.chars().enumerate() {
+    for (index, ch) in chars.iter().copied().enumerate() {
         if ch.is_ascii_uppercase() {
-            if index > 0 {
+            let previous = index.checked_sub(1).and_then(|index| chars.get(index));
+            let next = chars.get(index + 1);
+            let starts_new_word = previous.is_some_and(|previous| {
+                previous.is_ascii_lowercase()
+                    || previous.is_ascii_digit()
+                    || (previous.is_ascii_uppercase() && next.is_some_and(char::is_ascii_lowercase))
+            });
+            if starts_new_word && !output.ends_with('-') {
                 output.push('-');
             }
             output.push(ch.to_ascii_lowercase());
@@ -8365,6 +8379,11 @@ fn camel_to_kebab(value: &str) -> String {
 }
 
 fn format_namespace_help(namespace: &str, subcommands: &[ToolSubcommand]) -> String {
+    let max_len = subcommands
+        .iter()
+        .map(|subcommand| subcommand.name.len())
+        .max()
+        .unwrap_or(0);
     let mut lines = vec![
         format!("Executor tools: {namespace}"),
         String::new(),
@@ -8374,12 +8393,25 @@ fn format_namespace_help(namespace: &str, subcommands: &[ToolSubcommand]) -> Str
         "COMMANDS".to_string(),
     ];
     for subcommand in subcommands {
+        let padding = " ".repeat(max_len.saturating_sub(subcommand.name.len()) + 4);
         lines.push(format!(
-            "  {:<16}{}",
+            "  {}{}{}",
             subcommand.name,
+            padding,
             subcommand.description.as_deref().unwrap_or("")
         ));
     }
+    lines.push(String::new());
+    lines.push("EXAMPLES".to_string());
+    if let Some(first) = subcommands.first() {
+        lines.push(format!("  {namespace} {} key=value", first.name));
+    }
+    if let Some(second) = subcommands.get(1) {
+        lines.push(format!("  {namespace} {} --key value", second.name));
+    }
+    lines.push(String::new());
+    lines.push("LEARN MORE".to_string());
+    lines.push(format!("  {namespace} <command> --help"));
     lines.push(String::new());
     lines.join("\n")
 }
@@ -8399,6 +8431,13 @@ fn format_subcommand_help(namespace: &str, subcommand: &ToolSubcommand) -> Strin
         "  --json string    Pass all arguments as a JSON object".to_string(),
         "  --help           Show this help".to_string(),
         String::new(),
+        "EXAMPLES".to_string(),
+        format!("  {full} key=value"),
+        format!("  {full} --key value"),
+        format!("  {full} --json '{{\"key\":\"value\"}}'"),
+        format!("  echo '{{\"key\":\"value\"}}' | {full}"),
+        format!("  {full} key=value | jq -r .field"),
+        String::new(),
     ]
     .join("\n")
 }
@@ -8409,14 +8448,223 @@ mod tests {
     use serde_json::json;
 
     fn math_executor() -> JustBashExecutor {
+        JustBashExecutor::new()
+            .with_tool(
+                "math.add",
+                JustBashExecutorTool::new(Some("Add two numbers"), |args| {
+                    let a = args.get("a").and_then(JsonValue::as_i64).unwrap_or(0);
+                    let b = args.get("b").and_then(JsonValue::as_i64).unwrap_or(0);
+                    Ok(json!({ "sum": a + b }))
+                }),
+            )
+            .with_tool(
+                "math.multiply",
+                JustBashExecutorTool::new(Some("Multiply two numbers"), |args| {
+                    let a = args.get("a").and_then(JsonValue::as_i64).unwrap_or(0);
+                    let b = args.get("b").and_then(JsonValue::as_i64).unwrap_or(0);
+                    Ok(json!({ "product": a * b }))
+                }),
+            )
+            .with_tool(
+                "util.echo",
+                JustBashExecutorTool::new(Some("Echo arguments back"), Ok),
+            )
+    }
+
+    fn fail_executor() -> JustBashExecutor {
         JustBashExecutor::new().with_tool(
-            "math.add",
-            JustBashExecutorTool::new(Some("Add two numbers"), |args| {
-                let a = args.get("a").and_then(JsonValue::as_i64).unwrap_or(0);
-                let b = args.get("b").and_then(JsonValue::as_i64).unwrap_or(0);
-                Ok(json!({ "sum": a + b }))
+            "fail.now",
+            JustBashExecutorTool::new(None::<String>, |_args| Err("something broke".to_string())),
+        )
+    }
+
+    fn api_executor() -> JustBashExecutor {
+        JustBashExecutor::new().with_tool(
+            "api.listUsers",
+            JustBashExecutorTool::new(Some("List all users"), |_args| {
+                Ok(json!([{ "name": "Alice" }]))
             }),
         )
+    }
+
+    fn hidden_executor() -> JustBashExecutor {
+        JustBashExecutor::new()
+            .with_tool(
+                "calc.add",
+                JustBashExecutorTool::new(None::<String>, |args| {
+                    let a = args.get("a").and_then(JsonValue::as_i64).unwrap_or(0);
+                    let b = args.get("b").and_then(JsonValue::as_i64).unwrap_or(0);
+                    Ok(json!({ "sum": a + b }))
+                }),
+            )
+            .with_expose_tools_as_commands(false)
+    }
+
+    fn countries_executor() -> JustBashExecutor {
+        JustBashExecutor::new()
+            .with_tool(
+                "countries.country",
+                JustBashExecutorTool::new(Some("Get a country by code"), |args| {
+                    let code = args.get("code").and_then(JsonValue::as_str).unwrap_or("");
+                    Ok(match code {
+                        "JP" => json!({
+                            "name": "Japan",
+                            "capital": "Tokyo",
+                            "continent": "Asia",
+                        }),
+                        "US" => json!({
+                            "name": "United States",
+                            "capital": "Washington D.C.",
+                            "continent": "North America",
+                        }),
+                        "BR" => json!({
+                            "name": "Brazil",
+                            "capital": "Brasilia",
+                            "continent": "South America",
+                        }),
+                        "AR" => json!({
+                            "name": "Argentina",
+                            "capital": "Buenos Aires",
+                            "continent": "South America",
+                        }),
+                        _ => JsonValue::Null,
+                    })
+                }),
+            )
+            .with_tool(
+                "countries.list",
+                JustBashExecutorTool::new(Some("List all countries"), |args| {
+                    let continent = args.get("continent").and_then(JsonValue::as_str);
+                    let mut countries = vec![
+                        json!({"code": "JP", "name": "Japan", "continent": "Asia"}),
+                        json!({"code": "US", "name": "United States", "continent": "North America"}),
+                        json!({"code": "BR", "name": "Brazil", "continent": "South America"}),
+                        json!({"code": "AR", "name": "Argentina", "continent": "South America"}),
+                    ];
+                    if let Some(continent) = continent {
+                        countries.retain(|country| {
+                            country
+                                .get("continent")
+                                .and_then(JsonValue::as_str)
+                                .is_some_and(|value| value == continent)
+                        });
+                    }
+                    Ok(JsonValue::Array(countries))
+                }),
+            )
+    }
+
+    fn parsed_tool_args(args: &[&str], stdin: &str) -> JsonValue {
+        parse_tool_cli_args(
+            &args
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>(),
+            stdin,
+        )
+        .expect("tool CLI args should parse")
+    }
+
+    #[test]
+    fn just_bash_executor_cli_helpers_match_upstream_tool_command_rows() {
+        assert_eq!(camel_to_kebab("listPets"), "list-pets");
+        assert_eq!(camel_to_kebab("getPetById"), "get-pet-by-id");
+        assert_eq!(camel_to_kebab("createUser"), "create-user");
+        assert_eq!(camel_to_kebab("add"), "add");
+        assert_eq!(camel_to_kebab("list"), "list");
+        assert_eq!(camel_to_kebab("parseXMLDocument"), "parse-xml-document");
+        assert_eq!(camel_to_kebab("getHTTPResponse"), "get-http-response");
+        assert_eq!(camel_to_kebab("already-kebab"), "already-kebab");
+
+        assert_eq!(
+            parsed_tool_args(&["a=1", "b=2"], ""),
+            json!({"a": 1, "b": 2})
+        );
+        assert_eq!(
+            parsed_tool_args(&["--a", "1", "--b", "2"], ""),
+            json!({"a": 1, "b": 2})
+        );
+        assert_eq!(
+            parsed_tool_args(&["--a=1", "--b=2"], ""),
+            json!({"a": 1, "b": 2})
+        );
+        assert_eq!(
+            parsed_tool_args(&["--json", r#"{"a":1,"b":2}"#], ""),
+            json!({"a": 1, "b": 2})
+        );
+        assert_eq!(
+            parsed_tool_args(&[r#"--json={"a":1}"#], ""),
+            json!({"a": 1})
+        );
+        assert_eq!(parsed_tool_args(&[], ""), json!({}));
+        let numeric_expected =
+            serde_json::from_str::<JsonValue>(r#"{"a":42,"b":3.14,"c":-5}"#).unwrap();
+        assert_eq!(
+            parsed_tool_args(&["a=42", "b=3.14", "c=-5"], ""),
+            numeric_expected
+        );
+        assert_eq!(
+            parsed_tool_args(&["a=true", "b=false"], ""),
+            json!({"a": true, "b": false})
+        );
+        assert_eq!(parsed_tool_args(&["a=null"], ""), json!({"a": null}));
+        assert_eq!(
+            parsed_tool_args(&["a=[1,2,3]"], ""),
+            json!({"a": [1, 2, 3]})
+        );
+        assert_eq!(
+            parsed_tool_args(&["name=hello", "path=/tmp/file"], ""),
+            json!({"name": "hello", "path": "/tmp/file"})
+        );
+        assert_eq!(parsed_tool_args(&["a="], ""), json!({"a": ""}));
+        assert_eq!(
+            parsed_tool_args(&[r#"{"a":1,"b":2}"#], ""),
+            json!({"a": 1, "b": 2})
+        );
+        assert_eq!(
+            parsed_tool_args(&[], r#"{"a":1,"b":2}"#),
+            json!({"a": 1, "b": 2})
+        );
+        assert_eq!(
+            parsed_tool_args(&["a=99"], r#"{"a":1,"b":2}"#),
+            json!({"a": 99, "b": 2})
+        );
+        assert_eq!(
+            parsed_tool_args(&["--json", r#"{"a":99}"#], r#"{"a":1,"b":2}"#),
+            json!({"a": 99, "b": 2})
+        );
+        assert_eq!(
+            parsed_tool_args(&["--json", r#"{"a":1,"b":2}"#, "a=99"], ""),
+            json!({"a": 99, "b": 2})
+        );
+        assert_eq!(
+            parsed_tool_args(&["--verbose", "--debug"], ""),
+            json!({"verbose": true, "debug": true})
+        );
+        assert_eq!(
+            parsed_tool_args(&["a=1"], "not json at all"),
+            json!({"a": 1})
+        );
+
+        let malformed_json =
+            parse_tool_cli_args(&["--json".to_string(), r#"{"a":"#.to_string()], "");
+        assert!(
+            malformed_json
+                .expect_err("malformed JSON should fail")
+                .contains("Invalid --json value")
+        );
+        let array_json = parse_tool_cli_args(&[r#"--json=[1,2,3]"#.to_string()], "");
+        assert!(
+            array_json
+                .expect_err("array JSON should fail")
+                .contains("--json must be a JSON object")
+        );
+        let malformed_positional = parse_tool_cli_args(&[r#"{"a":"#.to_string()], "");
+        assert!(
+            malformed_positional
+                .expect_err("malformed positional JSON should fail")
+                .contains("Invalid positional JSON")
+        );
     }
 
     #[test]
@@ -8661,8 +8909,128 @@ mod tests {
         assert_eq!(malformed.exit_code, 1);
         assert!(malformed.stderr.contains("Invalid --json value"));
 
+        let piped = bash.exec("math add a=1 b=2 | jq -r .sum", JustBashExecOptions::new());
+        assert_eq!(piped.exit_code, 0);
+        assert_eq!(piped.stdout, "3\n");
+
         let help = bash.exec("math --help", JustBashExecOptions::new());
+        assert_eq!(help.exit_code, 0);
         assert!(help.stdout.contains("Executor tools: math"));
+        assert!(help.stdout.contains("COMMANDS"));
+        assert!(help.stdout.contains("add"));
+        assert!(help.stdout.contains("multiply"));
         assert!(help.stdout.contains("Add two numbers"));
+
+        let namespace_help = bash.exec("math", JustBashExecOptions::new());
+        assert_eq!(namespace_help.exit_code, 0);
+        assert!(namespace_help.stdout.contains("COMMANDS"));
+        assert!(namespace_help.stdout.contains("LEARN MORE"));
+
+        let subcommand_help = bash.exec("math add --help", JustBashExecOptions::new());
+        assert_eq!(subcommand_help.exit_code, 0);
+        assert!(subcommand_help.stdout.contains("Add two numbers"));
+        assert!(subcommand_help.stdout.contains("USAGE"));
+        assert!(subcommand_help.stdout.contains("EXAMPLES"));
+        assert!(subcommand_help.stdout.contains("--json"));
+        assert!(subcommand_help.stdout.contains("math add"));
+
+        let unknown = bash.exec("math nonexistent", JustBashExecOptions::new());
+        assert_eq!(unknown.exit_code, 1);
+        assert!(unknown.stderr.contains("unknown command \"nonexistent\""));
+        assert!(unknown.stderr.contains("--help"));
+
+        let util = bash.exec(
+            "util echo --json '{\"hello\":\"world\"}'",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(util.exit_code, 0);
+        assert_eq!(util.stdout, "{\"hello\":\"world\"}\n");
+
+        let multiply = bash.exec("math multiply a=3 b=4", JustBashExecOptions::new());
+        assert_eq!(multiply.exit_code, 0);
+        assert_eq!(multiply.stdout, "{\"product\":12}\n");
+
+        let chained = bash.exec(
+            "math add a=10 b=20 | jq -r .sum",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(chained.exit_code, 0);
+        assert_eq!(chained.stdout, "30\n");
+
+        let failing = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_executor(fail_executor()),
+        );
+        let failure = failing.exec("fail now", JustBashExecOptions::new());
+        assert_eq!(failure.exit_code, 1);
+        assert!(failure.stderr.contains("something broke"));
+
+        let hidden = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_executor(hidden_executor()),
+        );
+        let hidden_result = hidden.exec("calc add a=1 b=2", JustBashExecOptions::new());
+        assert_eq!(hidden_result.exit_code, 127);
+        assert!(hidden_result.stderr.contains("command not found"));
+
+        let aliases = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_executor(api_executor()),
+        );
+        let kebab = aliases.exec("api list-users", JustBashExecOptions::new());
+        assert_eq!(kebab.exit_code, 0);
+        assert!(kebab.stdout.contains("Alice"));
+        let camel = aliases.exec("api listUsers", JustBashExecOptions::new());
+        assert_eq!(camel.exit_code, 0);
+        assert!(camel.stdout.contains("Alice"));
+    }
+
+    #[test]
+    fn just_bash_executor_custom_source_example_rows_use_virtual_session_state() {
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_executor(countries_executor()),
+        );
+
+        let country = bash.exec(
+            "countries country code=JP | jq -r .name",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(country.exit_code, 0);
+        assert_eq!(country.stdout, "Japan\n");
+
+        let all = bash.exec(
+            "countries list | jq -r 'length'",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(all.exit_code, 0);
+        assert_eq!(all.stdout, "4\n");
+
+        let filtered = bash.exec(
+            "countries list continent='South America' | jq -r 'length'",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(filtered.exit_code, 0);
+        assert_eq!(filtered.stdout, "2\n");
+
+        let detail = bash.exec(
+            "countries country code=US | jq -r .capital",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(detail.exit_code, 0);
+        assert_eq!(detail.stdout, "Washington D.C.\n");
+
+        let write = bash.exec(
+            "countries list continent='South America' > /tmp/countries.json",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(write.exit_code, 0);
+
+        let read = bash.exec(
+            "cat /tmp/countries.json | jq -r 'length'",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(read.exit_code, 0);
+        assert_eq!(read.stdout, "2\n");
+
+        let stored = bash.read_file("/tmp/countries.json").unwrap();
+        assert!(stored.contains("Brazil"));
+        assert!(stored.contains("Argentina"));
     }
 }

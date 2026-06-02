@@ -52,3 +52,27 @@ result = bash.exec("false");
 assert.equal(result.stdout, "");
 assert.equal(result.stderr, "");
 assert.equal(result.exitCode, 1);
+
+result = bash.exec('echo "Hello from CJS consumer"');
+assert.equal(result.stdout, "Hello from CJS consumer\n");
+assert.equal(result.exitCode, 0);
+
+const websiteStyle = new Bash({
+  files: {
+    "/home/user/greeting.txt": "Hello\n",
+  },
+});
+result = websiteStyle.exec('echo "friend" >> greeting.txt');
+assert.equal(result.exitCode, 0);
+result = websiteStyle.exec("cat greeting.txt");
+assert.equal(result.stdout, "Hello\nfriend\n");
+
+const exampleStyle = new Bash({
+  files: {
+    "/data/sample.json": '{"name":"Alice","age":30,"city":"NYC"}',
+  },
+  cwd: "/data",
+});
+result = exampleStyle.exec("cat sample.json | jq -r .name");
+assert.equal(result.exitCode, 0);
+assert.equal(result.stdout, "Alice\n");
