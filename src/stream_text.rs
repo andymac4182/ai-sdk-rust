@@ -11101,6 +11101,50 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_result_to_ui_message_stream_suppresses_start_and_finish_when_disabled() {
+        // Upstream parity: packages/ai to-ui-message-stream.test.ts
+        // "suppresses start/finish chunks when sendStart/sendFinish are false".
+        // Feed the raw TextStreamParts directly (start, text-start, text-end,
+        // finish) so the mapping mirrors the upstream input exactly.
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let mut result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Say hello")],
+        )));
+
+        result.parts = vec![
+            TextStreamPart::Start(TextStreamStartPart::new()),
+            TextStreamPart::TextStart(LanguageModelTextStart::new("t1")),
+            TextStreamPart::TextEnd(LanguageModelTextEnd::new("t1")),
+            TextStreamPart::Finish(TextStreamFinishPart::new(
+                FinishReason::Stop,
+                Some("stop".to_string()),
+                usage(),
+            )),
+        ];
+
+        let chunks = result.to_ui_message_stream_with_options(
+            StreamTextUiMessageStreamOptions::new()
+                .with_send_start(false)
+                .with_send_finish(false),
+        );
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                { "type": "text-start", "id": "t1" },
+                { "type": "text-end", "id": "t1" }
+            ])
+        );
+    }
+
+    #[test]
     fn stream_text_result_to_ui_message_stream_supports_send_reasoning_true() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
@@ -11274,6 +11318,81 @@ mod tests {
                 ]
             })
         );
+        assert_eq!(
+            finish_events[0].messages[1],
+            finish_events[0].response_message
+        );
+    }
+
+    #[test]
+    fn stream_text_result_to_ui_message_stream_injects_generated_message_id_and_calls_on_finish() {
+        // Upstream parity: packages/ai to-ui-message-stream.test.ts
+        // "injects generated message id and calls onFinish". The original
+        // messages end with a user message, so the response is a fresh
+        // assistant message (isContinuation=false) with the generated id.
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("t1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("t1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("t1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Say hello")],
+        )));
+
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+        let generate_calls = Arc::new(Mutex::new(0usize));
+        let generate_calls_for_callback = Arc::clone(&generate_calls);
+        let original_user = UiMessage::new("user-msg-1", UiMessageRole::User)
+            .with_part(json!({ "type": "text", "text": "Hi" }));
+
+        let chunks = result.to_ui_message_stream_with_options(
+            StreamTextUiMessageStreamOptions::new()
+                .with_original_messages([original_user.clone()])
+                .with_generate_message_id(move || {
+                    *generate_calls_for_callback.lock().expect("generate lock") += 1;
+                    "msg-123".to_string()
+                })
+                .with_on_finish(move |event| {
+                    finish_events_for_callback
+                        .lock()
+                        .expect("finish events lock")
+                        .push(event);
+                }),
+        );
+
+        assert_eq!(
+            serde_json::to_value(&chunks[0]).expect("chunk serializes"),
+            json!({ "type": "start", "messageId": "msg-123" })
+        );
+        assert_eq!(*generate_calls.lock().expect("generate lock"), 1);
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(!finish_events[0].is_aborted);
+        assert!(!finish_events[0].is_continuation);
+        assert_eq!(finish_events[0].finish_reason, Some(FinishReason::Stop));
+        assert_eq!(
+            serde_json::to_value(&finish_events[0].response_message).expect("message serializes"),
+            json!({
+                "id": "msg-123",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello", "state": "done" }
+                ]
+            })
+        );
+        assert_eq!(finish_events[0].messages.len(), 2);
+        assert_eq!(finish_events[0].messages[0].id, "user-msg-1");
         assert_eq!(
             finish_events[0].messages[1],
             finish_events[0].response_message
