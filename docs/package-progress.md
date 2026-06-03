@@ -4,16 +4,16 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 - Displayed package rows: 54
 - Average estimated completion: 87.9%
-- Portable package average: 85.1%
+- Portable package average: 85.2%
 - Closed package rows: 45 / 54
 - Strict portable verified rows: 35 / 44
 - In-progress rows: 9
 - Not-started rows: 0
 - Strict inventory full upstream cases scanned: 9013
-- Strict inventory full portable cases mapped: 6433 / 7670
-- Strict inventory full portable cases unmapped: 1237
-- Displayed-row strict portable test cases mapped: 6115 / 7267
-- Displayed-row strict portable test cases unmapped: 1152
+- Strict inventory full portable cases mapped: 6462 / 7670
+- Strict inventory full portable cases unmapped: 1208
+- Displayed-row strict portable test cases mapped: 6144 / 7267
+- Displayed-row strict portable test cases unmapped: 1123
 
 ## 100% Closed
 
@@ -71,7 +71,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | --- | ---: | --- | --- | --- |
 | `ai` | 60% | In progress | root core SDK package | strict test inventory: 924 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/gateway` | 90% | In progress | provider package | strict test inventory: 38 portable upstream cases still need named Rust tests; sample failing IDs:... |
-| `@ai-sdk/google` | 94% | In progress | provider package | strict test inventory: 30 portable upstream cases still need named Rust tests; sample failing IDs:... |
+| `@ai-sdk/google` | 99% | In progress | provider package | strict test inventory: 1 portable upstream cases still need named Rust tests; sample failing IDs: `packages-google-0291` |
 | `@ai-sdk/azure` | 0% | In progress | provider package | strict test inventory: 55 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/baseten` | 0% | In progress | provider package | strict test inventory: 25 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/cerebras` | 0% | In progress | provider package | strict test inventory: 13 portable upstream cases still need named Rust tests; sample failing IDs:... |
