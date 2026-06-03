@@ -10,11 +10,11 @@ Generated from upstream `vercel/ai` after `npx opensrc fetch https://github.com/
 | Local upstream source | `/Users/andrewmcclenaghan/.opensrc/repos/github.com/vercel/ai/main` |
 | Test files scanned | 561 |
 | Upstream cases scanned | 9013 |
-| Portable cases mapped to named Rust tests | 6186 |
-| Portable cases still missing named Rust tests | 1484 |
+| Portable cases mapped to named Rust tests | 6187 |
+| Portable cases still missing named Rust tests | 1483 |
 | JavaScript-only exceptions | 924 |
 | Type-system-impossible exceptions | 419 |
-| Portable mapped denominator | 6186 / 7670 |
+| Portable mapped denominator | 6187 / 7670 |
 
 This inventory is intentionally stricter than package-level progress. A package can only claim case-level parity after every portable upstream row below is either `portable-mapped` to a named Rust test or explicitly classified as `js-only-documented` or `type-system-impossible`.
 
@@ -79,7 +79,7 @@ This inventory is intentionally stricter than package-level progress. A package 
 | `packages/voyage` | `@ai-sdk/voyage` | provider package | `verified` | `src/voyage.rs` | 3 | 21 | 21 | 0 | 0 | 0 | none |
 | `packages/vue` | `@ai-sdk/vue` | JavaScript framework adapter | `js-only-documented` | none | 4 | 40 | 0 | 0 | 40 | 0 | none |
 | `packages/workflow` | `@ai-sdk/workflow` | AI SDK workflow package | `verified` | crates/ai-sdk-workflow; crates/workflow facade | 8 | 144 | 139 | 0 | 2 | 3 | none |
-| `packages/xai` | `@ai-sdk/xai` | provider package | `verified` | `src/xai.rs`, `src/openai_compatible.rs`, `src/open_responses.rs` | 14 | 338 | 337 | 1 | 0 | 0 | `packages-xai-0136` |
+| `packages/xai` | `@ai-sdk/xai` | provider package | `verified` | `src/xai.rs`, `src/openai_compatible.rs`, `src/open_responses.rs` | 14 | 338 | 338 | 0 | 0 | 0 | none |
 | `examples/ai-functions` | `examples/ai-functions` | example | `not-started` | unassigned | 25 | 64 | 0 | 20 | 0 | 44 | `examples-ai-functions-0045`; `examples-ai-functions-0046`; `examples-ai-functions-0047`; `examples-ai-functions-0048`; `examples-ai-functions-0049` |
 
 ## Case Inventory
@@ -8832,7 +8832,7 @@ This inventory is intentionally stricter than package-level progress. A package 
 | `packages-xai-0133` | `packages/xai` | `packages/xai/src/responses/xai-responses-prepare-tools.test.ts:6` it should prepare web_search tool with no args | `portable-mapped` | `src/xai.rs`, `src/openai_compatible.rs`, `src/open_responses.rs` | `xai_responses_model_prepares_server_tools_custom_tool_and_usage`; `xai_responses_tool_ids_input_usage_stream_metadata_are_xai_specific` | docs/ai-02-openai-compatible-providers.md | Mapped by the AI-02 exact case map. |
 | `packages-xai-0134` | `packages/xai` | `packages/xai/src/responses/xai-responses-prepare-tools.test.ts:35` it should prepare web_search tool with allowed domains | `portable-mapped` | `src/xai.rs`, `src/openai_compatible.rs`, `src/open_responses.rs` | `xai_responses_model_prepares_server_tools_custom_tool_and_usage`; `xai_responses_tool_ids_input_usage_stream_metadata_are_xai_specific` | docs/ai-02-openai-compatible-providers.md | Mapped by the AI-02 exact case map. |
 | `packages-xai-0135` | `packages/xai` | `packages/xai/src/responses/xai-responses-prepare-tools.test.ts:65` it should prepare web_search tool with excluded domains | `portable-mapped` | `src/xai.rs`, `src/openai_compatible.rs`, `src/open_responses.rs` | `xai_responses_model_prepares_server_tools_custom_tool_and_usage`; `xai_responses_tool_ids_input_usage_stream_metadata_are_xai_specific` | docs/ai-02-openai-compatible-providers.md | Mapped by the AI-02 exact case map. |
-| `packages-xai-0136` | `packages/xai` | `packages/xai/src/responses/xai-responses-prepare-tools.test.ts:94` it should prepare web_search tool with image search | `portable-unmapped` | `src/xai.rs`, `src/openai_compatible.rs`, `src/open_responses.rs` | missing | strict inventory default | Portable upstream case still needs a named Rust test or an explicit non-portable exception. |
+| `packages-xai-0136` | `packages/xai` | `packages/xai/src/responses/xai-responses-prepare-tools.test.ts:94` it should prepare web_search tool with image search | `portable-mapped` | `src/xai.rs`, `src/openai_compatible.rs`, `src/open_responses.rs` | `xai_responses_web_search_tool_maps_enable_image_search` | docs/ai-02-openai-compatible-providers.md | Mapped by the AI-02 exact case map. |
 | `packages-xai-0137` | `packages/xai` | `packages/xai/src/responses/xai-responses-prepare-tools.test.ts:121` it should prepare web_search tool with image understanding | `portable-mapped` | `src/xai.rs`, `src/openai_compatible.rs`, `src/open_responses.rs` | `xai_responses_model_prepares_server_tools_custom_tool_and_usage`; `xai_responses_tool_ids_input_usage_stream_metadata_are_xai_specific` | docs/ai-02-openai-compatible-providers.md | Mapped by the AI-02 exact case map. |
 | `packages-xai-0138` | `packages/xai` | `packages/xai/src/responses/xai-responses-prepare-tools.test.ts:150` it should prepare x_search tool with no args | `portable-mapped` | `src/xai.rs`, `src/openai_compatible.rs`, `src/open_responses.rs` | `xai_responses_model_prepares_server_tools_custom_tool_and_usage`; `xai_responses_tool_ids_input_usage_stream_metadata_are_xai_specific` | docs/ai-02-openai-compatible-providers.md | Mapped by the AI-02 exact case map. |
 | `packages-xai-0139` | `packages/xai` | `packages/xai/src/responses/xai-responses-prepare-tools.test.ts:177` it should prepare x_search tool with allowed handles | `portable-mapped` | `src/xai.rs`, `src/openai_compatible.rs`, `src/open_responses.rs` | `xai_responses_model_prepares_server_tools_custom_tool_and_usage`; `xai_responses_tool_ids_input_usage_stream_metadata_are_xai_specific` | docs/ai-02-openai-compatible-providers.md | Mapped by the AI-02 exact case map. |
