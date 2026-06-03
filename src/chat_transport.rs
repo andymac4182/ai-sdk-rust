@@ -4324,6 +4324,63 @@ mod tests {
     }
 
     #[test]
+    fn http_chat_transport_includes_body_in_request_by_default() {
+        let transport = HttpChatTransport::with_options(
+            HttpChatTransportOptions::new()
+                .with_api("http://localhost/api/chat")
+                .with_body(JsonObject::from_iter([(
+                    "someData".to_string(),
+                    json!(true),
+                )])),
+        );
+        let send = ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, "c123")
+            .with_message_id("m123")
+            .with_messages([UiMessage::new("m123", crate::UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Hello, world!" }))]);
+
+        let request = transport.build_send_messages_request(&send, None);
+
+        assert_eq!(request.method, HttpChatTransportMethod::Post);
+        assert_eq!(request.api, "http://localhost/api/chat");
+        assert_eq!(
+            request.body,
+            Some(json!({
+                "id": "c123",
+                "messageId": "m123",
+                "messages": [
+                    {
+                        "id": "m123",
+                        "role": "user",
+                        "parts": [{ "type": "text", "text": "Hello, world!" }]
+                    }
+                ],
+                "someData": true,
+                "trigger": "submit-message"
+            }))
+        );
+    }
+
+    #[test]
+    fn http_chat_transport_includes_headers_in_request_by_default() {
+        let transport = HttpChatTransport::with_options(
+            HttpChatTransportOptions::new()
+                .with_api("http://localhost/api/chat")
+                .with_header("X-Test-Header", "test-value"),
+        );
+        let send = ChatTransportSendOptions::new(ChatTransportTrigger::SubmitMessage, "c123")
+            .with_message_id("m123")
+            .with_messages([UiMessage::new("m123", crate::UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "Hello, world!" }))]);
+
+        let request = transport.build_send_messages_request(&send, None);
+
+        assert_eq!(
+            request.headers.get("x-test-header").map(String::as_str),
+            Some("test-value")
+        );
+    }
+
+    #[test]
     fn http_chat_transport_includes_body_in_request_when_function_is_provided() {
         let transport = HttpChatTransport::with_options(
             HttpChatTransportOptions::new()
