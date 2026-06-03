@@ -2076,6 +2076,92 @@ mod tests {
     }
 
     #[test]
+    fn telemetry_dispatcher_publishes_on_start_lifecycle_event_without_integrations() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+        let diagnostics = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&diagnostics);
+        let _subscription = subscribe_telemetry_diagnostics(move |message| {
+            captured.lock().expect("diagnostics lock").push(message);
+        });
+
+        create_telemetry_dispatcher(Some(TelemetryOptions::new()))
+            .on_start(json!({ "callId": "diagnostic-channel-without-integrations" }));
+
+        let diagnostics = diagnostics.lock().expect("diagnostics lock");
+        let published: Vec<_> = diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.event.event.get("callId")
+                    == Some(&json!("diagnostic-channel-without-integrations"))
+            })
+            .collect();
+
+        assert_eq!(published.len(), 1);
+        let diagnostic = published[0];
+        assert_eq!(diagnostic.kind, TelemetryEventKind::OnStart);
+        assert_eq!(diagnostic.event.kind, TelemetryEventKind::OnStart);
+        assert_eq!(
+            diagnostic.event.event,
+            json!({ "callId": "diagnostic-channel-without-integrations" })
+        );
+        assert_eq!(diagnostic.event.function_id, None);
+        assert_eq!(diagnostic.event.record_inputs, None);
+        assert_eq!(diagnostic.event.record_outputs, None);
+    }
+
+    #[test]
+    fn telemetry_dispatcher_applies_telemetry_settings_per_call() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+        let diagnostics = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&diagnostics);
+        let _subscription = subscribe_telemetry_diagnostics(move |message| {
+            captured.lock().expect("diagnostics lock").push(message);
+        });
+
+        let enabled = create_telemetry_dispatcher(Some(
+            TelemetryOptions::new().with_function_id("enabled-function"),
+        ));
+        let disabled = create_telemetry_dispatcher(Some(
+            TelemetryOptions::new()
+                .with_enabled(false)
+                .with_function_id("disabled-function"),
+        ));
+
+        disabled.on_start(json!({ "callId": "diagnostic-channel-disabled-call" }));
+        enabled.on_start(json!({ "callId": "diagnostic-channel-enabled-call" }));
+
+        let diagnostics = diagnostics.lock().expect("diagnostics lock");
+        let published: Vec<_> = diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                let call_id = diagnostic
+                    .event
+                    .event
+                    .get("callId")
+                    .and_then(JsonValue::as_str);
+                call_id == Some("diagnostic-channel-enabled-call")
+                    || call_id == Some("diagnostic-channel-disabled-call")
+            })
+            .collect();
+
+        assert_eq!(published.len(), 1);
+        let diagnostic = published[0];
+        assert_eq!(diagnostic.kind, TelemetryEventKind::OnStart);
+        assert_eq!(
+            diagnostic.event.event,
+            json!({ "callId": "diagnostic-channel-enabled-call" })
+        );
+        assert_eq!(
+            diagnostic.event.function_id.as_deref(),
+            Some("enabled-function")
+        );
+        assert_eq!(diagnostic.event.record_inputs, None);
+        assert_eq!(diagnostic.event.record_outputs, None);
+    }
+
+    #[test]
     fn telemetry_dispatcher_swallows_callback_panics_and_continues() {
         let _guard = telemetry_test_guard();
         reset_telemetry_state_for_tests();
