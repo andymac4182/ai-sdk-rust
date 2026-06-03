@@ -733,3 +733,42 @@ exercises the corresponding upstream behavior deterministically.
 | `packages/voyage/src/voyage-provider.test.ts` | should create reranking model with correct provider and modelId | `voyage_provider_creates_reranking_model_with_object_warning_and_options` | none |
 | `packages/voyage/src/voyage-provider.test.ts` | should throw NoSuchModelError for languageModel | `voyage_provider_reports_unsupported_language_and_image_models` | none |
 | `packages/voyage/src/voyage-provider.test.ts` | should throw NoSuchModelError for imageModel | `voyage_provider_reports_unsupported_language_and_image_models` | none |
+
+## Luma Exact Case Map
+
+Row-level strict mapping for portable `packages/luma` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named Rust test in
+`crates/ai-sdk-luma/src/lib.rs` that exercises the same behavior against the
+real Luma image model request mapping, response parsing, and provider wiring.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/luma/src/luma-image-model.test.ts` | should pass the correct parameters including aspect ratio | `luma_provider_creates_image_model_with_headers_body_and_metadata` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should call the correct urls in sequence | `luma_provider_creates_image_model_with_headers_body_and_metadata` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should pass headers | `luma_provider_creates_image_model_with_headers_body_and_metadata` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should not pass providerOptions.{pollIntervalMillis,maxPollAttempts} | `luma_provider_creates_image_model_with_headers_body_and_metadata` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should handle API errors | `luma_image_model_maps_api_and_status_errors_to_metadata` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should handle failed generation state | `luma_image_model_maps_api_and_status_errors_to_metadata` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should return warnings for unsupported parameters | `luma_image_model_maps_reference_images_and_warnings` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should include timestamp, headers and modelId in response | `luma_provider_creates_image_model_with_headers_body_and_metadata` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should expose correct provider and model information | `luma_provider_reports_unsupported_model_families_and_trait_image` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should send image by default when URL file is provided | `luma_image_model_sends_image_by_default_when_url_file_is_provided` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should send modify_image when referenceType is set | `luma_image_model_sends_style_and_modify_image_reference_modes` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should send style when referenceType is style | `luma_image_model_sends_style_and_modify_image_reference_modes` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should send character when referenceType is character | `luma_image_model_sends_character_with_default_identity` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should send character with custom identity id from images config | `luma_image_model_sends_character_with_custom_identity_id_from_images_config` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should send character with multiple identities from images config | `luma_image_model_maps_reference_images_and_warnings` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should support multiple images for image | `luma_image_model_supports_multiple_images_for_image` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should use custom weights from images config | `luma_image_model_uses_custom_weights_from_images_config` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should throw error when mask is provided | `luma_image_model_reports_editing_limits_for_masks_base64_and_too_many_images` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should throw error when base64 file data is provided | `luma_image_model_reports_editing_limits_for_masks_base64_and_too_many_images` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should throw error when base64 mask data is provided | `luma_image_model_throws_when_base64_mask_data_is_provided` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should throw error when more than 4 images for image | `luma_image_model_reports_editing_limits_for_masks_base64_and_too_many_images` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should throw error when multiple files for modify_image | `luma_image_model_throws_when_multiple_files_for_modify_image` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should parse response with image references | `luma_image_model_parses_response_with_image_references` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should parse response with style references | `luma_image_model_parses_response_with_style_references` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should parse response with character references | `luma_image_model_parses_response_with_character_references` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should parse response with modify image reference | `luma_image_model_parses_response_with_modify_image_and_multiple_reference_types` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should parse response with multiple reference types | `luma_image_model_parses_response_with_modify_image_and_multiple_reference_types` | none |
+| `packages/luma/src/luma-provider.test.ts` | should construct an image model with default configuration | `luma_provider_settings_serde_accepts_upstream_shape` | none |
+| `packages/luma/src/luma-provider.test.ts` | should respect custom configuration options | `luma_provider_creates_image_model_with_headers_body_and_metadata` | none |

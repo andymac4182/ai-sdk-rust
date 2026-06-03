@@ -1403,6 +1403,172 @@ mod tests {
     }
 
     #[test]
+    fn luma_image_model_sends_character_with_default_identity() {
+        let (body, _warnings, _poll) = luma_image_request_body(
+            "test-model",
+            &ImageModelCallOptions::new(1)
+                .with_prompt("A warrior")
+                .with_files(vec![
+                    ImageModelFile::url(
+                        Url::parse("https://example.com/person1.jpg").expect("valid URL"),
+                    ),
+                    ImageModelFile::url(
+                        Url::parse("https://example.com/person2.jpg").expect("valid URL"),
+                    ),
+                ])
+                .with_provider_options(luma_provider_options(json!({
+                    "referenceType": "character"
+                }))),
+        )
+        .expect("character request body maps");
+
+        assert_eq!(
+            body,
+            json!({
+                "character": {
+                    "identity0": {
+                        "images": [
+                            "https://example.com/person1.jpg",
+                            "https://example.com/person2.jpg"
+                        ]
+                    }
+                },
+                "model": "test-model",
+                "prompt": "A warrior"
+            })
+        );
+    }
+
+    #[test]
+    fn luma_image_model_sends_character_with_custom_identity_id_from_images_config() {
+        let (body, _warnings, _poll) = luma_image_request_body(
+            "test-model",
+            &ImageModelCallOptions::new(1)
+                .with_prompt("A woman with a cat")
+                .with_files(vec![ImageModelFile::url(
+                    Url::parse("https://example.com/person.jpg").expect("valid URL"),
+                )])
+                .with_provider_options(luma_provider_options(json!({
+                    "referenceType": "character",
+                    "images": [{"id": "identity0"}]
+                }))),
+        )
+        .expect("character request body maps");
+
+        assert_eq!(
+            body,
+            json!({
+                "character": {
+                    "identity0": {
+                        "images": ["https://example.com/person.jpg"]
+                    }
+                },
+                "model": "test-model",
+                "prompt": "A woman with a cat"
+            })
+        );
+    }
+
+    #[test]
+    fn luma_image_model_supports_multiple_images_for_image() {
+        let (body, _warnings, _poll) = luma_image_request_body(
+            "test-model",
+            &ImageModelCallOptions::new(1)
+                .with_prompt("Combine these concepts")
+                .with_files(vec![
+                    ImageModelFile::url(
+                        Url::parse("https://example.com/input1.jpg").expect("valid URL"),
+                    ),
+                    ImageModelFile::url(
+                        Url::parse("https://example.com/input2.jpg").expect("valid URL"),
+                    ),
+                ]),
+        )
+        .expect("multi-image request body maps");
+
+        assert_eq!(
+            body,
+            json!({
+                "image": [
+                    {"url": "https://example.com/input1.jpg", "weight": 0.85},
+                    {"url": "https://example.com/input2.jpg", "weight": 0.85}
+                ],
+                "model": "test-model",
+                "prompt": "Combine these concepts"
+            })
+        );
+    }
+
+    #[test]
+    fn luma_image_model_uses_custom_weights_from_images_config() {
+        let (body, _warnings, _poll) = luma_image_request_body(
+            "test-model",
+            &ImageModelCallOptions::new(1)
+                .with_prompt("Styled image")
+                .with_files(vec![ImageModelFile::url(
+                    Url::parse("https://example.com/input.jpg").expect("valid URL"),
+                )])
+                .with_provider_options(luma_provider_options(json!({
+                    "images": [{"weight": 0.5}]
+                }))),
+        )
+        .expect("weighted image request body maps");
+
+        assert_eq!(
+            body,
+            json!({
+                "image": [
+                    {"url": "https://example.com/input.jpg", "weight": 0.5}
+                ],
+                "model": "test-model",
+                "prompt": "Styled image"
+            })
+        );
+    }
+
+    #[test]
+    fn luma_image_model_throws_when_base64_mask_data_is_provided() {
+        let error = luma_image_request_body(
+            "test-model",
+            &ImageModelCallOptions::new(1)
+                .with_prompt("Edit with mask")
+                .with_files(vec![ImageModelFile::url(
+                    Url::parse("https://example.com/input.jpg").expect("valid URL"),
+                )])
+                .with_mask(ImageModelFile::file(
+                    "image/png",
+                    FileDataContent::Bytes(vec![255, 255, 255, 0]),
+                )),
+        )
+        .expect_err("base64 mask is rejected");
+
+        assert!(error.contains("does not support mask-based image editing"));
+    }
+
+    #[test]
+    fn luma_image_model_throws_when_multiple_files_for_modify_image() {
+        let error = luma_image_request_body(
+            "test-model",
+            &ImageModelCallOptions::new(1)
+                .with_prompt("Edit multiple images")
+                .with_files(vec![
+                    ImageModelFile::url(
+                        Url::parse("https://example.com/input1.jpg").expect("valid URL"),
+                    ),
+                    ImageModelFile::url(
+                        Url::parse("https://example.com/input2.jpg").expect("valid URL"),
+                    ),
+                ])
+                .with_provider_options(luma_provider_options(json!({
+                    "referenceType": "modify_image"
+                }))),
+        )
+        .expect_err("multiple modify_image inputs rejected");
+
+        assert!(error.contains("modify_image only supports a single input image"));
+    }
+
+    #[test]
     fn luma_image_model_parses_response_with_image_references() {
         assert_luma_completed_response_parses(json!({
             "generation_type": "image",
