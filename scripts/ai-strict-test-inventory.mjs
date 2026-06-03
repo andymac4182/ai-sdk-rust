@@ -614,7 +614,7 @@ function parseFoundationalMappings(
     }
 
     const values = Object.fromEntries(headers.map((header, index) => [header, cells[index]]));
-    const location = values['Upstream case']?.match(/`(packages\/[^`]+):(\d+)`/);
+    const location = values['Upstream case']?.match(/`((?:packages|examples)\/[^`]+):(\d+)`/);
     if (!location) {
       continue;
     }
