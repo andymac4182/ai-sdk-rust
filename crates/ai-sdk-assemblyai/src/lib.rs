@@ -1117,7 +1117,8 @@ fn assemblyai_provider_api_response(
 mod tests {
     use super::{
         AssemblyAIProvider, AssemblyAIProviderSettings, AssemblyAITransport,
-        AssemblyAITransportFuture, DEFAULT_ASSEMBLYAI_BASE_URL, assemblyai, create_assemblyai,
+        AssemblyAITransportFuture, DEFAULT_ASSEMBLYAI_BASE_URL, assemblyai, assemblyai_error_data,
+        create_assemblyai,
     };
     use ai_sdk_rust::{
         FileDataContent, ModelType, Provider, ProviderAbortController, ProviderApiRequest,
@@ -1609,5 +1610,41 @@ mod tests {
         assert_eq!(settings.headers.get("x-extra"), Some(&"1".to_string()));
         assert_eq!(settings.polling_interval, Some(10));
         assert_eq!(DEFAULT_ASSEMBLYAI_BASE_URL, "https://api.assemblyai.com");
+    }
+
+    #[test]
+    fn assemblyai_error_schema_parses_resource_exhausted_error() {
+        let nested_message = "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"Resource has been exhausted (e.g. check quota).\",\n    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n";
+        let raw = json!({
+            "error": {
+                "message": nested_message,
+                "code": 429,
+            }
+        });
+
+        let parsed = assemblyai_error_data(&raw).expect("resource exhausted error parses");
+
+        assert_eq!(parsed.error.message, nested_message);
+        assert_eq!(parsed.error.code, 429);
+    }
+
+    #[test]
+    fn assemblyai_uses_real_date_when_no_custom_date_provider_is_specified() {
+        let before = OffsetDateTime::now_utc();
+        let (_requests, transport) = assemblyai_success_transport();
+        let provider =
+            create_assemblyai(AssemblyAIProviderSettings::new().with_api_key("test-api-key"))
+                .with_transport(transport);
+
+        let result = poll_ready(provider.transcription("best").do_generate(
+            TranscriptionModelCallOptions::new(FileDataContent::Bytes(vec![1, 2, 3]), "audio/wav"),
+        ));
+        let after = OffsetDateTime::now_utc();
+
+        assert_eq!(result.response.model_id, "best");
+        // The default date provider must use the real clock, not the unix epoch.
+        assert!(result.response.timestamp >= before);
+        assert!(result.response.timestamp <= after);
+        assert_ne!(result.response.timestamp, fixed_timestamp());
     }
 }
