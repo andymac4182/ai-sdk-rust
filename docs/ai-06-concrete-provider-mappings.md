@@ -48,7 +48,7 @@ the strict inventory generator.
 | `packages/replicate` | `crates/ai-sdk-replicate` | 63 |
 | `packages/revai` | `crates/ai-sdk-revai` | 6 |
 | `packages/togetherai` | `src/togetherai.rs`, `src/openai_compatible.rs` | 10 |
-| `packages/voyage` | `src/voyage.rs` | 21 |
+| `packages/voyage` | `src/voyage.rs` | 0 |
 
 ## Alibaba Exact Case Map
 
@@ -672,3 +672,29 @@ All 55 portable `packages/azure` upstream cases map to named Rust tests in `crat
 | `packages/perplexity/src/perplexity-language-model.test.ts` | should stream images | `perplexity_provider_streams_sources_and_usage` | none |
 | `packages/perplexity/src/perplexity-language-model.test.ts` | should stream extended usage | `perplexity_provider_streams_sources_and_usage` | none |
 | `packages/perplexity/src/perplexity-language-model.test.ts` | should stream raw chunks | `perplexity_provider_streams_raw_chunks` | none |
+
+## Voyage Exact Case Map
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should send request with stringified json documents | `voyage_provider_creates_reranking_model_with_object_warning_and_options` | none |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should send request with the correct headers | `voyage_provider_creates_reranking_model_with_object_warning_and_options` | none |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should return result with warnings | `voyage_provider_creates_reranking_model_with_object_warning_and_options` | none |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should return result with the correct ranking | `voyage_provider_creates_reranking_model_with_object_warning_and_options; voyage_reranking_model_with_text_documents_sends_plain_strings_without_warnings` | none |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should return result with the correct response body | `voyage_reranking_model_with_text_documents_sends_plain_strings_without_warnings` | none |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should send request with text documents | `voyage_reranking_model_with_text_documents_sends_plain_strings_without_warnings` | none |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should return result without warnings | `voyage_reranking_model_with_text_documents_sends_plain_strings_without_warnings` | none |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should send request with the correct headers | `voyage_reranking_model_with_text_documents_sends_plain_strings_without_warnings` | none |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should return result with the correct ranking | `voyage_reranking_model_with_text_documents_sends_plain_strings_without_warnings` | none |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should return result with the correct response body | `voyage_reranking_model_with_text_documents_sends_plain_strings_without_warnings` | none |
+| `packages/voyage/src/voyage-embedding-model.test.ts` | should extract embedding | `voyage_provider_creates_embedding_model_with_options_headers_and_sorted_results` | none |
+| `packages/voyage/src/voyage-embedding-model.test.ts` | should expose the raw response | `voyage_provider_creates_embedding_model_with_options_headers_and_sorted_results` | none |
+| `packages/voyage/src/voyage-embedding-model.test.ts` | should extract usage | `voyage_provider_creates_embedding_model_with_options_headers_and_sorted_results` | none |
+| `packages/voyage/src/voyage-embedding-model.test.ts` | should pass the model and the values | `voyage_provider_creates_embedding_model_with_options_headers_and_sorted_results` | none |
+| `packages/voyage/src/voyage-embedding-model.test.ts` | should pass the input_type setting | `voyage_provider_creates_embedding_model_with_options_headers_and_sorted_results` | none |
+| `packages/voyage/src/voyage-embedding-model.test.ts` | should pass the output_dimension setting | `voyage_provider_creates_embedding_model_with_options_headers_and_sorted_results` | none |
+| `packages/voyage/src/voyage-embedding-model.test.ts` | should pass headers | `voyage_provider_creates_embedding_model_with_options_headers_and_sorted_results` | none |
+| `packages/voyage/src/voyage-provider.test.ts` | should create embedding model with correct provider and modelId | `voyage_provider_creates_embedding_model_with_options_headers_and_sorted_results` | none |
+| `packages/voyage/src/voyage-provider.test.ts` | should create reranking model with correct provider and modelId | `voyage_provider_creates_reranking_model_with_object_warning_and_options` | none |
+| `packages/voyage/src/voyage-provider.test.ts` | should throw NoSuchModelError for languageModel | `voyage_provider_reports_unsupported_language_and_image_models` | none |
+| `packages/voyage/src/voyage-provider.test.ts` | should throw NoSuchModelError for imageModel | `voyage_provider_reports_unsupported_language_and_image_models` | none |

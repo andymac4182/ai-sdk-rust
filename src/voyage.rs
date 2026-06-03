@@ -1335,6 +1335,111 @@ mod tests {
     }
 
     #[test]
+    fn voyage_reranking_model_with_text_documents_sends_plain_strings_without_warnings() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: VoyageTransport = Arc::new(move |request| -> VoyageTransportFuture {
+            *captured_request_for_transport
+                .lock()
+                .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+            Box::pin(ready(Ok(ProviderApiResponse::text(
+                200,
+                "OK",
+                json!({
+                    "object": "list",
+                    "data": [
+                        {
+                            "index": 1,
+                            "relevance_score": 0.5703125
+                        },
+                        {
+                            "index": 0,
+                            "relevance_score": 0.255859375
+                        }
+                    ],
+                    "model": "rerank-2.5",
+                    "usage": {
+                        "total_tokens": 12
+                    }
+                })
+                .to_string(),
+            ))))
+        });
+        let model = VoyageProvider::new()
+            .with_api_key("test-api-key")
+            .with_transport(transport)
+            .reranking_model("rerank-2.5");
+        let result = poll_ready(
+            model.do_rerank(
+                RerankingModelCallOptions::new(
+                    RerankingModelDocuments::text(vec![
+                        "sunny day at the beach".to_string(),
+                        "rainy day in the city".to_string(),
+                    ]),
+                    "rainy day",
+                )
+                .with_top_n(2),
+            ),
+        );
+
+        // Text documents produce no compatibility warnings (unlike object documents).
+        assert!(result.warnings.is_empty());
+
+        // Ranking is mapped from the API data array, preserving order and scores.
+        assert_eq!(result.ranking.len(), 2);
+        assert_eq!(result.ranking[0].index, 1);
+        assert_eq!(result.ranking[0].relevance_score, 0.5703125);
+        assert_eq!(result.ranking[1].index, 0);
+        assert_eq!(result.ranking[1].relevance_score, 0.255859375);
+
+        // The raw response body is exposed verbatim.
+        assert_eq!(
+            result
+                .response
+                .as_ref()
+                .and_then(|response| response.body.as_ref()),
+            Some(&json!({
+                "object": "list",
+                "data": [
+                    { "index": 1, "relevance_score": 0.5703125 },
+                    { "index": 0, "relevance_score": 0.255859375 }
+                ],
+                "model": "rerank-2.5",
+                "usage": { "total_tokens": 12 }
+            }))
+        );
+
+        // Text documents are sent as plain strings (not stringified JSON objects).
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        assert_eq!(request.url, "https://api.voyageai.com/v1/rerank");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-api-key")
+        );
+        assert_eq!(
+            request
+                .body
+                .as_ref()
+                .and_then(ProviderApiRequestBody::as_text)
+                .and_then(|body| serde_json::from_str::<JsonValue>(body).ok()),
+            Some(json!({
+                "query": "rainy day",
+                "documents": [
+                    "sunny day at the beach",
+                    "rainy day in the city"
+                ],
+                "model": "rerank-2.5",
+                "top_k": 2
+            }))
+        );
+    }
+
+    #[test]
     fn voyage_reranking_model_maps_api_error_to_metadata() {
         let transport: VoyageTransport = Arc::new(move |_request| -> VoyageTransportFuture {
             Box::pin(ready(Ok(ProviderApiResponse::text(
