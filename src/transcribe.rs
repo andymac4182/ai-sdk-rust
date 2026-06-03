@@ -10,6 +10,7 @@ use crate::VERSION;
 use crate::file_data::FileDataContent;
 use crate::headers::Headers;
 use crate::language_model::ProviderAbortSignal;
+use crate::logger::{LogWarningsOptions, log_warnings};
 use crate::provider::ProviderMetadata;
 use crate::provider::ProviderOptions;
 use crate::provider_utils::{
@@ -375,6 +376,10 @@ pub async fn transcribe<M: TranscriptionModel + ?Sized>(
         })
         .await;
 
+    log_warnings(
+        &LogWarningsOptions::new(warnings.clone()).with_scope(model.provider(), model.model_id()),
+    );
+
     if text.is_empty() {
         return Err(NoTranscriptGeneratedError::new([response]).into());
     }
@@ -453,6 +458,7 @@ mod tests {
     use crate::VERSION;
     use crate::file_data::FileDataContent;
     use crate::headers::Headers;
+    use crate::logger::{LogWarningsOptions, take_log_warning_calls_for_tests};
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
     use crate::provider_utils::{DownloadError, DownloadedBlob};
     use crate::transcription_model::{
@@ -1000,6 +1006,68 @@ mod tests {
             ]
         );
         assert_eq!(result.provider_metadata, ProviderMetadata::new());
+    }
+
+    // packages-ai-2197: it should call logWarnings with the correct warnings.
+    #[test]
+    fn transcribe_calls_log_warnings_with_correct_warnings() {
+        let expected_warnings = vec![
+            Warning::Other {
+                message: "Setting is not supported".to_string(),
+            },
+            Warning::Unsupported {
+                feature: "mediaType".to_string(),
+                details: Some("MediaType parameter not supported".to_string()),
+            },
+        ];
+        let model = RecordingTranscriptionModel::new(vec![
+            TranscriptionModelResult::new(
+                "This is a sample transcript.",
+                Vec::new(),
+                transcription_response("transcribe-test"),
+            )
+            .with_warning(expected_warnings[0].clone())
+            .with_warning(expected_warnings[1].clone()),
+        ]);
+        take_log_warning_calls_for_tests();
+
+        poll_ready(transcribe(TranscribeOptions::new(
+            &model,
+            FileDataContent::Bytes(vec![1, 2, 3, 4]),
+        )))
+        .expect("transcription succeeds");
+
+        assert_eq!(
+            take_log_warning_calls_for_tests(),
+            vec![
+                LogWarningsOptions::new(expected_warnings)
+                    .with_scope("test-provider", "transcribe-test")
+            ]
+        );
+    }
+
+    // packages-ai-2198: it should call logWarnings with empty array when no warnings are present.
+    #[test]
+    fn transcribe_calls_log_warnings_with_empty_array_when_no_warnings() {
+        let model = RecordingTranscriptionModel::new(vec![TranscriptionModelResult::new(
+            "This is a sample transcript.",
+            Vec::new(),
+            transcription_response("transcribe-test"),
+        )]);
+        take_log_warning_calls_for_tests();
+
+        poll_ready(transcribe(TranscribeOptions::new(
+            &model,
+            FileDataContent::Bytes(vec![1, 2, 3, 4]),
+        )))
+        .expect("transcription succeeds");
+
+        assert_eq!(
+            take_log_warning_calls_for_tests(),
+            vec![
+                LogWarningsOptions::new(Vec::new()).with_scope("test-provider", "transcribe-test")
+            ]
+        );
     }
 
     #[test]
