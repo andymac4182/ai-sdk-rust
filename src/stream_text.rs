@@ -5266,7 +5266,7 @@ mod tests {
     use crate::file_data::{FileData, FileDataContent};
     use crate::generate_text::{
         GenerateTextContentPart, NormalizedToolApprovalStatus, ToolApprovalStatusKind,
-        ToolCallRepairOptions, ToolCallRepairOriginalError, has_tool_call,
+        ToolCallRepairOptions, ToolCallRepairOriginalError, custom_stop_condition, has_tool_call,
     };
     use crate::json::NonNullJsonValue;
     use crate::language_model::{
@@ -17318,6 +17318,100 @@ mod tests {
         assert_eq!(result.steps.len(), 1);
         assert_eq!(result.finish_reason, FinishReason::ToolCalls);
         assert_eq!(result.tool_calls[0].tool_name, "weather");
+    }
+
+    /// Maps packages/ai stream-text.test.ts:14861
+    /// `stopConditionCalls should be called for each stop condition` — when
+    /// `stopWhen` carries multiple conditions, every condition is evaluated for
+    /// the same accumulated steps (upstream awaits `Promise.all(...)` before
+    /// `.some(...)`), so each predicate fires exactly once even though an earlier
+    /// one returns `false` and a later one returns `true`. The loop stops after a
+    /// single step.
+    #[test]
+    fn stream_text_calls_each_stop_condition_for_the_accumulated_steps() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("id-0")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "id-0", "thinking",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("id-0")),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": "value" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            // A second response would only be requested if the loop failed to
+            // stop after the first step; reaching it throws via the assertion
+            // below on `stream_calls().len()`.
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "text-1",
+                    "should not run",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+        let input_schema = json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        // Records every `(condition_number, steps_len)` invocation so the test
+        // can prove both conditions are evaluated with the same accumulated
+        // steps, mirroring upstream's `stopConditionCalls` array.
+        let calls = Arc::new(Mutex::new(Vec::<(u8, usize)>::new()));
+        let calls_first = Arc::clone(&calls);
+        let calls_second = Arc::clone(&calls);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("tool1", input_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("result1")) }),
+                )
+                .with_max_steps(10)
+                .with_stop_conditions([
+                    custom_stop_condition(move |steps| {
+                        calls_first
+                            .lock()
+                            .expect("first stop-condition call log")
+                            .push((0, steps.len()));
+                        false
+                    }),
+                    custom_stop_condition(move |steps| {
+                        calls_second
+                            .lock()
+                            .expect("second stop-condition call log")
+                            .push((1, steps.len()));
+                        true
+                    }),
+                ]),
+        ));
+
+        // The loop stops after the single tool-call step.
+        assert_eq!(model.stream_calls().len(), 1);
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.finish_reason, FinishReason::ToolCalls);
+
+        // Both conditions ran exactly once, each observing the one accumulated
+        // step (the short-circuiting `.any()` would skip the second condition if
+        // the first had returned `true`, but never the reverse — upstream
+        // guarantees *all* conditions are evaluated).
+        let recorded = calls.lock().expect("stop-condition call log");
+        assert_eq!(recorded.as_slice(), &[(0, 1), (1, 1)]);
     }
 
     #[test]

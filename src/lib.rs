@@ -207,8 +207,8 @@ pub use generate_speech::{
 };
 pub use generate_text::{
     ActiveTools, CollectToolApprovalsError, CollectedToolApproval, CollectedToolApprovals,
-    ContentPart, DefaultGeneratedFile, DynamicToolCall, DynamicToolError, DynamicToolResult,
-    ExperimentalGeneratedImage, GenerateTextContentPart, GenerateTextEndEvent,
+    ContentPart, CustomStopCondition, DefaultGeneratedFile, DynamicToolCall, DynamicToolError,
+    DynamicToolResult, ExperimentalGeneratedImage, GenerateTextContentPart, GenerateTextEndEvent,
     GenerateTextFileContent, GenerateTextFinishEvent, GenerateTextInclude, GenerateTextModelInfo,
     GenerateTextOnFinish, GenerateTextOnFinishCallback, GenerateTextOnFinishFunction,
     GenerateTextOnFinishFuture, GenerateTextOnLanguageModelCallEnd,
@@ -244,10 +244,10 @@ pub use generate_text::{
     ToolInputRefinement, ToolInputRefinementError, ToolInputRefinementFunction,
     ToolInputRefinementFuture, ToolModelOutputErrorMode, TypedToolCall, TypedToolError,
     TypedToolOutputDenied, TypedToolResult, UiMessageStreamError, UnsupportedModelVersionError,
-    collect_tool_approvals, create_tool_model_output, experimental_filter_active_tools,
-    filter_active_tools, generate_text, has_tool_call, is_loop_finished, is_step_count,
-    is_stop_condition_met, normalize_tool_approval_status, prune_messages, resolve_tool_approval,
-    step_count_is,
+    collect_tool_approvals, create_tool_model_output, custom_stop_condition,
+    experimental_filter_active_tools, filter_active_tools, generate_text, has_tool_call,
+    is_loop_finished, is_step_count, is_stop_condition_met, normalize_tool_approval_status,
+    prune_messages, resolve_tool_approval, step_count_is,
 };
 #[allow(deprecated)]
 pub use generate_text::{
