@@ -542,8 +542,8 @@ impl GoogleLanguageModel {
             });
         }
 
-        // `serviceTier` is a Gemini API option; on Vertex it is dropped and warned, and
-        // `sharedRequestType`/`requestType` replace it via dedicated paygo headers.
+        // 'serviceTier' is a Gemini API option; on Vertex it is dropped and warned, and
+        // 'sharedRequestType'/'requestType' replace it via dedicated paygo headers.
         if google_options.service_tier.is_some() && is_vertex_provider {
             warnings.push(Warning::Other {
                 message: "'serviceTier' is a Gemini API option and is not supported on Vertex AI. \
