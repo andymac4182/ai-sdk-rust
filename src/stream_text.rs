@@ -53,8 +53,8 @@ use crate::language_model::{
 use crate::logger::{LogWarningsOptions, log_warnings};
 use crate::prompt::{
     Prompt, PromptDownload, TimeoutConfiguration, apply_downloaded_prompt_assets,
-    download_prompt_assets, get_total_timeout_ms, prompt_has_url_files,
-    standardize_and_convert_to_language_model_prompt,
+    download_prompt_assets, get_chunk_timeout_ms, get_step_timeout_ms, get_total_timeout_ms,
+    prompt_has_url_files, standardize_and_convert_to_language_model_prompt,
 };
 use crate::provider::{
     ApiCallError, InvalidPromptError, ProviderMetadata, ProviderOptions, get_error_message,
@@ -2512,13 +2512,32 @@ where
     let active_tools_for_start = active_tools.clone();
     let base_active_tools = active_tools;
     let call_id = generate_text_call_id();
+    // Mirror upstream `streamText`: when `stepMs`/`chunkMs` are configured a
+    // dedicated AbortController is created per category and its signal is always
+    // merged into the request abort signal (the controller is aborted only once
+    // the corresponding step/chunk timeout actually fires). The controllers are
+    // kept alive for the lifetime of the stream so the merged signal stays valid.
+    let step_abort_controller =
+        get_step_timeout_ms(timeout.as_ref()).map(|_| StreamTextAbortController::new());
+    let chunk_abort_controller =
+        get_chunk_timeout_ms(timeout.as_ref()).map(|_| StreamTextAbortController::new());
     let request_abort_signal = merge_abort_signals([
         call_options
             .abort_signal
             .clone()
             .map(AbortSignalSource::signal),
         get_total_timeout_ms(timeout.as_ref()).map(AbortSignalSource::timeout_ms),
+        step_abort_controller
+            .as_ref()
+            .map(|controller| AbortSignalSource::signal(controller.signal())),
+        chunk_abort_controller
+            .as_ref()
+            .map(|controller| AbortSignalSource::signal(controller.signal())),
     ]);
+    // Keep the controllers alive for the duration of the call so the merged
+    // signal does not observe a dropped source.
+    let _step_abort_controller = step_abort_controller;
+    let _chunk_abort_controller = chunk_abort_controller;
     call_options.abort_signal = request_abort_signal.clone();
     let abort_signal = request_abort_signal;
     let max_steps = max_steps.max(1);
@@ -13265,9 +13284,7 @@ mod tests {
 
         let result = poll_ready(stream_text(
             StreamTextOptions::new(&model, vec![user_message("Say hello")]).with_timeout(
-                TimeoutConfiguration::detailed(
-                    TimeoutConfigurationOptions::new().with_step_ms(5_000),
-                ),
+                TimeoutConfiguration::detailed(TimeoutConfigurationOptions::new()),
             ),
         ));
 
@@ -13310,6 +13327,223 @@ mod tests {
         let stream_calls = model.stream_calls();
         assert_eq!(stream_calls.len(), 1);
         assert!(stream_calls[0].abort_signal.is_some());
+    }
+
+    /// Maps packages/ai stream-text.test.ts:16517
+    /// `should forward stepMs as abort signal to each step` — configuring only
+    /// `step_ms` (no total timeout) still forwards a defined abort signal to the
+    /// provider `doStream` call (the per-step abort controller signal is merged
+    /// into the request signal even before any timeout fires).
+    #[test]
+    fn stream_text_forwards_step_ms_as_abort_signal_to_each_step() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_timeout(
+                TimeoutConfiguration::detailed(
+                    TimeoutConfigurationOptions::new().with_step_ms(5_000),
+                ),
+            ),
+        ));
+        result.consume_stream();
+
+        let stream_calls = model.stream_calls();
+        assert_eq!(stream_calls.len(), 1);
+        let signal = stream_calls[0]
+            .abort_signal
+            .as_ref()
+            .expect("step_ms should forward a defined abort signal");
+        assert!(!signal.is_aborted());
+    }
+
+    /// Maps packages/ai stream-text.test.ts:16549
+    /// `should reuse the same abort signal for all steps when stepMs is set` —
+    /// across a two-step tool loop the provider `doStream` call receives a defined
+    /// abort signal on every step, and it is the *same* signal instance each time
+    /// (the per-step abort controller is created once and reused, only its
+    /// timeout is reset per step).
+    #[test]
+    fn stream_text_reuses_the_same_abort_signal_for_all_steps_when_step_ms_is_set() {
+        let input_schema = json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        let model = MockLanguageModel::new().with_stream_results(vec![
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": "test" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    LanguageModelFinishReason {
+                        unified: FinishReason::ToolCalls,
+                        raw: None,
+                    },
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "Final response",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_timeout(TimeoutConfiguration::detailed(
+                    TimeoutConfigurationOptions::new().with_step_ms(5_000),
+                ))
+                .with_max_steps(2)
+                .with_stop_condition(StopCondition::StepCount(2))
+                .with_tool(
+                    Tool::new("tool1", input_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("tool result")) }),
+                ),
+        ));
+        result.consume_stream();
+
+        let stream_calls = model.stream_calls();
+        assert_eq!(stream_calls.len(), 2);
+        let first = stream_calls[0]
+            .abort_signal
+            .as_ref()
+            .expect("first step should receive a defined abort signal");
+        let second = stream_calls[1]
+            .abort_signal
+            .as_ref()
+            .expect("second step should receive a defined abort signal");
+        assert!(!first.is_aborted());
+        assert!(!second.is_aborted());
+        // The same merged abort signal is reused for every step.
+        assert!(first.is_same_signal(second));
+    }
+
+    /// Maps packages/ai stream-text.test.ts:16642
+    /// `should forward chunkMs as abort signal to model` — configuring only
+    /// `chunk_ms` (no total timeout) still forwards a defined abort signal to the
+    /// provider `doStream` call.
+    #[test]
+    fn stream_text_forwards_chunk_ms_as_abort_signal_to_model() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_timeout(
+                TimeoutConfiguration::detailed(
+                    TimeoutConfigurationOptions::new().with_chunk_ms(5_000),
+                ),
+            ),
+        ));
+        result.consume_stream();
+
+        let stream_calls = model.stream_calls();
+        assert_eq!(stream_calls.len(), 1);
+        assert!(stream_calls[0].abort_signal.is_some());
+    }
+
+    /// Maps packages/ai stream-text.test.ts:16673
+    /// `should complete successfully when chunks arrive within chunkMs timeout` —
+    /// when all chunks arrive before the (generous) `chunk_ms` timeout could fire,
+    /// the stream completes normally and the forwarded abort signal is never
+    /// marked aborted.
+    #[test]
+    fn stream_text_completes_successfully_when_chunks_arrive_within_chunk_ms_timeout() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", " World")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_timeout(
+                TimeoutConfiguration::detailed(
+                    TimeoutConfigurationOptions::new().with_chunk_ms(5_000),
+                ),
+            ),
+        ));
+        result.consume_stream();
+
+        assert_eq!(result.text, "Hello World");
+        let stream_calls = model.stream_calls();
+        assert_eq!(stream_calls.len(), 1);
+        let signal = stream_calls[0]
+            .abort_signal
+            .as_ref()
+            .expect("chunk_ms should forward a defined abort signal");
+        assert!(!signal.is_aborted());
+    }
+
+    /// Maps packages/ai stream-text.test.ts:16792
+    /// `should clean up step timeout when doStream throws an error` — when
+    /// `doStream` throws immediately under a `step_ms` timeout, the stream
+    /// consumes to completion (surfacing the error) without panicking, leaving no
+    /// pending step timeout behind.
+    #[test]
+    fn stream_text_cleans_up_step_timeout_when_do_stream_throws_an_error() {
+        // Model whose stream surfaces an immediate failure (mirrors upstream
+        // `doStream` throwing) under a configured step timeout.
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(json!({
+                    "message": "Fail immediately"
+                }))),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_max_retries(0)
+                .with_timeout(TimeoutConfiguration::detailed(
+                    TimeoutConfigurationOptions::new().with_step_ms(10_000),
+                )),
+        ));
+        // Should consume to completion without panicking; the per-step abort
+        // controller (created for the step timeout) is dropped/cleaned up
+        // alongside the failed step.
+        result.consume_stream();
+
+        assert_eq!(result.finish_reason, FinishReason::Error);
+        let has_error = result
+            .parts
+            .iter()
+            .any(|part| matches!(part, TextStreamPart::Error(_)));
+        assert!(has_error);
     }
 
     struct DelayedStreamLanguageModel {
