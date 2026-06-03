@@ -6397,6 +6397,634 @@ mod tests {
         );
     }
 
+    fn url_source(id: &str, url: &str, title: &str) -> LanguageModelSource {
+        LanguageModelSource::Url(LanguageModelUrlSource::new(id, url).with_title(title))
+    }
+
+    fn data_file(base64: &str) -> LanguageModelFile {
+        LanguageModelFile::new(
+            "text/plain",
+            LanguageModelFileData::Data {
+                data: FileDataContent::Base64(base64.to_string()),
+            },
+        )
+    }
+
+    fn tool1() -> Tool {
+        let schema = json!({ "type": "object", "properties": {} })
+            .as_object()
+            .expect("schema is an object")
+            .clone();
+        Tool::new("tool1", schema)
+            .with_execute(|_input, _options| async move { Ok(json!("result1")) })
+    }
+
+    /// Maps packages/ai stream-text.test.ts:5773 — sources aggregate across all
+    /// steps while the final step only retains its own source.
+    #[test]
+    fn stream_text_result_sources_contain_sources_from_all_steps() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Source(url_source(
+                    "source-0",
+                    "https://example.com/0",
+                    "Source 0",
+                )),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1", "tool1", "{}",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Source(url_source(
+                    "source-1",
+                    "https://example.com/1",
+                    "Source 1",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("prompt")])
+                .with_tool(tool1())
+                .with_max_steps(3),
+        ));
+
+        assert_eq!(
+            result.sources,
+            vec![
+                url_source("source-0", "https://example.com/0", "Source 0"),
+                url_source("source-1", "https://example.com/1", "Source 1"),
+            ]
+        );
+        assert_eq!(
+            result.steps.last().expect("final step exists").sources,
+            vec![url_source("source-1", "https://example.com/1", "Source 1")]
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:5875 — files aggregate across all
+    /// steps while the final step only retains its own file.
+    #[test]
+    fn stream_text_result_files_contain_files_from_all_steps() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::File(data_file("c3RlcC0w")),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1", "tool1", "{}",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::File(data_file("c3RlcC0x")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("prompt")])
+                .with_tool(tool1())
+                .with_max_steps(3),
+        ));
+
+        assert_eq!(
+            result.files,
+            vec![data_file("c3RlcC0w"), data_file("c3RlcC0x")]
+        );
+        assert_eq!(
+            result.steps.last().expect("final step exists").files,
+            vec![data_file("c3RlcC0x")]
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:5952 — onFinish receives files from
+    /// all steps while the last reported step only carries its own file.
+    #[test]
+    fn stream_text_result_sends_files_from_all_steps_to_on_finish() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::File(data_file("c3RlcC0w")),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1", "tool1", "{}",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::File(data_file("c3RlcC0x")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+        let finish_events = Arc::new(Mutex::new(Vec::<GenerateTextFinishEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("prompt")])
+                .with_tool(tool1())
+                .with_max_steps(3)
+                .with_on_finish(move |event| {
+                    let finish_events = Arc::clone(&finish_events_for_callback);
+                    async move {
+                        finish_events
+                            .lock()
+                            .expect("finish events lock")
+                            .push(event);
+                    }
+                }),
+        ));
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        let files: Vec<(String, String)> = finish_events[0]
+            .files
+            .iter()
+            .map(|file| (file.media_type().to_string(), file.base64()))
+            .collect();
+        assert_eq!(
+            files,
+            vec![
+                ("text/plain".to_string(), "c3RlcC0w".to_string()),
+                ("text/plain".to_string(), "c3RlcC0x".to_string()),
+            ]
+        );
+        let final_step_files: Vec<(String, String)> = finish_events[0]
+            .steps
+            .last()
+            .expect("final step exists")
+            .files
+            .iter()
+            .map(|file| (file.media_type().to_string(), file.base64()))
+            .collect();
+        assert_eq!(
+            final_step_files,
+            vec![("text/plain".to_string(), "c3RlcC0x".to_string())]
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:6034 — file stream parts from all
+    /// steps surface as file parts while the final step keeps only its file.
+    #[test]
+    fn stream_text_result_contains_file_content_parts_from_all_steps() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::File(data_file("c3RlcC0w")),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1", "tool1", "{}",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::File(data_file("c3RlcC0x")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("prompt")])
+                .with_tool(tool1())
+                .with_max_steps(3),
+        ));
+
+        let file_parts: Vec<LanguageModelFile> = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::File(part) => Some(part.file.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            file_parts,
+            vec![data_file("c3RlcC0w"), data_file("c3RlcC0x")]
+        );
+        assert_eq!(
+            result.steps.last().expect("final step exists").files.len(),
+            1
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:6299 — a single step records the
+    /// sources emitted by the model response.
+    #[test]
+    fn stream_text_step_result_contains_sources_from_model_response() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Source(url_source(
+                    "123",
+                    "https://example.com",
+                    "Example",
+                )),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Source(url_source(
+                    "456",
+                    "https://example.com/2",
+                    "Example 2",
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("prompt")],
+        )));
+
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(
+            result.steps[0].sources,
+            vec![
+                url_source("123", "https://example.com", "Example"),
+                url_source("456", "https://example.com/2", "Example 2"),
+            ]
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:6404 — a single step records the
+    /// files emitted by the model response.
+    #[test]
+    fn stream_text_step_result_contains_files_from_model_response() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::File(data_file("c3RlcC0w")),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("prompt")],
+        )));
+
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.steps[0].files, vec![data_file("c3RlcC0w")]);
+    }
+
+    /// Maps packages/ai stream-text.test.ts:6522 — a single step records the
+    /// reasoning files emitted by the model response.
+    #[test]
+    fn stream_text_step_result_contains_reasoning_files_from_model_response() {
+        let reasoning_file = LanguageModelReasoningFile::new(
+            "image/png",
+            LanguageModelFileData::Data {
+                data: FileDataContent::Base64("reasoning-data".to_string()),
+            },
+        );
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ReasoningFile(reasoning_file.clone()),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("prompt")],
+        )));
+
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.steps[0].reasoning_files, vec![reasoning_file]);
+    }
+
+    /// Maps packages/ai stream-text.test.ts:6113 — a single step records the
+    /// reasoning text emitted by the model response.
+    #[test]
+    fn stream_text_step_result_contains_reasoning_from_model_response() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("1")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "1",
+                    "I will open the conversation with witty banter.",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("1")),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("2")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("2", "Hi there!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("2")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("prompt")],
+        )));
+
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(
+            result.steps[0].reasoning_text.as_deref(),
+            Some("I will open the conversation with witty banter.")
+        );
+        assert_eq!(result.steps[0].text, "Hi there!");
+    }
+
+    /// Maps packages/ai stream-text.test.ts:6659 — the final step exposed on the
+    /// result equals the last collected step.
+    #[test]
+    fn stream_text_result_exposes_the_final_step() {
+        let model = MockLanguageModel::new().with_stream_results([
+            warning_logger_tool_call_stream_result("tool1", Vec::new()),
+            warning_logger_text_stream_result("done", Vec::new()),
+        ]);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("prompt")])
+                .with_tool(
+                    Tool::new(
+                        "tool1",
+                        json!({ "type": "object", "properties": { "value": { "type": "string" } } })
+                            .as_object()
+                            .expect("schema is an object")
+                            .clone(),
+                    )
+                    .with_execute(|_input, _options| async move { Ok(json!("result")) }),
+                )
+                .with_max_steps(2),
+        ));
+
+        assert_eq!(result.steps.len(), 2);
+        let final_step = result.steps.last().expect("final step exists");
+        assert_eq!(final_step.text, result.text);
+        assert_eq!(final_step.finish_reason, result.finish_reason);
+        assert_eq!(final_step.response.id, result.response.id);
+    }
+
+    /// Maps packages/ai stream-text.test.ts:6804 — tool calls aggregate across
+    /// all steps and split into static/dynamic groups; the final text step has
+    /// none.
+    #[test]
+    fn stream_text_result_resolves_tool_calls_from_all_steps() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": "value-1" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-2",
+                    "dynamicTool",
+                    r#"{ "value": "value-2" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "done")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+
+        let value_schema = json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        let result =
+            poll_ready(stream_text(
+                StreamTextOptions::new(&model, vec![user_message("test-input")])
+                    .with_tool(Tool::new("tool1", value_schema.clone()).with_execute(
+                        |_input, _options| async move { Ok(json!("value-1-result")) },
+                    ))
+                    .with_tool(Tool::dynamic("dynamicTool", value_schema).with_execute(
+                        |_input, _options| async move { Ok(json!("value-2-result")) },
+                    ))
+                    .with_max_steps(4),
+            ));
+
+        let ids: Vec<&str> = result
+            .tool_calls
+            .iter()
+            .map(|call| call.tool_call_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["call-1", "call-2"]);
+
+        let static_ids: Vec<&str> = result
+            .tool_calls
+            .iter()
+            .filter(|call| call.dynamic != Some(true))
+            .map(|call| call.tool_call_id.as_str())
+            .collect();
+        assert_eq!(static_ids, vec!["call-1"]);
+
+        let dynamic_ids: Vec<&str> = result
+            .tool_calls
+            .iter()
+            .filter(|call| call.dynamic == Some(true))
+            .map(|call| call.tool_call_id.as_str())
+            .collect();
+        assert_eq!(dynamic_ids, vec!["call-2"]);
+
+        assert!(
+            result
+                .steps
+                .last()
+                .expect("final step exists")
+                .tool_calls
+                .is_empty()
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:6932 — tool results aggregate across
+    /// all steps and split into static/dynamic groups; the final text step has
+    /// none.
+    #[test]
+    fn stream_text_result_resolves_tool_results_from_all_steps() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": "value-1" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-2",
+                    "dynamicTool",
+                    r#"{ "value": "value-2" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "done")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+
+        let value_schema = json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        let result =
+            poll_ready(stream_text(
+                StreamTextOptions::new(&model, vec![user_message("test-input")])
+                    .with_tool(Tool::new("tool1", value_schema.clone()).with_execute(
+                        |_input, _options| async move { Ok(json!("value-1-result")) },
+                    ))
+                    .with_tool(Tool::dynamic("dynamicTool", value_schema).with_execute(
+                        |_input, _options| async move { Ok(json!("value-2-result")) },
+                    ))
+                    .with_max_steps(4),
+            ));
+
+        let ids: Vec<&str> = result
+            .tool_results
+            .iter()
+            .map(|result| result.tool_call_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["call-1", "call-2"]);
+
+        let static_ids: Vec<&str> = result
+            .tool_results
+            .iter()
+            .filter(|result| result.dynamic != Some(true))
+            .map(|result| result.tool_call_id.as_str())
+            .collect();
+        assert_eq!(static_ids, vec!["call-1"]);
+
+        let dynamic_ids: Vec<&str> = result
+            .tool_results
+            .iter()
+            .filter(|result| result.dynamic == Some(true))
+            .map(|result| result.tool_call_id.as_str())
+            .collect();
+        assert_eq!(dynamic_ids, vec!["call-2"]);
+
+        assert!(
+            result
+                .steps
+                .last()
+                .expect("final step exists")
+                .tool_results
+                .is_empty()
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:5681 — the result exposes provider
+    /// response metadata (id, model id, timestamp, headers) and assistant
+    /// response messages.
+    #[test]
+    fn stream_text_result_resolves_with_response_information() {
+        let response_metadata = LanguageModelStreamResponseMetadata::new()
+            .with_id("id-0")
+            .with_model_id("mock-model-id")
+            .with_timestamp(time::OffsetDateTime::UNIX_EPOCH);
+        let model = MockLanguageModel::new().with_stream_result(
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(response_metadata),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ])
+            .with_response(LanguageModelStreamResultResponse::new().with_header("call", "2")),
+        );
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("prompt")],
+        )));
+
+        assert_eq!(result.response.id, Some("id-0".to_string()));
+        assert_eq!(result.response.model_id, Some("mock-model-id".to_string()));
+        assert_eq!(
+            result.response.timestamp,
+            Some(time::OffsetDateTime::UNIX_EPOCH)
+        );
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("call")),
+            Some(&"2".to_string())
+        );
+        assert_eq!(
+            result.response_messages,
+            vec![LanguageModelMessage::Assistant(
+                LanguageModelAssistantMessage::new(vec![LanguageModelAssistantContentPart::Text(
+                    LanguageModelTextPart::new("Hello")
+                )])
+            )]
+        );
+    }
+
     #[test]
     fn stream_text_calls_language_model_do_stream_with_standardized_prompt() {
         let model =

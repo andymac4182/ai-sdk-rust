@@ -52,6 +52,7 @@ pub mod resolve_model;
 pub mod retry;
 pub mod skills;
 pub mod speech_model;
+pub mod stream_language_model_call;
 pub mod stream_object;
 pub mod stream_text;
 pub mod subagents;

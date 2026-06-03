@@ -6689,6 +6689,69 @@ mod tests {
     }
 
     #[test]
+    fn handle_ui_message_stream_finish_passes_through_abort_reason_when_provided() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+        let chunks = vec![
+            UiMessageChunk::start_with_message_id("msg-abort-reason"),
+            UiMessageChunk::text_start("text-1"),
+            UiMessageChunk::text_delta("text-1", "Starting text"),
+            UiMessageChunk::abort_with_reason("manual abort"),
+            UiMessageChunk::finish(),
+        ];
+
+        let result = handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new(chunks.clone()).with_on_finish(move |event| {
+                finish_events_for_callback
+                    .lock()
+                    .expect("finish events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        // The abort chunk (including its reason) is passed through unchanged in
+        // the output stream, and onFinish is invoked exactly once.
+        assert_eq!(result, chunks);
+        assert_eq!(
+            serde_json::to_value(&result[3]).expect("abort chunk serializes"),
+            json!({ "type": "abort", "reason": "manual abort" })
+        );
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(finish_events[0].is_aborted);
+    }
+
+    #[test]
+    fn handle_ui_message_stream_finish_calls_on_finish_when_stream_ends_without_finish_chunk() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        // Mirrors the upstream "reader is cancelled" case: the input stream is
+        // truncated (no finish chunk), yet onFinish must still be invoked with a
+        // non-aborted event whose response message id matches the start chunk.
+        handle_ui_message_stream_finish(
+            HandleUiMessageStreamFinishOptions::new([
+                UiMessageChunk::start_with_message_id("msg-1"),
+                UiMessageChunk::text_start("text-1"),
+                UiMessageChunk::text_delta("text-1", "Hello"),
+            ])
+            .with_on_finish(move |event| {
+                finish_events_for_callback
+                    .lock()
+                    .expect("finish events lock")
+                    .push(event);
+            }),
+        )
+        .expect("stream finish is handled");
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(!finish_events[0].is_aborted);
+        assert_eq!(finish_events[0].response_message.id, "msg-1");
+    }
+
+    #[test]
     fn handle_ui_message_stream_finish_calls_on_step_finish_when_finish_step_chunk_is_encountered()
     {
         let step_events = Arc::new(Mutex::new(

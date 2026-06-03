@@ -2759,4 +2759,336 @@ mod tests {
         assert_eq!(available_providers, vec!["openai".to_string()]);
         assert_eq!(message, "registry lookup failed");
     }
+
+    // Upstream provider-registry.test.ts:86 — languageModel throws NoSuchModelError
+    // when the provider resolves but returns no model.
+    #[test]
+    fn provider_registry_language_model_throws_no_such_model_error_if_provider_returns_no_model() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let error = registry
+            .language_model("provider:missing")
+            .expect_err("model lookup fails");
+        let model_error = error.as_no_such_model().expect("error is missing model");
+
+        assert_eq!(model_error.model_id(), "missing");
+        assert_eq!(model_error.model_type(), ModelType::LanguageModel);
+        assert_eq!(error.to_string(), "No such languageModel: missing");
+    }
+
+    // Upstream provider-registry.test.ts:116 — languageModel throws NoSuchModelError
+    // when the registry id does not contain the separator.
+    #[test]
+    fn provider_registry_language_model_throws_no_such_model_error_if_id_has_no_colon() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let error = registry
+            .language_model("model")
+            .expect_err("id without separator fails");
+        let model_error = error.as_no_such_model().expect("error is missing model");
+
+        assert_eq!(model_error.model_id(), "model");
+        assert_eq!(model_error.model_type(), ModelType::LanguageModel);
+        assert_eq!(
+            model_error.message(),
+            "Invalid languageModel id for registry: model (must be in the format \"providerId:modelId\")"
+        );
+    }
+
+    // Upstream provider-registry.test.ts:226 — embeddingModel throws NoSuchProviderError
+    // when the provider id is not registered.
+    #[test]
+    fn provider_registry_embedding_model_throws_no_such_provider_error_if_provider_missing() {
+        let registry =
+            create_provider_registry([("anthropic", StaticProvider { id: "anthropic" })]);
+
+        let error = registry
+            .embedding_model("openai:model")
+            .expect_err("provider lookup fails");
+        let provider_error = error
+            .as_no_such_provider()
+            .expect("error is missing provider");
+
+        assert_eq!(provider_error.provider_id(), "openai");
+        assert_eq!(provider_error.model_type(), ModelType::EmbeddingModel);
+        assert_eq!(
+            error.to_string(),
+            "No such provider: openai (available providers: anthropic)"
+        );
+    }
+
+    // Upstream provider-registry.test.ts:235 — embeddingModel-group case asserting a
+    // language-model lookup throws NoSuchModelError when the provider returns no model.
+    #[test]
+    fn provider_registry_embedding_group_language_model_throws_no_such_model_error() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let error = registry
+            .language_model("provider:missing")
+            .expect_err("model lookup fails");
+        let model_error = error.as_no_such_model().expect("error is missing model");
+
+        assert_eq!(model_error.model_id(), "missing");
+        assert_eq!(model_error.model_type(), ModelType::LanguageModel);
+    }
+
+    // Upstream provider-registry.test.ts:259 — embeddingModel throws NoSuchModelError
+    // when the registry id does not contain the separator.
+    #[test]
+    fn provider_registry_embedding_model_throws_no_such_model_error_if_id_has_no_colon() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let error = registry
+            .embedding_model("model")
+            .expect_err("id without separator fails");
+        let model_error = error.as_no_such_model().expect("error is missing model");
+
+        assert_eq!(model_error.model_id(), "model");
+        assert_eq!(model_error.model_type(), ModelType::EmbeddingModel);
+        assert_eq!(
+            model_error.message(),
+            "Invalid embeddingModel id for registry: model (must be in the format \"providerId:modelId\")"
+        );
+    }
+
+    // Upstream provider-registry.test.ts:268 — embeddingModel supports a custom separator.
+    #[test]
+    fn provider_registry_embedding_model_supports_custom_separator() {
+        let registry = create_provider_registry_with_options(
+            [("provider", StaticProvider { id: "provider" })],
+            ProviderRegistryOptions::new().with_separator("|"),
+        );
+
+        let model = registry
+            .embedding_model("provider|model")
+            .expect("embedding model resolves");
+
+        assert_eq!(model.provider(), "provider");
+        assert_eq!(model.model_id(), "model");
+    }
+
+    // Upstream provider-registry.test.ts:325 — imageModel throws NoSuchProviderError
+    // when the provider id is not registered.
+    #[test]
+    fn provider_registry_image_model_throws_no_such_provider_error_if_provider_missing() {
+        let registry =
+            create_provider_registry([("anthropic", StaticProvider { id: "anthropic" })]);
+
+        let error = registry
+            .image_model("openai:model")
+            .expect_err("provider lookup fails");
+        let provider_error = error
+            .as_no_such_provider()
+            .expect("error is missing provider");
+
+        assert_eq!(provider_error.provider_id(), "openai");
+        assert_eq!(provider_error.model_type(), ModelType::ImageModel);
+        assert_eq!(
+            error.to_string(),
+            "No such provider: openai (available providers: anthropic)"
+        );
+    }
+
+    // Upstream provider-registry.test.ts:334 — imageModel throws NoSuchModelError when
+    // the provider resolves but returns no model.
+    #[test]
+    fn provider_registry_image_model_throws_no_such_model_error_if_provider_returns_no_model() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let error = registry
+            .image_model("provider:missing")
+            .expect_err("model lookup fails");
+        let model_error = error.as_no_such_model().expect("error is missing model");
+
+        assert_eq!(model_error.model_id(), "missing");
+        assert_eq!(model_error.model_type(), ModelType::ImageModel);
+        assert_eq!(error.to_string(), "No such imageModel: missing");
+    }
+
+    // Upstream provider-registry.test.ts:351 — imageModel throws NoSuchModelError when
+    // the registry id does not contain the separator.
+    #[test]
+    fn provider_registry_image_model_throws_no_such_model_error_if_id_has_no_colon() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let error = registry
+            .image_model("model")
+            .expect_err("id without separator fails");
+        let model_error = error.as_no_such_model().expect("error is missing model");
+
+        assert_eq!(model_error.model_id(), "model");
+        assert_eq!(model_error.model_type(), ModelType::ImageModel);
+        assert_eq!(
+            model_error.message(),
+            "Invalid imageModel id for registry: model (must be in the format \"providerId:modelId\")"
+        );
+    }
+
+    // Upstream provider-registry.test.ts:358 — imageModel supports a custom separator.
+    #[test]
+    fn provider_registry_image_model_supports_custom_separator() {
+        let registry = create_provider_registry_with_options(
+            [("provider", StaticProvider { id: "provider" })],
+            ProviderRegistryOptions::new().with_separator("|"),
+        );
+
+        let model = registry
+            .image_model("provider|model")
+            .expect("image model resolves");
+
+        assert_eq!(model.provider(), "provider");
+        assert_eq!(model.model_id(), "model");
+    }
+
+    // Upstream provider-registry.test.ts:428 — transcriptionModel throws NoSuchModelError
+    // when the registry id does not contain the separator.
+    #[test]
+    fn provider_registry_transcription_model_throws_no_such_model_error_if_id_has_no_colon() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let error = registry
+            .transcription_model("model")
+            .expect_err("id without separator fails");
+        let model_error = error.as_no_such_model().expect("error is missing model");
+
+        assert_eq!(model_error.model_id(), "model");
+        assert_eq!(model_error.model_type(), ModelType::TranscriptionModel);
+        assert_eq!(
+            model_error.message(),
+            "Invalid transcriptionModel id for registry: model (must be in the format \"providerId:modelId\")"
+        );
+    }
+
+    // Upstream provider-registry.test.ts:485 — speechModel throws NoSuchModelError when
+    // the registry id does not contain the separator.
+    #[test]
+    fn provider_registry_speech_model_throws_no_such_model_error_if_id_has_no_colon() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let error = registry
+            .speech_model("model")
+            .expect_err("id without separator fails");
+        let model_error = error.as_no_such_model().expect("error is missing model");
+
+        assert_eq!(model_error.model_id(), "model");
+        assert_eq!(model_error.model_type(), ModelType::SpeechModel);
+        assert_eq!(
+            model_error.message(),
+            "Invalid speechModel id for registry: model (must be in the format \"providerId:modelId\")"
+        );
+    }
+
+    // Upstream provider-registry.test.ts:558 — rerankingModel throws NoSuchModelError when
+    // the registry id does not contain the separator.
+    #[test]
+    fn provider_registry_reranking_model_throws_no_such_model_error_if_id_has_no_colon() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let error = registry
+            .reranking_model("model")
+            .expect_err("id without separator fails");
+        let model_error = error.as_no_such_model().expect("error is missing model");
+
+        assert_eq!(model_error.model_id(), "model");
+        assert_eq!(model_error.model_type(), ModelType::RerankingModel);
+        assert_eq!(
+            model_error.message(),
+            "Invalid rerankingModel id for registry: model (must be in the format \"providerId:modelId\")"
+        );
+    }
+
+    // Upstream provider-registry.test.ts:567 — rerankingModel supports a custom separator.
+    #[test]
+    fn provider_registry_reranking_model_supports_custom_separator() {
+        let registry = create_provider_registry_with_options(
+            [("provider", StaticProvider { id: "provider" })],
+            ProviderRegistryOptions::new().with_separator("|"),
+        );
+
+        let model = registry
+            .reranking_model("provider|model")
+            .expect("reranking model resolves");
+
+        assert_eq!(model.provider(), "provider");
+        assert_eq!(model.model_id(), "model");
+    }
+
+    // Upstream provider-registry.test.ts:662 — videoModel throws NoSuchModelError when
+    // the registry id does not contain the separator.
+    #[test]
+    fn provider_registry_video_model_throws_no_such_model_error_if_id_has_no_colon() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let error = registry
+            .video_model("model")
+            .expect_err("id without separator fails");
+        let model_error = error.as_no_such_model().expect("error is missing model");
+
+        assert_eq!(model_error.model_id(), "model");
+        assert_eq!(model_error.model_type(), ModelType::VideoModel);
+        assert_eq!(
+            model_error.message(),
+            "Invalid videoModel id for registry: model (must be in the format \"providerId:modelId\")"
+        );
+    }
+
+    // Upstream provider-registry.test.ts:669 — videoModel supports a custom separator.
+    #[test]
+    fn provider_registry_video_model_supports_custom_separator() {
+        let registry = create_provider_registry_with_options(
+            [("provider", StaticProvider { id: "provider" })],
+            ProviderRegistryOptions::new().with_separator("|"),
+        );
+
+        let model = registry
+            .video_model("provider|model")
+            .expect("video model resolves");
+
+        assert_eq!(model.provider(), "provider");
+        assert_eq!(model.model_id(), "model");
+    }
+
+    // Upstream provider-registry.test.ts:813 — files() throws when the provider does not
+    // expose a files interface. In Rust this is enforced at the type level: a provider
+    // without a files() method does not implement ProviderWithFiles, so the registry has
+    // no files() method to call. We assert the analogous runtime failure: looking up a
+    // provider id that is not registered for the files interface errors.
+    #[test]
+    fn provider_registry_files_throws_when_provider_not_exposed() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let error = registry
+            .files("not-a-provider")
+            .expect_err("missing files-capable provider fails");
+        let provider_error = error
+            .as_no_such_provider()
+            .expect("error is missing provider");
+
+        assert_eq!(provider_error.provider_id(), "not-a-provider");
+        assert_eq!(
+            error.to_string(),
+            "No such provider: not-a-provider (available providers: provider)"
+        );
+    }
+
+    // Upstream provider-registry.test.ts:823 — skills() throws when the provider does not
+    // expose a skills interface. As with files(), Rust enforces capability at the type
+    // level; we assert the analogous runtime failure for an unregistered provider id.
+    #[test]
+    fn provider_registry_skills_throws_when_provider_not_exposed() {
+        let registry = create_provider_registry([("provider", StaticProvider { id: "provider" })]);
+
+        let error = registry
+            .skills("not-a-provider")
+            .expect_err("missing skills-capable provider fails");
+        let provider_error = error
+            .as_no_such_provider()
+            .expect("error is missing provider");
+
+        assert_eq!(provider_error.provider_id(), "not-a-provider");
+        assert_eq!(
+            error.to_string(),
+            "No such provider: not-a-provider (available providers: provider)"
+        );
+    }
 }
