@@ -1759,6 +1759,36 @@ mod tests {
     }
 
     #[test]
+    fn elevenlabs_transcription_model_uses_real_date_when_no_custom_date_provider_is_specified() {
+        let fixture = json!({
+            "language_code": "eng",
+            "language_probability": 0.89,
+            "text": "Hello from the Vercel AI SDK.",
+            "words": []
+        });
+        let (_requests, transport) = capture_transport(move |_| json_response(fixture.clone()));
+        // No `with_current_date` override: the default provider must supply a real
+        // wall-clock timestamp (mirrors upstream "use real date when no custom date
+        // provider is specified").
+        let provider =
+            create_elevenlabs(ElevenLabsProviderSettings::new().with_api_key("test-api-key"))
+                .with_transport(transport);
+
+        let before = OffsetDateTime::now_utc();
+        let result = poll_ready(provider.transcription("scribe_v1").do_generate(
+            TranscriptionModelCallOptions::new(FileDataContent::Bytes(vec![1]), "audio/wav"),
+        ));
+        let after = OffsetDateTime::now_utc();
+
+        assert_eq!(result.response.model_id, "scribe_v1");
+        // The default provider stamps the current instant, not the UNIX epoch the
+        // custom-date tests inject, so the timestamp must fall within the call window.
+        assert_ne!(result.response.timestamp, OffsetDateTime::UNIX_EPOCH);
+        assert!(result.response.timestamp >= before);
+        assert!(result.response.timestamp <= after);
+    }
+
+    #[test]
     fn elevenlabs_models_map_api_errors_to_metadata() {
         let (requests, transport) = capture_transport(|_| {
             ProviderApiResponse::text(

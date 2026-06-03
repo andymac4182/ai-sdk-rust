@@ -980,3 +980,30 @@ provider wiring.
 | `packages/lmnt/src/lmnt-speech-model.test.ts` | should use real date when no custom date provider is specified | `lmnt_speech_model_uses_real_date_provider_by_default` | none |
 | `packages/lmnt/src/lmnt-speech-model.test.ts` | should handle different audio formats | `lmnt_speech_model_handles_different_audio_formats` | none |
 | `packages/lmnt/src/lmnt-speech-model.test.ts` | should include warnings if any are generated | `lmnt_speech_model_emits_no_warnings_for_supported_request` | none |
+
+## ElevenLabs Exact Case Map
+
+Row-level strict mapping for portable `packages/elevenlabs` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named colocated Rust
+test in `crates/ai-sdk-elevenlabs/src/lib.rs` that exercises the same behavior
+against the real ElevenLabs speech/transcription request mapping, response
+parsing, error schema, default date provider, and provider wiring through fake
+capture transports.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/elevenlabs/src/elevenlabs-error.test.ts` | should parse ElevenLabs resource exhausted error | `elevenlabs_models_map_api_errors_to_metadata` | none |
+| `packages/elevenlabs/src/elevenlabs-speech-model.test.ts` | should generate speech with required parameters | `elevenlabs_speech_model_maps_format_defaults_and_instruction_warning` | none |
+| `packages/elevenlabs/src/elevenlabs-speech-model.test.ts` | should handle custom output format | `elevenlabs_speech_model_sends_headers_body_query_options_and_metadata` | none |
+| `packages/elevenlabs/src/elevenlabs-speech-model.test.ts` | should handle language parameter | `elevenlabs_speech_model_sends_headers_body_query_options_and_metadata` | none |
+| `packages/elevenlabs/src/elevenlabs-speech-model.test.ts` | should handle speed parameter in voice settings | `elevenlabs_speech_model_sends_headers_body_query_options_and_metadata` | none |
+| `packages/elevenlabs/src/elevenlabs-speech-model.test.ts` | should warn about unsupported instructions parameter | `elevenlabs_speech_model_maps_format_defaults_and_instruction_warning` | none |
+| `packages/elevenlabs/src/elevenlabs-speech-model.test.ts` | should pass provider-specific options | `elevenlabs_speech_model_sends_headers_body_query_options_and_metadata` | none |
+| `packages/elevenlabs/src/elevenlabs-speech-model.test.ts` | should include user-agent header | `elevenlabs_speech_model_sends_headers_body_query_options_and_metadata` | none |
+| `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should pass the model | `elevenlabs_transcription_model_sends_form_options_and_maps_response` | none |
+| `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should pass headers | `elevenlabs_transcription_model_sends_form_options_and_maps_response` | none |
+| `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should extract the transcription text | `elevenlabs_transcription_model_sends_form_options_and_maps_response` | none |
+| `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should pass provider options correctly | `elevenlabs_transcription_model_sends_form_options_and_maps_response` | none |
+| `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should include response data with timestamp, modelId and headers | `elevenlabs_transcription_model_sends_form_options_and_maps_response` | none |
+| `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should use real date when no custom date provider is specified | `elevenlabs_transcription_model_uses_real_date_when_no_custom_date_provider_is_specified` | none |
+| `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should work when no additional formats are returned | `elevenlabs_transcription_model_applies_upstream_defaults_when_options_object_is_present` | none |
