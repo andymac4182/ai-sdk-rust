@@ -4676,6 +4676,50 @@ mod tests {
     }
 
     #[test]
+    fn create_ui_message_stream_response_can_respond_with_a_stream_created_by_to_ui_message_stream()
+    {
+        use crate::language_model::{LanguageModelTextEnd, LanguageModelTextStart};
+        use crate::stream_text::{
+            TextStreamPart, TextStreamStartPart, TextStreamTextDeltaPart, ToUiMessageChunkOptions,
+            to_ui_message_chunk,
+        };
+
+        // Mirror the upstream `toUIMessageStream` input: a high-level text stream
+        // of `start`, `text-start`, `text-delta`, `text-end` parts with a fixed
+        // `generateMessageId` of `msg-123`.
+        let parts = vec![
+            TextStreamPart::Start(TextStreamStartPart::new()),
+            TextStreamPart::TextStart(LanguageModelTextStart::new("t1")),
+            TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("t1", "Hello")),
+            TextStreamPart::TextEnd(LanguageModelTextEnd::new("t1")),
+        ];
+
+        let mut options = ToUiMessageChunkOptions::new();
+        options.response_message_id = Some("msg-123".to_string());
+
+        let chunks: Vec<UiMessageChunk> = parts
+            .iter()
+            .filter_map(|part| to_ui_message_chunk(part, &options))
+            .collect();
+
+        let response = create_ui_message_stream_response(
+            UiMessageStreamResponseOptions::new(chunks).with_status(200),
+        );
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.decoded_body().expect("response body decodes"),
+            vec![
+                "data: {\"type\":\"start\",\"messageId\":\"msg-123\"}\n\n".to_string(),
+                "data: {\"type\":\"text-start\",\"id\":\"t1\"}\n\n".to_string(),
+                "data: {\"type\":\"text-delta\",\"id\":\"t1\",\"delta\":\"Hello\"}\n\n".to_string(),
+                "data: {\"type\":\"text-end\",\"id\":\"t1\"}\n\n".to_string(),
+                "data: [DONE]\n\n".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn create_ui_message_stream_should_send_data_stream_part_and_close_the_stream() {
         let chunks = create_ui_message_stream(CreateUiMessageStreamOptions::new(), |writer| {
             writer.write(UiMessageChunk::text_start("1"));

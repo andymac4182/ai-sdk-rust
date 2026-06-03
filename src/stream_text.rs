@@ -11101,6 +11101,50 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_result_to_ui_message_stream_suppresses_start_and_finish_when_disabled() {
+        // Upstream parity: packages/ai to-ui-message-stream.test.ts
+        // "suppresses start/finish chunks when sendStart/sendFinish are false".
+        // Feed the raw TextStreamParts directly (start, text-start, text-end,
+        // finish) so the mapping mirrors the upstream input exactly.
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let mut result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Say hello")],
+        )));
+
+        result.parts = vec![
+            TextStreamPart::Start(TextStreamStartPart::new()),
+            TextStreamPart::TextStart(LanguageModelTextStart::new("t1")),
+            TextStreamPart::TextEnd(LanguageModelTextEnd::new("t1")),
+            TextStreamPart::Finish(TextStreamFinishPart::new(
+                FinishReason::Stop,
+                Some("stop".to_string()),
+                usage(),
+            )),
+        ];
+
+        let chunks = result.to_ui_message_stream_with_options(
+            StreamTextUiMessageStreamOptions::new()
+                .with_send_start(false)
+                .with_send_finish(false),
+        );
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                { "type": "text-start", "id": "t1" },
+                { "type": "text-end", "id": "t1" }
+            ])
+        );
+    }
+
+    #[test]
     fn stream_text_result_to_ui_message_stream_supports_send_reasoning_true() {
         let model =
             MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
@@ -11274,6 +11318,81 @@ mod tests {
                 ]
             })
         );
+        assert_eq!(
+            finish_events[0].messages[1],
+            finish_events[0].response_message
+        );
+    }
+
+    #[test]
+    fn stream_text_result_to_ui_message_stream_injects_generated_message_id_and_calls_on_finish() {
+        // Upstream parity: packages/ai to-ui-message-stream.test.ts
+        // "injects generated message id and calls onFinish". The original
+        // messages end with a user message, so the response is a fresh
+        // assistant message (isContinuation=false) with the generated id.
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("t1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("t1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("t1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Say hello")],
+        )));
+
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+        let generate_calls = Arc::new(Mutex::new(0usize));
+        let generate_calls_for_callback = Arc::clone(&generate_calls);
+        let original_user = UiMessage::new("user-msg-1", UiMessageRole::User)
+            .with_part(json!({ "type": "text", "text": "Hi" }));
+
+        let chunks = result.to_ui_message_stream_with_options(
+            StreamTextUiMessageStreamOptions::new()
+                .with_original_messages([original_user.clone()])
+                .with_generate_message_id(move || {
+                    *generate_calls_for_callback.lock().expect("generate lock") += 1;
+                    "msg-123".to_string()
+                })
+                .with_on_finish(move |event| {
+                    finish_events_for_callback
+                        .lock()
+                        .expect("finish events lock")
+                        .push(event);
+                }),
+        );
+
+        assert_eq!(
+            serde_json::to_value(&chunks[0]).expect("chunk serializes"),
+            json!({ "type": "start", "messageId": "msg-123" })
+        );
+        assert_eq!(*generate_calls.lock().expect("generate lock"), 1);
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        assert!(!finish_events[0].is_aborted);
+        assert!(!finish_events[0].is_continuation);
+        assert_eq!(finish_events[0].finish_reason, Some(FinishReason::Stop));
+        assert_eq!(
+            serde_json::to_value(&finish_events[0].response_message).expect("message serializes"),
+            json!({
+                "id": "msg-123",
+                "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "text": "Hello", "state": "done" }
+                ]
+            })
+        );
+        assert_eq!(finish_events[0].messages.len(), 2);
+        assert_eq!(finish_events[0].messages[0].id, "user-msg-1");
         assert_eq!(
             finish_events[0].messages[1],
             finish_events[0].response_message
@@ -12331,6 +12450,99 @@ mod tests {
         assert_eq!(model.stream_calls()[0].include_raw_chunks, Some(false));
     }
 
+    /// Maps packages/ai stream-text.test.ts:20326
+    /// `should filter available tools to only the ones in activeTools` — only the
+    /// tools named in `active_tools` are forwarded to the provider `doStream`
+    /// call; the remaining configured tools are filtered out.
+    #[test]
+    fn stream_text_filters_available_tools_to_active_tools() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", ", ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let value_schema = json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("tool1", value_schema.clone())
+                        .with_execute(|_input, _options| async move { Ok(json!("result1")) }),
+                )
+                .with_tool(
+                    Tool::new("tool2", value_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("result2")) }),
+                )
+                .with_active_tools(["tool1"]),
+        ));
+
+        assert_eq!(result.text, "Hello, world!");
+        let stream_calls = model.stream_calls();
+        assert_eq!(stream_calls.len(), 1);
+        let tools = stream_calls[0]
+            .tools
+            .as_ref()
+            .expect("tools forwarded to provider call");
+        let tool_names: Vec<&str> = tools
+            .iter()
+            .map(|tool| match tool {
+                LanguageModelTool::Function(tool) => tool.name.as_str(),
+                LanguageModelTool::Provider(tool) => tool.name.as_str(),
+            })
+            .collect();
+        assert_eq!(tool_names, vec!["tool1"]);
+    }
+
+    /// Maps packages/ai stream-text.test.ts:20705
+    /// `should pass includeRawChunks flag correctly to the model` — the resolved
+    /// `include_raw_chunks` flag (true, false, or unset default) is forwarded to
+    /// the provider `doStream` call exactly as configured.
+    #[test]
+    fn stream_text_passes_include_raw_chunks_flag_correctly_to_model() {
+        fn run(option: Option<bool>) -> Option<bool> {
+            let model =
+                MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                    LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                    LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                    LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                    LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                        usage(),
+                        finish_reason(),
+                    )),
+                ]));
+
+            let mut options = StreamTextOptions::new(&model, vec![user_message("test prompt")]);
+            if let Some(include_raw_chunks) = option {
+                options = options.with_include_raw_chunks(include_raw_chunks);
+            }
+            let result = poll_ready(stream_text(options));
+            result.consume_stream();
+
+            model.stream_calls()[0].include_raw_chunks
+        }
+
+        // include.rawChunks: true -> forwarded as true.
+        assert_eq!(run(Some(true)), Some(true));
+        // include.rawChunks: false -> forwarded as false.
+        assert_eq!(run(Some(false)), Some(false));
+        // omitted -> defaults to unset (treated as false by the provider).
+        assert_eq!(run(None), None);
+    }
+
     #[test]
     fn stream_text_passes_response_format_to_model() {
         let model =
@@ -12828,6 +13040,41 @@ mod tests {
         let stream_calls = model.stream_calls();
         assert_eq!(stream_calls.len(), 1);
         assert!(stream_calls[0].abort_signal.is_none());
+    }
+
+    /// Maps packages/ai stream-text.test.ts:16761
+    /// `should support chunkMs alongside totalMs and stepMs` — configuring all of
+    /// `total_ms`, `step_ms`, and `chunk_ms` still forwards a (total-derived)
+    /// abort signal to the provider `doStream` call.
+    #[test]
+    fn stream_text_supports_chunk_ms_alongside_total_ms_and_step_ms() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_timeout(
+                TimeoutConfiguration::detailed(
+                    TimeoutConfigurationOptions::new()
+                        .with_total_ms(30_000)
+                        .with_step_ms(10_000)
+                        .with_chunk_ms(5_000),
+                ),
+            ),
+        ));
+        result.consume_stream();
+
+        assert_eq!(result.text, "Hello");
+        let stream_calls = model.stream_calls();
+        assert_eq!(stream_calls.len(), 1);
+        assert!(stream_calls[0].abort_signal.is_some());
     }
 
     struct DelayedStreamLanguageModel {
@@ -16584,6 +16831,139 @@ mod tests {
         );
     }
 
+    fn provider_executed_approval_result() -> StreamTextResult {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new("mcp-call-1", "mcp_tool", r#"{"query":"test"}"#)
+                        .with_provider_executed(true),
+                ),
+                LanguageModelStreamPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequest::new("mcp-approval-1", "mcp-call-1"),
+                ),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+
+        poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("Run MCP tool")],
+        )))
+    }
+
+    /// Maps packages/ai stream-text.test.ts:27868
+    /// `should add provider-executed tool approval request to UI message stream`
+    /// — a provider-executed tool call awaiting approval surfaces both a
+    /// `tool-input-available` (providerExecuted) chunk and a
+    /// `tool-approval-request` chunk in the UI message stream.
+    #[test]
+    fn stream_text_adds_provider_executed_tool_approval_request_to_ui_message_stream() {
+        let result = provider_executed_approval_result();
+
+        let chunks = serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize");
+        let chunks = chunks.as_array().expect("chunks are an array");
+        assert!(chunks.contains(&json!({
+            "type": "tool-input-available",
+            "toolCallId": "mcp-call-1",
+            "toolName": "mcp_tool",
+            "input": { "query": "test" },
+            "providerExecuted": true
+        })));
+        assert!(chunks.contains(&json!({
+            "type": "tool-approval-request",
+            "approvalId": "mcp-approval-1",
+            "toolCallId": "mcp-call-1"
+        })));
+    }
+
+    /// Maps packages/ai stream-text.test.ts:27903
+    /// `should add provider-executed tool approval request to content` — the
+    /// streamed content carries the provider-executed tool-call followed by the
+    /// tool-approval-request that references it.
+    #[test]
+    fn stream_text_adds_provider_executed_tool_approval_request_to_content() {
+        let result = provider_executed_approval_result();
+
+        let tool_call_index = result
+            .parts
+            .iter()
+            .position(|part| {
+                matches!(
+                    part,
+                    TextStreamPart::ToolCall(call)
+                        if call.tool_call_id == "mcp-call-1"
+                            && call.provider_executed == Some(true)
+                )
+            })
+            .expect("provider-executed tool-call content part present");
+
+        let (approval_index, approval_request) = result
+            .parts
+            .iter()
+            .enumerate()
+            .find_map(|(index, part)| match part {
+                TextStreamPart::ToolApprovalRequest(request)
+                    if request.tool_call_id == "mcp-call-1" =>
+                {
+                    Some((index, request))
+                }
+                _ => None,
+            })
+            .expect("tool-approval-request content part present");
+
+        assert!(tool_call_index < approval_index);
+        assert_eq!(approval_request.approval_id, "mcp-approval-1");
+    }
+
+    /// Maps packages/ai stream-text.test.ts:27936
+    /// `should add provider-executed tool approval request to response messages`
+    /// — the assistant response message retains the provider-executed tool-call
+    /// and a tool-approval-request part (after the tool call).
+    #[test]
+    fn stream_text_adds_provider_executed_tool_approval_request_to_response_messages() {
+        let result = provider_executed_approval_result();
+
+        let assistant_message = result
+            .response_messages
+            .iter()
+            .find_map(|message| match message {
+                LanguageModelMessage::Assistant(assistant) => Some(assistant),
+                _ => None,
+            })
+            .expect("assistant response message present");
+
+        let tool_call_index = assistant_message
+            .content
+            .iter()
+            .position(|part| {
+                matches!(
+                    part,
+                    LanguageModelAssistantContentPart::ToolCall(call)
+                        if call.tool_call_id == "mcp-call-1" && call.tool_name == "mcp_tool"
+                )
+            })
+            .expect("tool-call content part present");
+
+        let (approval_index, approval_request) = assistant_message
+            .content
+            .iter()
+            .enumerate()
+            .find_map(|(index, part)| match part {
+                LanguageModelAssistantContentPart::ToolApprovalRequest(request)
+                    if request.tool_call_id == "mcp-call-1" =>
+                {
+                    Some((index, request))
+                }
+                _ => None,
+            })
+            .expect("tool-approval-request content part present");
+
+        assert!(tool_call_index < approval_index);
+        assert_eq!(approval_request.approval_id, "mcp-approval-1");
+    }
+
     #[test]
     fn stream_text_sends_approved_provider_executed_tool_approval_response_once() {
         let model =
@@ -16835,6 +17215,161 @@ mod tests {
             "approvalId": approval_request.approval_id.clone(),
             "toolCallId": "call-1"
         })));
+    }
+
+    /// Maps packages/ai stream-text.test.ts:25524
+    /// `should add tool approval requests to the content` — a user-approval tool
+    /// call adds a tool-call followed by a tool-approval-request to the streamed
+    /// content, and the approval request references the originating tool call.
+    #[test]
+    fn stream_text_adds_tool_approval_requests_to_content() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": "value" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("tool1", input_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("result1")) }),
+                )
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new()
+                        .with_tool_status("tool1", NormalizedToolApprovalStatus::UserApproval),
+                )
+                .with_max_steps(3),
+        ));
+
+        let tool_call_index = result
+            .parts
+            .iter()
+            .position(|part| {
+                matches!(part, TextStreamPart::ToolCall(call) if call.tool_call_id == "call-1")
+            })
+            .expect("tool-call content part present");
+
+        let (approval_index, approval_request) = result
+            .parts
+            .iter()
+            .enumerate()
+            .find_map(|(index, part)| match part {
+                TextStreamPart::ToolApprovalRequest(request)
+                    if request.tool_call_id == "call-1" =>
+                {
+                    Some((index, request))
+                }
+                _ => None,
+            })
+            .expect("tool-approval-request content part present");
+
+        assert!(tool_call_index < approval_index);
+        assert!(!approval_request.approval_id.is_empty());
+        // No approval response yet: approval is still pending in the content.
+        assert!(
+            result
+                .parts
+                .iter()
+                .all(|part| !matches!(part, TextStreamPart::ToolApprovalResponse(_)))
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:25557
+    /// `should add tool approval requests to the response messages` — when a tool
+    /// call requires user approval, the assistant response message retains both
+    /// the tool-call and a tool-approval-request part (after the tool call).
+    #[test]
+    fn stream_text_adds_tool_approval_requests_to_response_messages() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": "value" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("tool1", input_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("result1")) }),
+                )
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new()
+                        .with_tool_status("tool1", NormalizedToolApprovalStatus::UserApproval),
+                )
+                .with_max_steps(3),
+        ));
+
+        // The tool is not executed; approval is pending.
+        assert!(result.tool_results.is_empty());
+
+        let assistant_message = result
+            .response_messages
+            .iter()
+            .find_map(|message| match message {
+                LanguageModelMessage::Assistant(assistant) => Some(assistant),
+                _ => None,
+            })
+            .expect("assistant response message present");
+
+        let tool_call_index = assistant_message
+            .content
+            .iter()
+            .position(|part| {
+                matches!(
+                    part,
+                    LanguageModelAssistantContentPart::ToolCall(call)
+                        if call.tool_call_id == "call-1" && call.tool_name == "tool1"
+                )
+            })
+            .expect("tool-call content part present");
+
+        let (approval_index, approval_request) = assistant_message
+            .content
+            .iter()
+            .enumerate()
+            .find_map(|(index, part)| match part {
+                LanguageModelAssistantContentPart::ToolApprovalRequest(request)
+                    if request.tool_call_id == "call-1" =>
+                {
+                    Some((index, request))
+                }
+                _ => None,
+            })
+            .expect("tool-approval-request content part present");
+
+        assert!(tool_call_index < approval_index);
+        assert!(!approval_request.approval_id.is_empty());
     }
 
     #[test]

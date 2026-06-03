@@ -3,6 +3,7 @@ use crate::file_data::FileDataContent;
 use crate::generate_text::GeneratedFile;
 use crate::headers::Headers;
 use crate::language_model::ProviderAbortSignal;
+use crate::logger::{LogWarningsOptions, log_warnings};
 use crate::provider::{ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{Base64DecodeError, detect_media_type, with_user_agent_suffix};
 use crate::speech_model::{
@@ -308,6 +309,10 @@ pub async fn generate_speech<M: SpeechModel + ?Sized>(
         return Err(NoSpeechGeneratedError::new([response]));
     }
 
+    log_warnings(
+        &LogWarningsOptions::new(warnings.clone()).with_scope(model.provider(), model.model_id()),
+    );
+
     let media_type = detect_media_type(&audio, Some("audio")).unwrap_or("audio/mp3");
     let audio = GeneratedAudioFile::new(media_type, audio);
 
@@ -364,6 +369,7 @@ mod tests {
     use crate::VERSION;
     use crate::file_data::FileDataContent;
     use crate::headers::Headers;
+    use crate::logger::{LogWarningsOptions, take_log_warning_calls_for_tests};
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
     use crate::speech_model::{
         SpeechModel, SpeechModelCallOptions, SpeechModelResponse, SpeechModelResponseMetadata,
@@ -721,6 +727,64 @@ mod tests {
         assert_eq!(
             error.responses(),
             &[SpeechModelResponseMetadata::from_response(response)]
+        );
+    }
+
+    // packages-ai-0368: it should call logWarnings with the correct warnings.
+    #[test]
+    fn generate_speech_calls_log_warnings_with_correct_warnings() {
+        let expected_warnings = vec![
+            Warning::Other {
+                message: "Setting is not supported".to_string(),
+            },
+            Warning::Unsupported {
+                feature: "voice".to_string(),
+                details: Some("Voice parameter not supported".to_string()),
+            },
+        ];
+        let model = RecordingSpeechModel::new(vec![
+            SpeechModelResult::new(
+                FileDataContent::Bytes(vec![1, 2, 3, 4]),
+                speech_response("speech-test"),
+            )
+            .with_warning(expected_warnings[0].clone())
+            .with_warning(expected_warnings[1].clone()),
+        ]);
+        take_log_warning_calls_for_tests();
+
+        poll_ready(generate_speech(GenerateSpeechOptions::new(
+            &model,
+            "This is a sample text to convert to speech.",
+        )))
+        .expect("speech generates");
+
+        assert_eq!(
+            take_log_warning_calls_for_tests(),
+            vec![
+                LogWarningsOptions::new(expected_warnings)
+                    .with_scope("test-provider", "speech-test")
+            ]
+        );
+    }
+
+    // packages-ai-0369: it should call logWarnings with empty array when no warnings are present.
+    #[test]
+    fn generate_speech_calls_log_warnings_with_empty_array_when_no_warnings() {
+        let model = RecordingSpeechModel::new(vec![SpeechModelResult::new(
+            FileDataContent::Bytes(vec![1, 2, 3, 4]),
+            speech_response("speech-test"),
+        )]);
+        take_log_warning_calls_for_tests();
+
+        poll_ready(generate_speech(GenerateSpeechOptions::new(
+            &model,
+            "This is a sample text to convert to speech.",
+        )))
+        .expect("speech generates");
+
+        assert_eq!(
+            take_log_warning_calls_for_tests(),
+            vec![LogWarningsOptions::new(Vec::new()).with_scope("test-provider", "speech-test")]
         );
     }
 
