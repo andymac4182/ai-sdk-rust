@@ -779,6 +779,31 @@ mapped one row at a time below.
 | `packages/deepinfra/src/deepinfra-provider.test.ts` | should construct an image model with correct configuration | `deepinfra_provider_creates_image_model_and_generates_images`; `deepinfra_provider_implements_provider_trait` | none |
 | `packages/deepinfra/src/deepinfra-provider.test.ts` | should use default settings when none provided | `deepinfra_provider_uses_default_base_url_and_function_alias`; `deepinfra_provider_creates_image_model_and_generates_images` | none |
 | `packages/deepinfra/src/deepinfra-provider.test.ts` | should respect custom baseURL | `deepinfra_provider_creates_image_model_and_generates_images`; `deepinfra_provider_settings_serde_accepts_upstream_base_url` | none |
+## Cerebras Exact Case Map
+
+The Cerebras provider is ported in the root `ai-sdk-rust` crate
+(`src/cerebras.rs`) on top of the shared OpenAI-compatible chat model. The
+`CerebrasChatLanguageModel` wrapper reproduces the upstream
+`CerebrasChatLanguageModel` structured-output finish-reason normalization
+(`doGenerate`/`doStream`) and the `transformCerebrasRequestBody`
+`reasoning_content` to `reasoning` rewrite. All cases are mapped to named Rust
+tests colocated in `src/cerebras.rs`.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/cerebras/src/cerebras-chat-language-model.test.ts` | preserves the captured first tool-call step | `cerebras_preserves_the_captured_first_tool_call_step` | upstream replays a recorded JSON fixture; the Rust test drives the same structured-output `json` request, reasoning, single tool call, and raw `tool_calls` finish reason through the transport |
+| `packages/cerebras/src/cerebras-chat-language-model.test.ts` | drops the captured repeated tool call when structured output text is present | `cerebras_drops_the_captured_repeated_tool_call_when_structured_output_text_is_present` | none |
+| `packages/cerebras/src/cerebras-chat-language-model.test.ts` | preserves the captured mixed response without structured output | `cerebras_preserves_the_captured_mixed_response_without_structured_output` | none |
+| `packages/cerebras/src/cerebras-chat-language-model.test.ts` | normalizes captured streamed structured output with tool calls finish reason | `cerebras_normalizes_captured_streamed_structured_output_with_tool_calls_finish_reason` | upstream asserts the full usage snapshot from a recorded chunk fixture; the Rust test pins the normalized finish reason (`tool_calls` raw downgraded to unified `stop`), which is the Cerebras-specific behavior under test |
+| `packages/cerebras/src/cerebras-chat-language-model.test.ts` | preserves the first streamed tool call and drops the repeated one | `cerebras_preserves_the_first_streamed_tool_call_and_drops_the_repeated_one` | none |
+| `packages/cerebras/src/cerebras-provider.test.ts` | should create a CerebrasProvider instance with default options | `cerebras_provider_creates_a_provider_instance_with_default_options` | exact JavaScript constructor mock assertions are not portable; Rust covers default base URL, `CEREBRAS_API_KEY` resolution, and `v4` specification version |
+| `packages/cerebras/src/cerebras-provider.test.ts` | should create a CerebrasProvider instance with custom options | `cerebras_provider_creates_a_provider_instance_with_custom_options`; `cerebras_provider_creates_chat_model_with_headers_base_url_and_structured_outputs` | exact JavaScript constructor mock assertions are not portable; Rust covers request URL/base URL/header/API-key behavior |
+| `packages/cerebras/src/cerebras-provider.test.ts` | should pass header | `cerebras_provider_passes_header` | none |
+| `packages/cerebras/src/cerebras-provider.test.ts` | should return a chat model when called as a function | `cerebras_provider_returns_a_chat_model_when_called_as_a_function` | Rust exposes `cerebras(model_id)` instead of a callable provider object |
+| `packages/cerebras/src/cerebras-provider.test.ts` | should convert assistant reasoning_content to reasoning | `cerebras_converts_assistant_reasoning_content_to_reasoning`; `cerebras_request_body_transform_keeps_existing_reasoning_field` | none |
+| `packages/cerebras/src/cerebras-provider.test.ts` | should construct a language model with correct configuration | `cerebras_provider_constructs_a_language_model_with_correct_configuration` | none |
+| `packages/cerebras/src/cerebras-provider.test.ts` | should throw NoSuchModelError when attempting to create embedding model | `cerebras_provider_throws_nosuchmodelerror_when_attempting_to_create_embedding_model` | exact JavaScript thrown-error class identity is represented as a Rust `NoSuchModelError` value |
+| `packages/cerebras/src/cerebras-provider.test.ts` | should construct a chat model with correct configuration | `cerebras_provider_constructs_a_chat_model_with_correct_configuration` | none |
 
 ## Live-Only Proof
 

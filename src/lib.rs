@@ -96,8 +96,8 @@ pub use baseten::{
     BasetenProvider, BasetenProviderSettings, DEFAULT_BASETEN_BASE_URL, baseten, create_baseten,
 };
 pub use cerebras::{
-    CerebrasProvider, CerebrasProviderSettings, DEFAULT_CEREBRAS_BASE_URL, cerebras,
-    create_cerebras,
+    CerebrasChatLanguageModel, CerebrasProvider, CerebrasProviderSettings,
+    DEFAULT_CEREBRAS_BASE_URL, cerebras, create_cerebras,
 };
 pub use chat_transport::{
     Chat, ChatError, ChatMessageInput, ChatRequestOptions, ChatStatus, ChatTransport,
