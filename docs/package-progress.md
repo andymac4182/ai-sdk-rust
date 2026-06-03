@@ -3,17 +3,17 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv` with strict test inventory `docs/ai-strict-test-inventory.md`._
 
 - Displayed package rows: 54
-- Average estimated completion: 91.8%
-- Portable package average: 90.0%
-- Closed package rows: 48 / 54
-- Strict portable verified rows: 38 / 44
-- In-progress rows: 6
+- Average estimated completion: 93.7%
+- Portable package average: 92.2%
+- Closed package rows: 49 / 54
+- Strict portable verified rows: 39 / 44
+- In-progress rows: 5
 - Not-started rows: 0
 - Strict inventory full upstream cases scanned: 9013
-- Strict inventory full portable cases mapped: 6561 / 7669
-- Strict inventory full portable cases unmapped: 1108
-- Displayed-row strict portable test cases mapped: 6243 / 7266
-- Displayed-row strict portable test cases unmapped: 1023
+- Strict inventory full portable cases mapped: 6586 / 7669
+- Strict inventory full portable cases unmapped: 1083
+- Displayed-row strict portable test cases mapped: 6268 / 7266
+- Displayed-row strict portable test cases unmapped: 998
 
 ## 100% Closed
 
@@ -36,6 +36,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/bytedance` | 100% | Verified | provider package |
 | `@ai-sdk/cohere` | 100% | Verified | provider package |
 | `@ai-sdk/deepgram` | 100% | Verified | provider package |
+| `@ai-sdk/deepinfra` | 100% | Verified | provider package |
 | `@ai-sdk/deepseek` | 100% | Verified | provider package |
 | `@ai-sdk/elevenlabs` | 100% | Verified | provider package |
 | `@ai-sdk/fal` | 100% | Verified | provider package |
@@ -76,7 +77,6 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/google` | 99% | In progress | provider package | strict test inventory: 1 portable upstream cases still need named Rust tests; sample failing IDs: `packages-google-0291` |
 | `@ai-sdk/azure` | 0% | In progress | provider package | strict test inventory: 55 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/cerebras` | 0% | In progress | provider package | strict test inventory: 13 portable upstream cases still need named Rust tests; sample failing IDs:... |
-| `@ai-sdk/deepinfra` | 0% | In progress | provider package | strict test inventory: 25 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/test-server` | 0% | In progress | testing support package | strict test inventory: 5 portable upstream cases still need named Rust tests; sample failing IDs:... |
 
 ## Not Started

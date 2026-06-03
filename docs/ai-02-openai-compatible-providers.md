@@ -746,6 +746,39 @@ unit test.
 | `packages/baseten/src/baseten-provider.unit.test.ts` | should handle unsupported image models | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0023_unsupported_image_models` | none |
 | `packages/baseten/src/baseten-provider.unit.test.ts` | should implement all required provider methods | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0024_implements_all_required_provider_methods` | none |
 | `packages/baseten/src/baseten-provider.unit.test.ts` | should allow calling provider as function | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0025_provider_callable_as_function` | none |
+## DeepInfra Exact Case Map
+
+The DeepInfra package is ported in the root crate at `src/deepinfra.rs` with
+colocated `#[cfg(test)] mod tests`. Every current portable upstream case is
+mapped one row at a time below.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/deepinfra/src/deepinfra-chat-language-model.test.ts` | should fix incorrect completion_tokens for gemini/gemma models when reasoning_tokens > completion_tokens | `deepinfra_chat_corrects_reasoning_usage_when_reasoning_exceeds_completion_tokens`; `deepinfra_chat_corrects_stream_finish_reasoning_usage` | none |
+| `packages/deepinfra/src/deepinfra-chat-language-model.test.ts` | should not modify usage for non-gemini models with correct data | `deepinfra_chat_preserves_usage_for_non_gemini_models_without_reasoning` | upstream `reasoning: 0` is the Rust-native `Some(0)` output-token reasoning value |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should pass the correct parameters including aspect ratio and seed | `deepinfra_provider_creates_image_model_and_generates_images` | none |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should call the correct url | `deepinfra_provider_creates_image_model_and_generates_images` | none |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should pass headers | `deepinfra_provider_creates_image_model_and_generates_images` | none |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should handle API errors | `deepinfra_image_model_maps_generation_api_error_to_metadata` | exact JavaScript thrown-error class identity is represented as Rust-native provider error metadata |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should handle size parameter | `deepinfra_provider_creates_image_model_and_generates_images` | none |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should respect the abort signal | `deepinfra_image_model_respects_abort_signal` | upstream `This operation was aborted` thrown message is represented as Rust-native `Aborted` provider error metadata; live in-flight transport timing is credential-gated |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should include timestamp, headers and modelId in response | `deepinfra_image_model_reports_specification_version_and_response_metadata` | upstream `_internal.currentDate` injection is a JavaScript test hook; Rust uses current UTC and asserts the timestamp falls within the request window plus modelId and headers |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should include response headers from API call | `deepinfra_provider_creates_image_model_and_generates_images`; `deepinfra_image_model_reports_specification_version_and_response_metadata` | none |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should expose correct provider and model information | `deepinfra_image_model_reports_specification_version_and_response_metadata` | none |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should send edit request with files | `deepinfra_image_model_edits_with_files_mask_and_provider_options` | none |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should send edit request with files and mask | `deepinfra_image_model_edits_with_files_mask_and_provider_options` | none |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should send edit request with multiple images | `deepinfra_image_model_edits_with_files_mask_and_provider_options` | none |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should include response metadata for edit requests | `deepinfra_image_model_edits_with_files_mask_and_provider_options` | upstream `_internal.currentDate` injection is a JavaScript test hook; Rust validates response headers and uses current UTC |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should pass provider options in edit request | `deepinfra_image_model_edits_with_files_mask_and_provider_options` | none |
+| `packages/deepinfra/src/deepinfra-provider.test.ts` | should create a DeepInfraProvider instance with default options | `deepinfra_provider_creates_chat_model_with_headers_and_base_url`; `deepinfra_provider_uses_default_base_url_and_function_alias` | `loadApiKey` mock-call assertion is JavaScript-only; Rust covers the `DEEPINFRA_API_KEY` precedence and the `Authorization: Bearer` header behavior directly |
+| `packages/deepinfra/src/deepinfra-provider.test.ts` | should create a DeepInfraProvider instance with custom options | `deepinfra_provider_creates_chat_model_with_headers_and_base_url`; `deepinfra_provider_settings_serde_accepts_upstream_base_url` | exact JavaScript constructor mock assertions are not portable; Rust covers request/base URL/header/API-key behavior |
+| `packages/deepinfra/src/deepinfra-provider.test.ts` | should return a chat model when called as a function | `deepinfra_provider_uses_default_base_url_and_function_alias` | Rust exposes `deepinfra(model_id)` instead of a callable object |
+| `packages/deepinfra/src/deepinfra-provider.test.ts` | should construct a chat model with correct configuration | `deepinfra_provider_creates_chat_model_with_headers_and_base_url`; `deepinfra_provider_implements_provider_trait` | none |
+| `packages/deepinfra/src/deepinfra-provider.test.ts` | should construct a completion model with correct configuration | `deepinfra_provider_creates_completion_model` | none |
+| `packages/deepinfra/src/deepinfra-provider.test.ts` | should construct a text embedding model with correct configuration | `deepinfra_provider_creates_embedding_model_aliases`; `deepinfra_provider_implements_provider_trait` | none |
+| `packages/deepinfra/src/deepinfra-provider.test.ts` | should construct an image model with correct configuration | `deepinfra_provider_creates_image_model_and_generates_images`; `deepinfra_provider_implements_provider_trait` | none |
+| `packages/deepinfra/src/deepinfra-provider.test.ts` | should use default settings when none provided | `deepinfra_provider_uses_default_base_url_and_function_alias`; `deepinfra_provider_creates_image_model_and_generates_images` | none |
+| `packages/deepinfra/src/deepinfra-provider.test.ts` | should respect custom baseURL | `deepinfra_provider_creates_image_model_and_generates_images`; `deepinfra_provider_settings_serde_accepts_upstream_base_url` | none |
 
 ## Live-Only Proof
 
