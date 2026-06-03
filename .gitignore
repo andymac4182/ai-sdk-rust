@@ -2,3 +2,5 @@
 Cargo.lock
 .env.local
 scripts/open-agents-local-e2e/node_modules/
+
+.plan/
