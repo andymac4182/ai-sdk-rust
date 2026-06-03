@@ -12,6 +12,7 @@ use crate::generate_text::GeneratedFile;
 use crate::headers::Headers;
 use crate::json::JsonValue;
 use crate::language_model::ProviderAbortSignal;
+use crate::logger::{LogWarningsOptions, log_warnings};
 use crate::provider::{ProviderMetadata, ProviderOptions};
 use crate::provider_utils::{
     DownloadError, DownloadedBlob, convert_base64_to_bytes, detect_media_type,
@@ -505,6 +506,17 @@ pub async fn generate_video<M: VideoModel + ?Sized>(
         }
     }
 
+    if videos.is_empty() {
+        return Err(NoVideoGeneratedError::new(responses).into());
+    }
+
+    if !warnings.is_empty() {
+        log_warnings(
+            &LogWarningsOptions::new(warnings.clone())
+                .with_scope(model.provider(), model.model_id()),
+        );
+    }
+
     GenerateVideoResult::new(videos, warnings, responses, provider_metadata).map_err(Into::into)
 }
 
@@ -730,6 +742,7 @@ mod tests {
     use crate::VERSION;
     use crate::file_data::FileDataContent;
     use crate::generate_text::GeneratedFile;
+    use crate::logger::{LogWarningsOptions, take_log_warning_calls_for_tests};
     use crate::provider::{ProviderMetadata, ProviderOptions, SpecificationVersion};
     use crate::provider_utils::DownloadedBlob;
     use crate::video_model::{
@@ -1328,5 +1341,774 @@ mod tests {
 
         assert_eq!(model.specification_version(), SpecificationVersion::V4);
         assert_eq!(result.video.media_type(), "video/mp4");
+    }
+
+    #[test]
+    fn generate_video_sends_args_to_do_generate() {
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "mock-provider": {
+                "loop": true
+            }
+        }))
+        .expect("provider options deserialize");
+        let model = RecordingVideoModel::new(vec![VideoModelResult::new(
+            vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+            video_response("video-test"),
+        )]);
+
+        poll_ready(generate_video(
+            GenerateVideoOptions::new(&model, "a cat walking on a beach")
+                .with_aspect_ratio("16:9")
+                .with_resolution("1920x1080")
+                .with_duration(5.0)
+                .with_fps(30.0)
+                .with_seed(12345)
+                .with_provider_options(provider_options.clone())
+                .with_header("custom-request-header", "request-header-value"),
+        ))
+        .expect("video generation succeeds");
+
+        let calls = model.calls();
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        assert_eq!(call.n, 1);
+        assert_eq!(call.prompt.as_deref(), Some("a cat walking on a beach"));
+        assert!(call.image.is_none());
+        assert_eq!(call.aspect_ratio.as_deref(), Some("16:9"));
+        assert_eq!(call.resolution.as_deref(), Some("1920x1080"));
+        assert_eq!(call.duration, Some(5.0));
+        assert_eq!(call.fps, Some(30.0));
+        assert_eq!(call.seed, Some(12345));
+        assert_eq!(call.provider_options, provider_options);
+        assert_eq!(
+            call.headers
+                .as_ref()
+                .and_then(|headers| headers.get("custom-request-header")),
+            Some(&"request-header-value".to_string())
+        );
+        assert_eq!(
+            call.headers
+                .as_ref()
+                .and_then(|headers| headers.get("user-agent")),
+            Some(&format!("ai/{VERSION}"))
+        );
+    }
+
+    #[test]
+    fn generate_video_returns_warnings() {
+        let model = RecordingVideoModel::new(vec![
+            VideoModelResult::new(
+                vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+                video_response("video-test"),
+            )
+            .with_warning(Warning::Other {
+                message: "Setting is not supported".to_string(),
+            }),
+        ]);
+
+        let result = poll_ready(generate_video(GenerateVideoOptions::new(
+            &model,
+            "a cat walking on a beach",
+        )))
+        .expect("video generation succeeds");
+
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Other {
+                message: "Setting is not supported".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn generate_video_calls_log_warnings_with_the_correct_warnings() {
+        let expected_warnings = vec![
+            Warning::Other {
+                message: "Setting is not supported".to_string(),
+            },
+            Warning::Unsupported {
+                feature: "duration".to_string(),
+                details: Some("Duration parameter not supported".to_string()),
+            },
+        ];
+        let model = RecordingVideoModel::new(vec![
+            VideoModelResult::new(
+                vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+                video_response("video-test"),
+            )
+            .with_warning(expected_warnings[0].clone())
+            .with_warning(expected_warnings[1].clone()),
+        ]);
+
+        take_log_warning_calls_for_tests();
+        poll_ready(generate_video(GenerateVideoOptions::new(
+            &model,
+            "a cat walking on a beach",
+        )))
+        .expect("video generation succeeds");
+
+        assert_eq!(
+            take_log_warning_calls_for_tests(),
+            vec![
+                LogWarningsOptions::new(expected_warnings)
+                    .with_scope("test-provider", "video-test")
+            ]
+        );
+    }
+
+    #[test]
+    fn generate_video_does_not_call_log_warnings_when_no_warnings_present() {
+        let model = RecordingVideoModel::new(vec![VideoModelResult::new(
+            vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+            video_response("video-test"),
+        )]);
+
+        take_log_warning_calls_for_tests();
+        poll_ready(generate_video(GenerateVideoOptions::new(
+            &model,
+            "a cat walking on a beach",
+        )))
+        .expect("video generation succeeds");
+
+        assert!(take_log_warning_calls_for_tests().is_empty());
+    }
+
+    #[test]
+    fn generate_video_returns_base64_videos_with_correct_mime_types() {
+        let model = RecordingVideoModel::new(vec![VideoModelResult::new(
+            vec![
+                VideoModelVideoData::base64(mp4_base64(), "video/mp4"),
+                VideoModelVideoData::base64(webm_base64(), "video/webm"),
+            ],
+            video_response("video-test"),
+        )]);
+
+        let result = poll_ready(generate_video(GenerateVideoOptions::new(
+            &model,
+            "a cat walking on a beach",
+        )))
+        .expect("video generation succeeds");
+
+        assert_eq!(result.videos.len(), 2);
+        assert_eq!(result.videos[0].media_type(), "video/mp4");
+        assert_eq!(result.videos[1].media_type(), "video/webm");
+    }
+
+    #[test]
+    fn generate_video_returns_first_video() {
+        let model = RecordingVideoModel::new(vec![VideoModelResult::new(
+            vec![
+                VideoModelVideoData::base64(mp4_base64(), "video/mp4"),
+                VideoModelVideoData::base64(webm_base64(), "video/webm"),
+            ],
+            video_response("video-test"),
+        )]);
+
+        let result = poll_ready(generate_video(GenerateVideoOptions::new(
+            &model,
+            "a cat walking on a beach",
+        )))
+        .expect("video generation succeeds");
+
+        assert_eq!(result.video.media_type(), "video/mp4");
+    }
+
+    #[test]
+    fn generate_video_returns_binary_videos() {
+        let binary_data = crate::provider_utils::convert_base64_to_bytes(mp4_base64())
+            .expect("mp4 base64 decodes");
+        let model = RecordingVideoModel::new(vec![VideoModelResult::new(
+            vec![VideoModelVideoData::binary(
+                binary_data.clone(),
+                "video/mp4",
+            )],
+            video_response("video-test"),
+        )]);
+
+        let result = poll_ready(generate_video(GenerateVideoOptions::new(
+            &model,
+            "a cat walking on a beach",
+        )))
+        .expect("video generation succeeds");
+
+        assert_eq!(result.videos.len(), 1);
+        assert_eq!(
+            result.video.uint8_array().expect("binary video has bytes"),
+            binary_data
+        );
+    }
+
+    #[test]
+    fn generate_video_fetches_videos_from_urls() {
+        let fetched = Arc::new(Mutex::new(false));
+        let download = GenerateVideoDownload::new({
+            let fetched = Arc::clone(&fetched);
+            move |_options| {
+                *fetched.lock().expect("fetched lock is not poisoned") = true;
+                ready(Ok(DownloadedBlob::new(
+                    crate::provider_utils::convert_base64_to_bytes(mp4_base64())
+                        .expect("mp4 base64 decodes"),
+                )
+                .with_media_type("video/mp4")))
+            }
+        });
+        let url = Url::parse("https://example.com/video.mp4").expect("url parses");
+        let model = RecordingVideoModel::new(vec![VideoModelResult::new(
+            vec![VideoModelVideoData::url(url, "video/mp4")],
+            video_response("video-test"),
+        )]);
+
+        let result = poll_ready(generate_video(
+            GenerateVideoOptions::new(&model, "a cat walking on a beach").with_download(download),
+        ))
+        .expect("video generation succeeds");
+
+        assert!(*fetched.lock().expect("fetched lock is not poisoned"));
+        assert_eq!(result.videos.len(), 1);
+    }
+
+    #[test]
+    fn generate_video_throws_download_error_when_fetch_fails() {
+        let url = Url::parse("https://example.com/video.mp4").expect("url parses");
+        let download = GenerateVideoDownload::new(move |options| {
+            ready(Err(crate::provider_utils::DownloadError::with_status(
+                options.url.to_string(),
+                404,
+                "Not Found",
+            )))
+        });
+        let model = RecordingVideoModel::new(vec![VideoModelResult::new(
+            vec![VideoModelVideoData::url(url, "video/mp4")],
+            video_response("video-test"),
+        )]);
+
+        let error = poll_ready(generate_video(
+            GenerateVideoOptions::new(&model, "a cat walking on a beach").with_download(download),
+        ))
+        .expect_err("failed download errors");
+
+        let download_error = error
+            .as_download_error()
+            .expect("error is download failure");
+        assert_eq!(
+            download_error.message(),
+            "Failed to download https://example.com/video.mp4: 404 Not Found"
+        );
+    }
+
+    #[test]
+    fn generate_video_generates_videos_across_several_calls() {
+        let model = RecordingVideoModel::new(vec![
+            VideoModelResult::new(
+                vec![
+                    VideoModelVideoData::base64(mp4_base64(), "video/mp4"),
+                    VideoModelVideoData::base64(mp4_base64(), "video/mp4"),
+                ],
+                video_response("video-test"),
+            ),
+            VideoModelResult::new(
+                vec![VideoModelVideoData::base64(webm_base64(), "video/webm")],
+                video_response("video-test"),
+            ),
+        ])
+        .with_max_videos_per_call(2);
+
+        let result = poll_ready(generate_video(
+            GenerateVideoOptions::new(&model, "a cat walking on a beach").with_n(3),
+        ))
+        .expect("video generation succeeds");
+
+        assert_eq!(
+            model
+                .calls()
+                .iter()
+                .map(|options| options.n)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        assert_eq!(result.videos.len(), 3);
+    }
+
+    #[test]
+    fn generate_video_aggregates_warnings_across_calls() {
+        let warning1 = Warning::Other {
+            message: "Warning from call 1".to_string(),
+        };
+        let warning2 = Warning::Other {
+            message: "Warning from call 2".to_string(),
+        };
+        let model = RecordingVideoModel::new(vec![
+            VideoModelResult::new(
+                vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+                video_response("video-test"),
+            )
+            .with_warning(warning1.clone()),
+            VideoModelResult::new(
+                vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+                video_response("video-test"),
+            )
+            .with_warning(warning2.clone()),
+        ])
+        .with_max_videos_per_call(1);
+
+        let result = poll_ready(generate_video(
+            GenerateVideoOptions::new(&model, "a cat walking on a beach").with_n(2),
+        ))
+        .expect("video generation succeeds");
+
+        assert_eq!(result.warnings, vec![warning1, warning2]);
+    }
+
+    #[test]
+    fn generate_video_generates_with_max_videos_per_call() {
+        // Covers both the sync and async maxVideosPerCall table rows: the Rust
+        // VideoModel::max_videos_per_call future resolves a single configured
+        // value, and the chunking math is identical for both.
+        for max_videos_per_call in [2usize, 2usize] {
+            let model = RecordingVideoModel::new(vec![
+                VideoModelResult::new(
+                    vec![
+                        VideoModelVideoData::base64(mp4_base64(), "video/mp4"),
+                        VideoModelVideoData::base64(mp4_base64(), "video/mp4"),
+                    ],
+                    video_response("video-test"),
+                ),
+                VideoModelResult::new(
+                    vec![VideoModelVideoData::base64(webm_base64(), "video/webm")],
+                    video_response("video-test"),
+                ),
+            ])
+            .with_max_videos_per_call(max_videos_per_call);
+
+            let result = poll_ready(generate_video(
+                GenerateVideoOptions::new(&model, "a cat walking on a beach").with_n(3),
+            ))
+            .expect("video generation succeeds");
+
+            assert_eq!(result.videos.len(), 3);
+            assert_eq!(model.max_videos_calls(), 1);
+            assert_eq!(
+                model
+                    .calls()
+                    .iter()
+                    .map(|options| options.n)
+                    .collect::<Vec<_>>(),
+                vec![2, 1]
+            );
+        }
+    }
+
+    #[test]
+    fn generate_video_throws_no_video_generated_error() {
+        let response = video_response("video-test");
+        let model =
+            RecordingVideoModel::new(vec![VideoModelResult::new(Vec::new(), response.clone())]);
+
+        let error = poll_ready(generate_video(GenerateVideoOptions::new(
+            &model,
+            "a cat walking on a beach",
+        )))
+        .expect_err("empty video response fails");
+
+        let no_video = error.as_no_video_generated().expect("error is no-video");
+        assert_eq!(no_video.message(), "No video generated.");
+        assert_eq!(
+            no_video.responses(),
+            &[VideoModelResponseMetadata::from_response(response, None)]
+        );
+    }
+
+    #[test]
+    fn generate_video_includes_response_headers_in_no_video_error() {
+        let response = video_response("video-test")
+            .with_header("custom-response-header", "response-header-value");
+        let model =
+            RecordingVideoModel::new(vec![VideoModelResult::new(Vec::new(), response.clone())]);
+
+        let error = poll_ready(generate_video(GenerateVideoOptions::new(
+            &model,
+            "a cat walking on a beach",
+        )))
+        .expect_err("empty video response fails");
+
+        let no_video = error.as_no_video_generated().expect("error is no-video");
+        let responses = no_video.responses();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(
+            responses[0]
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("custom-response-header")),
+            Some(&"response-header-value".to_string())
+        );
+    }
+
+    #[test]
+    fn generate_video_returns_response_metadata() {
+        let model = RecordingVideoModel::new(vec![
+            VideoModelResult::new(
+                vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+                video_response("test-model").with_header("x-test", "value"),
+            )
+            .with_provider_metadata(provider_metadata(
+                "testProvider",
+                json!({ "videos": [null] }),
+            )),
+        ]);
+
+        let result = poll_ready(generate_video(GenerateVideoOptions::new(
+            &model,
+            "a cat walking on a beach",
+        )))
+        .expect("video generation succeeds");
+
+        assert_eq!(result.responses.len(), 1);
+        let metadata = &result.responses[0];
+        assert_eq!(metadata.model_id, "test-model");
+        assert_eq!(
+            metadata
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-test")),
+            Some(&"value".to_string())
+        );
+        assert_eq!(
+            metadata.provider_metadata,
+            Some(provider_metadata(
+                "testProvider",
+                json!({ "videos": [null] })
+            ))
+        );
+    }
+
+    #[test]
+    fn generate_video_returns_provider_metadata() {
+        let metadata = provider_metadata(
+            "testProvider",
+            json!({ "videos": [{ "seed": 12345, "duration": 5 }] }),
+        );
+        let model = RecordingVideoModel::new(vec![
+            VideoModelResult::new(
+                vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+                video_response("test-model"),
+            )
+            .with_provider_metadata(metadata.clone()),
+        ]);
+
+        let result = poll_ready(generate_video(GenerateVideoOptions::new(
+            &model,
+            "a cat walking on a beach",
+        )))
+        .expect("video generation succeeds");
+
+        assert_eq!(result.provider_metadata, metadata);
+    }
+
+    #[test]
+    fn generate_video_merges_provider_metadata_from_multiple_calls() {
+        let model = RecordingVideoModel::new(vec![
+            VideoModelResult::new(
+                vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+                video_response("video-test"),
+            )
+            .with_provider_metadata(provider_metadata(
+                "testProvider",
+                json!({ "videos": [{ "seed": 111 }] }),
+            )),
+            VideoModelResult::new(
+                vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+                video_response("video-test"),
+            )
+            .with_provider_metadata(provider_metadata(
+                "testProvider",
+                json!({ "videos": [{ "seed": 222 }] }),
+            )),
+        ])
+        .with_max_videos_per_call(1);
+
+        let result = poll_ready(generate_video(
+            GenerateVideoOptions::new(&model, "a cat walking on a beach").with_n(2),
+        ))
+        .expect("video generation succeeds");
+
+        assert_eq!(
+            result.provider_metadata,
+            provider_metadata(
+                "testProvider",
+                json!({ "videos": [{ "seed": 111 }, { "seed": 222 }] })
+            )
+        );
+    }
+
+    #[test]
+    fn generate_video_handles_gateway_provider_metadata() {
+        let model = RecordingVideoModel::new(vec![
+            VideoModelResult::new(
+                vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+                video_response("video-test"),
+            )
+            .with_provider_metadata(provider_metadata(
+                "gateway",
+                json!({
+                    "videos": [{ "seed": 111 }],
+                    "routing": { "provider": "fal" }
+                }),
+            )),
+            VideoModelResult::new(
+                vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+                video_response("video-test"),
+            )
+            .with_provider_metadata(provider_metadata(
+                "gateway",
+                json!({
+                    "videos": [{ "seed": 222 }],
+                    "cost": "0.08"
+                }),
+            )),
+        ])
+        .with_max_videos_per_call(1);
+
+        let result = poll_ready(generate_video(
+            GenerateVideoOptions::new(&model, "a cat walking on a beach").with_n(2),
+        ))
+        .expect("video generation succeeds");
+
+        assert_eq!(
+            result.provider_metadata,
+            provider_metadata(
+                "gateway",
+                json!({
+                    "videos": [{ "seed": 111 }, { "seed": 222 }],
+                    "routing": { "provider": "fal" },
+                    "cost": "0.08"
+                })
+            )
+        );
+    }
+
+    #[test]
+    fn generate_video_handles_undefined_provider_metadata() {
+        let model = RecordingVideoModel::new(vec![VideoModelResult::new(
+            vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+            video_response("test-model-id"),
+        )]);
+
+        let result = poll_ready(generate_video(GenerateVideoOptions::new(
+            &model,
+            "a cat walking on a beach",
+        )))
+        .expect("video generation succeeds");
+
+        assert_eq!(result.provider_metadata, ProviderMetadata::new());
+    }
+
+    #[test]
+    fn generate_video_preserves_per_call_provider_metadata() {
+        let first_metadata = provider_metadata(
+            "testProvider",
+            json!({
+                "videos": [{ "seed": 111, "duration": 5 }],
+                "requestId": "req-001"
+            }),
+        );
+        let second_metadata = provider_metadata(
+            "testProvider",
+            json!({
+                "videos": [{ "seed": 222, "duration": 8 }],
+                "requestId": "req-002"
+            }),
+        );
+        let model = RecordingVideoModel::new(vec![
+            VideoModelResult::new(
+                vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+                video_response("video-test"),
+            )
+            .with_provider_metadata(first_metadata.clone()),
+            VideoModelResult::new(
+                vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+                video_response("video-test"),
+            )
+            .with_provider_metadata(second_metadata.clone()),
+        ])
+        .with_max_videos_per_call(1);
+
+        let result = poll_ready(generate_video(
+            GenerateVideoOptions::new(&model, "a cat walking on a beach").with_n(2),
+        ))
+        .expect("video generation succeeds");
+
+        assert_eq!(result.responses.len(), 2);
+        assert_eq!(result.responses[0].provider_metadata, Some(first_metadata));
+        assert_eq!(result.responses[1].provider_metadata, Some(second_metadata));
+        assert_eq!(
+            result.provider_metadata,
+            provider_metadata(
+                "testProvider",
+                json!({
+                    "videos": [
+                        { "seed": 111, "duration": 5 },
+                        { "seed": 222, "duration": 8 }
+                    ],
+                    "requestId": "req-002"
+                })
+            )
+        );
+    }
+
+    #[test]
+    fn generate_video_handles_string_prompt() {
+        let model = RecordingVideoModel::new(vec![VideoModelResult::new(
+            vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+            video_response("video-test"),
+        )]);
+
+        poll_ready(generate_video(GenerateVideoOptions::new(
+            &model,
+            "a simple text prompt",
+        )))
+        .expect("video generation succeeds");
+
+        let calls = model.calls();
+        assert_eq!(calls[0].prompt.as_deref(), Some("a simple text prompt"));
+        assert!(calls[0].image.is_none());
+    }
+
+    #[test]
+    fn generate_video_handles_object_prompt_with_text_and_image() {
+        let model = RecordingVideoModel::new(vec![VideoModelResult::new(
+            vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+            video_response("video-test"),
+        )]);
+
+        poll_ready(generate_video(GenerateVideoOptions::new(
+            &model,
+            GenerateVideoPromptImage::base64(png_base64()).with_text("image to video prompt"),
+        )))
+        .expect("video generation succeeds");
+
+        let calls = model.calls();
+        assert_eq!(calls[0].prompt.as_deref(), Some("image to video prompt"));
+        assert!(calls[0].image.is_some());
+    }
+
+    #[test]
+    fn generate_video_handles_url_image_in_prompt() {
+        let model = RecordingVideoModel::new(vec![VideoModelResult::new(
+            vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+            video_response("video-test"),
+        )]);
+
+        poll_ready(generate_video(GenerateVideoOptions::new(
+            &model,
+            GenerateVideoPromptImage::base64("https://example.com/image.png"),
+        )))
+        .expect("video generation succeeds");
+
+        let calls = model.calls();
+        let expected_url = Url::parse("https://example.com/image.png").expect("url parses");
+        assert!(matches!(
+            calls[0].image.as_ref(),
+            Some(VideoModelFile::Url { url, .. }) if *url == expected_url
+        ));
+    }
+
+    #[test]
+    fn generate_video_handles_data_url_image_in_prompt() {
+        let model = RecordingVideoModel::new(vec![VideoModelResult::new(
+            vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+            video_response("video-test"),
+        )]);
+
+        poll_ready(generate_video(GenerateVideoOptions::new(
+            &model,
+            GenerateVideoPromptImage::data_url(format!("data:image/png;base64,{}", png_base64())),
+        )))
+        .expect("video generation succeeds");
+
+        let calls = model.calls();
+        let expected_bytes =
+            crate::provider_utils::convert_base64_to_bytes(png_base64()).expect("png decodes");
+        assert!(matches!(
+            calls[0].image.as_ref(),
+            Some(VideoModelFile::File {
+                media_type,
+                data: FileDataContent::Bytes(bytes),
+                ..
+            }) if media_type == "image/png" && *bytes == expected_bytes
+        ));
+    }
+
+    #[test]
+    fn generate_video_handles_uint8_array_image_in_prompt() {
+        let png_bytes =
+            crate::provider_utils::convert_base64_to_bytes(png_base64()).expect("png decodes");
+        let model = RecordingVideoModel::new(vec![VideoModelResult::new(
+            vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+            video_response("video-test"),
+        )]);
+
+        poll_ready(generate_video(GenerateVideoOptions::new(
+            &model,
+            GenerateVideoPromptImage::bytes(png_bytes),
+        )))
+        .expect("video generation succeeds");
+
+        let calls = model.calls();
+        assert!(matches!(
+            calls[0].image.as_ref(),
+            Some(VideoModelFile::File { .. })
+        ));
+    }
+
+    #[test]
+    fn generate_video_detects_image_media_type_from_raw_base64() {
+        let model = RecordingVideoModel::new(vec![VideoModelResult::new(
+            vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+            video_response("video-test"),
+        )]);
+
+        poll_ready(generate_video(GenerateVideoOptions::new(
+            &model,
+            GenerateVideoPromptImage::base64(png_base64()),
+        )))
+        .expect("video generation succeeds");
+
+        let calls = model.calls();
+        let expected_bytes =
+            crate::provider_utils::convert_base64_to_bytes(png_base64()).expect("png decodes");
+        assert!(matches!(
+            calls[0].image.as_ref(),
+            Some(VideoModelFile::File {
+                media_type,
+                data: FileDataContent::Bytes(bytes),
+                ..
+            }) if media_type == "image/png" && *bytes == expected_bytes
+        ));
+    }
+
+    #[test]
+    fn generate_video_detects_image_media_type_from_uint8_array() {
+        // JPEG magic bytes: 0xFF 0xD8 0xFF
+        let jpeg_bytes = vec![0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46];
+        let model = RecordingVideoModel::new(vec![VideoModelResult::new(
+            vec![VideoModelVideoData::base64(mp4_base64(), "video/mp4")],
+            video_response("video-test"),
+        )]);
+
+        poll_ready(generate_video(GenerateVideoOptions::new(
+            &model,
+            GenerateVideoPromptImage::bytes(jpeg_bytes.clone()),
+        )))
+        .expect("video generation succeeds");
+
+        let calls = model.calls();
+        assert!(matches!(
+            calls[0].image.as_ref(),
+            Some(VideoModelFile::File {
+                media_type,
+                data: FileDataContent::Bytes(bytes),
+                ..
+            }) if media_type == "image/jpeg" && *bytes == jpeg_bytes
+        ));
     }
 }
