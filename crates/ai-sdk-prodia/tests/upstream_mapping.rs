@@ -112,12 +112,16 @@ fn prodia_0019_it_exposes_correct_provider_and_model_information() {
     assert_upstream_case_covered("prodia-0019", "image_identity");
 }
 
-// --- prodia-provider.test.ts (packages-prodia-0037, 0039..0041) ---
-// (0038 `.languageModel` is an out-of-slice exception; see module docs.)
+// --- prodia-provider.test.ts (packages-prodia-0037..0041) ---
 
 #[test]
 fn prodia_0037_it_creates_image_models_via_image_and_image_model() {
     assert_upstream_case_covered("prodia-0037", "provider_image");
+}
+
+#[test]
+fn prodia_0038_it_creates_language_models_via_language_model() {
+    assert_upstream_case_covered("prodia-0038", "language_provider_create");
 }
 
 #[test]
@@ -200,4 +204,91 @@ fn prodia_0053_it_handles_api_errors() {
 #[test]
 fn prodia_0054_it_sends_multipart_form_data_when_image_is_provided() {
     assert_upstream_case_covered("prodia-0054", "video_img2vid_multipart");
+}
+
+// --- prodia-language-model.test.ts (packages-prodia-0020..0036) ---
+
+#[test]
+fn prodia_0020_it_exposes_correct_provider_and_model_information() {
+    assert_upstream_case_covered("prodia-0020", "language_identity");
+}
+
+#[test]
+fn prodia_0021_it_extracts_text_from_user_message_and_sends_correct_request() {
+    assert_upstream_case_covered("prodia-0021", "language_request_basic");
+}
+
+#[test]
+fn prodia_0022_it_routes_top_level_only_image_media_type_with_detected_full_mime() {
+    assert_upstream_case_covered("prodia-0022", "language_image_full_mime");
+}
+
+#[test]
+fn prodia_0023_it_top_level_only_image_media_type_undetectable_keeps_default() {
+    assert_upstream_case_covered("prodia-0023", "language_image_undetectable");
+}
+
+#[test]
+fn prodia_0024_it_includes_system_message_in_prompt() {
+    assert_upstream_case_covered("prodia-0024", "language_system_message");
+}
+
+#[test]
+fn prodia_0025_it_sends_include_messages_true_in_config() {
+    assert_upstream_case_covered("prodia-0025", "language_include_messages");
+}
+
+#[test]
+fn prodia_0026_it_returns_text_content_from_message_txt_response_part() {
+    assert_upstream_case_covered("prodia-0026", "language_text_content");
+}
+
+#[test]
+fn prodia_0027_it_returns_image_content_from_image_png_response_part() {
+    assert_upstream_case_covered("prodia-0027", "language_image_content");
+}
+
+#[test]
+fn prodia_0028_it_returns_finish_reason_as_stop() {
+    assert_upstream_case_covered("prodia-0028", "language_finish_reason");
+}
+
+#[test]
+fn prodia_0029_it_returns_provider_metadata() {
+    assert_upstream_case_covered("prodia-0029", "language_provider_metadata");
+}
+
+#[test]
+fn prodia_0030_it_emits_warnings_for_unsupported_llm_features() {
+    assert_upstream_case_covered("prodia-0030", "language_warnings");
+}
+
+#[test]
+fn prodia_0031_it_passes_aspect_ratio_from_provider_options() {
+    assert_upstream_case_covered("prodia-0031", "language_aspect_ratio");
+}
+
+#[test]
+fn prodia_0032_it_merges_provider_and_request_headers() {
+    assert_upstream_case_covered("prodia-0032", "language_headers_merge");
+}
+
+#[test]
+fn prodia_0033_it_includes_timestamp_and_model_id_in_response() {
+    assert_upstream_case_covered("prodia-0033", "language_response_metadata");
+}
+
+#[test]
+fn prodia_0034_it_handles_api_errors() {
+    assert_upstream_case_covered("prodia-0034", "language_api_error");
+}
+
+#[test]
+fn prodia_0035_it_handles_response_with_text_only_no_image() {
+    assert_upstream_case_covered("prodia-0035", "language_text_only");
+}
+
+#[test]
+fn prodia_0036_it_wraps_do_generate_result_into_stream_parts() {
+    assert_upstream_case_covered("prodia-0036", "language_stream_parts");
 }
