@@ -1000,7 +1000,7 @@ mod tests {
     };
     use crate::openai_compatible::{OpenAICompatibleTransport, OpenAICompatibleTransportFuture};
     use crate::prompt::Prompt;
-    use crate::provider::{Provider, ProviderOptions};
+    use crate::provider::{Provider, ProviderOptions, SpecificationVersion};
     use crate::provider_utils::{
         FormDataValue, ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod,
         ProviderApiResponse,
@@ -1011,6 +1011,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
+    use time::OffsetDateTime;
 
     #[test]
     fn deepinfra_provider_creates_chat_model_with_headers_and_base_url() {
@@ -1203,6 +1204,70 @@ mod tests {
                 .and_then(|raw| raw.get("total_tokens"))
                 .and_then(JsonValue::as_u64),
             Some(24)
+        );
+    }
+
+    #[test]
+    fn deepinfra_chat_preserves_usage_for_non_gemini_models_without_reasoning() {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "id": "test-id",
+                        "object": "chat.completion",
+                        "created": 1234567890,
+                        "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Test response"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 18,
+                            "completion_tokens": 475,
+                            "total_tokens": 493,
+                            "prompt_tokens_details": null
+                        }
+                    })
+                    .to_string(),
+                ))))
+            });
+        let model = DeepInfraProvider::new()
+            .with_transport(transport)
+            .chat_model("mistralai/Mixtral-8x7B-Instruct-v0.1");
+        let result = poll_ready(model.do_generate(LanguageModelCallOptions::new(vec![
+            LanguageModelMessage::System(LanguageModelSystemMessage::new("Test prompt")),
+        ])));
+
+        // Usage is left untouched for non-gemini responses that carry no reasoning
+        // detail: text equals the original completion token count and reasoning is zero.
+        assert_eq!(result.usage.output_tokens.total, Some(475));
+        assert_eq!(result.usage.output_tokens.text, Some(475));
+        assert_eq!(result.usage.output_tokens.reasoning, Some(0));
+        assert_eq!(
+            result
+                .usage
+                .raw
+                .as_ref()
+                .and_then(|raw| raw.get("completion_tokens"))
+                .and_then(JsonValue::as_u64),
+            Some(475)
+        );
+        assert_eq!(
+            result
+                .usage
+                .raw
+                .as_ref()
+                .and_then(|raw| raw.get("total_tokens"))
+                .and_then(JsonValue::as_u64),
+            Some(493)
         );
     }
 
@@ -1542,6 +1607,52 @@ mod tests {
                 .image("black-forest-labs/FLUX-1-schnell")
                 .provider(),
             "deepinfra.image"
+        );
+    }
+
+    #[test]
+    fn deepinfra_image_model_reports_specification_version_and_response_metadata() {
+        let transport: OpenAICompatibleTransport =
+            Arc::new(|_request| -> OpenAICompatibleTransportFuture {
+                Box::pin(ready(Ok(ProviderApiResponse::text(
+                    200,
+                    "OK",
+                    json!({
+                        "images": ["data:image/png;base64,test-image-data"]
+                    })
+                    .to_string(),
+                )
+                .with_headers(Headers::from([(
+                    "x-request-id".to_string(),
+                    "test-request-id".to_string(),
+                )])))))
+            });
+        let model = DeepInfraProvider::new()
+            .with_transport(transport)
+            .image_model("stability-ai/sdxl");
+
+        assert_eq!(model.specification_version(), SpecificationVersion::V4);
+        assert_eq!(model.provider(), "deepinfra.image");
+        assert_eq!(model.model_id(), "stability-ai/sdxl");
+        assert_eq!(poll_ready(model.max_images_per_call()), Some(1));
+
+        let before = OffsetDateTime::now_utc();
+        let result = poll_ready(
+            model.do_generate(ImageModelCallOptions::new(1).with_prompt("A cute otter")),
+        );
+        let after = OffsetDateTime::now_utc();
+
+        // Response carries timestamp, modelId, and the upstream headers.
+        assert_eq!(result.response.model_id, "stability-ai/sdxl");
+        assert!(result.response.timestamp >= before && result.response.timestamp <= after);
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("test-request-id")
         );
     }
 

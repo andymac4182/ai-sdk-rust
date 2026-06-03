@@ -704,6 +704,107 @@ Additional AI-02E deterministic closure tests not represented by current upstrea
 
 Additional AI-02G deterministic closure tests not represented by current upstream `it(...)` declarations: `togetherai_image_model_validates_provider_options_before_request` covers the `togetheraiImageModelOptionsSchema` known-field validation edge; `togetherai_reranking_model_validates_provider_options_before_request` covers the `rankFields` validation edge; `togetherai_image_model_maps_api_error_to_metadata` and `togetherai_reranking_model_maps_api_error_to_metadata` pin Rust-native provider error metadata for thrown-error surfaces. Remote image/rerank API acceptance is represented by ignored `live_togetherai_image_and_rerank_validate_provider_contract`, gated by `TOGETHER_API_KEY` or deprecated `TOGETHER_AI_API_KEY`.
 
+## Baseten Exact Case Map
+
+`packages/baseten/src/baseten-provider.unit.test.ts` has 25 portable
+`it(...)` declarations covering `createBaseten` provider construction, the
+default Model APIs base URL, `BASETEN_API_KEY` Bearer headers, the
+`ai-sdk/baseten/{VERSION}` user-agent suffix, `/sync/v1` vs `/predict`
+endpoint validation for chat models, `/sync` URL rewriting for embeddings,
+and the `NoSuchModelError` image-model surface. Baseten is OpenAI-compatible,
+so its `createBaseten` configuration logic is ported into
+`crates/ai-sdk-openai-compatible/src/baseten.rs` (alongside
+`openai_compatible.rs`), and each case is mapped to a colocated
+`#[cfg(test)]` test that asserts the same provider name, constructed model
+id, built URL, resolved headers, or thrown-error message as the upstream
+unit test.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should create a BasetenProvider instance with default options | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0001_create_provider_with_default_options` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should create a BasetenProvider instance with custom options | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0002_create_provider_with_custom_options` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should support optional modelId parameter | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0003_call_as_function_supports_optional_model_id` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should construct a chat model with correct configuration for default Model APIs | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0004_chat_model_default_model_apis_configuration` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should construct a chat model with optional modelId | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0005_chat_model_optional_model_id` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should handle /sync/v1 endpoints correctly | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0006_sync_v1_endpoints_construct_and_build_url` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should throw error for /predict endpoints with chat models | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0007_predict_endpoints_throw_for_chat_models` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should be an alias for chatModel | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0008_language_model_is_alias_for_chat_model` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should support optional modelId parameter | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0009_language_model_optional_model_id` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should throw error when no modelURL is provided | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0010_embedding_throws_when_no_model_url` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should construct embedding model for /sync endpoints | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0011_embedding_sync_endpoint_builds_url_with_v1` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should throw error for /predict endpoints (not supported with Performance Client) | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0012_embedding_predict_endpoint_throws` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should support /sync/v1 endpoints (strips /v1 before passing to Performance Client) | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0013_embedding_sync_v1_strips_v1_for_performance_client` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should support custom modelId for embeddings | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0014_embedding_custom_model_id` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should throw NoSuchModelError for unsupported image models | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0015_image_model_throws_no_such_model` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should use default baseURL when no modelURL is provided | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0016_default_base_url_when_no_model_url` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should use custom baseURL when provided | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0017_custom_base_url` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should use modelURL for custom endpoints | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0018_model_url_for_custom_endpoints` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should include Authorization header with API key | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0019_authorization_header_with_api_key` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should include custom headers when provided | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0020_custom_headers_included` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should include user-agent with version | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0021_user_agent_with_version` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should handle missing modelURL for embeddings gracefully | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0022_missing_model_url_for_embeddings` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should handle unsupported image models | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0023_unsupported_image_models` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should implement all required provider methods | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0024_implements_all_required_provider_methods` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should allow calling provider as function | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0025_provider_callable_as_function` | none |
+## DeepInfra Exact Case Map
+
+The DeepInfra package is ported in the root crate at `src/deepinfra.rs` with
+colocated `#[cfg(test)] mod tests`. Every current portable upstream case is
+mapped one row at a time below.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/deepinfra/src/deepinfra-chat-language-model.test.ts` | should fix incorrect completion_tokens for gemini/gemma models when reasoning_tokens > completion_tokens | `deepinfra_chat_corrects_reasoning_usage_when_reasoning_exceeds_completion_tokens`; `deepinfra_chat_corrects_stream_finish_reasoning_usage` | none |
+| `packages/deepinfra/src/deepinfra-chat-language-model.test.ts` | should not modify usage for non-gemini models with correct data | `deepinfra_chat_preserves_usage_for_non_gemini_models_without_reasoning` | upstream `reasoning: 0` is the Rust-native `Some(0)` output-token reasoning value |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should pass the correct parameters including aspect ratio and seed | `deepinfra_provider_creates_image_model_and_generates_images` | none |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should call the correct url | `deepinfra_provider_creates_image_model_and_generates_images` | none |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should pass headers | `deepinfra_provider_creates_image_model_and_generates_images` | none |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should handle API errors | `deepinfra_image_model_maps_generation_api_error_to_metadata` | exact JavaScript thrown-error class identity is represented as Rust-native provider error metadata |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should handle size parameter | `deepinfra_provider_creates_image_model_and_generates_images` | none |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should respect the abort signal | `deepinfra_image_model_respects_abort_signal` | upstream `This operation was aborted` thrown message is represented as Rust-native `Aborted` provider error metadata; live in-flight transport timing is credential-gated |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should include timestamp, headers and modelId in response | `deepinfra_image_model_reports_specification_version_and_response_metadata` | upstream `_internal.currentDate` injection is a JavaScript test hook; Rust uses current UTC and asserts the timestamp falls within the request window plus modelId and headers |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should include response headers from API call | `deepinfra_provider_creates_image_model_and_generates_images`; `deepinfra_image_model_reports_specification_version_and_response_metadata` | none |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should expose correct provider and model information | `deepinfra_image_model_reports_specification_version_and_response_metadata` | none |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should send edit request with files | `deepinfra_image_model_edits_with_files_mask_and_provider_options` | none |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should send edit request with files and mask | `deepinfra_image_model_edits_with_files_mask_and_provider_options` | none |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should send edit request with multiple images | `deepinfra_image_model_edits_with_files_mask_and_provider_options` | none |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should include response metadata for edit requests | `deepinfra_image_model_edits_with_files_mask_and_provider_options` | upstream `_internal.currentDate` injection is a JavaScript test hook; Rust validates response headers and uses current UTC |
+| `packages/deepinfra/src/deepinfra-image-model.test.ts` | should pass provider options in edit request | `deepinfra_image_model_edits_with_files_mask_and_provider_options` | none |
+| `packages/deepinfra/src/deepinfra-provider.test.ts` | should create a DeepInfraProvider instance with default options | `deepinfra_provider_creates_chat_model_with_headers_and_base_url`; `deepinfra_provider_uses_default_base_url_and_function_alias` | `loadApiKey` mock-call assertion is JavaScript-only; Rust covers the `DEEPINFRA_API_KEY` precedence and the `Authorization: Bearer` header behavior directly |
+| `packages/deepinfra/src/deepinfra-provider.test.ts` | should create a DeepInfraProvider instance with custom options | `deepinfra_provider_creates_chat_model_with_headers_and_base_url`; `deepinfra_provider_settings_serde_accepts_upstream_base_url` | exact JavaScript constructor mock assertions are not portable; Rust covers request/base URL/header/API-key behavior |
+| `packages/deepinfra/src/deepinfra-provider.test.ts` | should return a chat model when called as a function | `deepinfra_provider_uses_default_base_url_and_function_alias` | Rust exposes `deepinfra(model_id)` instead of a callable object |
+| `packages/deepinfra/src/deepinfra-provider.test.ts` | should construct a chat model with correct configuration | `deepinfra_provider_creates_chat_model_with_headers_and_base_url`; `deepinfra_provider_implements_provider_trait` | none |
+| `packages/deepinfra/src/deepinfra-provider.test.ts` | should construct a completion model with correct configuration | `deepinfra_provider_creates_completion_model` | none |
+| `packages/deepinfra/src/deepinfra-provider.test.ts` | should construct a text embedding model with correct configuration | `deepinfra_provider_creates_embedding_model_aliases`; `deepinfra_provider_implements_provider_trait` | none |
+| `packages/deepinfra/src/deepinfra-provider.test.ts` | should construct an image model with correct configuration | `deepinfra_provider_creates_image_model_and_generates_images`; `deepinfra_provider_implements_provider_trait` | none |
+| `packages/deepinfra/src/deepinfra-provider.test.ts` | should use default settings when none provided | `deepinfra_provider_uses_default_base_url_and_function_alias`; `deepinfra_provider_creates_image_model_and_generates_images` | none |
+| `packages/deepinfra/src/deepinfra-provider.test.ts` | should respect custom baseURL | `deepinfra_provider_creates_image_model_and_generates_images`; `deepinfra_provider_settings_serde_accepts_upstream_base_url` | none |
+## Cerebras Exact Case Map
+
+The Cerebras provider is ported in the root `ai-sdk-rust` crate
+(`src/cerebras.rs`) on top of the shared OpenAI-compatible chat model. The
+`CerebrasChatLanguageModel` wrapper reproduces the upstream
+`CerebrasChatLanguageModel` structured-output finish-reason normalization
+(`doGenerate`/`doStream`) and the `transformCerebrasRequestBody`
+`reasoning_content` to `reasoning` rewrite. All cases are mapped to named Rust
+tests colocated in `src/cerebras.rs`.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/cerebras/src/cerebras-chat-language-model.test.ts` | preserves the captured first tool-call step | `cerebras_preserves_the_captured_first_tool_call_step` | upstream replays a recorded JSON fixture; the Rust test drives the same structured-output `json` request, reasoning, single tool call, and raw `tool_calls` finish reason through the transport |
+| `packages/cerebras/src/cerebras-chat-language-model.test.ts` | drops the captured repeated tool call when structured output text is present | `cerebras_drops_the_captured_repeated_tool_call_when_structured_output_text_is_present` | none |
+| `packages/cerebras/src/cerebras-chat-language-model.test.ts` | preserves the captured mixed response without structured output | `cerebras_preserves_the_captured_mixed_response_without_structured_output` | none |
+| `packages/cerebras/src/cerebras-chat-language-model.test.ts` | normalizes captured streamed structured output with tool calls finish reason | `cerebras_normalizes_captured_streamed_structured_output_with_tool_calls_finish_reason` | upstream asserts the full usage snapshot from a recorded chunk fixture; the Rust test pins the normalized finish reason (`tool_calls` raw downgraded to unified `stop`), which is the Cerebras-specific behavior under test |
+| `packages/cerebras/src/cerebras-chat-language-model.test.ts` | preserves the first streamed tool call and drops the repeated one | `cerebras_preserves_the_first_streamed_tool_call_and_drops_the_repeated_one` | none |
+| `packages/cerebras/src/cerebras-provider.test.ts` | should create a CerebrasProvider instance with default options | `cerebras_provider_creates_a_provider_instance_with_default_options` | exact JavaScript constructor mock assertions are not portable; Rust covers default base URL, `CEREBRAS_API_KEY` resolution, and `v4` specification version |
+| `packages/cerebras/src/cerebras-provider.test.ts` | should create a CerebrasProvider instance with custom options | `cerebras_provider_creates_a_provider_instance_with_custom_options`; `cerebras_provider_creates_chat_model_with_headers_base_url_and_structured_outputs` | exact JavaScript constructor mock assertions are not portable; Rust covers request URL/base URL/header/API-key behavior |
+| `packages/cerebras/src/cerebras-provider.test.ts` | should pass header | `cerebras_provider_passes_header` | none |
+| `packages/cerebras/src/cerebras-provider.test.ts` | should return a chat model when called as a function | `cerebras_provider_returns_a_chat_model_when_called_as_a_function` | Rust exposes `cerebras(model_id)` instead of a callable provider object |
+| `packages/cerebras/src/cerebras-provider.test.ts` | should convert assistant reasoning_content to reasoning | `cerebras_converts_assistant_reasoning_content_to_reasoning`; `cerebras_request_body_transform_keeps_existing_reasoning_field` | none |
+| `packages/cerebras/src/cerebras-provider.test.ts` | should construct a language model with correct configuration | `cerebras_provider_constructs_a_language_model_with_correct_configuration` | none |
+| `packages/cerebras/src/cerebras-provider.test.ts` | should throw NoSuchModelError when attempting to create embedding model | `cerebras_provider_throws_nosuchmodelerror_when_attempting_to_create_embedding_model` | exact JavaScript thrown-error class identity is represented as a Rust `NoSuchModelError` value |
+| `packages/cerebras/src/cerebras-provider.test.ts` | should construct a chat model with correct configuration | `cerebras_provider_constructs_a_chat_model_with_correct_configuration` | none |
+
 ## Live-Only Proof
 
 AI-02C, AI-02D, AI-02E, AI-02F, and AI-02G add ignored xAI, Groq, Cohere,
@@ -719,3 +820,60 @@ deterministic gaps before adding or claiming live tests.
 | `packages/cohere` | Real Cohere chat, embedding, and rerank API acceptance through ignored `live_cohere_chat_acceptance_requires_cohere_api_key`, `live_cohere_embedding_acceptance_requires_cohere_api_key`, and `live_cohere_reranking_acceptance_requires_cohere_api_key`. | `COHERE_API_KEY` |
 | `packages/fireworks` | Represented by ignored `live_fireworks_chat_generation_validates_provider_contract`, `live_fireworks_workflow_image_generation_validates_provider_contract`, `live_fireworks_image_generation_route_validates_provider_contract`, `live_fireworks_async_image_generation_validates_polling_contract`, and `live_fireworks_image_api_error_body_validates_provider_metadata`. | `FIREWORKS_API_KEY` |
 | `packages/togetherai` | Real TogetherAI image/rerank API acceptance through ignored `live_togetherai_image_and_rerank_validate_provider_contract`; live in-flight transport abort timing remains credential-gated and nondeterministic. | `TOGETHER_API_KEY` or deprecated `TOGETHER_AI_API_KEY` |
+
+
+## AI-02H Hugging Face Responses Provider Disposition
+
+The Hugging Face provider is implemented in the root `ai-sdk-rust` crate at
+`src/huggingface.rs` (Responses API only). Every portable upstream case from
+`packages/huggingface/src/huggingface-provider.test.ts` and
+`packages/huggingface/src/responses/huggingface-responses-language-model.test.ts`
+is mapped one row at a time below to a named, behavior-asserting colocated
+`#[cfg(test)] mod tests` function in `src/huggingface.rs`. Each mapped test
+sends a real request through a captured `HuggingFaceTransport` and asserts the
+concrete request body, response content, usage, streaming parts, warnings, or
+error metadata for the cited upstream behavior, so it fails if the behavior is
+wrong. No live credential-gated proof is required because the provider's
+deterministic request shaping, content/stream mapping, structured output, tool
+preparation, image media-type detection, and error/warning surfaces are fully
+closed by the colocated tests.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/huggingface/src/huggingface-provider.test.ts` | should create provider with default configuration | `huggingface_provider_uses_default_base_url_and_function_alias` | none |
+| `packages/huggingface/src/huggingface-provider.test.ts` | should create provider with custom settings | `huggingface_provider_generates_text_with_request_and_response_metadata` | none |
+| `packages/huggingface/src/huggingface-provider.test.ts` | should expose responses method | `huggingface_provider_uses_default_base_url_and_function_alias` | none |
+| `packages/huggingface/src/huggingface-provider.test.ts` | should expose languageModel method | `huggingface_provider_implements_provider_trait` | none |
+| `packages/huggingface/src/huggingface-provider.test.ts` | should throw for text embedding models | `huggingface_provider_reports_unsupported_embedding_and_image` | none |
+| `packages/huggingface/src/huggingface-provider.test.ts` | should throw for image models | `huggingface_provider_reports_unsupported_embedding_and_image` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should generate text | `huggingface_provider_generates_text_with_request_and_response_metadata` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should extract usage | `huggingface_provider_generates_text_with_request_and_response_metadata` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should extract text from output array when output_text is missing | `huggingface_responses_converts_images_tool_messages_and_content_parts` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle missing usage gracefully | `huggingface_responses_resolves_top_level_image_media_types` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should send model id, settings, and input | `huggingface_provider_generates_text_with_request_and_response_metadata` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle unsupported settings with warnings | `huggingface_responses_maps_warnings_and_stream_errors` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should generate text and sources from annotations | `huggingface_responses_converts_images_tool_messages_and_content_parts` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle MCP tools with annotations | `huggingface_responses_converts_images_tool_messages_and_content_parts` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should stream text deltas | `huggingface_responses_streams_text_with_request_and_response_metadata` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle streaming without usage | `huggingface_responses_streams_without_usage` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle non-message item types | `huggingface_responses_streams_non_message_item_types` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle streaming errors | `huggingface_responses_maps_warnings_and_stream_errors` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should send correct streaming request | `huggingface_responses_streams_text_with_request_and_response_metadata` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should convert user messages with images | `huggingface_responses_converts_images_tool_messages_and_content_parts` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should throw for file parts with provider references | `huggingface_responses_reports_unsupported_provider_references` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle assistant messages | `huggingface_responses_converts_assistant_text_messages` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should warn about unsupported assistant content types | `huggingface_responses_does_not_warn_about_assistant_tool_and_reasoning_parts` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should warn about tool messages | `huggingface_responses_converts_images_tool_messages_and_content_parts` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle function_call tool responses | `huggingface_responses_maps_function_call_tool_responses` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should stream tool calls | `huggingface_responses_streams_reasoning_text_and_tool_calls` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should send text.format for structured output | `huggingface_responses_maps_system_provider_options_and_structured_output` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle structured output with custom name and description | `huggingface_responses_maps_system_provider_options_and_structured_output` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle reasoning content in responses | `huggingface_responses_converts_images_tool_messages_and_content_parts` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should stream reasoning content | `huggingface_responses_streams_reasoning_text_and_tool_calls` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should send provider-specific options | `huggingface_responses_maps_system_provider_options_and_structured_output` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should prepare tools correctly | `huggingface_responses_prepares_tools_and_tool_choices` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | should handle auto and required tool choices | `huggingface_responses_prepares_tools_and_tool_choices` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | passes full image/png through unchanged for inline data | `huggingface_responses_resolves_top_level_image_media_types` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | detects image subtype from inline bytes for top-level "image" | `huggingface_responses_resolves_top_level_image_media_types` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | passes through URL source for top-level-only image | `huggingface_responses_resolves_top_level_image_media_types` | none |
+| `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | normalizes image/* wildcard via detection | `huggingface_responses_resolves_top_level_image_media_types` | none |
