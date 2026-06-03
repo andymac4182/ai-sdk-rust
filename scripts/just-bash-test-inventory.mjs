@@ -3466,6 +3466,36 @@ const jbc37CaseGroups = [
     notes:
       'JBC-37 verifies xan preserves multibyte UTF-8 CSV fields through the Rust virtual pipe path.',
   },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.agg.test.ts',
+    lines: [
+      10, 19, 28, 37, 46, 55, 64, 73, 82, 91, 100, 111, 124, 137, 146, 157,
+      166, 179,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_agg_aggregations',
+    notes:
+      'JBC verifies portable xan agg count/count(expr)/sum/mean/avg/min/max/first/last/median/multiple/all/any/mode/cardinality/values/distinct_values and computed-expression aggregation over in-memory CSV.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.basic.test.ts',
+    lines: [222, 233, 242, 255, 266, 275],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_sample_and_flatten_rows',
+    notes:
+      'JBC verifies portable xan sample positional/seeded/error-without-size and xan flatten vertical record display, -l limit, and f alias over in-memory CSV.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.frequency.test.ts',
+    lines: [12, 22, 34, 43, 50, 61],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_frequency_rows',
+    notes:
+      'JBC verifies portable xan frequency all-columns, -s column select, -l limit, empty-value <empty> display, equal-count stability ordering, and -g groupby header over in-memory CSV.',
+  },
 ];
 
 const jbc44CaseGroups = [
