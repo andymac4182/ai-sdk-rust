@@ -255,6 +255,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn to_text_stream_keeps_only_text_deltas() {
+        use crate::language_model::{LanguageModelTextEnd, LanguageModelTextStart};
+        use crate::stream_text::{
+            TextStreamPart, TextStreamStartPart, TextStreamTextDeltaPart, to_text_stream,
+        };
+
+        // Mirrors upstream `to-text-stream.test.ts` "keeps only text deltas".
+        let stream = to_text_stream([
+            TextStreamPart::Start(TextStreamStartPart::new()),
+            TextStreamPart::TextStart(LanguageModelTextStart::new("t1")),
+            TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("t1", "Hello")),
+            TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("t1", ", world!")),
+            TextStreamPart::TextEnd(LanguageModelTextEnd::new("t1")),
+        ]);
+
+        assert_eq!(stream, vec!["Hello".to_string(), ", world!".to_string()]);
+    }
+
+    #[test]
     fn create_text_stream_response_sets_headers_status_and_encoded_chunks() {
         let response = create_text_stream_response(
             TextStreamResponseOptions::new(["test-data"])
