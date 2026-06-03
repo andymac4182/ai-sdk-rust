@@ -17,9 +17,10 @@ pub use gateway::{
     GatewayLanguageModelEntry, GatewayLanguageModelPricing, GatewayLanguageModelSpecification,
     GatewayModelType, GatewayProvider, GatewayProviderOptions, GatewayProviderOptionsSort,
     GatewayProviderOptionsValidationError, GatewayProviderSettings, GatewayProviderTimeouts,
-    GatewayRerankingModel, GatewaySpendReportDatePart, GatewaySpendReportGroupBy,
-    GatewaySpendReportParams, GatewaySpendReportResponse, GatewaySpendReportRow, GatewayTransport,
-    GatewayTransportFuture, GatewayVideoModel, create_gateway, create_gateway_provider, gateway,
+    GatewayRerankingModel, GatewaySpeechModel, GatewaySpendReportDatePart,
+    GatewaySpendReportGroupBy, GatewaySpendReportParams, GatewaySpendReportResponse,
+    GatewaySpendReportRow, GatewayTranscriptionModel, GatewayTransport, GatewayTransportFuture,
+    GatewayVideoModel, create_gateway, create_gateway_provider, gateway,
     gateway_observability_headers, gateway_provider_options, get_gateway_auth_token,
     try_gateway_provider_options,
 };
