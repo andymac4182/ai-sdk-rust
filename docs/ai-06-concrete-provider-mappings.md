@@ -30,7 +30,7 @@ the strict inventory generator.
 | `packages/black-forest-labs` | `crates/ai-sdk-black-forest-labs` | 24 |
 | `packages/bytedance` | `crates/ai-sdk-bytedance` | 41 |
 | `packages/cerebras` | `src/cerebras.rs`, `src/openai_compatible.rs` | 13 |
-| `packages/deepgram` | `crates/ai-sdk-deepgram` | 25 |
+| `packages/deepgram` | `crates/ai-sdk-deepgram` | 0 |
 | `packages/deepinfra` | `src/deepinfra.rs`, `src/openai_compatible.rs` | 25 |
 | `packages/deepseek` | `crates/ai-sdk-deepseek` | 38 |
 | `packages/elevenlabs` | `crates/ai-sdk-elevenlabs` | 15 |
@@ -663,6 +663,47 @@ each mapped test fails if the behavior regresses.
 | `packages/revai/src/revai-transcription-model.test.ts` | should include response data with timestamp, modelId and headers | `crates/ai-sdk-revai/src/lib.rs::revai_transcription_model_transcribes_audio_with_headers_options_and_response` | none |
 | `packages/revai/src/revai-transcription-model.test.ts` | should use real date when no custom date provider is specified | `crates/ai-sdk-revai/src/lib.rs::revai_transcription_uses_real_date_when_no_custom_date_provider` | none |
 
+## Deepgram Exact Case Map
+
+Row-level strict mapping for portable `packages/deepgram` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a colocated `#[cfg(test)]`
+test in `crates/ai-sdk-deepgram/src/lib.rs` that genuinely exercises the behavior
+(error-body schema parsing, speech `/v1/speak` request construction with model,
+text body, provider-option query params, array-tag joining, output-format ->
+encoding/container mapping, incompatible-parameter cleanup, unsupported-parameter
+warnings, response audio/timestamp/modelId/headers metadata, request-body echo,
+and the transcription `/v1/listen` request with detected-language extraction and
+the real-wall-clock date fallback) so each mapped test fails if the behavior
+regresses.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/deepgram/src/deepgram-error.test.ts` | should parse Deepgram resource exhausted error | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_error_parses_resource_exhausted_error` | none |
+| `packages/deepgram/src/deepgram-speech-model.test.ts` | should pass the model and text | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_speech_model_sends_headers_body_query_options_and_metadata` | none |
+| `packages/deepgram/src/deepgram-speech-model.test.ts` | should pass headers | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_speech_model_sends_headers_body_query_options_and_metadata` | none |
+| `packages/deepgram/src/deepgram-speech-model.test.ts` | should pass query parameters for model | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_speech_model_sends_headers_body_query_options_and_metadata` | none |
+| `packages/deepgram/src/deepgram-speech-model.test.ts` | should map outputFormat to encoding/container | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_speech_model_maps_format_and_warnings` | none |
+| `packages/deepgram/src/deepgram-speech-model.test.ts` | should pass provider options | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_speech_model_sends_headers_body_query_options_and_metadata` | none |
+| `packages/deepgram/src/deepgram-speech-model.test.ts` | should handle array tag | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_speech_model_sends_headers_body_query_options_and_metadata` | none |
+| `packages/deepgram/src/deepgram-speech-model.test.ts` | should return audio data | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_speech_model_sends_headers_body_query_options_and_metadata` | none |
+| `packages/deepgram/src/deepgram-speech-model.test.ts` | should include response data with timestamp, modelId and headers | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_speech_model_sends_headers_body_query_options_and_metadata` | none |
+| `packages/deepgram/src/deepgram-speech-model.test.ts` | should warn about unsupported voice parameter | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_speech_model_maps_format_and_warnings` | none |
+| `packages/deepgram/src/deepgram-speech-model.test.ts` | should warn about unsupported speed parameter | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_speech_model_maps_format_and_warnings` | none |
+| `packages/deepgram/src/deepgram-speech-model.test.ts` | should warn about unsupported language parameter | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_speech_model_maps_format_and_warnings` | none |
+| `packages/deepgram/src/deepgram-speech-model.test.ts` | should warn about unsupported instructions parameter | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_speech_model_maps_format_and_warnings` | none |
+| `packages/deepgram/src/deepgram-speech-model.test.ts` | should include request body in response | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_speech_model_includes_request_body_in_response` | none |
+| `packages/deepgram/src/deepgram-speech-model.test.ts` | should clean up incompatible parameters when encoding changes via providerOptions | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_speech_model_cleans_up_incompatible_parameters_when_encoding_changes_via_provider_options` | none |
+| `packages/deepgram/src/deepgram-speech-model.test.ts` | should clean up incompatible parameters when container changes encoding implicitly | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_speech_model_cleans_up_incompatible_parameters_when_container_changes_encoding_implicitly` | none |
+| `packages/deepgram/src/deepgram-transcription-model.test.ts` | should pass the model | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_transcription_model_sends_audio_query_headers_and_maps_response` | none |
+| `packages/deepgram/src/deepgram-transcription-model.test.ts` | should pass headers | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_transcription_model_sends_audio_query_headers_and_maps_response` | none |
+| `packages/deepgram/src/deepgram-transcription-model.test.ts` | should extract the transcription text | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_transcription_model_sends_audio_query_headers_and_maps_response` | none |
+| `packages/deepgram/src/deepgram-transcription-model.test.ts` | should pass detectLanguage as detect_language query parameter | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_transcription_model_sends_audio_query_headers_and_maps_response` | none |
+| `packages/deepgram/src/deepgram-transcription-model.test.ts` | should return detected language from response | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_transcription_model_sends_audio_query_headers_and_maps_response` | none |
+| `packages/deepgram/src/deepgram-transcription-model.test.ts` | should include response data with timestamp, modelId and headers | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_transcription_model_sends_audio_query_headers_and_maps_response` | none |
+| `packages/deepgram/src/deepgram-transcription-model.test.ts` | should use real date when no custom date provider is specified | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_transcription_model_uses_real_date_when_no_custom_date_provider_is_specified` | none |
+| `packages/deepgram/src/deepgram-transcription-model.test.ts` | should return detected language from inline response | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_transcription_model_returns_detected_language_from_inline_response` | none |
+| `packages/deepgram/src/deepgram-transcription-model.test.ts` | should return undefined language when not detected | `crates/ai-sdk-deepgram/src/lib.rs::deepgram_transcription_model_returns_undefined_language_when_not_detected` | none |
+
 ## Azure OpenAI Exact Case Map
 
 All 55 portable `packages/azure` upstream cases map to named Rust tests in `crates/ai-sdk-azure/tests/upstream_mapping.rs`, each delegating to the deterministic `assert_upstream_case_covered` capability assertion in `crates/ai-sdk-azure/src/lib.rs` (mirroring the foundational provider crates). Buckets exercise the real Azure OpenAI provider request construction (URL, `api-version` query param, header and user-agent passthrough, request body) and response extraction (text, usage, metadata, headers) so each mapped test fails if the behavior regresses. The responses-API tool/streaming rows route through the shared `crates/ai-sdk-open-responses` model with Azure-specific `assistant-` file-id and `/responses?api-version=` wiring.
@@ -980,3 +1021,30 @@ provider wiring.
 | `packages/lmnt/src/lmnt-speech-model.test.ts` | should use real date when no custom date provider is specified | `lmnt_speech_model_uses_real_date_provider_by_default` | none |
 | `packages/lmnt/src/lmnt-speech-model.test.ts` | should handle different audio formats | `lmnt_speech_model_handles_different_audio_formats` | none |
 | `packages/lmnt/src/lmnt-speech-model.test.ts` | should include warnings if any are generated | `lmnt_speech_model_emits_no_warnings_for_supported_request` | none |
+
+## ElevenLabs Exact Case Map
+
+Row-level strict mapping for portable `packages/elevenlabs` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named colocated Rust
+test in `crates/ai-sdk-elevenlabs/src/lib.rs` that exercises the same behavior
+against the real ElevenLabs speech/transcription request mapping, response
+parsing, error schema, default date provider, and provider wiring through fake
+capture transports.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/elevenlabs/src/elevenlabs-error.test.ts` | should parse ElevenLabs resource exhausted error | `elevenlabs_models_map_api_errors_to_metadata` | none |
+| `packages/elevenlabs/src/elevenlabs-speech-model.test.ts` | should generate speech with required parameters | `elevenlabs_speech_model_maps_format_defaults_and_instruction_warning` | none |
+| `packages/elevenlabs/src/elevenlabs-speech-model.test.ts` | should handle custom output format | `elevenlabs_speech_model_sends_headers_body_query_options_and_metadata` | none |
+| `packages/elevenlabs/src/elevenlabs-speech-model.test.ts` | should handle language parameter | `elevenlabs_speech_model_sends_headers_body_query_options_and_metadata` | none |
+| `packages/elevenlabs/src/elevenlabs-speech-model.test.ts` | should handle speed parameter in voice settings | `elevenlabs_speech_model_sends_headers_body_query_options_and_metadata` | none |
+| `packages/elevenlabs/src/elevenlabs-speech-model.test.ts` | should warn about unsupported instructions parameter | `elevenlabs_speech_model_maps_format_defaults_and_instruction_warning` | none |
+| `packages/elevenlabs/src/elevenlabs-speech-model.test.ts` | should pass provider-specific options | `elevenlabs_speech_model_sends_headers_body_query_options_and_metadata` | none |
+| `packages/elevenlabs/src/elevenlabs-speech-model.test.ts` | should include user-agent header | `elevenlabs_speech_model_sends_headers_body_query_options_and_metadata` | none |
+| `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should pass the model | `elevenlabs_transcription_model_sends_form_options_and_maps_response` | none |
+| `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should pass headers | `elevenlabs_transcription_model_sends_form_options_and_maps_response` | none |
+| `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should extract the transcription text | `elevenlabs_transcription_model_sends_form_options_and_maps_response` | none |
+| `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should pass provider options correctly | `elevenlabs_transcription_model_sends_form_options_and_maps_response` | none |
+| `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should include response data with timestamp, modelId and headers | `elevenlabs_transcription_model_sends_form_options_and_maps_response` | none |
+| `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should use real date when no custom date provider is specified | `elevenlabs_transcription_model_uses_real_date_when_no_custom_date_provider_is_specified` | none |
+| `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should work when no additional formats are returned | `elevenlabs_transcription_model_applies_upstream_defaults_when_options_object_is_present` | none |

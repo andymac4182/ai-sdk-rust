@@ -542,22 +542,62 @@ impl GoogleLanguageModel {
             });
         }
 
-        let mut sanitized_service_tier = google_options.service_tier.clone();
-        if is_vertex_provider {
-            sanitized_service_tier =
-                sanitized_service_tier.map(|tier| vertex_service_tier(&tier).to_string());
+        // 'serviceTier' is a Gemini API option; on Vertex it is dropped and warned, and
+        // 'sharedRequestType'/'requestType' replace it via dedicated paygo headers.
+        if google_options.service_tier.is_some() && is_vertex_provider {
+            warnings.push(Warning::Other {
+                message: "'serviceTier' is a Gemini API option and is not supported on Vertex AI. \
+                     Use 'sharedRequestType' (and optionally 'requestType') instead. See \
+                     https://docs.cloud.google.com/vertex-ai/generative-ai/docs/priority-paygo"
+                    .to_string(),
+            });
+        }
+        if (google_options.shared_request_type.is_some() || google_options.request_type.is_some())
+            && !is_vertex_provider
+        {
+            warnings.push(Warning::Other {
+                message: format!(
+                    "'sharedRequestType' and 'requestType' are Vertex AI options and are ignored \
+                     with the current Google provider ({}).",
+                    self.config.provider
+                ),
+            });
         }
 
+        let mut extra_headers: Vec<(String, String)> = Vec::new();
+        if is_vertex_provider {
+            if let Some(shared_request_type) = &google_options.shared_request_type {
+                extra_headers.push((
+                    "X-Vertex-AI-LLM-Shared-Request-Type".to_string(),
+                    shared_request_type.clone(),
+                ));
+            }
+            if let Some(request_type) = &google_options.request_type {
+                extra_headers.push((
+                    "X-Vertex-AI-LLM-Request-Type".to_string(),
+                    request_type.clone(),
+                ));
+            }
+        }
+        let body_service_tier = if is_vertex_provider {
+            None
+        } else {
+            google_options.service_tier.clone()
+        };
+
         let is_gemma_model = self.model_id.to_ascii_lowercase().starts_with("gemma-");
-        let supports_function_response_parts = self.model_id.starts_with("gemini-3");
-        let prompt = convert_to_google_messages(
+        let is_gemini3_model = is_gemini3_model_id(&self.model_id);
+        let supports_function_response_parts = is_gemini3_model;
+        let (prompt, convert_warnings) = convert_to_google_messages_with_warnings(
             &options.prompt,
             ConvertToGoogleMessagesOptions {
                 is_gemma_model,
+                is_gemini3_model,
                 provider_options_names: provider_option_names.clone(),
                 supports_function_response_parts,
             },
         )?;
+        warnings.extend(convert_warnings);
 
         let prepared_tools = prepare_google_tools(
             options.tools.as_deref(),
@@ -677,12 +717,13 @@ impl GoogleLanguageModel {
             google_options.cached_content.clone(),
         );
         insert_opt(&mut body, "labels", google_options.labels.clone());
-        insert_opt(&mut body, "serviceTier", sanitized_service_tier);
+        insert_opt(&mut body, "serviceTier", body_service_tier);
 
         Ok(GoogleLanguageArgs {
             body: JsonValue::Object(body),
             warnings,
             provider_options_names: provider_option_names,
+            extra_headers,
         })
     }
 
@@ -701,12 +742,15 @@ impl GoogleLanguageModel {
             }
         };
         let request_body = args.body.clone();
-        let headers = match self.request_headers(options.headers.as_ref()) {
+        let mut headers = match self.request_headers(options.headers.as_ref()) {
             Ok(headers) => headers,
             Err(error) => {
                 return google_error_generate_result(&self.model_id, &error, request_body);
             }
         };
+        for (name, value) in &args.extra_headers {
+            headers.insert(name.clone(), Some(value.clone()));
+        }
 
         let post_options = PostJsonToApiOptions::new(
             format!(
@@ -763,10 +807,13 @@ impl GoogleLanguageModel {
             }
         };
         let request_body = args.body.clone();
-        let headers = match self.request_headers(options.headers.as_ref()) {
+        let mut headers = match self.request_headers(options.headers.as_ref()) {
             Ok(headers) => headers,
             Err(error) => return google_error_stream_result(&error, request_body),
         };
+        for (name, value) in &args.extra_headers {
+            headers.insert(name.clone(), Some(value.clone()));
+        }
 
         let post_options = PostJsonToApiOptions::new(
             format!(
@@ -873,6 +920,10 @@ pub struct GoogleLanguageModelOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_request_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retrieval_config: Option<JsonValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_function_call_arguments: Option<bool>,
@@ -882,6 +933,7 @@ struct GoogleLanguageArgs {
     body: JsonValue,
     warnings: Vec<Warning>,
     provider_options_names: Vec<&'static str>,
+    extra_headers: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -1101,21 +1153,28 @@ impl GoogleImageModel {
 
     async fn do_generate_imagen(&self, options: ImageModelCallOptions) -> ImageModelResult {
         let mut warnings = Vec::new();
+        // Imagen API endpoints do not support image editing: upstream throws synchronously.
         if options
             .files
             .as_ref()
             .is_some_and(|files| !files.is_empty())
         {
-            warnings.push(Warning::Unsupported {
-                feature: "image editing".to_string(),
-                details: Some("Google Gemini API does not support image editing with Imagen models. Use Google Vertex AI for image editing capabilities.".to_string()),
-            });
+            return image_error_result(
+                &self.model_id,
+                warnings,
+                "Google Gemini API does not support image editing with Imagen models. \
+                 Use Google Vertex AI (@ai-sdk/google-vertex) for image editing capabilities.",
+                (self.config.current_date)(),
+            );
         }
         if options.mask.is_some() {
-            warnings.push(Warning::Unsupported {
-                feature: "mask".to_string(),
-                details: Some("Google Gemini API does not support image editing with masks. Use Google Vertex AI for image editing capabilities.".to_string()),
-            });
+            return image_error_result(
+                &self.model_id,
+                warnings,
+                "Google Gemini API does not support image editing with masks. \
+                 Use Google Vertex AI (@ai-sdk/google-vertex) for image editing capabilities.",
+                (self.config.current_date)(),
+            );
         }
         if options.size.is_some() {
             warnings.push(Warning::Unsupported {
@@ -1276,17 +1335,40 @@ impl GoogleImageModel {
             }
         }
 
-        let provider_options: ProviderOptions = serde_json::from_value(strip_nulls(json!({
-            "google": {
-                "responseModalities": ["IMAGE"],
-                "imageConfig": options.aspect_ratio.as_ref().map(|aspect_ratio| json!({ "aspectRatio": aspect_ratio })),
-            }
-        }))).expect("provider options shape is valid");
+        // `googleSearch` is the dedicated grounding escape hatch for the gemini image
+        // model (generateImage has no `tools` parameter). It is pulled out of the
+        // google provider options and forwarded as a `google.google_search` tool, and
+        // must NOT leak into the passthrough google options sent to the language model.
+        let google_provider_options =
+            provider_options_for::<JsonObject>("google", Some(&options.provider_options))
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+        let google_search = google_provider_options.get("googleSearch").cloned();
+        let mut passthrough_google_options = google_provider_options.clone();
+        passthrough_google_options.remove("googleSearch");
 
-        let lm_options = LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+        let mut google_options_value = json!({
+            "responseModalities": ["IMAGE"],
+            "imageConfig": options.aspect_ratio.as_ref().map(|aspect_ratio| json!({ "aspectRatio": aspect_ratio })),
+        });
+        if let Some(map) = google_options_value.as_object_mut() {
+            for (key, value) in passthrough_google_options {
+                map.insert(key, value);
+            }
+        }
+        let provider_options: ProviderOptions =
+            serde_json::from_value(strip_nulls(json!({ "google": google_options_value })))
+                .expect("provider options shape is valid");
+
+        let mut lm_options = LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
             ai_sdk_rust::LanguageModelUserMessage::new(user_parts),
         )])
         .with_provider_options(provider_options);
+        if let Some(args) = google_search {
+            let args_object = args.as_object().cloned().unwrap_or_default();
+            lm_options = lm_options.with_tool(GoogleTools.google_search(args_object));
+        }
         let result = self
             .config
             .clone()
@@ -1307,13 +1389,26 @@ impl GoogleImageModel {
             })
             .collect::<Vec<_>>();
 
+        // Carry the language-model `providerMetadata.google` (e.g. groundingMetadata)
+        // through into the image result's google metadata, alongside the per-image array.
+        let language_model_google_metadata: JsonObject = result
+            .provider_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("google"))
+            .cloned()
+            .unwrap_or_default();
+        let google_entry = ImageModelProviderMetadataEntry {
+            images: vec![json!({}); images.len()],
+            extra: language_model_google_metadata,
+        };
+
         let mut image_result = ImageModelResult::new(
             images.clone(),
             ImageModelResponse::new((self.config.current_date)(), self.model_id.clone()),
         )
         .with_provider_metadata(ImageModelProviderMetadata::from([(
             "google".to_string(),
-            ImageModelProviderMetadataEntry::new(vec![json!({}); images.len()]),
+            google_entry,
         )]));
 
         if let (Some(input), Some(output)) = (
@@ -1916,6 +2011,27 @@ impl GoogleInteractionsLanguageModel {
             google_options.get("previousInteractionId").cloned(),
         );
         insert_opt(&mut body, "store", google_options.get("store").cloned());
+
+        // `environment` is only honored on agent calls; on model-id calls it is dropped
+        // with a warning. The object form normalizes sources/network like upstream.
+        if let Some(environment) = google_options.get("environment") {
+            if !environment.is_null() {
+                if self.agent.is_none() {
+                    warnings.push(Warning::Other {
+                        message: "google.interactions: environment is only supported when an agent is set; environment will be omitted from the request body.".to_string(),
+                    });
+                } else if let Some(serialized) = serialize_interactions_environment(environment) {
+                    body.insert("environment".to_string(), serialized);
+                }
+            }
+        }
+        // `background` is opt-in and omitted by default.
+        if let Some(background) = google_options.get("background") {
+            if !background.is_null() {
+                body.insert("background".to_string(), background.clone());
+            }
+        }
+
         Ok((strip_nulls(JsonValue::Object(body)), warnings))
     }
 
@@ -1953,18 +2069,97 @@ impl GoogleInteractionsLanguageModel {
         )
         .await;
 
-        match result {
-            Ok(response) => google_interactions_generate_result(
+        let (mut response_value, mut raw_value) = match result {
+            Ok(response) => (
                 response.value,
                 response.raw_value.unwrap_or(JsonValue::Null),
-                request_body,
-                warnings,
-                &self.config.generate_id,
             ),
             Err(error) => {
-                google_error_generate_result(&self.model_id, &format!("{error:?}"), request_body)
+                return google_error_generate_result(
+                    &self.model_id,
+                    &format!("{error:?}"),
+                    request_body,
+                );
+            }
+        };
+
+        // Agent calls may return a non-terminal status (e.g. `in_progress`) when invoked
+        // with `background: true`. Poll `GET /interactions/{id}` until terminal so the
+        // synchronous surface matches a completed call.
+        if self.agent.is_some()
+            && !is_terminal_interactions_status(
+                response_value.get("status").and_then(JsonValue::as_str),
+            )
+        {
+            let Some(interaction_id) = response_value
+                .get("id")
+                .and_then(JsonValue::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+            else {
+                return google_error_generate_result(
+                    &self.model_id,
+                    "google.interactions: cannot poll a background interaction without an id. The POST response did not include an interaction id.",
+                    request_body,
+                );
+            };
+            let poll_headers =
+                match google_request_headers(&self.config.settings, options.headers.as_ref()) {
+                    Ok(headers) => headers,
+                    Err(error) => {
+                        return google_error_generate_result(&self.model_id, &error, request_body);
+                    }
+                };
+            for _ in 0..1000 {
+                if is_terminal_interactions_status(
+                    response_value.get("status").and_then(JsonValue::as_str),
+                ) {
+                    break;
+                }
+                let get_options = ai_sdk_rust::GetFromApiOptions::new(format!(
+                    "{}/interactions/{}",
+                    self.config.base_url, interaction_id
+                ))
+                .with_headers(poll_headers.clone())
+                .with_environment(RuntimeEnvironment::unknown())
+                .with_optional_abort_signal(options.abort_signal.clone());
+                let transport = Arc::clone(&self.config.transport);
+                let poll = get_from_api(
+                    get_options,
+                    move |request| (transport)(request),
+                    |request, response| {
+                        create_json_response_handler(
+                            response.json_response_handler_options(request),
+                            |value| Ok::<JsonValue, String>(value.clone()),
+                        )
+                        .map_err(ProviderApiResponseHandlerError::from)
+                    },
+                    google_failed_response_handler,
+                )
+                .await;
+                match poll {
+                    Ok(response) => {
+                        response_value = response.value;
+                        raw_value = response.raw_value.unwrap_or(JsonValue::Null);
+                    }
+                    Err(error) => {
+                        return google_error_generate_result(
+                            &self.model_id,
+                            &format!("{error:?}"),
+                            request_body,
+                        );
+                    }
+                }
             }
         }
+
+        google_interactions_generate_result(
+            response_value,
+            raw_value,
+            request_body,
+            warnings,
+            &self.config.generate_id,
+        )
     }
 
     async fn do_stream_result(
@@ -2548,18 +2743,40 @@ struct GooglePrompt {
 
 struct ConvertToGoogleMessagesOptions {
     is_gemma_model: bool,
+    is_gemini3_model: bool,
     provider_options_names: Vec<&'static str>,
     supports_function_response_parts: bool,
 }
 
+/// Documented sentinel injected for Gemini 3 tool-call replays that are missing
+/// a `thoughtSignature`, to avoid HTTP 400 from the Gemini API.
+const SKIP_THOUGHT_SIGNATURE_VALIDATOR: &str = "skip_thought_signature_validator";
+
+/// Mirrors upstream `/^gemini-3[.-]/`: matches `gemini-3-...` and `gemini-3.x` model ids.
+fn is_gemini3_model_id(model_id: &str) -> bool {
+    model_id
+        .strip_prefix("gemini-3")
+        .is_some_and(|rest| rest.starts_with('-') || rest.starts_with('.'))
+}
+
+#[cfg(test)]
 fn convert_to_google_messages(
     prompt: &LanguageModelPrompt,
     options: ConvertToGoogleMessagesOptions,
 ) -> Result<GooglePrompt, String> {
+    let (result, _warnings) = convert_to_google_messages_with_warnings(prompt, options)?;
+    Ok(result)
+}
+
+fn convert_to_google_messages_with_warnings(
+    prompt: &LanguageModelPrompt,
+    options: ConvertToGoogleMessagesOptions,
+) -> Result<(GooglePrompt, Vec<Warning>), String> {
     let mut system_instruction_parts = Vec::new();
     let mut contents = Vec::new();
     let mut system_messages_allowed = true;
     let is_vertex_like = !options.provider_options_names.contains(&"google");
+    let mut missing_signature_tool_names: Vec<String> = Vec::new();
 
     for message in prompt {
         match message {
@@ -2595,6 +2812,8 @@ fn convert_to_google_messages(
                         part,
                         &options.provider_options_names,
                         is_vertex_like,
+                        options.is_gemini3_model,
+                        &mut missing_signature_tool_names,
                     )?;
                     if let Some(converted) = converted {
                         parts.push(converted);
@@ -2653,10 +2872,39 @@ fn convert_to_google_messages(
     } else {
         None
     };
-    Ok(GooglePrompt {
-        contents,
-        system_instruction,
-    })
+
+    let mut warnings = Vec::new();
+    if !missing_signature_tool_names.is_empty() {
+        let mut unique_tool_names: Vec<String> = Vec::new();
+        for name in &missing_signature_tool_names {
+            if !unique_tool_names.contains(name) {
+                unique_tool_names.push(name.clone());
+            }
+        }
+        let tools_list = unique_tool_names
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let message = format!(
+            "Replayed {count} `functionCall` part(s) for a Gemini 3 model without a \
+             `thoughtSignature` (tools: {tools_list}). Injected the documented \
+             `skip_thought_signature_validator` sentinel to keep the request from failing with \
+             HTTP 400. The likely cause is application code that drops \
+             `providerOptions.google.thoughtSignature` when persisting or serializing assistant \
+             tool-call messages. See https://ai.google.dev/gemini-api/docs/thought-signatures.",
+            count = missing_signature_tool_names.len(),
+        );
+        warnings.push(Warning::Other { message });
+    }
+
+    Ok((
+        GooglePrompt {
+            contents,
+            system_instruction,
+        },
+        warnings,
+    ))
 }
 
 fn convert_file_part_to_google(
@@ -2712,6 +2960,8 @@ fn convert_assistant_part_to_google(
     part: &LanguageModelAssistantContentPart,
     provider_names: &[&str],
     is_vertex_like: bool,
+    is_gemini3_model: bool,
+    missing_signature_tool_names: &mut Vec<String>,
 ) -> Result<Option<JsonValue>, String> {
     match part {
         LanguageModelAssistantContentPart::Text(text) => {
@@ -2771,6 +3021,19 @@ fn convert_assistant_part_to_google(
             Ok(Some(value))
         }
         LanguageModelAssistantContentPart::ToolCall(tool_call) => {
+            let existing_signature =
+                thought_signature(tool_call.provider_options.as_ref(), provider_names)
+                    .map(|s| s.to_string());
+            // For Gemini 3, replays missing a real thoughtSignature get the documented
+            // sentinel injected so the request does not fail with HTTP 400.
+            let effective_signature = match existing_signature {
+                Some(signature) => Some(signature),
+                None if is_gemini3_model => {
+                    missing_signature_tool_names.push(tool_call.tool_name.clone());
+                    Some(SKIP_THOUGHT_SIGNATURE_VALIDATOR.to_string())
+                }
+                None => None,
+            };
             let provider_opts =
                 part_provider_options(tool_call.provider_options.as_ref(), provider_names);
             if let Some(opts) = provider_opts {
@@ -2785,9 +3048,7 @@ fn convert_assistant_part_to_google(
                             "id": server_id,
                         }
                     });
-                    if let Some(signature) =
-                        opts.get("thoughtSignature").and_then(JsonValue::as_str)
-                    {
+                    if let Some(signature) = &effective_signature {
                         value["thoughtSignature"] = json!(signature);
                     }
                     return Ok(Some(value));
@@ -2800,9 +3061,7 @@ fn convert_assistant_part_to_google(
                     "args": tool_call.input,
                 }
             });
-            if let Some(signature) =
-                thought_signature(tool_call.provider_options.as_ref(), provider_names)
-            {
+            if let Some(signature) = &effective_signature {
                 value["thoughtSignature"] = json!(signature);
             }
             Ok(Some(value))
@@ -3504,6 +3763,16 @@ fn google_stream_result_from_chunks(
     let mut last_code_execution_tool_call_id = None;
     let mut last_server_tool_call_id = None;
     let mut has_tool_calls = false;
+    // Stream finish provider-metadata accumulators (last-wins like upstream).
+    let mut last_grounding_metadata = JsonValue::Null;
+    let mut last_url_context_metadata = JsonValue::Null;
+    let mut last_usage_metadata = JsonValue::Null;
+    let mut last_prompt_feedback = JsonValue::Null;
+    let mut last_safety_ratings = JsonValue::Null;
+    let mut last_finish_message = JsonValue::Null;
+    let mut emitted_source_urls: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut finish_provider_metadata: Option<ProviderMetadata> = None;
 
     for chunk in chunks {
         match chunk {
@@ -3523,6 +3792,10 @@ fn google_stream_result_from_chunks(
                 }
                 if let Some(usage_metadata) = value.get("usageMetadata") {
                     usage = convert_google_usage(Some(usage_metadata));
+                    last_usage_metadata = usage_metadata.clone();
+                }
+                if let Some(prompt_feedback) = value.get("promptFeedback") {
+                    last_prompt_feedback = prompt_feedback.clone();
                 }
                 let Some(candidate) = value
                     .get("candidates")
@@ -3531,8 +3804,63 @@ fn google_stream_result_from_chunks(
                 else {
                     continue;
                 };
+                if let Some(grounding) = candidate.get("groundingMetadata") {
+                    if !grounding.is_null() {
+                        last_grounding_metadata = grounding.clone();
+                    }
+                }
+                if let Some(url_context) = candidate.get("urlContextMetadata") {
+                    if !url_context.is_null() {
+                        last_url_context_metadata = url_context.clone();
+                    }
+                }
+                if let Some(safety_ratings) = candidate.get("safetyRatings") {
+                    last_safety_ratings = safety_ratings.clone();
+                }
+                if let Some(finish_message) = candidate.get("finishMessage") {
+                    last_finish_message = finish_message.clone();
+                }
+                // Emit url sources from this chunk's grounding metadata, de-duplicated.
+                for source in extract_sources(
+                    candidate.get("groundingMetadata"),
+                    generate_id,
+                    provider_names,
+                ) {
+                    if let LanguageModelContent::Source(LanguageModelSource::Url(url_source)) =
+                        &source
+                    {
+                        if !emitted_source_urls.insert(url_source.url.clone()) {
+                            continue;
+                        }
+                    }
+                    stream.push(content_to_stream_part(source));
+                }
                 if let Some(raw) = candidate.get("finishReason").and_then(JsonValue::as_str) {
                     finish_reason.raw = Some(raw.to_string());
+                    finish_provider_metadata = Some(wrap_provider_metadata(
+                        provider_names,
+                        JsonObject::from_iter([
+                            ("promptFeedback".to_string(), last_prompt_feedback.clone()),
+                            (
+                                "groundingMetadata".to_string(),
+                                last_grounding_metadata.clone(),
+                            ),
+                            (
+                                "urlContextMetadata".to_string(),
+                                last_url_context_metadata.clone(),
+                            ),
+                            ("safetyRatings".to_string(), last_safety_ratings.clone()),
+                            ("usageMetadata".to_string(), last_usage_metadata.clone()),
+                            ("finishMessage".to_string(), last_finish_message.clone()),
+                            (
+                                "serviceTier".to_string(),
+                                last_usage_metadata
+                                    .get("serviceTier")
+                                    .cloned()
+                                    .unwrap_or(JsonValue::Null),
+                            ),
+                        ]),
+                    ));
                 }
                 let parts = candidate
                     .pointer("/content/parts")
@@ -3615,9 +3943,11 @@ fn google_stream_result_from_chunks(
         )));
     }
     finish_reason.unified = map_google_finish_reason(finish_reason.raw.as_deref(), has_tool_calls);
-    stream.push(LanguageModelStreamPart::Finish(
-        LanguageModelStreamFinish::new(usage, finish_reason),
-    ));
+    let mut finish = LanguageModelStreamFinish::new(usage, finish_reason);
+    if let Some(metadata) = finish_provider_metadata {
+        finish.provider_metadata = Some(metadata);
+    }
+    stream.push(LanguageModelStreamPart::Finish(finish));
     LanguageModelStreamResult::new(stream)
         .with_request(LanguageModelRequest::new().with_body(request_body))
         .with_response(LanguageModelStreamResultResponse {
@@ -4453,12 +4783,90 @@ fn resolve_thinking_config(
     }
 }
 
-fn vertex_service_tier(service_tier: &str) -> &str {
-    match service_tier {
-        "priority" => "PRIORITY",
-        "flex" => "FLEX",
-        _ => service_tier,
+/// Terminal interaction statuses that stop background polling.
+fn is_terminal_interactions_status(status: Option<&str>) -> bool {
+    matches!(
+        status,
+        Some("completed" | "failed" | "cancelled" | "incomplete")
+    )
+}
+
+/// Serializes the `environment` provider option for an interactions agent request.
+/// A string passes through verbatim (`"remote"` or an env id). The object form is
+/// normalized to `{ type, sources?, network? }`, pruning null targets on non-inline
+/// sources and serializing the network allowlist/disabled forms.
+fn serialize_interactions_environment(environment: &JsonValue) -> Option<JsonValue> {
+    if let Some(text) = environment.as_str() {
+        return Some(json!(text));
     }
+    let options = environment.as_object()?;
+
+    let mut result = JsonObject::new();
+    result.insert("type".to_string(), json!("remote"));
+
+    if let Some(sources) = options.get("sources").and_then(JsonValue::as_array) {
+        let serialized_sources: Vec<JsonValue> = sources
+            .iter()
+            .map(|source| {
+                let source_type = source.get("type").and_then(JsonValue::as_str).unwrap_or("");
+                if source_type == "inline" {
+                    json!({
+                        "type": "inline",
+                        "content": source.get("content").cloned().unwrap_or(JsonValue::Null),
+                        "target": source.get("target").cloned().unwrap_or(JsonValue::Null),
+                    })
+                } else {
+                    let mut entry = JsonObject::new();
+                    entry.insert("type".to_string(), json!(source_type));
+                    if let Some(value) = source.get("source") {
+                        entry.insert("source".to_string(), value.clone());
+                    }
+                    // Prune null targets on non-inline sources.
+                    if let Some(target) = source.get("target") {
+                        if !target.is_null() {
+                            entry.insert("target".to_string(), target.clone());
+                        }
+                    }
+                    JsonValue::Object(entry)
+                }
+            })
+            .collect();
+        if !serialized_sources.is_empty() {
+            result.insert("sources".to_string(), JsonValue::Array(serialized_sources));
+        }
+    }
+
+    match options.get("network") {
+        Some(JsonValue::String(value)) if value == "disabled" => {
+            result.insert("network".to_string(), json!("disabled"));
+        }
+        Some(JsonValue::Object(network)) => {
+            if let Some(allowlist) = network.get("allowlist").and_then(JsonValue::as_array) {
+                let entries: Vec<JsonValue> = allowlist
+                    .iter()
+                    .map(|entry| {
+                        let mut serialized = JsonObject::new();
+                        if let Some(domain) = entry.get("domain") {
+                            serialized.insert("domain".to_string(), domain.clone());
+                        }
+                        if let Some(transform) = entry.get("transform") {
+                            if !transform.is_null() {
+                                serialized.insert("transform".to_string(), transform.clone());
+                            }
+                        }
+                        JsonValue::Object(serialized)
+                    })
+                    .collect();
+                result.insert(
+                    "network".to_string(),
+                    json!({ "allowlist": JsonValue::Array(entries) }),
+                );
+            }
+        }
+        _ => {}
+    }
+
+    Some(strip_nulls(JsonValue::Object(result)))
 }
 
 fn embedding_parts(value: &str, multimodal: Option<&Vec<JsonValue>>) -> Vec<JsonValue> {
@@ -5250,6 +5658,7 @@ mod tests {
             &prompt,
             ConvertToGoogleMessagesOptions {
                 is_gemma_model: false,
+                is_gemini3_model: false,
                 provider_options_names: vec!["google"],
                 supports_function_response_parts: true,
             },
@@ -5274,6 +5683,170 @@ mod tests {
             converted.contents[2]["parts"][0]["functionResponse"]["name"],
             "weather"
         );
+    }
+
+    // Upstream: packages/google/src/convert-to-google-messages.test.ts:1669-1814 — the
+    // Gemini 3 `skip_thought_signature_validator` sentinel-injection suite.
+    #[test]
+    fn google_convert_to_google_messages_gemini3_sentinel_upstream_cases() {
+        fn tool_call_with_options(
+            id: &str,
+            name: &str,
+            input: JsonValue,
+            options: Option<JsonValue>,
+        ) -> LanguageModelAssistantContentPart {
+            let mut part = LanguageModelToolCallPart::new(id, name, input);
+            if let Some(options) = options {
+                part = part.with_provider_options(serde_json::from_value(options).unwrap());
+            }
+            LanguageModelAssistantContentPart::ToolCall(part)
+        }
+
+        fn assistant_prompt(
+            tool_call: LanguageModelAssistantContentPart,
+        ) -> Vec<LanguageModelMessage> {
+            vec![
+                LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                    LanguageModelUserContentPart::Text(LanguageModelTextPart::new("hi")),
+                ])),
+                LanguageModelMessage::Assistant(ai_sdk_rust::LanguageModelAssistantMessage::new(
+                    vec![tool_call],
+                )),
+            ]
+        }
+
+        fn convert(
+            prompt: &Vec<LanguageModelMessage>,
+            is_gemini3_model: bool,
+            provider_options_names: Vec<&'static str>,
+        ) -> (GooglePrompt, Vec<Warning>) {
+            convert_to_google_messages_with_warnings(
+                prompt,
+                ConvertToGoogleMessagesOptions {
+                    is_gemma_model: false,
+                    is_gemini3_model,
+                    provider_options_names,
+                    supports_function_response_parts: true,
+                },
+            )
+            .unwrap()
+        }
+
+        fn model_function_call(prompt: &GooglePrompt) -> &JsonValue {
+            let assistant = prompt
+                .contents
+                .iter()
+                .find(|c| c["role"] == "model")
+                .expect("model message");
+            &assistant["parts"][0]
+        }
+
+        // 0063: Gemini 3 + tool-call missing signature -> sentinel injected + one warning.
+        let (result, warnings) = convert(
+            &assistant_prompt(tool_call_with_options(
+                "tc_1",
+                "weather",
+                json!({"location":"SF"}),
+                None,
+            )),
+            true,
+            vec!["google"],
+        );
+        let part = model_function_call(&result);
+        assert_eq!(part["functionCall"]["id"], "tc_1");
+        assert_eq!(part["functionCall"]["name"], "weather");
+        assert_eq!(part["functionCall"]["args"], json!({"location":"SF"}));
+        assert_eq!(part["thoughtSignature"], SKIP_THOUGHT_SIGNATURE_VALIDATOR);
+        assert_eq!(warnings.len(), 1);
+        let Warning::Other { message } = &warnings[0] else {
+            panic!("expected Warning::Other, got {:?}", warnings[0]);
+        };
+        assert!(message.contains("skip_thought_signature_validator"));
+        assert!(message.contains("`weather`"));
+
+        // 0064: non-Gemini-3 model -> no sentinel, no warning.
+        let (result, warnings) = convert(
+            &assistant_prompt(tool_call_with_options(
+                "tc_1",
+                "weather",
+                json!({"location":"SF"}),
+                None,
+            )),
+            false,
+            vec!["google"],
+        );
+        let part = model_function_call(&result);
+        assert_eq!(part["functionCall"]["name"], "weather");
+        assert!(part.get("thoughtSignature").is_none());
+        assert!(warnings.is_empty());
+
+        // 0065: real signature under `google` -> kept, no sentinel, no warning.
+        let (result, warnings) = convert(
+            &assistant_prompt(tool_call_with_options(
+                "tc_1",
+                "weather",
+                json!({"location":"SF"}),
+                Some(json!({ "google": { "thoughtSignature": "real_sig" } })),
+            )),
+            true,
+            vec!["google"],
+        );
+        assert_eq!(model_function_call(&result)["thoughtSignature"], "real_sig");
+        assert!(warnings.is_empty());
+
+        // 0066: real signature under `vertex` (vertex-like provider names) -> kept, no warning.
+        let (result, warnings) = convert(
+            &assistant_prompt(tool_call_with_options(
+                "tc_1",
+                "weather",
+                json!({"location":"SF"}),
+                Some(json!({ "vertex": { "thoughtSignature": "vertex_sig" } })),
+            )),
+            true,
+            vec!["googleVertex", "vertex"],
+        );
+        assert_eq!(
+            model_function_call(&result)["thoughtSignature"],
+            "vertex_sig"
+        );
+        assert!(warnings.is_empty());
+
+        // 0067: real signature under `googleVertex` -> kept, no warning.
+        let (result, warnings) = convert(
+            &assistant_prompt(tool_call_with_options(
+                "tc_1",
+                "weather",
+                json!({"location":"SF"}),
+                Some(json!({ "googleVertex": { "thoughtSignature": "google_vertex_sig" } })),
+            )),
+            true,
+            vec!["googleVertex", "vertex"],
+        );
+        assert_eq!(
+            model_function_call(&result)["thoughtSignature"],
+            "google_vertex_sig"
+        );
+        assert!(warnings.is_empty());
+
+        // 0068: one warning per request listing each affected tool name.
+        let multi_prompt = vec![
+            LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
+                LanguageModelUserContentPart::Text(LanguageModelTextPart::new("hi")),
+            ])),
+            LanguageModelMessage::Assistant(ai_sdk_rust::LanguageModelAssistantMessage::new(vec![
+                tool_call_with_options("tc_1", "weather", json!({"location":"SF"}), None),
+                tool_call_with_options("tc_2", "weather", json!({"location":"NYC"}), None),
+                tool_call_with_options("tc_3", "search", json!({"query":"q"}), None),
+            ])),
+        ];
+        let (_result, warnings) = convert(&multi_prompt, true, vec!["google"]);
+        assert_eq!(warnings.len(), 1);
+        let Warning::Other { message } = &warnings[0] else {
+            panic!("expected Warning::Other");
+        };
+        assert!(message.contains("3 "));
+        assert!(message.contains("`weather`"));
+        assert!(message.contains("`search`"));
     }
 
     #[test]
@@ -5378,6 +5951,258 @@ mod tests {
         assert!(request[0].headers.contains_key("x-goog-api-key"));
     }
 
+    fn vertex_provider_with_response(
+        response: JsonValue,
+        captured: Arc<Mutex<Vec<ProviderApiRequest>>>,
+    ) -> GoogleProvider {
+        GoogleProvider::from_settings(
+            GoogleProviderSettings::new()
+                .with_api_key("test-key")
+                .with_name("google.vertex.chat"),
+        )
+        .with_generate_id(|| "test-id".to_string())
+        .with_transport(capture_transport(response, captured))
+    }
+
+    fn text_response(text: &str) -> JsonValue {
+        json!({
+            "candidates": [{
+                "content": { "parts": [{ "text": text }], "role": "model" },
+                "finishReason": "STOP",
+                "index": 0
+            }],
+            "usageMetadata": { "promptTokenCount": 1, "candidatesTokenCount": 2, "totalTokenCount": 3 }
+        })
+    }
+
+    fn warning_messages(result: &LanguageModelGenerateResult) -> Vec<String> {
+        result
+            .warnings
+            .iter()
+            .filter_map(|warning| match warning {
+                Warning::Other { message } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Upstream: packages/google/src/google-language-model.test.ts:633/659/694 — Vertex paygo
+    // request-type headers, serviceTier drop+warn on Vertex, and sharedRequestType warn on
+    // non-Vertex providers.
+    #[test]
+    fn google_language_model_request_type_and_service_tier_upstream_cases() {
+        // 0199: requestType + sharedRequestType emit Vertex paygo headers.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = vertex_provider_with_response(text_response("ok"), Arc::clone(&captured));
+        let _ = poll_ready(
+            provider.chat("gemini-pro").do_generate(
+                text_prompt("Hi").with_provider_options(
+                    serde_json::from_value(json!({
+                        "google": { "sharedRequestType": "priority", "requestType": "shared" }
+                    }))
+                    .unwrap(),
+                ),
+            ),
+        );
+        let headers = &captured.lock().unwrap()[0].headers;
+        assert_eq!(
+            headers.get("x-vertex-ai-llm-shared-request-type"),
+            Some(&"priority".to_string())
+        );
+        assert_eq!(
+            headers.get("x-vertex-ai-llm-request-type"),
+            Some(&"shared".to_string())
+        );
+
+        // 0200: serviceTier on Vertex is dropped from the body and a warning is emitted.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = vertex_provider_with_response(text_response("ok"), Arc::clone(&captured));
+        let result = poll_ready(provider.chat("gemini-pro").do_generate(
+            text_prompt("Hi").with_provider_options(
+                serde_json::from_value(json!({ "google": { "serviceTier": "priority" } })).unwrap(),
+            ),
+        ));
+        let body = captured.lock().unwrap()[0].request_body_values.clone();
+        assert!(body.get("serviceTier").is_none());
+        let headers = &captured.lock().unwrap()[0].headers;
+        assert!(headers.get("x-vertex-ai-llm-shared-request-type").is_none());
+        assert!(
+            warning_messages(&result)
+                .iter()
+                .any(|message| message.contains("'serviceTier' is a Gemini API option"))
+        );
+
+        // 0201: sharedRequestType on a non-Vertex provider warns and emits no paygo headers.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = provider_with_response(text_response("ok"), Arc::clone(&captured));
+        let result = poll_ready(
+            provider.chat("gemini-2.5-flash").do_generate(
+                text_prompt("Hi").with_provider_options(
+                    serde_json::from_value(
+                        json!({ "google": { "sharedRequestType": "priority" } }),
+                    )
+                    .unwrap(),
+                ),
+            ),
+        );
+        let headers = &captured.lock().unwrap()[0].headers;
+        assert!(headers.get("x-vertex-ai-llm-shared-request-type").is_none());
+        assert!(
+            warning_messages(&result)
+                .iter()
+                .any(|message| message.contains("'sharedRequestType' and 'requestType'"))
+        );
+    }
+
+    // Upstream: packages/google/src/google-language-model.test.ts:790/1342/2956 — reasoning
+    // thoughtSignature extraction, source extraction from grounding, retrievalConfig forwarding.
+    #[test]
+    fn google_language_model_metadata_and_grounding_upstream_cases() {
+        // 0205: a text part carrying a thoughtSignature is exposed via providerMetadata.google.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = provider_with_response(
+            json!({
+                "candidates": [{
+                    "content": { "parts": [
+                        { "text": "There are 3 r's.", "thoughtSignature": "sig-xyz" }
+                    ], "role": "model" },
+                    "finishReason": "STOP"
+                }],
+                "usageMetadata": { "promptTokenCount": 9, "candidatesTokenCount": 29, "thoughtsTokenCount": 258 }
+            }),
+            Arc::clone(&captured),
+        );
+        let result = poll_ready(
+            provider
+                .chat("gemini-3-pro-preview")
+                .do_generate(text_prompt("Hi")),
+        );
+        let LanguageModelContent::Text(text) = &result.content[0] else {
+            panic!("expected text content");
+        };
+        let signature = text
+            .provider_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("google"))
+            .and_then(|google| google.get("thoughtSignature"))
+            .and_then(JsonValue::as_str);
+        assert_eq!(signature, Some("sig-xyz"));
+
+        // 0219: a url source is extracted from groundingMetadata.groundingChunks[].web.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = provider_with_response(
+            json!({
+                "candidates": [{
+                    "content": { "parts": [{ "text": "test response" }], "role": "model" },
+                    "finishReason": "STOP",
+                    "groundingMetadata": {
+                        "groundingChunks": [
+                            { "web": { "uri": "https://source.example.com", "title": "Source Title" } }
+                        ]
+                    }
+                }],
+                "usageMetadata": { "promptTokenCount": 1, "candidatesTokenCount": 2 }
+            }),
+            Arc::clone(&captured),
+        );
+        let result = poll_ready(
+            provider
+                .chat("gemini-2.5-flash")
+                .do_generate(text_prompt("Hi")),
+        );
+        let LanguageModelContent::Source(LanguageModelSource::Url(source)) = &result.content[1]
+        else {
+            panic!("expected url source as second content part");
+        };
+        assert_eq!(source.url, "https://source.example.com");
+        assert_eq!(source.title.as_deref(), Some("Source Title"));
+
+        // 0252: retrievalConfig provider option forwarded into toolConfig.retrievalConfig and
+        // the google_maps provider tool is serialized as `googleMaps`.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = provider_with_response(text_response("ok"), Arc::clone(&captured));
+        let _ = poll_ready(
+            provider.chat("gemini-2.0-flash-exp").do_generate(
+                text_prompt("Hi")
+                    .with_tool(GoogleTools.google_maps())
+                    .with_provider_options(
+                        serde_json::from_value(json!({
+                            "google": {
+                                "retrievalConfig": {
+                                    "latLng": { "latitude": 34.090199, "longitude": -117.881081 }
+                                }
+                            }
+                        }))
+                        .unwrap(),
+                    ),
+            ),
+        );
+        let body = captured.lock().unwrap()[0].request_body_values.clone();
+        assert_eq!(body["tools"][0], json!({ "googleMaps": {} }));
+        assert_eq!(
+            body["toolConfig"]["retrievalConfig"]["latLng"]["latitude"],
+            34.090199
+        );
+    }
+
+    // Upstream: packages/google/src/google-language-model.test.ts:4413/4791 — streamed finish
+    // event carries grounding metadata and serviceTier in providerMetadata.google.
+    #[test]
+    fn google_language_model_stream_finish_metadata_upstream_cases() {
+        fn stream_transport(chunks: &str) -> GoogleTransport {
+            let body = chunks.to_string();
+            Arc::new(move |_request| {
+                let body = body.clone();
+                Box::pin(async move { Ok(ProviderApiResponse::text(200, "OK", body)) })
+            })
+        }
+
+        fn finish_metadata(parts: &[LanguageModelStreamPart]) -> JsonObject {
+            parts
+                .iter()
+                .find_map(|part| match part {
+                    LanguageModelStreamPart::Finish(finish) => finish
+                        .provider_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("google"))
+                        .cloned(),
+                    _ => None,
+                })
+                .expect("finish provider metadata")
+        }
+
+        // 0294: groundingMetadata is exposed on the finish event.
+        let provider =
+            GoogleProvider::from_settings(GoogleProviderSettings::new().with_api_key("test-key"))
+                .with_transport(stream_transport(
+                    "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"test\"}],\"role\":\"model\"},\"finishReason\":\"STOP\",\"groundingMetadata\":{\"webSearchQueries\":[\"What's the weather in Chicago this weekend?\"],\"groundingChunks\":[{\"web\":{\"uri\":\"https://example.com/weather\",\"title\":\"Chicago Weather Forecast\"}}]}}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1}}\n\n",
+                ));
+        let result = poll_ready(
+            provider
+                .chat("gemini-2.5-flash")
+                .do_stream(text_prompt("Hi")),
+        );
+        let metadata = finish_metadata(&result.stream);
+        assert_eq!(
+            metadata["groundingMetadata"]["webSearchQueries"][0],
+            "What's the weather in Chicago this weekend?"
+        );
+
+        // 0302: serviceTier read from the chunk's usageMetadata is exposed on finish.
+        let provider =
+            GoogleProvider::from_settings(GoogleProviderSettings::new().with_api_key("test-key"))
+                .with_transport(stream_transport(
+                    "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Blue\"}],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":1,\"totalTokenCount\":11,\"serviceTier\":\"priority\"}}\n\n",
+                ));
+        let result = poll_ready(
+            provider
+                .chat("gemini-2.5-flash")
+                .do_stream(text_prompt("Hi")),
+        );
+        let metadata = finish_metadata(&result.stream);
+        assert_eq!(metadata["serviceTier"], "priority");
+    }
+
     #[test]
     fn google_language_model_stream_upstream_cases() {
         let captured = Arc::new(Mutex::new(Vec::new()));
@@ -5460,6 +6285,205 @@ mod tests {
             }
         );
         assert!(captured.lock().unwrap()[0].url.ends_with(":predict"));
+    }
+
+    // Upstream: packages/google/src/google-image-model.test.ts:392 (Imagen image-editing not
+    // supported) and :673/:695/:713/:737/:759 (Gemini image model googleSearch + grounding).
+    #[test]
+    fn google_image_model_gemini_search_and_editing_upstream_cases() {
+        fn request_body(captured: &Arc<Mutex<Vec<ProviderApiRequest>>>) -> JsonValue {
+            captured.lock().unwrap()[0].request_body_values.clone()
+        }
+
+        // 0124: Imagen rejects image editing (files provided) with the exact error message.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = provider_with_response(
+            json!({ "predictions": [{ "bytesBase64Encoded": "image-data" }] }),
+            Arc::clone(&captured),
+        );
+        let result = poll_ready(
+            provider.image("imagen-3.0-generate-002").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Edit this image")
+                    .with_files(vec![ImageModelFile::File {
+                        media_type: "image/png".to_string(),
+                        data: FileDataContent::Base64("base64-source-image".to_string()),
+                        provider_options: None,
+                    }]),
+            ),
+        );
+        assert!(result.images.is_empty());
+        assert_eq!(
+            result.warnings[0],
+            Warning::Other {
+                message: "Google Gemini API does not support image editing with Imagen models. \
+                          Use Google Vertex AI (@ai-sdk/google-vertex) for image editing \
+                          capabilities."
+                    .to_string(),
+            }
+        );
+        // No HTTP request was made (the error is raised before posting).
+        assert!(captured.lock().unwrap().is_empty());
+
+        // 0134: Gemini image model warns for the unsupported `size` option.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = provider_with_response(
+            json!({
+                "candidates": [{
+                    "content": { "parts": [
+                        { "inlineData": { "mimeType": "image/png", "data": "aW1n" } }
+                    ], "role": "model" },
+                    "finishReason": "STOP"
+                }],
+                "usageMetadata": { "promptTokenCount": 10, "candidatesTokenCount": 100, "totalTokenCount": 110 }
+            }),
+            Arc::clone(&captured),
+        );
+        let result = poll_ready(
+            provider.image("gemini-2.5-flash-image").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A beautiful sunset")
+                    .with_size("1024x1024"),
+            ),
+        );
+        assert!(
+            result.warnings.contains(&Warning::Unsupported {
+                feature: "size".to_string(),
+                details: Some(
+                    "This model does not support the `size` option. Use `aspectRatio` instead."
+                        .to_string()
+                ),
+            })
+        );
+
+        // 0135: no googleSearch -> no `tools` field forwarded to the language model.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = provider_with_response(
+            json!({
+                "candidates": [{
+                    "content": { "parts": [
+                        { "inlineData": { "mimeType": "image/png", "data": "aW1n" } }
+                    ], "role": "model" },
+                    "finishReason": "STOP"
+                }]
+            }),
+            Arc::clone(&captured),
+        );
+        let _ = poll_ready(
+            provider
+                .image("gemini-2.5-flash-image")
+                .do_generate(ImageModelCallOptions::new(1).with_prompt("A beautiful sunset")),
+        );
+        assert!(request_body(&captured).get("tools").is_none());
+
+        // 0136: providerOptions.google.googleSearch forwarded as the google_search tool.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = provider_with_response(
+            json!({
+                "candidates": [{
+                    "content": { "parts": [
+                        { "inlineData": { "mimeType": "image/png", "data": "aW1n" } }
+                    ], "role": "model" },
+                    "finishReason": "STOP"
+                }]
+            }),
+            Arc::clone(&captured),
+        );
+        let _ = poll_ready(
+            provider.image("gemini-2.5-flash-image").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A beautiful sunset")
+                    .with_provider_options(
+                        serde_json::from_value(json!({
+                            "google": { "googleSearch": { "searchTypes": { "imageSearch": {} } } }
+                        }))
+                        .unwrap(),
+                    ),
+            ),
+        );
+        let body = request_body(&captured);
+        assert_eq!(
+            body["tools"],
+            json!([{ "googleSearch": { "searchTypes": { "imageSearch": {} } } }])
+        );
+
+        // 0137: googleSearch does not leak into the passthrough google generationConfig.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = provider_with_response(
+            json!({
+                "candidates": [{
+                    "content": { "parts": [
+                        { "inlineData": { "mimeType": "image/png", "data": "aW1n" } }
+                    ], "role": "model" },
+                    "finishReason": "STOP"
+                }]
+            }),
+            Arc::clone(&captured),
+        );
+        let _ = poll_ready(
+            provider.image("gemini-2.5-flash-image").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A beautiful sunset")
+                    .with_provider_options(
+                        serde_json::from_value(json!({ "google": { "googleSearch": {} } }))
+                            .unwrap(),
+                    ),
+            ),
+        );
+        let body = request_body(&captured);
+        assert!(
+            body.get("generationConfig")
+                .and_then(|cfg| cfg.get("googleSearch"))
+                .is_none()
+        );
+
+        // 0138: groundingMetadata from the language-model response is forwarded into
+        // providerMetadata.google on the image result.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = provider_with_response(
+            json!({
+                "candidates": [{
+                    "content": { "parts": [
+                        { "inlineData": { "mimeType": "image/png", "data": "aW1n" } }
+                    ], "role": "model" },
+                    "finishReason": "STOP",
+                    "groundingMetadata": {
+                        "webSearchQueries": ["who performs at the 2026 super bowl halftime show"],
+                        "groundingChunks": [
+                            { "web": { "uri": "https://example.com/source", "title": "Example" } }
+                        ]
+                    }
+                }],
+                "usageMetadata": { "promptTokenCount": 10, "candidatesTokenCount": 100, "totalTokenCount": 110 }
+            }),
+            Arc::clone(&captured),
+        );
+        let result = poll_ready(
+            provider.image("gemini-2.5-flash-image").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("Who performs at the 2026 super bowl?")
+                    .with_provider_options(
+                        serde_json::from_value(json!({ "google": { "googleSearch": {} } }))
+                            .unwrap(),
+                    ),
+            ),
+        );
+        let google_metadata = result
+            .provider_metadata
+            .as_ref()
+            .expect("provider metadata")
+            .get("google")
+            .expect("google provider metadata");
+        let grounding = google_metadata
+            .extra
+            .get("groundingMetadata")
+            .expect("groundingMetadata forwarded");
+        assert_eq!(
+            grounding["webSearchQueries"][0],
+            "who performs at the 2026 super bowl halftime show"
+        );
+        // One per-image entry is still present.
+        assert_eq!(google_metadata.images.len(), result.images.len());
     }
 
     #[test]
@@ -5609,6 +6633,235 @@ mod tests {
             LanguageModelContent::ToolCall(_)
         ));
         assert!(captured.lock().unwrap()[0].url.ends_with("/interactions"));
+    }
+
+    // Upstream: packages/google/src/interactions/google-interactions-language-model.test.ts —
+    // background omission, environment serialization, polling, and background streaming.
+    #[test]
+    fn google_interactions_environment_and_polling_upstream_cases() {
+        fn completed_response() -> JsonValue {
+            json!({
+                "id": "interactions/1",
+                "status": "completed",
+                "steps": [
+                    { "type": "model_output", "content": [{ "type": "text", "text": "Answer" }] }
+                ],
+                "usage": { "promptTokenCount": 1, "candidatesTokenCount": 2 }
+            })
+        }
+
+        fn agent_options(environment: Option<JsonValue>) -> LanguageModelCallOptions {
+            let mut options = LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                    LanguageModelTextPart::new("Hi"),
+                )]),
+            )]);
+            if let Some(environment) = environment {
+                options = options.with_provider_options(
+                    serde_json::from_value(json!({ "google": { "environment": environment } }))
+                        .unwrap(),
+                );
+            }
+            options
+        }
+
+        fn body(captured: &Arc<Mutex<Vec<ProviderApiRequest>>>) -> JsonValue {
+            captured.lock().unwrap()[0].request_body_values.clone()
+        }
+
+        const AGENT: &str = "deep-research-pro-preview-12-2025";
+
+        // 0525: background is omitted by default on both agent and model-id calls.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = provider_with_response(completed_response(), Arc::clone(&captured));
+        let _ = poll_ready(
+            provider
+                .interactions(GoogleInteractionsModelInput::agent(AGENT))
+                .do_generate(agent_options(None)),
+        );
+        assert!(body(&captured).get("background").is_none());
+        assert_eq!(body(&captured)["agent"], AGENT);
+        assert!(body(&captured).get("model").is_none());
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = provider_with_response(completed_response(), Arc::clone(&captured));
+        let _ = poll_ready(
+            provider
+                .interactions("gemini-3-pro")
+                .do_generate(agent_options(None)),
+        );
+        assert!(body(&captured).get("background").is_none());
+
+        // 0527: env_id string passes through verbatim.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = provider_with_response(completed_response(), Arc::clone(&captured));
+        let _ = poll_ready(
+            provider
+                .interactions(GoogleInteractionsModelInput::agent(AGENT))
+                .do_generate(agent_options(Some(json!("env_abc123")))),
+        );
+        assert_eq!(body(&captured)["environment"], "env_abc123");
+
+        // 0528: object form with all three source types.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = provider_with_response(completed_response(), Arc::clone(&captured));
+        let _ = poll_ready(
+            provider
+                .interactions(GoogleInteractionsModelInput::agent(AGENT))
+                .do_generate(agent_options(Some(json!({
+                    "type": "remote",
+                    "sources": [
+                        { "type": "inline", "content": "note contents", "target": "/data/note.txt" },
+                        { "type": "gcs", "source": "gs://example/path", "target": "/data/" },
+                        { "type": "repository", "source": "github://octocat/Hello-World", "target": "/repo/" }
+                    ]
+                })))),
+        );
+        let environment = body(&captured)["environment"].clone();
+        assert_eq!(environment["type"], "remote");
+        assert_eq!(
+            environment["sources"],
+            json!([
+                { "type": "inline", "content": "note contents", "target": "/data/note.txt" },
+                { "type": "gcs", "source": "gs://example/path", "target": "/data/" },
+                { "type": "repository", "source": "github://octocat/Hello-World", "target": "/repo/" }
+            ])
+        );
+
+        // 0529: null target on non-inline sources is omitted.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = provider_with_response(completed_response(), Arc::clone(&captured));
+        let _ = poll_ready(
+            provider
+                .interactions(GoogleInteractionsModelInput::agent(AGENT))
+                .do_generate(agent_options(Some(json!({
+                    "type": "remote",
+                    "sources": [
+                        { "type": "gcs", "source": "gs://example/path" },
+                        { "type": "repository", "source": "github://octocat/Hello-World" }
+                    ]
+                })))),
+        );
+        assert_eq!(
+            body(&captured)["environment"]["sources"],
+            json!([
+                { "type": "gcs", "source": "gs://example/path" },
+                { "type": "repository", "source": "github://octocat/Hello-World" }
+            ])
+        );
+
+        // 0530: network allowlist with header transforms.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = provider_with_response(completed_response(), Arc::clone(&captured));
+        let _ = poll_ready(
+            provider
+                .interactions(GoogleInteractionsModelInput::agent(AGENT))
+                .do_generate(agent_options(Some(json!({
+                    "type": "remote",
+                    "network": {
+                        "allowlist": [
+                            { "domain": "generativelanguage.googleapis.com", "transform": [{ "x-goog-api-key": "AIza-redacted" }] },
+                            { "domain": "*" }
+                        ]
+                    }
+                })))),
+        );
+        assert_eq!(
+            body(&captured)["environment"]["network"],
+            json!({
+                "allowlist": [
+                    { "domain": "generativelanguage.googleapis.com", "transform": [{ "x-goog-api-key": "AIza-redacted" }] },
+                    { "domain": "*" }
+                ]
+            })
+        );
+
+        // 0531: network "disabled" serialized verbatim.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = provider_with_response(completed_response(), Arc::clone(&captured));
+        let _ = poll_ready(
+            provider
+                .interactions(GoogleInteractionsModelInput::agent(AGENT))
+                .do_generate(agent_options(Some(
+                    json!({ "type": "remote", "network": "disabled" }),
+                ))),
+        );
+        assert_eq!(
+            body(&captured)["environment"],
+            json!({ "type": "remote", "network": "disabled" })
+        );
+
+        // 0532: environment on a model-id call emits a warning and is dropped.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = provider_with_response(completed_response(), Arc::clone(&captured));
+        let result = poll_ready(
+            provider
+                .interactions("gemini-3-pro")
+                .do_generate(agent_options(Some(json!("remote")))),
+        );
+        assert!(body(&captured).get("environment").is_none());
+        assert!(result.warnings.iter().any(|warning| matches!(
+            warning,
+            Warning::Other { message } if message.contains("environment")
+        )));
+
+        // 0533: doGenerate returns the polled terminal response when POST returns in_progress.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_transport = Arc::clone(&captured);
+        let transport: GoogleTransport = Arc::new(move |request| {
+            captured_for_transport.lock().unwrap().push(request.clone());
+            let is_post = matches!(request.method, ProviderApiRequestMethod::Post);
+            Box::pin(async move {
+                let body = if is_post {
+                    json!({ "id": "v1_poll-test", "status": "in_progress", "model": "deep-research-pro-preview-12-2025" })
+                } else {
+                    json!({
+                        "id": "v1_poll-test",
+                        "status": "completed",
+                        "steps": [
+                            { "type": "model_output", "content": [{ "type": "text", "text": "Done" }] }
+                        ],
+                        "usage": { "promptTokenCount": 1, "candidatesTokenCount": 1 }
+                    })
+                };
+                Ok(ProviderApiResponse::text(200, "OK", body.to_string()))
+            })
+        });
+        let provider =
+            GoogleProvider::from_settings(GoogleProviderSettings::new().with_api_key("test-key"))
+                .with_transport(transport);
+        let result = poll_ready(
+            provider
+                .interactions(GoogleInteractionsModelInput::agent(AGENT))
+                .do_generate(agent_options(None)),
+        );
+        assert_eq!(result.finish_reason.raw.as_deref(), Some("completed"));
+        assert!(matches!(result.content[0], LanguageModelContent::Text(_)));
+        // A GET poll request was issued after the in_progress POST.
+        let calls = captured.lock().unwrap();
+        assert!(calls.len() >= 2);
+        assert!(matches!(calls[1].method, ProviderApiRequestMethod::Get));
+        assert!(calls[1].url.ends_with("/interactions/v1_poll-test"));
+        drop(calls);
+
+        // 0555: streaming with background:true puts `agent` and `background:true` (not `model`
+        // or `stream:true`) in the request body.
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = provider_with_response(completed_response(), Arc::clone(&captured));
+        let mut stream_options = agent_options(None);
+        stream_options = stream_options.with_provider_options(
+            serde_json::from_value(json!({ "google": { "background": true } })).unwrap(),
+        );
+        let _ = poll_ready(
+            provider
+                .interactions(GoogleInteractionsModelInput::agent(AGENT))
+                .do_stream(stream_options),
+        );
+        let stream_body = body(&captured);
+        assert_eq!(stream_body["agent"], AGENT);
+        assert!(stream_body.get("model").is_none());
+        assert_eq!(stream_body["background"], true);
+        assert!(stream_body.get("stream").is_none());
     }
 
     #[test]
