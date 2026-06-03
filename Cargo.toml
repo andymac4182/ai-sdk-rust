@@ -105,6 +105,7 @@ ai-sdk-otel = { path = "crates/ai-sdk-otel" }
 ai-sdk-provider = { path = "crates/ai-sdk-provider" }
 ai-sdk-provider-utils = { path = "crates/ai-sdk-provider-utils" }
 futures-executor = "0.3.32"
+icu_segmenter = "2"
 regex = "1.12.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

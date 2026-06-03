@@ -10,10 +10,10 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 - In-progress rows: 1
 - Not-started rows: 0
 - Strict inventory full upstream cases scanned: 9013
-- Strict inventory full portable cases mapped: 7388 / 7630
-- Strict inventory full portable cases unmapped: 242
-- Displayed-row strict portable test cases mapped: 7006 / 7228
-- Displayed-row strict portable test cases unmapped: 222
+- Strict inventory full portable cases mapped: 7417 / 7630
+- Strict inventory full portable cases unmapped: 213
+- Displayed-row strict portable test cases mapped: 7035 / 7228
+- Displayed-row strict portable test cases unmapped: 193
 
 ## 100% Closed
 
@@ -77,7 +77,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
-| `ai` | 90% | In progress | root core SDK package | strict test inventory: 222 portable upstream cases still need named Rust tests; sample failing IDs:... |
+| `ai` | 91% | In progress | root core SDK package | strict test inventory: 193 portable upstream cases still need named Rust tests; sample failing IDs:... |
 
 ## Not Started
 
