@@ -37,6 +37,7 @@ pub enum TelemetryEventKind {
     OnRerankEnd,
     OnEnd,
     OnError,
+    OnAbort,
 }
 
 impl TelemetryEventKind {
@@ -58,6 +59,7 @@ impl TelemetryEventKind {
             Self::OnRerankEnd => "onRerankEnd",
             Self::OnEnd => "onEnd",
             Self::OnError => "onError",
+            Self::OnAbort => "onAbort",
         }
     }
 }
@@ -394,6 +396,9 @@ fn dispatch_to_open_telemetry(recorder: &OpenTelemetryRecorder, event: Telemetry
                 recorder.on_error(error);
             }
         }
+        // Upstream's OpenTelemetry root integration does not subscribe to
+        // `onAbort`; abort events are only delivered to user integrations.
+        TelemetryEventKind::OnAbort => {}
     }
 }
 
@@ -491,6 +496,9 @@ fn dispatch_to_legacy_open_telemetry(
                 recorder.on_error(error);
             }
         }
+        // Upstream's OpenTelemetry root integration does not subscribe to
+        // `onAbort`; abort events are only delivered to user integrations.
+        TelemetryEventKind::OnAbort => {}
     }
 }
 
@@ -1142,6 +1150,10 @@ impl TelemetryDispatcher {
 
     pub fn on_error(&self, event: impl Serialize) {
         self.dispatch(TelemetryEventKind::OnError, event);
+    }
+
+    pub fn on_abort(&self, event: impl Serialize) {
+        self.dispatch(TelemetryEventKind::OnAbort, event);
     }
 
     /// Runs a tool execute function through the configured telemetry wrappers.
@@ -1958,6 +1970,29 @@ mod tests {
         );
         assert_eq!(event.event["text"], json!("Hello"));
         assert_eq!(step["toolsContext"], tools_context());
+    }
+
+    #[test]
+    fn restricted_telemetry_dispatcher_includes_configured_runtime_context_for_abort_events_and_all_steps_without_mutating_source_steps()
+     {
+        let step = create_restricted_step_result();
+        let event = dispatch_and_capture(
+            TelemetryEventKind::OnAbort,
+            restricted_runtime_options(),
+            json!({
+                "callId": "call-1",
+                "steps": [step.clone()],
+                "reason": "manual abort"
+            }),
+        );
+
+        assert_eq!(event.event["reason"], json!("manual abort"));
+        assert_eq!(
+            event.event["steps"][0]["runtimeContext"],
+            json!({ "requestId": "request-123" })
+        );
+        assert_eq!(event.event["steps"][0]["text"], json!("Hello"));
+        assert_eq!(step["runtimeContext"], runtime_context());
     }
 
     #[test]
