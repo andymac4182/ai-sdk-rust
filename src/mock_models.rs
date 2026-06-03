@@ -1117,6 +1117,58 @@ mod tests {
     }
 
     #[test]
+    fn mock_language_model_v2_returns_array_backed_generate_results_from_the_first_entry() {
+        let model = MockLanguageModel::new()
+            .with_generate_results([text_result("first"), text_result("second")]);
+
+        let first = poll_ready(model.do_generate(LanguageModelCallOptions::new(Vec::new())));
+        let second = poll_ready(model.do_generate(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(extract_text(&first), "first");
+        assert_eq!(extract_text(&second), "second");
+        assert_eq!(model.generate_calls().len(), 2);
+    }
+
+    #[test]
+    fn mock_language_model_v2_returns_array_backed_stream_results_from_the_first_entry() {
+        let model = MockLanguageModel::new()
+            .with_stream_results([stream_result("first"), stream_result("second")]);
+
+        let first = poll_ready(model.do_stream(LanguageModelCallOptions::new(Vec::new())));
+        let second = poll_ready(model.do_stream(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(collect_stream_text(&first), "first");
+        assert_eq!(collect_stream_text(&second), "second");
+        assert_eq!(model.stream_calls().len(), 2);
+    }
+
+    #[test]
+    fn mock_language_model_v3_returns_array_backed_generate_results_from_the_first_entry() {
+        let model = MockLanguageModel::new()
+            .with_generate_results([text_result("first"), text_result("second")]);
+
+        let first = poll_ready(model.do_generate(LanguageModelCallOptions::new(Vec::new())));
+        let second = poll_ready(model.do_generate(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(extract_text(&first), "first");
+        assert_eq!(extract_text(&second), "second");
+        assert_eq!(model.generate_calls().len(), 2);
+    }
+
+    #[test]
+    fn mock_language_model_v3_returns_array_backed_stream_results_from_the_first_entry() {
+        let model = MockLanguageModel::new()
+            .with_stream_results([stream_result("first"), stream_result("second")]);
+
+        let first = poll_ready(model.do_stream(LanguageModelCallOptions::new(Vec::new())));
+        let second = poll_ready(model.do_stream(LanguageModelCallOptions::new(Vec::new())));
+
+        assert_eq!(collect_stream_text(&first), "first");
+        assert_eq!(collect_stream_text(&second), "second");
+        assert_eq!(model.stream_calls().len(), 2);
+    }
+
+    #[test]
     fn mock_language_model_v4_returns_array_backed_generate_results_from_the_first_entry() {
         let model = MockLanguageModel::new()
             .with_generate_results([text_result("first"), text_result("second")]);

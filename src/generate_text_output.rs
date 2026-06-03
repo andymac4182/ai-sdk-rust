@@ -1146,4 +1146,404 @@ mod tests {
         assert_eq!(output.parse_partial_output(Some("null")), Some(json!(null)));
         assert_eq!(output.parse_partial_output(None), None);
     }
+
+    // ---------------------------------------------------------------------
+    // stream-text array/choice output streaming parity
+    //
+    // The upstream `streamText` cases drive `partialOutputStream`,
+    // `elementStream`, `output`, and `text` entirely from the cumulative text
+    // deltas fed through `Output.array(...)`/`Output.choice(...)`. These tests
+    // replay the exact upstream delta sequences through the array/choice
+    // partial/complete parsers (the same logic `streamText` uses) and assert
+    // the resulting snapshots, deduplicating repeated partial values the way
+    // the streamText output transform does.
+    // ---------------------------------------------------------------------
+
+    #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+    struct ContentElement {
+        content: String,
+    }
+
+    fn content_element_schema() -> FlexibleSchema<ContentElement> {
+        let schema = Schema::<ContentElement>::new(JsonObject::from_iter([
+            ("type".to_string(), JsonValue::String("object".to_string())),
+            (
+                "properties".to_string(),
+                JsonValue::Object(JsonObject::from_iter([(
+                    "content".to_string(),
+                    JsonValue::Object(JsonObject::from_iter([(
+                        "type".to_string(),
+                        JsonValue::String("string".to_string()),
+                    )])),
+                )])),
+            ),
+            (
+                "required".to_string(),
+                JsonValue::Array(vec![JsonValue::String("content".to_string())]),
+            ),
+        ]))
+        .with_validator(|value| {
+            match serde_json::from_value::<ContentElement>(value.clone()) {
+                Ok(value) => ValidationResult::success(value),
+                Err(error) => ValidationResult::failure(error.to_string()),
+            }
+        });
+        schema.into()
+    }
+
+    /// Accumulates `deltas` into the running text and returns the cumulative
+    /// snapshots a consumer of that text would observe after each delta.
+    fn cumulative_texts(deltas: &[&str]) -> Vec<String> {
+        let mut text = String::new();
+        let mut texts = Vec::new();
+        for delta in deltas {
+            text.push_str(delta);
+            texts.push(text.clone());
+        }
+        texts
+    }
+
+    /// Replays cumulative text snapshots through an array output, emitting the
+    /// deduplicated `partialOutputStream` the streamText transform produces.
+    fn array_partial_output_stream(
+        output: &ArrayOutput<ContentElement>,
+        deltas: &[&str],
+    ) -> Vec<Vec<ContentElement>> {
+        let mut stream = Vec::new();
+        for text in cumulative_texts(deltas) {
+            if let Some(partial) = output.parse_partial_output(Some(&text)) {
+                if stream.last() != Some(&partial) {
+                    stream.push(partial);
+                }
+            }
+        }
+        stream
+    }
+
+    /// Replays cumulative text snapshots through a choice output, emitting the
+    /// deduplicated `partialOutputStream` the streamText transform produces.
+    fn choice_partial_output_stream(output: &ChoiceOutput, deltas: &[&str]) -> Vec<String> {
+        let mut stream = Vec::new();
+        for text in cumulative_texts(deltas) {
+            if let Some(partial) = output.parse_partial_output(Some(&text)) {
+                if stream.last() != Some(&partial) {
+                    stream.push(partial);
+                }
+            }
+        }
+        stream
+    }
+
+    /// Three-element array streamed delta-by-delta, used by the array-output
+    /// streaming cases. Mirrors the upstream `describe('array with 3 elements')`
+    /// model stream.
+    const ARRAY_THREE_ELEMENTS_DELTAS: &[&str] = &[
+        "{\"elements\":[",
+        "{",
+        "\"content\":",
+        "\"element 1\"",
+        "},",
+        "{ ",
+        "\"content\": ",
+        "\"element 2\"",
+        "},",
+        "{",
+        "\"content\":",
+        "\"element 3\"",
+        "}",
+        "]",
+        "}",
+    ];
+
+    fn array_three_elements_text() -> String {
+        cumulative_texts(ARRAY_THREE_ELEMENTS_DELTAS)
+            .last()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Maps packages/ai stream-text.test.ts:19978
+    /// `should stream only complete objects in partialObjectStream` (array with
+    /// 3 elements) — only complete elements appear in each partial snapshot; the
+    /// in-progress trailing element is withheld until it parses cleanly.
+    #[test]
+    fn stream_text_array_output_three_elements_partial_output_stream() {
+        let output = array::<ContentElement>(content_element_schema());
+        let stream = array_partial_output_stream(&output, ARRAY_THREE_ELEMENTS_DELTAS);
+        assert_eq!(
+            stream,
+            vec![
+                vec![],
+                vec![ContentElement {
+                    content: "element 1".to_string()
+                }],
+                vec![
+                    ContentElement {
+                        content: "element 1".to_string()
+                    },
+                    ContentElement {
+                        content: "element 2".to_string()
+                    },
+                ],
+                vec![
+                    ContentElement {
+                        content: "element 1".to_string()
+                    },
+                    ContentElement {
+                        content: "element 2".to_string()
+                    },
+                    ContentElement {
+                        content: "element 3".to_string()
+                    },
+                ],
+            ]
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:20011
+    /// `should stream individual elements in elementStream` (array with 3
+    /// elements) — the element transform publishes each newly completed element
+    /// exactly once, in order.
+    #[test]
+    fn stream_text_array_output_three_elements_element_stream() {
+        let output = array::<ContentElement>(content_element_schema());
+        let mut transform = output.create_element_stream_transform();
+        let mut elements = Vec::new();
+        for partial in array_partial_output_stream(&output, ARRAY_THREE_ELEMENTS_DELTAS) {
+            elements.extend(transform.transform(&partial));
+        }
+        assert_eq!(
+            elements,
+            vec![
+                ContentElement {
+                    content: "element 1".to_string()
+                },
+                ContentElement {
+                    content: "element 2".to_string()
+                },
+                ContentElement {
+                    content: "element 3".to_string()
+                },
+            ]
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:20028
+    /// `should resolve output promise with the correct content` (array with 3
+    /// elements) — the completed text parses to all three validated elements.
+    #[test]
+    fn stream_text_array_output_three_elements_resolves_output() {
+        let (response, usage, finish_reason) = test_context();
+        let context = OutputParseContext::new(&response, &usage, &finish_reason);
+        let output = array::<ContentElement>(content_element_schema());
+        let parsed = output
+            .parse_complete_output(&array_three_elements_text(), context)
+            .expect("array output resolves");
+        assert_eq!(
+            parsed,
+            vec![
+                ContentElement {
+                    content: "element 1".to_string()
+                },
+                ContentElement {
+                    content: "element 2".to_string()
+                },
+                ContentElement {
+                    content: "element 3".to_string()
+                },
+            ]
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:20036
+    /// `should resolve text promise with the correct text` (array with 3
+    /// elements) — the raw text promise is the concatenated, unmodified deltas.
+    #[test]
+    fn stream_text_array_output_three_elements_resolves_text() {
+        assert_eq!(
+            array_three_elements_text(),
+            "{\"elements\":[{\"content\":\"element 1\"},{ \"content\": \"element 2\"},{\"content\":\"element 3\"}]}"
+        );
+    }
+
+    /// Two-element array delivered in a single text delta, used by the
+    /// "array with 2 elements streamed in 1 chunk" cases.
+    const ARRAY_TWO_ELEMENTS_SINGLE_CHUNK: &[&str] =
+        &[r#"{"elements":[{"content":"element 1"},{"content":"element 2"}]}"#];
+
+    /// Maps packages/ai stream-text.test.ts:20079
+    /// `should stream only complete objects in partialObjectStream` (array with
+    /// 2 elements in 1 chunk) — a single complete chunk yields a single partial
+    /// snapshot containing both elements.
+    #[test]
+    fn stream_text_array_output_single_chunk_partial_output_stream() {
+        let output = array::<ContentElement>(content_element_schema());
+        let stream = array_partial_output_stream(&output, ARRAY_TWO_ELEMENTS_SINGLE_CHUNK);
+        assert_eq!(
+            stream,
+            vec![vec![
+                ContentElement {
+                    content: "element 1".to_string()
+                },
+                ContentElement {
+                    content: "element 2".to_string()
+                },
+            ]]
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:20095
+    /// `should stream individual elements in elementStream` (array with 2
+    /// elements in 1 chunk) — both elements are published from the single
+    /// partial snapshot.
+    #[test]
+    fn stream_text_array_output_single_chunk_element_stream() {
+        let output = array::<ContentElement>(content_element_schema());
+        let mut transform = output.create_element_stream_transform();
+        let mut elements = Vec::new();
+        for partial in array_partial_output_stream(&output, ARRAY_TWO_ELEMENTS_SINGLE_CHUNK) {
+            elements.extend(transform.transform(&partial));
+        }
+        assert_eq!(
+            elements,
+            vec![
+                ContentElement {
+                    content: "element 1".to_string()
+                },
+                ContentElement {
+                    content: "element 2".to_string()
+                },
+            ]
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:20109
+    /// `should resolve output promise with the correct content` (array with 2
+    /// elements in 1 chunk) — both elements resolve from the completed text.
+    #[test]
+    fn stream_text_array_output_single_chunk_resolves_output() {
+        let (response, usage, finish_reason) = test_context();
+        let context = OutputParseContext::new(&response, &usage, &finish_reason);
+        let output = array::<ContentElement>(content_element_schema());
+        let parsed = output
+            .parse_complete_output(ARRAY_TWO_ELEMENTS_SINGLE_CHUNK[0], context)
+            .expect("array output resolves");
+        assert_eq!(
+            parsed,
+            vec![
+                ContentElement {
+                    content: "element 1".to_string()
+                },
+                ContentElement {
+                    content: "element 2".to_string()
+                },
+            ]
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:20116
+    /// `should resolve text promise with the correct text` (array with 2
+    /// elements in 1 chunk) — the text promise is the single unmodified chunk.
+    #[test]
+    fn stream_text_array_output_single_chunk_resolves_text() {
+        assert_eq!(
+            ARRAY_TWO_ELEMENTS_SINGLE_CHUNK[0],
+            r#"{"elements":[{"content":"element 1"},{"content":"element 2"}]}"#
+        );
+    }
+
+    /// Deltas for `{ "result": "sunny" }`, used by the choice-output cases.
+    const CHOICE_SUNNY_DELTAS: &[&str] = &["{ ", "\"result\": ", "\"su", "nny", "\"", " }"];
+
+    fn weather_choice() -> ChoiceOutput {
+        choice(vec![
+            "sunny".to_string(),
+            "rainy".to_string(),
+            "snowy".to_string(),
+        ])
+    }
+
+    /// Maps packages/ai stream-text.test.ts:20125
+    /// `should stream an choice value` — the choice partial stream emits the
+    /// single matched option once the repaired result uniquely matches.
+    #[test]
+    fn stream_text_choice_output_streams_choice_value() {
+        let output = weather_choice();
+        assert_eq!(
+            choice_partial_output_stream(&output, CHOICE_SUNNY_DELTAS),
+            vec!["sunny".to_string()]
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:20160
+    /// `should resolve text promise with the correct text` (choice output) — the
+    /// text promise is the raw concatenated JSON object text.
+    #[test]
+    fn stream_text_choice_output_resolves_text() {
+        assert_eq!(
+            cumulative_texts(CHOICE_SUNNY_DELTAS)
+                .last()
+                .cloned()
+                .unwrap(),
+            "{ \"result\": \"sunny\" }"
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:20190
+    /// `should resolve output promise with the correct content` (choice output)
+    /// — the completed text resolves to the matched option value.
+    #[test]
+    fn stream_text_choice_output_resolves_output() {
+        let (response, usage, finish_reason) = test_context();
+        let context = OutputParseContext::new(&response, &usage, &finish_reason);
+        let output = weather_choice();
+        let text = cumulative_texts(CHOICE_SUNNY_DELTAS)
+            .last()
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            output
+                .parse_complete_output(&text, context)
+                .expect("choice resolves"),
+            "sunny".to_string()
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:20220
+    /// `should not stream incorrect values` — a result that matches no option is
+    /// never emitted on the choice partial stream.
+    #[test]
+    fn stream_text_choice_output_does_not_stream_incorrect_values() {
+        let output = weather_choice();
+        let deltas: &[&str] = &["{ ", "\"result\": ", "\"foo", "bar", "\"", " }"];
+        assert!(choice_partial_output_stream(&output, deltas).is_empty());
+    }
+
+    /// Maps packages/ai stream-text.test.ts:20254
+    /// `should handle ambiguous values` — while several options share a prefix
+    /// the partial value is withheld, then the exact match is emitted once the
+    /// result resolves uniquely.
+    #[test]
+    fn stream_text_choice_output_handles_ambiguous_values() {
+        let output = choice(vec!["foobar".to_string(), "foobar2".to_string()]);
+        // No text-end: the final state is a repaired (unterminated) object.
+        let deltas: &[&str] = &["{ ", "\"result\": ", "\"foo", "bar", "\"", " }"];
+        assert_eq!(
+            choice_partial_output_stream(&output, deltas),
+            vec!["foobar".to_string()]
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:20288
+    /// `should handle non-ambiguous values` — a result that is a prefix of only
+    /// one option resolves to that option on the partial stream.
+    #[test]
+    fn stream_text_choice_output_handles_non_ambiguous_values() {
+        let output = choice(vec!["foobar".to_string(), "barfoo".to_string()]);
+        let deltas: &[&str] = &["{ ", "\"result\": ", "\"foo", "bar", "\"", " }"];
+        assert_eq!(
+            choice_partial_output_stream(&output, deltas),
+            vec!["foobar".to_string()]
+        );
+    }
 }
