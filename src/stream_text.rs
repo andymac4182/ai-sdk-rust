@@ -6899,9 +6899,12 @@ mod tests {
         // Each incoming delta fully drains the buffer through the segmenter, so a
         // hiragana fragment that is not yet a complete word ("こんに") is emitted
         // character-by-character ("こん", then "に"). This documents the Rust ICU
-        // segmentation; the exact boundary for the isolated "ちは" fragment differs
-        // from V8's Intl.Segmenter, so upstream case packages-ai-0905 is left as a
-        // documented model-version divergence rather than mapped here.
+        // segmentation. The algorithm matches upstream exactly; the only divergence
+        // is the word-boundary *data*: ICU4X keeps the isolated fragment "ちは" as
+        // one segment, whereas V8's Intl.Segmenter splits it into "ち" / "は".
+        // Upstream case packages-ai-0905 pins that exact boundary to V8's bundled
+        // ICU build, so it is classified `js-only-documented` (JavaScript runtime
+        // ICU dictionary) rather than mapped here; see docs/ai-core-package-inventory.md.
         let parts = smooth_stream(
             vec![
                 TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
