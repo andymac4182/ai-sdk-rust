@@ -3375,6 +3375,221 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn rg_imported_misc_search_modes_counts_and_context_rows_are_portable() {
+        // packages/just-bash/src/commands/rg/imported-tests/misc.test.ts
+        // 127 - inverted: should invert match with -v
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -v Sherlock sherlock",
+            0,
+            "Holmeses, success in the province of detective work must always\n\
+can extract a clew from a wisp of straw or a flake of cigar ash;\n\
+but Doctor Watson has to have it taken out for him and dusted,\n\
+and exhibited clearly, with a label attached.\n",
+        );
+        // 144 - inverted_line_numbers: should show line numbers with inverted match
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -n -v Sherlock sherlock",
+            0,
+            "2:Holmeses, success in the province of detective work must always\n\
+4:can extract a clew from a wisp of straw or a flake of cigar ash;\n\
+5:but Doctor Watson has to have it taken out for him and dusted,\n\
+6:and exhibited clearly, with a label attached.\n",
+        );
+        // 161 - case_insensitive: should search case-insensitively with -i
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -i sherlock sherlock",
+            0,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 178 - word: should match whole words with -w
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -w as sherlock",
+            0,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\n",
+        );
+        // 212 - line: should match whole lines with -x
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -x 'Watson|and exhibited clearly, with a label attached.' sherlock",
+            0,
+            "and exhibited clearly, with a label attached.\n",
+        );
+        // 231 - literal: should match literal strings with -F
+        assert_home_exec(
+            &[("file", "blib\n()\nblab\n")],
+            "rg -F '()' file",
+            0,
+            "()\n",
+        );
+        // 246 - quiet: should suppress output with -q
+        assert_home_exec(&[("sherlock", SHERLOCK)], "rg -q Sherlock sherlock", 0, "");
+        // 331 - file_types: should filter by type with -t
+        assert_home_exec(
+            &[
+                ("sherlock", SHERLOCK),
+                ("file.py", "Sherlock\n"),
+                ("file.rs", "Sherlock\n"),
+            ],
+            "rg -t rust Sherlock",
+            0,
+            "file.rs:1:Sherlock\n",
+        );
+        // 364 - file_types_negate: should negate type with -T
+        assert_home_exec(
+            &[("file.py", "Sherlock\n"), ("file.rs", "Sherlock\n")],
+            "rg -T rust Sherlock",
+            0,
+            "file.py:1:Sherlock\n",
+        );
+        // 486 - glob: should filter by glob with -g
+        assert_home_exec(
+            &[
+                ("sherlock", SHERLOCK),
+                ("file.py", "Sherlock\n"),
+                ("file.rs", "Sherlock\n"),
+            ],
+            "rg -g '*.rs' Sherlock",
+            0,
+            "file.rs:1:Sherlock\n",
+        );
+        // 503 - glob_negate: should negate glob with -g !
+        assert_home_exec(
+            &[("file.py", "Sherlock\n"), ("file.rs", "Sherlock\n")],
+            "rg -g '!*.rs' Sherlock",
+            0,
+            "file.py:1:Sherlock\n",
+        );
+        // 538 - glob_case_sensitive: should use case-sensitive glob matching
+        assert_home_exec(
+            &[("file1.HTML", "Sherlock\n"), ("file2.html", "Sherlock\n")],
+            "rg --glob '*.html' Sherlock",
+            0,
+            "file2.html:1:Sherlock\n",
+        );
+        // 590 - count: should count matching lines with --count
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg --count Sherlock",
+            0,
+            "sherlock:2\n",
+        );
+        // 605 - count_matches: should count all matches with --count-matches
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg --count-matches the",
+            0,
+            "sherlock:4\n",
+        );
+        // 620 - count_matches_inverted: should count inverted matches
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg --count-matches --invert-match Sherlock",
+            0,
+            "sherlock:4\n",
+        );
+        // 652 - include_zero: should include files with 0 matches with --include-zero
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg --count --include-zero nada",
+            1,
+            "sherlock:0\n",
+        );
+        // 670 - files_with_matches: should list files with --files-with-matches
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg --files-with-matches Sherlock",
+            0,
+            "sherlock\n",
+        );
+        // 685 - files_without_match: should list files without match
+        assert_home_exec(
+            &[("sherlock", SHERLOCK), ("file.py", "foo\n")],
+            "rg --files-without-match Sherlock",
+            0,
+            "file.py\n",
+        );
+        // 701 - after_context: should show after context with -A
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -A 1 Sherlock sherlock",
+            0,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+Holmeses, success in the province of detective work must always\n\
+be, to a very large extent, the result of luck. Sherlock Holmes\n\
+can extract a clew from a wisp of straw or a flake of cigar ash;\n",
+        );
+        // 718 - after_context_line_numbers: should show after context with line numbers
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -A 1 -n Sherlock sherlock",
+            0,
+            "1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+2-Holmeses, success in the province of detective work must always\n\
+3:be, to a very large extent, the result of luck. Sherlock Holmes\n\
+4-can extract a clew from a wisp of straw or a flake of cigar ash;\n",
+        );
+        // 735 - before_context: should show before context with -B
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -B 1 Sherlock sherlock",
+            0,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+Holmeses, success in the province of detective work must always\n\
+be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 752 - before_context_line_numbers: should show before context with line numbers
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -B 1 -n Sherlock sherlock",
+            0,
+            "1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+2-Holmeses, success in the province of detective work must always\n\
+3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 769 - context: should show context with -C
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -C 1 'world|attached' sherlock",
+            0,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+Holmeses, success in the province of detective work must always\n\
+--\n\
+but Doctor Watson has to have it taken out for him and dusted,\n\
+and exhibited clearly, with a label attached.\n",
+        );
+        // 786 - context_line_numbers: should show context with line numbers
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -C 1 -n 'world|attached' sherlock",
+            0,
+            "1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+2-Holmeses, success in the province of detective work must always\n\
+--\n\
+5-but Doctor Watson has to have it taken out for him and dusted,\n\
+6:and exhibited clearly, with a label attached.\n",
+        );
+        // 1150 - files: should list files with --files
+        assert_home_exec(
+            &[("a.txt", "x\n"), ("b.txt", "y\n")],
+            "rg --files",
+            0,
+            "a.txt\nb.txt\n",
+        );
+        // 1181 - sort_path: should sort files by path with --sort path
+        assert_home_exec(
+            &[("z.txt", "Sherlock\n"), ("a.txt", "Sherlock\n")],
+            "rg --sort path Sherlock",
+            0,
+            "a.txt:1:Sherlock\nz.txt:1:Sherlock\n",
+        );
+    }
+
+    #[test]
     fn rg_upstream_filtering_rows_are_portable() {
         assert_home_exec(
             &[

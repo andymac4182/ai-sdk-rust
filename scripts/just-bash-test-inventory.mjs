@@ -948,6 +948,18 @@ const jbc10CaseGroups = [
     notes:
       'JBC-10 verifies imported rg binary-detection rows: NUL-containing files are skipped in directory and explicit-file search, in -c counts, in -l file lists, and in mixed-content directories.',
   },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
+    lines: [
+      127, 144, 161, 178, 212, 231, 246, 331, 364, 486, 503, 538, 590,
+      605, 620, 652, 670, 685, 701, 718, 735, 752, 769, 786, 1150, 1181,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_misc_search_modes_counts_and_context_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported rg misc rows: -v/-n inverted, -i case-insensitive, -w word, -x whole-line, -F literal, -q quiet, -t/-T file-type filter, -g/--glob filters, --count/--count-matches/--include-zero counts, --files-with-matches/--files-without-match, -A/-B/-C context with line numbers, --files listing, and --sort path over the virtual filesystem.',
+  },
 ];
 
 const jbc12SourceGroups = [
