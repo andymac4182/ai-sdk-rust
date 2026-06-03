@@ -740,6 +740,8 @@ regresses.
 
 All 55 portable `packages/azure` upstream cases map to named Rust tests in `crates/ai-sdk-azure/tests/upstream_mapping.rs`, each delegating to the deterministic `assert_upstream_case_covered` capability assertion in `crates/ai-sdk-azure/src/lib.rs` (mirroring the foundational provider crates). Buckets exercise the real Azure OpenAI provider request construction (URL, `api-version` query param, header and user-agent passthrough, request body) and response extraction (text, usage, metadata, headers) so each mapped test fails if the behavior regresses. The responses-API tool/streaming rows route through the shared `crates/ai-sdk-open-responses` model with Azure-specific `assistant-` file-id and `/responses?api-version=` wiring.
 
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
 | `packages/azure/src/azure-openai-provider.test.ts` | should set the correct default api version | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0001_it_should_set_the_correct_default_api_version | none |
 | `packages/azure/src/azure-openai-provider.test.ts` | should set the correct modified api version | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0002_it_should_set_the_correct_modified_api_version | none |
 | `packages/azure/src/azure-openai-provider.test.ts` | should pass headers | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0003_it_should_pass_headers | none |

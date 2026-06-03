@@ -3,17 +3,17 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv` with strict test inventory `docs/ai-strict-test-inventory.md`._
 
 - Displayed package rows: 54
-- Average estimated completion: 97.4%
-- Portable package average: 96.8%
-- Closed package rows: 52 / 54
-- Strict portable verified rows: 42 / 44
-- In-progress rows: 2
+- Average estimated completion: 99.3%
+- Portable package average: 99.1%
+- Closed package rows: 53 / 54
+- Strict portable verified rows: 43 / 44
+- In-progress rows: 1
 - Not-started rows: 0
 - Strict inventory full upstream cases scanned: 9013
-- Strict inventory full portable cases mapped: 6669 / 7668
-- Strict inventory full portable cases unmapped: 999
-- Displayed-row strict portable test cases mapped: 6287 / 7266
-- Displayed-row strict portable test cases unmapped: 979
+- Strict inventory full portable cases mapped: 6724 / 7668
+- Strict inventory full portable cases unmapped: 944
+- Displayed-row strict portable test cases mapped: 6342 / 7266
+- Displayed-row strict portable test cases unmapped: 924
 
 ## 100% Closed
 
@@ -32,6 +32,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/xai` | 100% | Verified | provider package |
 | `@ai-sdk/alibaba` | 100% | Verified | provider package |
 | `@ai-sdk/assemblyai` | 100% | Verified | provider package |
+| `@ai-sdk/azure` | 100% | Verified | provider package |
 | `@ai-sdk/baseten` | 100% | Verified | provider package |
 | `@ai-sdk/black-forest-labs` | 100% | Verified | provider package |
 | `@ai-sdk/bytedance` | 100% | Verified | provider package |
@@ -77,7 +78,6 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
 | `ai` | 60% | In progress | root core SDK package | strict test inventory: 924 portable upstream cases still need named Rust tests; sample failing IDs:... |
-| `@ai-sdk/azure` | 0% | In progress | provider package | strict test inventory: 55 portable upstream cases still need named Rust tests; sample failing IDs:... |
 
 ## Not Started
 
