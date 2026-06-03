@@ -8830,12 +8830,22 @@ impl<'a> AwkExprParser<'a> {
     fn parse_primary(&mut self) -> Result<AwkExpr, String> {
         self.skip_whitespace();
         if self.consume_char('(') {
-            let expression = self.parse_expression()?;
-            self.skip_whitespace();
-            if !self.consume_char(')') {
-                return Err("unsupported program".to_string());
+            // Capture the full parenthesised group so a top-level comma list
+            // such as `(1, 2)` can be turned into a SUBSEP-joined subscript
+            // key (used by `(i, j) in array` membership tests). A single
+            // expression is returned unchanged.
+            let group = self.take_until_matching_paren()?;
+            let parts = split_awk_top_level(&group, ',');
+            if parts.len() > 1 {
+                return Ok(AwkExpr::FunctionCall {
+                    name: "__subsep".to_string(),
+                    args: parts
+                        .into_iter()
+                        .map(|part| parse_awk_expr(part.trim()))
+                        .collect::<Result<Vec<_>, _>>()?,
+                });
             }
-            return Ok(expression);
+            return parse_awk_expr(group.trim());
         }
         if self.peek_char() == Some('"') {
             let start = self.cursor;
@@ -9591,6 +9601,31 @@ fn eval_awk_function(
                 .map(|arg| eval_awk_expr(arg, context, runtime))
                 .collect::<Result<Vec<_>, _>>()?;
             format_awk_printf(&format, &values)
+        }
+        "split" => {
+            let value =
+                eval_awk_expr(args.first().ok_or("unsupported program")?, context, runtime)?;
+            let array = match args.get(1) {
+                Some(AwkExpr::Identifier(name)) => name.clone(),
+                _ => return Err("unsupported program".to_string()),
+            };
+            // The optional third argument selects the field separator. When it
+            // is omitted, split() uses whitespace splitting like the default
+            // FS, collapsing runs of blanks and ignoring leading/trailing ones.
+            let separator = match args.get(2) {
+                Some(arg) => {
+                    let raw = eval_awk_expr(arg, context, runtime)?;
+                    AwkSeparator::from_value(&raw)
+                }
+                None => AwkSeparator::Whitespace,
+            };
+            let parts = awk_fields(&value, &separator);
+            let entries = runtime.arrays.entry(array).or_default();
+            entries.clear();
+            for (index, part) in parts.iter().enumerate() {
+                entries.insert((index + 1).to_string(), part.clone());
+            }
+            Ok(parts.len().to_string())
         }
         "match" => {
             let value =
