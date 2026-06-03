@@ -728,12 +728,27 @@ impl AnthropicLanguageModel {
             betas.insert("mcp-client-2025-04-04".to_string());
         }
         if let Some(container) = anthropic_options.get("container") {
-            body.insert("container".to_string(), camel_to_snake_value(container));
-            if container
+            let has_skills = container
                 .get("skills")
                 .and_then(Value::as_array)
-                .is_some_and(|skills| !skills.is_empty())
-            {
+                .is_some_and(|skills| !skills.is_empty());
+            let container_value = if has_skills {
+                // Object format when skills are provided (agent skills feature).
+                let skills: Vec<Value> = container
+                    .get("skills")
+                    .and_then(Value::as_array)
+                    .map(|skills| skills.iter().map(serialize_container_skill).collect())
+                    .unwrap_or_default();
+                json!({
+                    "id": container.get("id").cloned().unwrap_or(Value::Null),
+                    "skills": skills,
+                })
+            } else {
+                // String format for container ID only (programmatic tool calling).
+                container.get("id").cloned().unwrap_or(Value::Null)
+            };
+            body.insert("container".to_string(), container_value);
+            if has_skills {
                 betas.insert("code-execution-2025-08-25".to_string());
                 betas.insert("skills-2025-10-02".to_string());
                 betas.insert("files-api-2025-04-14".to_string());
@@ -992,7 +1007,7 @@ pub fn get_model_capabilities(model_id: &str) -> ModelCapabilities {
         rejects_sampling_parameters,
         supports_xhigh_effort,
         is_known_model,
-    ) = if model_id.contains("claude-opus-4-7") {
+    ) = if model_id.contains("claude-opus-4-8") || model_id.contains("claude-opus-4-7") {
         (128000, true, true, true, true, true)
     } else if model_id.contains("claude-sonnet-4-6") || model_id.contains("claude-opus-4-6") {
         (128000, true, true, false, false, true)
@@ -1022,6 +1037,31 @@ pub fn get_model_capabilities(model_id: &str) -> ModelCapabilities {
         is_known_model,
         is_anthropic_model: is_known_model || model_id.starts_with("claude-"),
     }
+}
+
+/// Serializes a single agent-skill container entry to the Anthropic API shape,
+/// resolving `skillId`/`providerReference` to `skill_id`.
+fn serialize_container_skill(skill: &Value) -> Value {
+    let skill_type = skill.get("type").and_then(Value::as_str).unwrap_or("");
+    let skill_id = if skill_type == "custom" {
+        skill
+            .get("providerReference")
+            .or_else(|| skill.get("provider_reference"))
+            .and_then(|reference| reference.get("anthropic"))
+            .cloned()
+            .unwrap_or(Value::Null)
+    } else {
+        skill
+            .get("skillId")
+            .or_else(|| skill.get("skill_id"))
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    json!({
+        "type": skill.get("type").cloned().unwrap_or(Value::Null),
+        "skill_id": skill_id,
+        "version": skill.get("version").cloned().unwrap_or(Value::Null),
+    })
 }
 
 fn provider_options_name(provider: &str) -> String {
@@ -1196,12 +1236,7 @@ pub fn convert_to_anthropic_prompt(
     for (block_index, block) in blocks.iter().enumerate() {
         match block.block_type {
             PromptBlockType::System => {
-                if !plan.system.is_empty() {
-                    plan.warnings.push(Warning::Other {
-                        message: "Multiple system blocks are not supported by Anthropic"
-                            .to_string(),
-                    });
-                }
+                let mut content = Vec::new();
                 for message in &block.messages {
                     if let LanguageModelMessage::System(system) = message {
                         let mut block = Map::new();
@@ -1210,8 +1245,19 @@ pub fn convert_to_anthropic_prompt(
                         if let Some(cache_control) = get_cache_control(&system.provider_options) {
                             block.insert("cache_control".to_string(), cache_control);
                         }
-                        plan.system.push(Value::Object(block));
+                        content.push(Value::Object(block));
                     }
+                }
+                if plan.system.is_empty() {
+                    // First system block becomes the top-level `system` field.
+                    plan.system = content;
+                } else {
+                    // A mid-conversation system block is emitted inline as a message
+                    // and enables the mid-conversation system beta.
+                    plan.messages
+                        .push(json!({ "role": "system", "content": content }));
+                    plan.betas
+                        .insert("mid-conversation-system-2026-04-07".to_string());
                 }
             }
             PromptBlockType::User => {
@@ -1374,7 +1420,17 @@ fn convert_file_part(
                 .get("anthropic")
                 .cloned()
                 .unwrap_or_default();
-            if get_top_level_media_type(&file.media_type) == "image" {
+            let container_upload = provider_options_object(&file.provider_options, "anthropic")
+                .and_then(|options| {
+                    options
+                        .get("containerUpload")
+                        .or_else(|| options.get("container_upload"))
+                })
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if container_upload {
+                json!({ "type": "container_upload", "file_id": file_id })
+            } else if get_top_level_media_type(&file.media_type) == "image" {
                 json!({ "type": "image", "source": { "type": "file", "file_id": file_id } })
             } else {
                 json!({ "type": "document", "source": { "type": "file", "file_id": file_id } })
@@ -1480,7 +1536,40 @@ fn convert_tool_call_part(part: &LanguageModelToolCallPart) -> Value {
     }
 }
 
+/// Extracts the `errorCode` from a provider tool error result value, handling
+/// both stringified-JSON and plain-object forms (mirrors `extractErrorValue`).
+fn extract_error_code(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => serde_json::from_str::<Value>(text).ok().and_then(|parsed| {
+            parsed
+                .get("errorCode")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }),
+        Value::Object(_) => value
+            .get("errorCode")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
 fn convert_tool_result_part(part: &LanguageModelToolResultPart) -> Value {
+    // Provider-executed web_search error results round-trip to the API error shape.
+    if provider_tool_name(&part.tool_name) == "web_search"
+        && let LanguageModelToolResultOutput::ErrorJson { value, .. } = &part.output
+    {
+        let error_code = extract_error_code(value).unwrap_or_else(|| "unavailable".to_string());
+        return json!({
+            "type": "web_search_tool_result",
+            "tool_use_id": part.tool_call_id,
+            "content": {
+                "type": "web_search_tool_result_error",
+                "error_code": error_code,
+            },
+        });
+    }
+
     let (content, is_error) = match &part.output {
         LanguageModelToolResultOutput::Text { value, .. } => (Value::String(value.clone()), None),
         LanguageModelToolResultOutput::Json { value, .. } => (value.clone(), None),
@@ -3096,6 +3185,216 @@ pub fn assert_upstream_case_covered(case_id: &str, capability: &str) {
                 cache_validator: &mut validator,
             });
             assert_eq!(plan.tools[0]["name"], "bash", "{case_id}");
+        }
+        "container-id" => {
+            // packages-anthropic-0127: a container id without skills is serialized
+            // as a bare string for follow-up programmatic code-execution turns.
+            let model = anthropic("claude-3-haiku-20240307");
+            let provider_options: ProviderOptions = serde_json::from_value(json!({
+                "anthropic": { "container": { "id": "container_12345" } }
+            }))
+            .expect("provider options");
+            let options = LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                ai_sdk_provider::LanguageModelUserMessage::new(vec![
+                    LanguageModelUserContentPart::Text(LanguageModelTextPart::new("hi")),
+                ]),
+            )])
+            .with_max_output_tokens(4096)
+            .with_tool(AnthropicTools.code_execution_20250825())
+            .with_provider_options(provider_options);
+            let plan = model.request_plan(&options, false);
+            assert_eq!(plan.body["container"], json!("container_12345"), "{case_id}");
+        }
+        "container-skills" => {
+            // packages-anthropic-0128: skills in a container serialize to the object
+            // form, mapping skillId/providerReference to skill_id per entry.
+            let model = anthropic("claude-3-haiku-20240307");
+            let provider_options: ProviderOptions = serde_json::from_value(json!({
+                "anthropic": {
+                    "container": {
+                        "id": "test-container-id",
+                        "skills": [
+                            { "type": "anthropic", "skillId": "pptx", "version": "latest" },
+                            {
+                                "type": "custom",
+                                "providerReference": { "anthropic": "skill_01Xud7kLMsjLfc7Aa6RvigZf" },
+                                "version": "1.0"
+                            }
+                        ]
+                    }
+                }
+            }))
+            .expect("provider options");
+            let options = LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                ai_sdk_provider::LanguageModelUserMessage::new(vec![
+                    LanguageModelUserContentPart::Text(LanguageModelTextPart::new("Hello")),
+                ]),
+            )])
+            .with_max_output_tokens(4096)
+            .with_tool(AnthropicTools.code_execution_20250825())
+            .with_provider_options(provider_options);
+            let plan = model.request_plan(&options, false);
+            assert_eq!(
+                plan.body["container"],
+                json!({
+                    "id": "test-container-id",
+                    "skills": [
+                        { "type": "anthropic", "skill_id": "pptx", "version": "latest" },
+                        { "type": "custom", "skill_id": "skill_01Xud7kLMsjLfc7Aa6RvigZf", "version": "1.0" }
+                    ]
+                }),
+                "{case_id}",
+            );
+        }
+        "opus-4-8-capabilities" => {
+            // packages-anthropic-0252: claude-opus-4-8 shares the opus-4-7 snapshot.
+            let capabilities = get_model_capabilities("claude-opus-4-8");
+            assert!(capabilities.is_known_model, "{case_id}");
+            assert_eq!(capabilities.max_output_tokens, 128_000, "{case_id}");
+            assert!(capabilities.rejects_sampling_parameters, "{case_id}");
+            assert!(capabilities.supports_adaptive_thinking, "{case_id}");
+            assert!(capabilities.supports_structured_output, "{case_id}");
+            assert!(capabilities.supports_xhigh_effort, "{case_id}");
+        }
+        "mid-conversation-system" => {
+            // packages-anthropic-0341: a mid-conversation system message is emitted
+            // inline as a message and enables the mid-conversation system beta.
+            let prompt = vec![
+                LanguageModelMessage::System(ai_sdk_provider::LanguageModelSystemMessage::new(
+                    "initial",
+                )),
+                LanguageModelMessage::User(ai_sdk_provider::LanguageModelUserMessage::new(vec![
+                    LanguageModelUserContentPart::Text(LanguageModelTextPart::new("hi")),
+                ])),
+                LanguageModelMessage::Assistant(
+                    ai_sdk_provider::LanguageModelAssistantMessage::new(vec![
+                        LanguageModelAssistantContentPart::Text(
+                            ai_sdk_provider::LanguageModelTextPart::new("hello"),
+                        ),
+                    ]),
+                ),
+                LanguageModelMessage::System(ai_sdk_provider::LanguageModelSystemMessage::new(
+                    "switch tone",
+                )),
+                LanguageModelMessage::User(ai_sdk_provider::LanguageModelUserMessage::new(vec![
+                    LanguageModelUserContentPart::Text(LanguageModelTextPart::new("go")),
+                ])),
+            ];
+            let plan = convert_to_anthropic_prompt(AnthropicPromptConversionOptions {
+                prompt: &prompt,
+                send_reasoning: true,
+            });
+            assert_eq!(plan.system, vec![json!({ "type": "text", "text": "initial" })], "{case_id}");
+            assert!(
+                plan.messages.contains(&json!({
+                    "role": "system",
+                    "content": [{ "type": "text", "text": "switch tone" }]
+                })),
+                "{case_id}",
+            );
+            assert!(
+                plan.betas.contains("mid-conversation-system-2026-04-07"),
+                "{case_id}",
+            );
+        }
+        "image-file-reference" => {
+            // packages-anthropic-0357: an image file provider reference converts to
+            // an image source with file_id.
+            let file = LanguageModelFilePart::new(
+                FileData::Reference {
+                    reference: ProviderReference::from_map(BTreeMap::from([(
+                        "anthropic".to_string(),
+                        "file-img-12345".to_string(),
+                    )]))
+                    .expect("provider reference"),
+                },
+                "image/png",
+            );
+            let prompt = vec![LanguageModelMessage::User(
+                ai_sdk_provider::LanguageModelUserMessage::new(vec![
+                    LanguageModelUserContentPart::File(file),
+                ]),
+            )];
+            let plan = convert_to_anthropic_prompt(AnthropicPromptConversionOptions {
+                prompt: &prompt,
+                send_reasoning: true,
+            });
+            assert_eq!(
+                plan.messages[0]["content"][0],
+                json!({ "type": "image", "source": { "type": "file", "file_id": "file-img-12345" } }),
+                "{case_id}",
+            );
+        }
+        "container-upload-conversion" => {
+            // packages-anthropic-0360: a referenced file with containerUpload converts
+            // to a container_upload block instead of a document/image source.
+            let provider_options: ProviderOptions = serde_json::from_value(json!({
+                "anthropic": { "containerUpload": true }
+            }))
+            .expect("provider options");
+            let file = LanguageModelFilePart::new(
+                FileData::Reference {
+                    reference: ProviderReference::from_map(BTreeMap::from([(
+                        "anthropic".to_string(),
+                        "file-csv-12345".to_string(),
+                    )]))
+                    .expect("provider reference"),
+                },
+                "text/csv",
+            )
+            .with_provider_options(provider_options);
+            let prompt = vec![LanguageModelMessage::User(
+                ai_sdk_provider::LanguageModelUserMessage::new(vec![
+                    LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                        "Analyze this data.",
+                    )),
+                    LanguageModelUserContentPart::File(file),
+                ]),
+            )];
+            let plan = convert_to_anthropic_prompt(AnthropicPromptConversionOptions {
+                prompt: &prompt,
+                send_reasoning: true,
+            });
+            assert_eq!(
+                plan.messages[0]["content"][1],
+                json!({ "type": "container_upload", "file_id": "file-csv-12345" }),
+                "{case_id}",
+            );
+        }
+        "web-search-error-result" => {
+            // packages-anthropic-0379/0380: a provider-executed web_search error-json
+            // result (string or object) round-trips to the API error shape.
+            for error_value in [
+                json!(serde_json::to_string(&json!({
+                    "type": "web_search_tool_result_error",
+                    "errorCode": "invalid_tool_input"
+                }))
+                .unwrap()),
+                json!({
+                    "type": "web_search_tool_result_error",
+                    "errorCode": "max_uses_exceeded"
+                }),
+            ] {
+                let expected_code = extract_error_code(&error_value).unwrap();
+                let result = LanguageModelToolResultPart::new(
+                    "srvtoolu_error",
+                    "web_search",
+                    LanguageModelToolResultOutput::error_json(error_value),
+                );
+                let converted = convert_tool_result_part(&result);
+                assert_eq!(
+                    converted,
+                    json!({
+                        "type": "web_search_tool_result",
+                        "tool_use_id": "srvtoolu_error",
+                        "content": {
+                            "type": "web_search_tool_result_error",
+                            "error_code": expected_code
+                        }
+                    }),
+                    "{case_id}",
+                );
+            }
         }
         other => panic!("unknown Anthropic upstream capability {other} for {case_id}"),
     }

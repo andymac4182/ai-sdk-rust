@@ -2095,3 +2095,48 @@ fn anthropic_0420_it_passes_abort_signal_to_sandbox_command_execution() {
 fn anthropic_0424_it_passes_abort_signal_to_sandbox_command_execution() {
     assert_upstream_case_covered("anthropic-0424", "bash");
 }
+
+#[test]
+fn packages_anthropic_0127_it_should_send_container_id_for_a_follow_up_code_execution_turn() {
+    assert_upstream_case_covered("packages-anthropic-0127", "container-id");
+}
+
+#[test]
+fn packages_anthropic_0128_it_should_send_request_body_with_skills_in_container() {
+    assert_upstream_case_covered("packages-anthropic-0128", "container-skills");
+}
+
+#[test]
+fn packages_anthropic_0252_it_should_return_correct_capabilities_for_claude_opus_4_8() {
+    assert_upstream_case_covered("packages-anthropic-0252", "opus-4-8-capabilities");
+}
+
+#[test]
+fn packages_anthropic_0341_it_should_emit_a_mid_conversation_system_message_inline_and_add_the_beta()
+ {
+    assert_upstream_case_covered("packages-anthropic-0341", "mid-conversation-system");
+}
+
+#[test]
+fn packages_anthropic_0357_it_should_convert_messages_with_image_file_parts_using_provider_reference()
+ {
+    assert_upstream_case_covered("packages-anthropic-0357", "image-file-reference");
+}
+
+#[test]
+fn packages_anthropic_0360_it_should_convert_provider_referenced_file_parts_to_container_uploads_when_requested()
+ {
+    assert_upstream_case_covered("packages-anthropic-0360", "container-upload-conversion");
+}
+
+#[test]
+fn packages_anthropic_0379_it_should_convert_anthropic_web_search_tool_call_with_error_result_error_json_string()
+ {
+    assert_upstream_case_covered("packages-anthropic-0379", "web-search-error-result");
+}
+
+#[test]
+fn packages_anthropic_0380_it_should_convert_anthropic_web_search_tool_call_with_error_result_error_json_object()
+ {
+    assert_upstream_case_covered("packages-anthropic-0380", "web-search-error-result");
+}
