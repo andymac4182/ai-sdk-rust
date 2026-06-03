@@ -4733,6 +4733,37 @@ mod tests {
     }
 
     #[test]
+    fn merge_objects_should_handle_date_objects() {
+        // Upstream `merge-objects.test.ts:78` stores a `Date` at key `a` and
+        // asserts the override `Date` replaces the base by reference. At the
+        // Rust JSON boundary a `Date` crosses as its ISO-8601 string, so the
+        // faithful contract is: a non-mergeable (non-object) value in the
+        // override replaces the base value entirely rather than being merged.
+        let date1 = JsonValue::from("2023-01-01T00:00:00.000Z");
+        let date2 = JsonValue::from("2023-02-01T00:00:00.000Z");
+        let target = json!({ "a": date1 });
+        let source = json!({ "a": date2.clone() });
+
+        let result = merge_objects(Some(&target), Some(&source)).expect("merge result");
+        assert_eq!(result.as_object().and_then(|o| o.get("a")), Some(&date2));
+    }
+
+    #[test]
+    fn merge_objects_should_handle_regexp_objects() {
+        // Upstream `merge-objects.test.ts:89` stores a `RegExp` at key `a` and
+        // asserts the override `RegExp` replaces the base by reference. At the
+        // Rust JSON boundary a `RegExp` crosses as its source string, so the
+        // override pattern value must replace the base value entirely.
+        let regex1 = JsonValue::from("abc");
+        let regex2 = JsonValue::from("def");
+        let target = json!({ "a": regex1 });
+        let source = json!({ "a": regex2.clone() });
+
+        let result = merge_objects(Some(&target), Some(&source)).expect("merge result");
+        assert_eq!(result.as_object().and_then(|o| o.get("a")), Some(&regex2));
+    }
+
+    #[test]
     fn merge_objects_should_handle_null_values() {
         let target = json!({ "a": 1, "b": null });
         let source = json!({ "a": null, "b": 2 });
