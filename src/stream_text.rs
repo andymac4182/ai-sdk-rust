@@ -79,7 +79,7 @@ use crate::ui_message_stream::{
     create_ui_message_stream_response, get_response_ui_message_id, handle_ui_message_stream_finish,
     pipe_ui_message_stream_to_response,
 };
-use crate::util::{AbortSignalSource, Callback, merge_abort_signals};
+use crate::util::{AbortSignalSource, Callback, InvalidArgumentError, merge_abort_signals};
 use crate::warning::Warning;
 
 #[cfg(test)]
@@ -664,8 +664,39 @@ pub enum SmoothStreamChunking {
     /// Emit through the first custom pattern match.
     Pattern(Regex),
 
+    /// Emit the first Unicode word segment, matching upstream `Intl.Segmenter`.
+    ///
+    /// Backed by ICU's `WordSegmenter` (the same Unicode segmentation library
+    /// `Intl.Segmenter` uses), giving locale-aware word boundaries that are
+    /// recommended for CJK languages.
+    Segmenter,
+
     /// Emit the custom detector's prefix match.
     Detector(SmoothStreamChunkDetector),
+}
+
+impl SmoothStreamChunking {
+    /// Resolves an upstream string chunking strategy (`"word"` / `"line"`).
+    ///
+    /// Mirrors the upstream runtime validation: any other string (the JS
+    /// `chunking: 'foo'` / `chunking: null` cases) is rejected with an
+    /// [`InvalidArgumentError`], because no built-in regular expression exists
+    /// for it. In Rust the typed variants cannot be constructed from an invalid
+    /// value directly, so this constructor is the parity surface for those
+    /// error cases.
+    pub fn from_strategy(strategy: &str) -> Result<Self, InvalidArgumentError> {
+        match strategy {
+            "word" => Ok(Self::Word),
+            "line" => Ok(Self::Line),
+            other => Err(InvalidArgumentError::new(
+                "chunking",
+                JsonValue::String(other.to_string()),
+                format!(
+                    "Chunking must be \"word\", \"line\", a RegExp, an Intl.Segmenter, or a ChunkDetector function. Received: {other}"
+                ),
+            )),
+        }
+    }
 }
 
 impl fmt::Debug for SmoothStreamChunking {
@@ -677,6 +708,7 @@ impl fmt::Debug for SmoothStreamChunking {
                 .debug_tuple("Pattern")
                 .field(&pattern.as_str())
                 .finish(),
+            Self::Segmenter => formatter.write_str("Segmenter"),
             Self::Detector(_) => formatter.write_str("Detector(..)"),
         }
     }
@@ -4417,6 +4449,7 @@ fn detect_smooth_stream_chunk(
         SmoothStreamChunking::Word => detect_smooth_stream_regex_chunk(buffer, word_chunk_regex()),
         SmoothStreamChunking::Line => detect_smooth_stream_regex_chunk(buffer, line_chunk_regex()),
         SmoothStreamChunking::Pattern(regex) => detect_smooth_stream_regex_chunk(buffer, regex),
+        SmoothStreamChunking::Segmenter => Ok(detect_smooth_stream_segment_chunk(buffer)),
         SmoothStreamChunking::Detector(detector) => {
             let Some(chunk) = detector(buffer) else {
                 return Ok(None);
@@ -4453,6 +4486,31 @@ fn detect_smooth_stream_regex_chunk(
     }
 
     Ok(Some(buffer[..chunk_match.end()].to_string()))
+}
+
+/// Returns the first Unicode word segment of `buffer`, matching the upstream
+/// `Intl.Segmenter` (`granularity: 'word'`) detector. Returns `None` for an
+/// empty buffer, mirroring the upstream `buffer.length === 0` guard.
+fn detect_smooth_stream_segment_chunk(buffer: &str) -> Option<String> {
+    if buffer.is_empty() {
+        return None;
+    }
+
+    let segmenter = word_segmenter();
+    for boundary in segmenter.segment_str(buffer) {
+        if boundary == 0 {
+            continue;
+        }
+        return Some(buffer[..boundary].to_string());
+    }
+
+    None
+}
+
+fn word_segmenter() -> &'static icu_segmenter::WordSegmenterBorrowed<'static> {
+    static WORD_SEGMENTER: OnceLock<icu_segmenter::WordSegmenterBorrowed<'static>> =
+        OnceLock::new();
+    WORD_SEGMENTER.get_or_init(|| icu_segmenter::WordSegmenter::new_auto(Default::default()))
 }
 
 fn word_chunk_regex() -> &'static Regex {
@@ -6387,6 +6445,219 @@ mod tests {
         .expect_err("empty detector matches should fail");
 
         assert_eq!(error, SmoothStreamError::EmptyDetectorMatch);
+    }
+
+    #[test]
+    fn smooth_stream_rejects_invalid_string_chunking_strategy() {
+        let error = SmoothStreamChunking::from_strategy("foo")
+            .expect_err("an unknown chunking strategy should be rejected");
+
+        assert_eq!(error.parameter(), "chunking");
+        assert_eq!(error.value(), &json!("foo"));
+        assert_eq!(
+            error.message(),
+            "Invalid argument for parameter chunking: Chunking must be \"word\", \"line\", a RegExp, an Intl.Segmenter, or a ChunkDetector function. Received: foo"
+        );
+
+        // The supported string strategies still resolve to the built-in variants.
+        assert!(matches!(
+            SmoothStreamChunking::from_strategy("word"),
+            Ok(SmoothStreamChunking::Word)
+        ));
+        assert!(matches!(
+            SmoothStreamChunking::from_strategy("line"),
+            Ok(SmoothStreamChunking::Line)
+        ));
+    }
+
+    #[test]
+    fn smooth_stream_rejects_null_chunking_option() {
+        // Upstream rejects `chunking: null` with the same InvalidArgumentError as
+        // any other non-string/non-regex/non-segmenter value. In Rust the typed
+        // enum forbids constructing a null variant, so the parity surface is the
+        // string constructor receiving the JS `null` rendering.
+        let error = SmoothStreamChunking::from_strategy("null")
+            .expect_err("a null chunking option should be rejected");
+
+        assert_eq!(error.parameter(), "chunking");
+        assert_eq!(
+            error.message(),
+            "Invalid argument for parameter chunking: Chunking must be \"word\", \"line\", a RegExp, an Intl.Segmenter, or a ChunkDetector function. Received: null"
+        );
+    }
+
+    fn smooth_stream_segmenter_text_deltas(text: &str) -> Vec<TextStreamPart> {
+        smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", text)),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new().with_chunking(SmoothStreamChunking::Segmenter),
+        )
+        .expect("segmenter smoothing should succeed")
+    }
+
+    fn smooth_stream_expected_segment_parts(segments: &[&str]) -> Vec<TextStreamPart> {
+        let mut parts = vec![TextStreamPart::TextStart(LanguageModelTextStart::new("1"))];
+        for segment in segments {
+            parts.push(TextStreamPart::TextDelta(TextStreamTextDeltaPart::new(
+                "1", *segment,
+            )));
+        }
+        parts.push(TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")));
+        parts
+    }
+
+    #[test]
+    fn smooth_stream_should_segment_english_text_using_segmenter() {
+        // Assert the detected segments match the upstream Intl.Segmenter snapshot.
+        assert_eq!(
+            smooth_stream_segmenter_text_deltas("Hello, world!"),
+            smooth_stream_expected_segment_parts(&["Hello", ",", " ", "world", "!"])
+        );
+
+        // Every detected segment is scheduled with a trailing delay, matching the
+        // upstream `delay 10` interleaving (one delay per emitted text-delta).
+        let scheduled = smooth_stream_scheduled_parts(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Hello, world!")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            &SmoothStreamOptions::new().with_chunking(SmoothStreamChunking::Segmenter),
+        )
+        .expect("segmenter smoothing should schedule chunks");
+        assert_eq!(
+            scheduled,
+            vec![
+                SmoothStreamScheduledPart {
+                    part: TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                    delay_after: false,
+                },
+                SmoothStreamScheduledPart {
+                    part: TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "Hello")),
+                    delay_after: true,
+                },
+                SmoothStreamScheduledPart {
+                    part: TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", ",")),
+                    delay_after: true,
+                },
+                SmoothStreamScheduledPart {
+                    part: TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", " ")),
+                    delay_after: true,
+                },
+                SmoothStreamScheduledPart {
+                    part: TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "world")),
+                    delay_after: true,
+                },
+                SmoothStreamScheduledPart {
+                    part: TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "!")),
+                    delay_after: true,
+                },
+                SmoothStreamScheduledPart {
+                    part: TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                    delay_after: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_segment_japanese_text_using_segmenter() {
+        assert_eq!(
+            smooth_stream_segmenter_text_deltas("こんにちは世界"),
+            smooth_stream_expected_segment_parts(&["こんにちは", "世界"])
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_segment_chinese_text_using_segmenter() {
+        assert_eq!(
+            smooth_stream_segmenter_text_deltas("你好世界"),
+            smooth_stream_expected_segment_parts(&["你好", "世界"])
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_handle_mixed_cjk_and_latin_content() {
+        assert_eq!(
+            smooth_stream_segmenter_text_deltas("Hello こんにちは World"),
+            smooth_stream_expected_segment_parts(&["Hello", " ", "こんにちは", " ", "World"])
+        );
+    }
+
+    #[test]
+    fn smooth_stream_segmenter_drains_buffer_across_partial_deltas() {
+        // Each incoming delta fully drains the buffer through the segmenter, so a
+        // hiragana fragment that is not yet a complete word ("こんに") is emitted
+        // character-by-character ("こん", then "に"). This documents the Rust ICU
+        // segmentation; the exact boundary for the isolated "ちは" fragment differs
+        // from V8's Intl.Segmenter, so upstream case packages-ai-0905 is left as a
+        // documented model-version divergence rather than mapped here.
+        let parts = smooth_stream(
+            vec![
+                TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "こんに")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "ちは")),
+                TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("1", "世界")),
+                TextStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            ],
+            SmoothStreamOptions::new().with_chunking(SmoothStreamChunking::Segmenter),
+        )
+        .expect("segmenter smoothing should succeed");
+
+        assert_eq!(
+            parts,
+            smooth_stream_expected_segment_parts(&["こん", "に", "ちは", "世界"])
+        );
+    }
+
+    #[test]
+    fn smooth_stream_should_segment_longer_japanese_sentence_with_mixed_content() {
+        assert_eq!(
+            smooth_stream_segmenter_text_deltas(
+                "東京は日本の首都です。人口は約1400万人で、世界最大の都市圏の一つです。美しい桜の季節には多くの観光客が訪れます。"
+            ),
+            smooth_stream_expected_segment_parts(&[
+                "東京",
+                "は",
+                "日本",
+                "の",
+                "首都",
+                "です",
+                "。",
+                "人口",
+                "は",
+                "約",
+                "1400",
+                "万人",
+                "で",
+                "、",
+                "世界",
+                "最大",
+                "の",
+                "都市",
+                "圏",
+                "の",
+                "一つ",
+                "です",
+                "。",
+                "美しい",
+                "桜の",
+                "季節",
+                "に",
+                "は",
+                "多く",
+                "の",
+                "観光",
+                "客",
+                "が",
+                "訪れ",
+                "ます",
+                "。"
+            ])
+        );
     }
 
     #[test]
