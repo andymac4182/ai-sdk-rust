@@ -426,6 +426,39 @@ mod tests {
     }
 
     #[test]
+    fn upload_file_passes_tagged_data_through_to_files_upload_file() {
+        let files = RecordingFiles::default();
+
+        let result = poll_ready(upload_file(
+            &files,
+            UploadFileOptions::new(FilesUploadFileData::data(FileDataContent::Bytes(vec![
+                1, 2, 3,
+            ]))),
+        ));
+
+        let calls = files.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0],
+            FilesUploadFileCallOptions::new(
+                FilesUploadFileData::data(FileDataContent::Bytes(vec![1, 2, 3])),
+                "application/octet-stream",
+            )
+        );
+        assert_eq!(calls[0].filename, None);
+        assert_eq!(calls[0].provider_options, None);
+
+        assert_eq!(
+            result.provider_reference,
+            ProviderReference::try_from(BTreeMap::from([(
+                "test-provider".to_string(),
+                "file_123".to_string(),
+            )]))
+            .expect("provider reference is valid")
+        );
+    }
+
+    #[test]
     fn upload_file_passes_tagged_base64_string_data_through_to_files_upload_file() {
         let files = RecordingFiles::default();
 
