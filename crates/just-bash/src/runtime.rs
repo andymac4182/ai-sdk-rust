@@ -4329,6 +4329,231 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn rg_imported_feature_filters_stats_pcre_and_ignore_rows_are_portable() {
+        // packages/just-bash/src/commands/rg/imported-tests/feature.test.ts:20
+        // should hide filename with --no-filename
+        let no_filename = home_bash(&[("sherlock", SHERLOCK)]).exec("rg --no-filename Sherlock");
+        assert_eq!(no_filename.exit_code, 0);
+        assert!(!no_filename.stdout.contains("sherlock:"));
+        assert!(no_filename.stdout.contains("Sherlock"));
+        // feature.test.ts:35 - should show only matching text with -o
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -o Sherlock",
+            0,
+            "sherlock:Sherlock\nsherlock:Sherlock\n",
+        );
+        // feature.test.ts:49 - should use smart case with -S (lowercase matches insensitively)
+        let smart = home_bash(&[("sherlock", SHERLOCK)]).exec("rg -S sherlock");
+        assert_eq!(smart.exit_code, 0);
+        assert!(smart.stdout.contains("Sherlock"));
+        // feature.test.ts:62 - should be case-sensitive when pattern has uppercase
+        let cased = home_bash(&[("sherlock", SHERLOCK)]).exec("rg -S Sherlock");
+        assert_eq!(cased.exit_code, 0);
+        assert!(cased.stdout.contains("Sherlock"));
+        // feature.test.ts:77 - should list files with matches with -l
+        assert_home_exec(&[("sherlock", SHERLOCK)], "rg -l Sherlock", 0, "sherlock\n");
+        // feature.test.ts:89 - should list files without matches with --files-without-match
+        assert_home_exec(
+            &[("sherlock", SHERLOCK), ("file.py", "foo\n")],
+            "rg --files-without-match Sherlock",
+            0,
+            "file.py\n",
+        );
+        // feature.test.ts:102 - should count matches with -c
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -c Sherlock",
+            0,
+            "sherlock:2\n",
+        );
+        // misc.test.ts:21 - single_file: search single file without filename prefix
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg Sherlock sherlock",
+            0,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // feature.test.ts:396 - should return exit code 0 on match
+        assert_eq!(
+            home_bash(&[("sherlock", SHERLOCK)]).exec("rg .").exit_code,
+            0
+        );
+        // feature.test.ts:407 - should return exit code 1 on no match
+        assert_eq!(
+            home_bash(&[("sherlock", SHERLOCK)])
+                .exec("rg NADA")
+                .exit_code,
+            1
+        );
+        // feature.test.ts:418 - should return exit code 2 on error (invalid regex)
+        assert_eq!(
+            home_bash(&[("sherlock", SHERLOCK)])
+                .exec("rg '*'")
+                .exit_code,
+            2
+        );
+        // feature.test.ts:443 - should allow -C to set both -A and -B
+        assert_home_exec(
+            &[("test", "1\n2\n3\n4\n5\n6\n7\n8\n9\n")],
+            "rg -A2 -C1 5 test",
+            0,
+            "4\n5\n6\n7\n",
+        );
+        // feature.test.ts:860 - should output search statistics with --stats
+        let stats = home_bash(&[("file", "foo\nbar\nfoo\n")]).exec("rg --stats foo");
+        assert_eq!(stats.exit_code, 0);
+        assert!(stats.stdout.contains("2 matches"));
+        assert!(stats.stdout.contains("1 files contained matches"));
+        assert!(stats.stdout.contains("1 files searched"));
+        // feature.test.ts:874 - should show stats for multiple files
+        let stats_multi = home_bash(&[
+            ("a.txt", "foo\n"),
+            ("b.txt", "foo\nfoo\n"),
+            ("c.txt", "bar\n"),
+        ])
+        .exec("rg --stats foo");
+        assert_eq!(stats_multi.exit_code, 0);
+        assert!(stats_multi.stdout.contains("3 matches"));
+        assert!(stats_multi.stdout.contains("2 files contained matches"));
+        assert!(stats_multi.stdout.contains("3 files searched"));
+        // feature.test.ts:890 - should show stats even with no matches
+        let stats_none = home_bash(&[("file", "hello\n")]).exec("rg --stats notfound");
+        assert_eq!(stats_none.exit_code, 1);
+        assert!(stats_none.stdout.contains("0 matches"));
+        assert!(stats_none.stdout.contains("0 files contained matches"));
+        assert!(stats_none.stdout.contains("1 files searched"));
+        // feature.test.ts:904 - should include search results before stats
+        let stats_order = home_bash(&[("file", "test\n")]).exec("rg --stats test");
+        assert_eq!(stats_order.exit_code, 0);
+        let results_index = stats_order.stdout.find("file:1:test").expect("result line");
+        let stats_index = stats_order.stdout.find("1 matches").expect("stats line");
+        assert!(results_index < stats_index);
+        // feature.test.ts:917 - should show bytes searched in stats
+        let stats_bytes = home_bash(&[("file", "test content here\n")]).exec("rg --stats test");
+        assert_eq!(stats_bytes.exit_code, 0);
+        assert!(stats_bytes.stdout.contains("bytes searched"));
+        // feature.test.ts:931 - should error on -P flag (PCRE2 unsupported)
+        let pcre_short = home_bash(&[("file", "test\n")]).exec("rg -P test");
+        assert_eq!(pcre_short.exit_code, 1);
+        assert_eq!(
+            pcre_short.stderr,
+            "rg: PCRE2 is not supported. Use standard regex syntax instead.\n"
+        );
+        // feature.test.ts:945 - should error on --pcre2 flag
+        let pcre_long = home_bash(&[("file", "test\n")]).exec("rg --pcre2 test");
+        assert_eq!(pcre_long.exit_code, 1);
+        assert_eq!(
+            pcre_long.stderr,
+            "rg: PCRE2 is not supported. Use standard regex syntax instead.\n"
+        );
+        // feature.test.ts:974 - should read patterns from stdin with -f-
+        assert_home_exec(
+            &[("test.txt", "foo\nbar\nbaz\n")],
+            "echo 'bar' | rg -f- test.txt",
+            0,
+            "bar\n",
+        );
+        // feature.test.ts:990 - f45_relative_cwd: should apply patterns from --ignore-file
+        let ignore_file = home_bash(&[
+            ("my-ignore", "ignored.txt\n"),
+            ("ignored.txt", "test content\n"),
+            ("included.txt", "test content\n"),
+        ])
+        .exec("rg --ignore-file my-ignore test");
+        assert_eq!(ignore_file.exit_code, 0);
+        assert!(ignore_file.stdout.contains("included.txt"));
+        assert!(!ignore_file.stdout.contains("ignored.txt"));
+        // feature.test.ts:1006 - f45_precedence_with_others: --ignore-file patterns applied
+        let ignore_glob = home_bash(&[
+            ("custom-ignore", "*.log\n"),
+            ("test.txt", "test\n"),
+            ("test.log", "test\n"),
+        ])
+        .exec("rg --ignore-file custom-ignore test");
+        assert_eq!(ignore_glob.exit_code, 0);
+        assert!(ignore_glob.stdout.contains("test.txt"));
+        assert!(!ignore_glob.stdout.contains("test.log"));
+        // feature.test.ts:1024 - should skip .gitignore with --no-ignore-vcs
+        let vcs_files = &[
+            (".gitignore", "ignored.txt\n"),
+            ("ignored.txt", "Sherlock\n"),
+            ("visible.txt", "Sherlock\n"),
+        ];
+        assert_home_exec(vcs_files, "rg Sherlock", 0, "visible.txt:1:Sherlock\n");
+        let no_vcs = home_bash(vcs_files).exec("rg --no-ignore-vcs Sherlock");
+        assert_eq!(no_vcs.exit_code, 0);
+        assert!(no_vcs.stdout.contains("ignored.txt"));
+        assert!(no_vcs.stdout.contains("visible.txt"));
+    }
+
+    #[test]
+    fn rg_imported_binary_detection_rows_are_portable() {
+        // packages/just-bash/src/commands/rg/imported-tests/binary.test.ts:18
+        // should skip binary files by default in directory search
+        assert_home_exec(
+            &[
+                ("text.txt", "hello world\n"),
+                ("binary.bin", "hello\u{0}world\n"),
+            ],
+            "rg hello",
+            0,
+            "text.txt:1:hello world\n",
+        );
+        // binary.test.ts:32 - should skip binary files when searching single explicit file
+        assert_home_exec(
+            &[("binary.bin", "hello\u{0}world\n")],
+            "rg hello binary.bin",
+            1,
+            "",
+        );
+        // binary.test.ts:44 - should detect binary via NUL early in file
+        let early = format!("\u{0}{}pattern\n", "a".repeat(100));
+        assert_home_exec(&[("early.bin", early.as_str())], "rg pattern", 1, "");
+        // binary.test.ts:71 - should not count matches in binary files
+        assert_home_exec(
+            &[
+                ("text.txt", "match\nmatch\n"),
+                ("binary.bin", "match\u{0}match\n"),
+            ],
+            "rg -c match",
+            0,
+            "text.txt:2\n",
+        );
+        // binary.test.ts:86 - should not list binary files with -l
+        assert_home_exec(
+            &[("text.txt", "findme\n"), ("binary.bin", "findme\u{0}\n")],
+            "rg -l findme",
+            0,
+            "text.txt\n",
+        );
+        // binary.test.ts:101 - should only search text files in mixed directory
+        assert_home_exec(
+            &[
+                ("readme.md", "documentation\n"),
+                ("image.png", "\u{89}PNG\r\n\u{1a}\n\u{0}\u{0}\u{0}"),
+                ("script.sh", "echo documentation\n"),
+            ],
+            "rg --sort path documentation",
+            0,
+            "readme.md:1:documentation\nscript.sh:1:echo documentation\n",
+        );
+        // binary.test.ts:117 - should handle multiple binary and text files
+        assert_home_exec(
+            &[
+                ("a.txt", "test\n"),
+                ("b.bin", "test\u{0}\n"),
+                ("c.txt", "test\n"),
+                ("d.bin", "test\u{0}\n"),
+            ],
+            "rg test",
+            0,
+            "a.txt:1:test\nc.txt:1:test\n",
+        );
+    }
+
+    #[test]
     fn text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows() {
         let env = Bash::with_options(BashOptions {
             files: BTreeMap::from([

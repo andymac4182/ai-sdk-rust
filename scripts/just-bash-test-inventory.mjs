@@ -918,6 +918,36 @@ const jbc10CaseGroups = [
     notes:
       'JBC-10 verifies rg preserves UTF-8 stdin matches and emits the upstream stdin source label.',
   },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/feature.test.ts',
+    lines: [
+      20, 35, 49, 62, 77, 89, 102, 396, 407, 418, 443, 860, 874, 890,
+      904, 917, 931, 945, 974, 990, 1006, 1024,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_feature_filters_stats_pcre_and_ignore_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported rg feature rows for --no-filename, -o only-matching, -S smart case, -l/-c/--files-without-match, exit codes, -A/-C context max precedence, --stats output (matches/files/bytes), PCRE2 rejection, -f- stdin patterns, --ignore-file, and --no-ignore-vcs over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
+    lines: [21],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_feature_filters_stats_pcre_and_ignore_rows_are_portable',
+    notes:
+      'JBC-10 verifies the imported rg single_file row searches an explicit file without a filename prefix.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/binary.test.ts',
+    lines: [18, 32, 44, 71, 86, 101, 117],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_binary_detection_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported rg binary-detection rows: NUL-containing files are skipped in directory and explicit-file search, in -c counts, in -l file lists, and in mixed-content directories.',
+  },
 ];
 
 const jbc12SourceGroups = [
