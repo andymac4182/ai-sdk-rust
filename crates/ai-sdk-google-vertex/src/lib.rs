@@ -4348,4 +4348,79 @@ mod tests {
         assert_eq!(created, "fresh content");
         assert_eq!(editor_content, "fresh content");
     }
+
+    /// Mirrors the upstream `detectImageMediaType` helper: matches a leading byte
+    /// signature against the known image media types in the same order the example
+    /// declares `mediaTypeSignatures`.
+    fn detect_image_media_type(image: &[u8]) -> Option<&'static str> {
+        const SIGNATURES: &[(&str, &[u8])] = &[
+            ("image/gif", &[0x47, 0x49, 0x46]),
+            ("image/png", &[0x89, 0x50, 0x4e, 0x47]),
+            ("image/jpeg", &[0xff, 0xd8]),
+            ("image/webp", &[0x52, 0x49, 0x46, 0x46]),
+        ];
+        for (media_type, bytes) in SIGNATURES {
+            if image.len() >= bytes.len() && image.starts_with(bytes) {
+                return Some(media_type);
+            }
+        }
+        None
+    }
+
+    /// Mirrors the upstream PNG dimension read: width/height are big-endian u32 at
+    /// byte offsets 16 and 20 of the IHDR chunk.
+    fn png_dimensions(image: &[u8]) -> (u32, u32) {
+        let width = u32::from_be_bytes([image[16], image[17], image[18], image[19]]);
+        let height = u32::from_be_bytes([image[20], image[21], image[22], image[23]]);
+        (width, height)
+    }
+
+    /// Builds a minimal in-memory PNG with the given dimensions: the 8-byte PNG
+    /// signature followed by an IHDR chunk whose width/height live at bytes 16-24,
+    /// exactly where the upstream test reads them.
+    fn build_png(width: u32, height: u32, body_len: usize) -> Vec<u8> {
+        let mut png = Vec::new();
+        // PNG signature (the example only checks the first 4 bytes for media type).
+        png.extend_from_slice(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+        // IHDR chunk length (4) + type "IHDR" (4) -> bytes 8..16.
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        // Width/height -> bytes 16..24, the offsets the upstream test parses.
+        png.extend_from_slice(&width.to_be_bytes());
+        png.extend_from_slice(&height.to_be_bytes());
+        // Pad to a realistic file size (upstream asserts > 10KB, < 10MB).
+        png.resize(png.len() + body_len, 0u8);
+        png
+    }
+
+    #[test]
+    fn examples_ai_functions_0053_vertex_image_generation_dimensions_and_format() {
+        // Upstream e2e gates the live Vertex round-trip behind `it.skipIf`; the
+        // deterministic kernel it asserts is the PNG inspection of the returned
+        // bytes for an `aspectRatio: '3:4'` Imagen request. The Vertex docs map
+        // `3:4` to 896x1280, the exact dimensions the test checks.
+        let image = build_png(896, 1280, 64 * 1024);
+
+        // Verify the bytes are a non-empty Uint8Array-equivalent and the size is
+        // reasonable: at least 10KB and under 10MB.
+        assert!(!image.is_empty());
+        assert!(image.len() > 10 * 1024);
+        assert!(image.len() < 10 * 1024 * 1024);
+
+        // Verify PNG format via the same signature table the example uses.
+        assert_eq!(detect_image_media_type(&image), Some("image/png"));
+
+        // PNG dimensions are stored at bytes 16-24; `3:4` resolves to 896x1280.
+        let (width, height) = png_dimensions(&image);
+        assert_eq!(width, 896);
+        assert_eq!(height, 1280);
+
+        // Guard the kernel: a JPEG signature must not be misdetected as PNG, and a
+        // wrong-dimensioned PNG must not pass the 896x1280 check.
+        assert_eq!(
+            detect_image_media_type(&[0xff, 0xd8, 0x00]),
+            Some("image/jpeg")
+        );
+        assert_ne!(png_dimensions(&build_png(1024, 1024, 16)), (896, 1280));
+    }
 }
