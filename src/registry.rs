@@ -1972,6 +1972,83 @@ mod tests {
         );
     }
 
+    // Upstream custom-provider.test.ts:445 — `provider.files` is `undefined` when files is
+    // not configured and the fallback provider does not support files. In Rust this is a
+    // type-level guarantee: a `CustomProvider` only implements `ProviderWithFiles` when its
+    // fallback provider does. The default `NoFallbackProvider` does not implement
+    // `ProviderWithFiles`, so a plain `custom_provider()` has no `files()` method at all.
+    // We assert this with an autoref-specialization probe: the blanket impl reports "not
+    // exposed", and only a type that satisfies `ProviderWithFiles` reports "exposed".
+    #[test]
+    fn custom_provider_files_should_not_be_exposed_when_not_configured_and_fallback_lacks_files() {
+        // Probe trait: the inherent method wins for any type (default = not exposed),
+        // the trait method only applies when `ProviderWithFiles` is implemented.
+        struct FilesProbe<'a, T>(&'a T);
+
+        trait FilesNotExposed {
+            fn exposes_files(&self) -> bool {
+                false
+            }
+        }
+        impl<T> FilesNotExposed for FilesProbe<'_, T> {}
+
+        impl<T: ProviderWithFiles> FilesProbe<'_, T> {
+            #[allow(dead_code)]
+            fn exposes_files(&self) -> bool {
+                true
+            }
+        }
+
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>();
+
+        // `NoFallbackProvider` does not implement `ProviderWithFiles`, so method resolution
+        // falls back to the trait default (`false`). If the base custom provider ever began
+        // exposing files unconditionally, the inherent impl would win and this would be true.
+        assert!(!FilesProbe(&provider).exposes_files());
+
+        // Sanity check the probe itself: a type that *does* expose files reports true,
+        // proving the assertion above is not vacuously false.
+        let with_files = provider.with_files(StaticFiles {
+            provider: "mock-provider".to_string(),
+        });
+        assert!(FilesProbe(&with_files).exposes_files());
+    }
+
+    // Upstream custom-provider.test.ts:475 — `provider.skills` is `undefined` when skills is
+    // not configured and the fallback provider does not support skills. Same type-level
+    // guarantee as files: the default `NoFallbackProvider` does not implement
+    // `ProviderWithSkills`, so a plain `custom_provider()` exposes no `skills()` method.
+    #[test]
+    fn custom_provider_skills_should_not_be_exposed_when_not_configured_and_fallback_lacks_skills()
+    {
+        struct SkillsProbe<'a, T>(&'a T);
+
+        trait SkillsNotExposed {
+            fn exposes_skills(&self) -> bool {
+                false
+            }
+        }
+        impl<T> SkillsNotExposed for SkillsProbe<'_, T> {}
+
+        impl<T: ProviderWithSkills> SkillsProbe<'_, T> {
+            #[allow(dead_code)]
+            fn exposes_skills(&self) -> bool {
+                true
+            }
+        }
+
+        let provider =
+            custom_provider::<StaticLanguageModel, StaticEmbeddingModel, StaticImageModel>();
+
+        assert!(!SkillsProbe(&provider).exposes_skills());
+
+        let with_skills = provider.with_skills(StaticSkills {
+            provider: "mock-provider".to_string(),
+        });
+        assert!(SkillsProbe(&with_skills).exposes_skills());
+    }
+
     #[test]
     fn custom_provider_transcription_model_should_return_the_transcription_model_if_it_exists() {
         let model = StaticTranscriptionModel {
