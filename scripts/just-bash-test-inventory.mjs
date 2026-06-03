@@ -3329,6 +3329,36 @@ const jbc42CaseGroups = [
   },
 ];
 
+const jbcAwkEdgeCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.edge-cases.test.ts',
+    lines: [44, 53, 64, 71, 82, 91, 98, 105, 112, 122, 132, 141, 159, 168, 175, 184, 193],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_edge_special_chars_numeric_string_and_regex_rows',
+    notes:
+      'JBC-AWK-EDGE verifies portable AWK handling of literal quotes/backslashes/brackets/dollar/ampersand field data, very large and very small numeric magnitudes formatted with JS-compatible scientific notation, negative zero, floating-point precision, integer overflow, empty-string comparison, length() of empty and space-only records, and anchored/escaped/empty regex matches. The for-loop string-builder row (line 150) remains pending because C-style for is not yet implemented.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.arrays.test.ts',
+    lines: [297],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_edge_special_chars_numeric_string_and_regex_rows',
+    notes:
+      'JBC-AWK-EDGE verifies portable AWK post-increment of an array element yields the pre-increment value while updating the stored entry.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.binary.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_edge_special_chars_numeric_string_and_regex_rows',
+    notes:
+      'JBC-AWK-EDGE verifies portable AWK arithmetic over a file whose bytes are processed as text records ("1 2\\n3 4\\n" -> 3, 7).',
+  },
+];
+
 const jbc37CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/html-to-markdown/html-to-markdown.test.ts',
@@ -4014,6 +4044,7 @@ function caseOverrideFor(testCase) {
     ...jbc25CaseGroups,
     ...jbc35CaseGroups,
     ...jbc42CaseGroups,
+    ...jbcAwkEdgeCaseGroups,
     ...jbc38CaseGroups,
     ...jbc41CaseGroups,
     ...jbc43CaseGroups,
