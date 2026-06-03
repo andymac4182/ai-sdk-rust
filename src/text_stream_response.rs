@@ -1,5 +1,6 @@
 use crate::headers::Headers;
 use crate::provider_utils::normalize_headers;
+use crate::stream_text::TextStreamPart;
 
 /// Default content type used by upstream text-stream response helpers.
 pub const TEXT_STREAM_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
@@ -230,6 +231,23 @@ fn encode_text_stream(text_stream: Vec<String>) -> Vec<Vec<u8>> {
     text_stream.into_iter().map(String::into_bytes).collect()
 }
 
+/// Converts a stream of [`TextStreamPart`] chunks into a stream of text deltas.
+///
+/// Mirrors upstream `toTextStream`: only `text-delta` parts are kept, and each
+/// emits its high-level `text` field.
+pub fn to_text_stream<I>(parts: I) -> Vec<String>
+where
+    I: IntoIterator<Item = TextStreamPart>,
+{
+    parts
+        .into_iter()
+        .filter_map(|part| match part {
+            TextStreamPart::TextDelta(delta) => Some(delta.text),
+            _ => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
@@ -277,6 +295,29 @@ mod tests {
     }
 
     #[test]
+    fn create_text_stream_response_can_respond_with_to_text_stream_output() {
+        use crate::language_model::LanguageModelTextEnd;
+        use crate::stream_text::{
+            TextStreamPart, TextStreamStartPart, TextStreamTextDeltaPart, to_text_stream,
+        };
+
+        let parts = vec![
+            TextStreamPart::Start(TextStreamStartPart::new()),
+            TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("t1", "Hello")),
+            TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("t1", ", world!")),
+            TextStreamPart::TextEnd(LanguageModelTextEnd::new("t1")),
+        ];
+
+        let response =
+            create_text_stream_response(TextStreamResponseOptions::new(to_text_stream(parts)));
+
+        assert_eq!(
+            response.decoded_body().expect("body chunks decode"),
+            vec!["Hello".to_string(), ", world!".to_string()]
+        );
+    }
+
+    #[test]
     fn pipe_text_stream_to_response_writes_headers_chunks_and_end() {
         let mut response = MockTextStreamResponse::default();
 
@@ -300,6 +341,36 @@ mod tests {
             Some("test")
         );
         assert_eq!(response.decoded_chunks(), vec!["hello", " ", "world"]);
+        assert!(response.ended);
+    }
+
+    #[test]
+    fn pipe_text_stream_to_response_pipes_stream_created_by_to_text_stream() {
+        use crate::language_model::{LanguageModelTextEnd, LanguageModelTextStart};
+        use crate::stream_text::{TextStreamPart, TextStreamStartPart, TextStreamTextDeltaPart};
+
+        let mut response = MockTextStreamResponse::default();
+
+        let text_stream = to_text_stream([
+            TextStreamPart::Start(TextStreamStartPart::new()),
+            TextStreamPart::TextStart(LanguageModelTextStart::new("t1")),
+            TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("t1", "Hello")),
+            TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("t1", ", world!")),
+            TextStreamPart::TextEnd(LanguageModelTextEnd::new("t1")),
+        ]);
+
+        pipe_text_stream_to_response(&mut response, TextStreamResponseOptions::new(text_stream))
+            .expect("mock response writes");
+
+        // Defaults to status 200 and the text-plain content type.
+        assert_eq!(response.status, Some(200));
+        assert_eq!(response.status_text, None);
+        assert_eq!(
+            response.headers.get("content-type").map(String::as_str),
+            Some(TEXT_STREAM_CONTENT_TYPE)
+        );
+        // Only the text deltas are piped through, in order.
+        assert_eq!(response.decoded_chunks(), vec!["Hello", ", world!"]);
         assert!(response.ended);
     }
 

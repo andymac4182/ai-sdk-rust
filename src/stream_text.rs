@@ -11,11 +11,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::VERSION;
 use crate::generate_text::{
-    ActiveTools, GenerateTextFinishEvent, GenerateTextModelInfo, GenerateTextOnFinish,
-    GenerateTextOnLanguageModelCallEnd, GenerateTextOnLanguageModelCallStart, GenerateTextOnStart,
-    GenerateTextOnStepFinish, GenerateTextOnStepStart, GenerateTextOnToolExecutionEnd,
-    GenerateTextOnToolExecutionStart, GenerateTextStartEvent, GenerateTextStep,
-    GenerateTextStepPerformance, GenerateTextStepStartEvent, GenerateTextTool,
+    ActiveTools, GenerateTextFinishEvent, GenerateTextInclude, GenerateTextModelInfo,
+    GenerateTextOnFinish, GenerateTextOnLanguageModelCallEnd, GenerateTextOnLanguageModelCallStart,
+    GenerateTextOnStart, GenerateTextOnStepFinish, GenerateTextOnStepStart,
+    GenerateTextOnToolExecutionEnd, GenerateTextOnToolExecutionStart, GenerateTextStartEvent,
+    GenerateTextStep, GenerateTextStepPerformance, GenerateTextStepStartEvent, GenerateTextTool,
     GenerateTextToolCall, GenerateTextToolExecutionEndEvent, GenerateTextToolExecutionStartEvent,
     GenerateTextToolOutputDenied, GenerateTextToolResult, LanguageModelCallEndEvent,
     LanguageModelCallStartEvent, PrepareStep, PrepareStepOptions, PrepareStepResult,
@@ -1067,6 +1067,9 @@ pub struct StreamTextOptions<'a, M: LanguageModel + ?Sized> {
 
     /// Additional stop conditions checked after every completed step.
     pub stop_conditions: Vec<StopCondition>,
+
+    /// Settings controlling which large provider payloads are retained in step results.
+    pub include: GenerateTextInclude,
 }
 
 impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
@@ -1104,6 +1107,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             on_abort: None,
             max_steps: 1,
             stop_conditions: Vec::new(),
+            include: GenerateTextInclude::new(),
         }
     }
 
@@ -1148,6 +1152,7 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
             on_abort: None,
             max_steps: 1,
             stop_conditions: Vec::new(),
+            include: GenerateTextInclude::new(),
         }
     }
 
@@ -1548,6 +1553,13 @@ impl<'a, M: LanguageModel + ?Sized> StreamTextOptions<'a, M> {
     /// Sets whether raw stream chunks should be included.
     pub fn with_include_raw_chunks(mut self, include_raw_chunks: bool) -> Self {
         self.call_options.include_raw_chunks = Some(include_raw_chunks);
+        self
+    }
+
+    /// Sets payload retention settings controlling which large provider payloads are
+    /// retained in step results (request body and request messages).
+    pub fn with_include(mut self, include: GenerateTextInclude) -> Self {
+        self.include = include;
         self
     }
 
@@ -2386,6 +2398,23 @@ impl StreamTextResult {
     }
 }
 
+/// Converts a sequence of [`TextStreamPart`] chunks into a stream of text deltas.
+///
+/// This mirrors upstream `toTextStream`: only `text-delta` parts contribute and
+/// each contributes its `text` value, all other part types are dropped.
+pub fn to_text_stream<I>(parts: I) -> Vec<String>
+where
+    I: IntoIterator<Item = TextStreamPart>,
+{
+    parts
+        .into_iter()
+        .filter_map(|part| match part {
+            TextStreamPart::TextDelta(part) => Some(part.text),
+            _ => None,
+        })
+        .collect()
+}
+
 fn stream_text_output_value(text: &str) -> JsonValue {
     serde_json::from_str(text).unwrap_or_else(|_| JsonValue::String(text.to_string()))
 }
@@ -2471,6 +2500,7 @@ where
         on_abort,
         max_steps,
         stop_conditions,
+        include,
     } = options;
     let telemetry_dispatcher = create_telemetry_dispatcher(telemetry);
     let include_raw_chunks = call_options.include_raw_chunks.unwrap_or(false);
@@ -2781,6 +2811,8 @@ where
             &collected_step.tool_calls,
             &step_tools,
         );
+
+        apply_stream_text_include(&mut collected_step.request, include, &step_prompt);
 
         let mut generate_step = collected_step.to_generate_text_step(
             call_id.clone(),
@@ -5027,6 +5059,29 @@ fn language_model_response_from_stream_metadata(
         model_id: metadata.model_id,
         headers: metadata.headers,
         body: None,
+    }
+}
+
+/// Applies payload retention settings to a streamed step's request metadata.
+///
+/// Mirrors `apply_generate_text_include`: request messages are only retained when
+/// `include.request_messages` is set, and the provider request body is stripped
+/// unless `include.request_body` is set. By default both are excluded.
+fn apply_stream_text_include(
+    request: &mut Option<LanguageModelRequest>,
+    include: GenerateTextInclude,
+    step_prompt: &LanguageModelPrompt,
+) {
+    if include.request_messages {
+        request
+            .get_or_insert_with(LanguageModelRequest::new)
+            .messages = Some(step_prompt.clone());
+    }
+
+    if !include.request_body {
+        if let Some(request) = request {
+            request.body = None;
+        }
     }
 }
 
@@ -12423,6 +12478,130 @@ mod tests {
             serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize"),
             ui_message_stream
         );
+    }
+
+    fn request_retention_model(body: JsonValue) -> MockLanguageModel {
+        MockLanguageModel::new().with_stream_result(
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ])
+            .with_request(LanguageModelRequest::new().with_body(body)),
+        )
+    }
+
+    /// Maps packages/ai stream-text.test.ts:5406
+    /// `result.request should exclude request body and request messages by default`
+    /// — without an `include` retention setting, the resolved `result.request`
+    /// carries neither the provider body nor the request messages.
+    #[test]
+    fn stream_text_result_request_excludes_body_and_messages_by_default() {
+        let model = request_retention_model(json!("test body"));
+
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("test-input")],
+        )));
+        result.consume_stream();
+
+        let request = result.request.expect("request metadata present");
+        assert_eq!(request.body, None);
+        assert_eq!(request.messages, None);
+    }
+
+    /// Maps packages/ai stream-text.test.ts:5436
+    /// `should include request body when retention.requestBody is true` — enabling
+    /// `include.request_body` retains the provider request body while messages stay
+    /// excluded.
+    #[test]
+    fn stream_text_result_request_includes_body_when_retention_request_body_true() {
+        let model = request_retention_model(json!("test body"));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_include(GenerateTextInclude::new().with_request_body(true)),
+        ));
+        result.consume_stream();
+
+        let request = result.request.expect("request metadata present");
+        assert_eq!(request.body, Some(json!("test body")));
+        assert_eq!(request.messages, None);
+    }
+
+    /// Maps packages/ai stream-text.test.ts:5530
+    /// `should include request messages when retention.requestMessages is true` —
+    /// enabling both retention flags keeps the body and records the step prompt as
+    /// the request messages, exposed on both `result.request` and the step request.
+    #[test]
+    fn stream_text_result_request_includes_messages_when_retention_request_messages_true() {
+        let model = request_retention_model(json!("test body"));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_include(
+                GenerateTextInclude::new()
+                    .with_request_body(true)
+                    .with_request_messages(true),
+            ),
+        ));
+        result.consume_stream();
+
+        let expected_messages = vec![user_message("test-input")];
+        let request = result.request.clone().expect("request metadata present");
+        assert_eq!(request.body, Some(json!("test body")));
+        assert_eq!(request.messages.as_ref(), Some(&expected_messages));
+
+        let step_request = result.steps[0]
+            .request
+            .as_ref()
+            .expect("step request metadata present");
+        assert_eq!(step_request.messages.as_ref(), Some(&expected_messages));
+    }
+
+    /// Maps packages/ai stream-text.test.ts:5564
+    /// `should resolve with messages from after prepareStep` — when `prepareStep`
+    /// replaces the step messages and `include.request_messages` is enabled, the
+    /// retained request messages reflect the prepared prompt, not the original input.
+    #[test]
+    fn stream_text_result_request_resolves_with_messages_from_after_prepare_step() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let prepared_messages = vec![user_message("prepared prompt")];
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_include(GenerateTextInclude::new().with_request_messages(true))
+                .with_prepare_step({
+                    let prepared_messages = prepared_messages.clone();
+                    move |_options| {
+                        let prepared_messages = prepared_messages.clone();
+                        async move { PrepareStepResult::new().with_messages(prepared_messages) }
+                    }
+                }),
+        ));
+        result.consume_stream();
+
+        let request = result.request.clone().expect("request metadata present");
+        assert_eq!(request.messages.as_ref(), Some(&prepared_messages));
+
+        let step_request = result.steps[0]
+            .request
+            .as_ref()
+            .expect("step request metadata present");
+        assert_eq!(step_request.messages.as_ref(), Some(&prepared_messages));
     }
 
     #[test]

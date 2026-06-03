@@ -490,7 +490,7 @@ pub use stream_text::{
     StreamTextTransform, StreamTextTransformFunction, StreamTextUiMessageStreamOptions,
     TextStreamFilePart, TextStreamFinishPart, TextStreamFinishStepPart, TextStreamPart,
     TextStreamReasoningDeltaPart, TextStreamReasoningFilePart, TextStreamStartPart,
-    TextStreamStartStepPart, TextStreamTextDeltaPart, smooth_stream, stream_text,
+    TextStreamStartStepPart, TextStreamTextDeltaPart, smooth_stream, stream_text, to_text_stream,
 };
 pub use subagents::{
     SUBAGENT_STEP_LIMIT, SubagentInheritedContext, SubagentProfile, SubagentRegistry,
