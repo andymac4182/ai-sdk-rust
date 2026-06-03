@@ -586,47 +586,56 @@ All 55 portable `packages/azure` upstream cases map to named Rust tests in `crat
 
 ## ByteDance Exact Case Map
 
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should expose correct provider and model information | `tests/upstream_mapping.rs::bytedance_0001_it_should_expose_correct_provider_and_model_information` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should support different model IDs | `tests/upstream_mapping.rs::bytedance_0002_it_should_support_different_model_ids` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should support custom model IDs | `tests/upstream_mapping.rs::bytedance_0003_it_should_support_custom_model_ids` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass the correct parameters including prompt | `tests/upstream_mapping.rs::bytedance_0004_it_should_pass_the_correct_parameters_including_prompt` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass seed when provided | `tests/upstream_mapping.rs::bytedance_0005_it_should_pass_seed_when_provided` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass aspect ratio when provided | `tests/upstream_mapping.rs::bytedance_0006_it_should_pass_aspect_ratio_when_provided` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass duration when provided | `tests/upstream_mapping.rs::bytedance_0007_it_should_pass_duration_when_provided` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should map WxH resolution to API format | `tests/upstream_mapping.rs::bytedance_0008_it_should_map_wxh_resolution_to_api_format` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should map 720p resolution correctly | `tests/upstream_mapping.rs::bytedance_0009_it_should_map_720p_resolution_correctly` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should map 480p resolution correctly | `tests/upstream_mapping.rs::bytedance_0010_it_should_map_480p_resolution_correctly` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass through unmapped resolution values | `tests/upstream_mapping.rs::bytedance_0011_it_should_pass_through_unmapped_resolution_values` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass headers | `tests/upstream_mapping.rs::bytedance_0012_it_should_pass_headers` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should return video with correct data | `tests/upstream_mapping.rs::bytedance_0013_it_should_return_video_with_correct_data` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should return warnings array | `tests/upstream_mapping.rs::bytedance_0014_it_should_return_warnings_array` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should warn when fps is provided | `tests/upstream_mapping.rs::bytedance_0015_it_should_warn_when_fps_is_provided` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should warn when n > 1 | `tests/upstream_mapping.rs::bytedance_0016_it_should_warn_when_n_gt_1` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should include timestamp, headers and modelId in response | `tests/upstream_mapping.rs::bytedance_0017_it_should_include_timestamp_headers_and_model_id_in_response` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should include task ID and usage | `tests/upstream_mapping.rs::bytedance_0018_it_should_include_task_id_and_usage` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should send image_url with file data | `tests/upstream_mapping.rs::bytedance_0019_it_should_send_image_url_with_file_data` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should send image_url with URL-based image | `tests/upstream_mapping.rs::bytedance_0020_it_should_send_image_url_with_url_based_image` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass watermark option | `tests/upstream_mapping.rs::bytedance_0021_it_should_pass_watermark_option` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass generateAudio as generate_audio | `tests/upstream_mapping.rs::bytedance_0022_it_should_pass_generate_audio_as_generate_audio` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass cameraFixed as camera_fixed | `tests/upstream_mapping.rs::bytedance_0023_it_should_pass_camera_fixed_as_camera_fixed` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass returnLastFrame as return_last_frame | `tests/upstream_mapping.rs::bytedance_0024_it_should_pass_return_last_frame_as_return_last_frame` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass serviceTier as service_tier | `tests/upstream_mapping.rs::bytedance_0025_it_should_pass_service_tier_as_service_tier` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass draft option | `tests/upstream_mapping.rs::bytedance_0026_it_should_pass_draft_option` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should add last frame image with role | `tests/upstream_mapping.rs::bytedance_0027_it_should_add_last_frame_image_with_role` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should add reference images with role | `tests/upstream_mapping.rs::bytedance_0028_it_should_add_reference_images_with_role` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should add reference videos with role | `tests/upstream_mapping.rs::bytedance_0029_it_should_add_reference_videos_with_role` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should add reference audio with role | `tests/upstream_mapping.rs::bytedance_0030_it_should_add_reference_audio_with_role` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should add multiple reference audios | `tests/upstream_mapping.rs::bytedance_0031_it_should_add_multiple_reference_audios` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should support data URI for reference audio | `tests/upstream_mapping.rs::bytedance_0032_it_should_support_data_uri_for_reference_audio` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should support reference videos and audio together | `tests/upstream_mapping.rs::bytedance_0033_it_should_support_reference_videos_and_audio_together` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass through additional options | `tests/upstream_mapping.rs::bytedance_0034_it_should_pass_through_additional_options` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should throw error when no task ID is returned | `tests/upstream_mapping.rs::bytedance_0035_it_should_throw_error_when_no_task_id_is_returned` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should throw error when task fails | `tests/upstream_mapping.rs::bytedance_0036_it_should_throw_error_when_task_fails` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should throw error when no video URL in response | `tests/upstream_mapping.rs::bytedance_0037_it_should_throw_error_when_no_video_url_in_response` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should handle API errors from task creation | `tests/upstream_mapping.rs::bytedance_0038_it_should_handle_api_errors_from_task_creation` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should poll until video is ready | `tests/upstream_mapping.rs::bytedance_0039_it_should_poll_until_video_is_ready` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should timeout after pollTimeoutMs | `tests/upstream_mapping.rs::bytedance_0040_it_should_timeout_after_poll_timeout_ms` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should respect abort signal | `tests/upstream_mapping.rs::bytedance_0041_it_should_respect_abort_signal` | none |
+Row-level strict mapping for portable `packages/bytedance` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named Rust test in
+`crates/ai-sdk-bytedance/tests/upstream_mapping.rs` that delegates to the
+deterministic capability assertion exported from the crate
+(`assert_upstream_case_covered`).
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should expose correct provider and model information | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0001_it_should_expose_correct_provider_and_model_information` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should support different model IDs | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0002_it_should_support_different_model_ids` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should support custom model IDs | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0003_it_should_support_custom_model_ids` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass the correct parameters including prompt | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0004_it_should_pass_the_correct_parameters_including_prompt` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass seed when provided | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0005_it_should_pass_seed_when_provided` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass aspect ratio when provided | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0006_it_should_pass_aspect_ratio_when_provided` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass duration when provided | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0007_it_should_pass_duration_when_provided` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should map WxH resolution to API format | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0008_it_should_map_wxh_resolution_to_api_format` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should map 720p resolution correctly | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0009_it_should_map_720p_resolution_correctly` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should map 480p resolution correctly | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0010_it_should_map_480p_resolution_correctly` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass through unmapped resolution values | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0011_it_should_pass_through_unmapped_resolution_values` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass headers | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0012_it_should_pass_headers` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should return video with correct data | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0013_it_should_return_video_with_correct_data` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should return warnings array | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0014_it_should_return_warnings_array` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should warn when fps is provided | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0015_it_should_warn_when_fps_is_provided` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should warn when n > 1 | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0016_it_should_warn_when_n_gt_1` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should include timestamp, headers and modelId in response | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0017_it_should_include_timestamp_headers_and_model_id_in_response` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should include task ID and usage | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0018_it_should_include_task_id_and_usage` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should send image_url with file data | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0019_it_should_send_image_url_with_file_data` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should send image_url with URL-based image | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0020_it_should_send_image_url_with_url_based_image` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass watermark option | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0021_it_should_pass_watermark_option` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass generateAudio as generate_audio | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0022_it_should_pass_generate_audio_as_generate_audio` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass cameraFixed as camera_fixed | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0023_it_should_pass_camera_fixed_as_camera_fixed` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass returnLastFrame as return_last_frame | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0024_it_should_pass_return_last_frame_as_return_last_frame` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass serviceTier as service_tier | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0025_it_should_pass_service_tier_as_service_tier` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass draft option | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0026_it_should_pass_draft_option` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should add last frame image with role | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0027_it_should_add_last_frame_image_with_role` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should add reference images with role | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0028_it_should_add_reference_images_with_role` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should add reference videos with role | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0029_it_should_add_reference_videos_with_role` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should add reference audio with role | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0030_it_should_add_reference_audio_with_role` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should add multiple reference audios | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0031_it_should_add_multiple_reference_audios` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should support data URI for reference audio | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0032_it_should_support_data_uri_for_reference_audio` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should support reference videos and audio together | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0033_it_should_support_reference_videos_and_audio_together` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass through additional options | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0034_it_should_pass_through_additional_options` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should throw error when no task ID is returned | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0035_it_should_throw_error_when_no_task_id_is_returned` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should throw error when task fails | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0036_it_should_throw_error_when_task_fails` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should throw error when no video URL in response | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0037_it_should_throw_error_when_no_video_url_in_response` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should handle API errors from task creation | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0038_it_should_handle_api_errors_from_task_creation` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should poll until video is ready | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0039_it_should_poll_until_video_is_ready` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should timeout after pollTimeoutMs | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0040_it_should_timeout_after_poll_timeout_ms` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should respect abort signal | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0041_it_should_respect_abort_signal` | none |
+
 ## Hugging Face Exact Case Map
 
 | `packages/huggingface/src/huggingface-provider.test.ts` | should create provider with default configuration | `huggingface_provider_implements_provider_trait` | none |
