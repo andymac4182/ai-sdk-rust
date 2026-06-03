@@ -35,7 +35,7 @@ the strict inventory generator.
 | `packages/deepseek` | `crates/ai-sdk-deepseek` | 38 |
 | `packages/elevenlabs` | `crates/ai-sdk-elevenlabs` | 15 |
 | `packages/fal` | `crates/ai-sdk-fal` | 12 |
-| `packages/gladia` | `crates/ai-sdk-gladia` | 7 |
+| `packages/gladia` | `crates/ai-sdk-gladia` | 0 |
 | `packages/huggingface` | `src/huggingface.rs` | 37 |
 | `packages/hume` | `crates/ai-sdk-hume` | 9 |
 | `packages/klingai` | `crates/ai-sdk-klingai` | 0 |
@@ -920,3 +920,23 @@ real Luma image model request mapping, response parsing, and provider wiring.
 | `packages/luma/src/luma-image-model.test.ts` | should parse response with multiple reference types | `luma_image_model_parses_response_with_modify_image_and_multiple_reference_types` | none |
 | `packages/luma/src/luma-provider.test.ts` | should construct an image model with default configuration | `luma_provider_settings_serde_accepts_upstream_shape` | none |
 | `packages/luma/src/luma-provider.test.ts` | should respect custom configuration options | `luma_provider_creates_image_model_with_headers_body_and_metadata` | none |
+
+## Gladia Exact Case Map
+
+Row-level strict mapping for portable `packages/gladia` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named Rust test in
+`crates/ai-sdk-gladia/tests/upstream_mapping.rs` that exercises the same behavior
+against the real Gladia transcription model: the upload/initiate/poll request
+chain, error-envelope decoding, response text extraction, and response metadata
+and header propagation. Every mapped test fails if the ported behavior diverges
+from upstream.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/gladia/src/gladia-error.test.ts` | should parse Gladia resource exhausted error | `gladia_0001_it_should_parse_gladia_resource_exhausted_error` | none |
+| `packages/gladia/src/gladia-transcription-model.test.ts` | should pass audio_url to pre-recorded endpoint | `gladia_0002_it_should_pass_audio_url_to_pre_recorded_endpoint` | none |
+| `packages/gladia/src/gladia-transcription-model.test.ts` | should pass headers | `gladia_0003_it_should_pass_headers` | none |
+| `packages/gladia/src/gladia-transcription-model.test.ts` | should extract the transcription text | `gladia_0004_it_should_extract_the_transcription_text` | none |
+| `packages/gladia/src/gladia-transcription-model.test.ts` | should generate full response | `gladia_0005_it_should_generate_full_response` | none |
+| `packages/gladia/src/gladia-transcription-model.test.ts` | should include response headers | `gladia_0006_it_should_include_response_headers` | none |
+| `packages/gladia/src/gladia-transcription-model.test.ts` | should include timestamp and modelId | `gladia_0007_it_should_include_timestamp_and_model_id` | none |
