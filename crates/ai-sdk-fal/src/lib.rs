@@ -12,12 +12,16 @@ use ai_sdk_rust::{
     LoadApiKeyError, ModelType, NoSuchModelError, OpenAICompatibleChatLanguageModel,
     OpenAICompatibleEmbeddingModel, PostJsonToApiOptions, Provider, ProviderAbortSignal,
     ProviderApiRequest, ProviderApiRequestBody, ProviderApiRequestMethod, ProviderApiResponse,
-    ProviderApiResponseHandlerError, ProviderMetadata, ProviderWithVideoModel, RuntimeEnvironment,
-    VideoModel, VideoModelCallOptions, VideoModelResponse, VideoModelResult, VideoModelVideoData,
-    Warning, combine_headers, convert_image_model_file_to_data_uri, create_binary_response_handler,
-    create_json_error_response_handler, create_json_response_handler, delay_with_options,
-    get_from_api, parse_provider_options, post_json_to_api, with_user_agent_suffix,
-    without_trailing_slash,
+    ProviderApiResponseHandlerError, ProviderMetadata, ProviderWithSpeechModel,
+    ProviderWithTranscriptionModel, ProviderWithVideoModel, RuntimeEnvironment, SpeechModel,
+    SpeechModelCallOptions, SpeechModelRequest, SpeechModelResponse, SpeechModelResult,
+    TranscriptionModel, TranscriptionModelCallOptions, TranscriptionModelResponse,
+    TranscriptionModelResult, TranscriptionModelSegment, VideoModel, VideoModelCallOptions,
+    VideoModelResponse, VideoModelResult, VideoModelVideoData, Warning, combine_headers,
+    convert_image_model_file_to_data_uri, convert_to_base64, create_binary_response_handler,
+    create_json_error_response_handler, create_json_response_handler,
+    create_status_code_error_response_handler, delay_with_options, get_from_api,
+    parse_provider_options, post_json_to_api, with_user_agent_suffix, without_trailing_slash,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -107,6 +111,24 @@ pub struct FalVideoModel {
     current_date: FalDateProvider,
 }
 
+/// fal speech (text-to-speech) model.
+#[derive(Clone)]
+pub struct FalSpeechModel {
+    model_id: String,
+    settings: FalProviderSettings,
+    transport: FalTransport,
+    current_date: FalDateProvider,
+}
+
+/// fal transcription (speech-to-text) model.
+#[derive(Clone)]
+pub struct FalTranscriptionModel {
+    model_id: String,
+    settings: FalProviderSettings,
+    transport: FalTransport,
+    current_date: FalDateProvider,
+}
+
 /// Future returned by an injected fal HTTP transport.
 pub type FalTransportFuture =
     Pin<Box<dyn Future<Output = Result<ProviderApiResponse, FetchErrorInfo>> + Send>>;
@@ -118,6 +140,9 @@ type FalDateProvider = Arc<dyn Fn() -> OffsetDateTime + Send + Sync>;
 type FalImageGenerateFuture<'a> = Pin<Box<dyn Future<Output = ImageModelResult> + Send + 'a>>;
 type FalVideoMaxVideosFuture<'a> = Ready<Option<usize>>;
 type FalVideoGenerateFuture<'a> = Pin<Box<dyn Future<Output = VideoModelResult> + Send + 'a>>;
+type FalSpeechGenerateFuture<'a> = Pin<Box<dyn Future<Output = SpeechModelResult> + Send + 'a>>;
+type FalTranscriptionGenerateFuture<'a> =
+    Pin<Box<dyn Future<Output = TranscriptionModelResult> + Send + 'a>>;
 
 impl FalProvider {
     /// Creates a fal provider with default settings.
@@ -228,6 +253,26 @@ impl FalProvider {
         model_id: impl Into<String>,
     ) -> Result<OpenAICompatibleEmbeddingModel, NoSuchModelError> {
         self.embedding_model(model_id)
+    }
+
+    /// Creates a speech (text-to-speech) model.
+    pub fn speech(&self, model_id: impl Into<String>) -> FalSpeechModel {
+        FalSpeechModel::new(
+            model_id,
+            self.settings.clone(),
+            Arc::clone(&self.transport),
+            Arc::clone(&self.current_date),
+        )
+    }
+
+    /// Creates a transcription (speech-to-text) model.
+    pub fn transcription(&self, model_id: impl Into<String>) -> FalTranscriptionModel {
+        FalTranscriptionModel::new(
+            model_id,
+            self.settings.clone(),
+            Arc::clone(&self.transport),
+            Arc::clone(&self.current_date),
+        )
     }
 }
 
@@ -741,6 +786,407 @@ impl VideoModel for FalVideoModel {
     }
 }
 
+impl FalSpeechModel {
+    fn new(
+        model_id: impl Into<String>,
+        settings: FalProviderSettings,
+        transport: FalTransport,
+        current_date: FalDateProvider,
+    ) -> Self {
+        Self {
+            model_id: model_id.into(),
+            settings,
+            transport,
+            current_date,
+        }
+    }
+
+    /// Returns the provider-specific model id.
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    /// Returns the provider id for this model.
+    pub fn provider(&self) -> &str {
+        "fal.speech"
+    }
+
+    /// Returns a copy of this model that uses the supplied HTTP transport.
+    pub fn with_transport(mut self, transport: FalTransport) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    fn speech_url(&self) -> String {
+        format!("{DEFAULT_FAL_BASE_URL}/{}", self.model_id)
+    }
+
+    fn request_headers(
+        &self,
+        call_headers: Option<&Headers>,
+    ) -> Result<BTreeMap<String, Option<String>>, LoadApiKeyError> {
+        Ok(combine_headers([
+            Some(fal_provider_header_entries(&self.settings)?),
+            optional_headers(call_headers),
+        ]))
+    }
+
+    async fn do_generate_result(&self, options: SpeechModelCallOptions) -> SpeechModelResult {
+        let timestamp = (self.current_date)();
+        let abort_signal = options.abort_signal.clone();
+        let (request_body, warnings) = match fal_speech_request_body(&options) {
+            Ok(args) => args,
+            Err(error) => {
+                return fal_speech_result_from_error(&self.model_id, error, None, Vec::new());
+            }
+        };
+        let request_headers = match self.request_headers(options.headers.as_ref()) {
+            Ok(headers) => headers,
+            Err(error) => {
+                return fal_speech_result_from_error(
+                    &self.model_id,
+                    error.to_string(),
+                    None,
+                    warnings,
+                );
+            }
+        };
+        let request_body_text = request_body.to_string();
+        let transport = Arc::clone(&self.transport);
+        let response = match post_json_to_api(
+            PostJsonToApiOptions::new(self.speech_url(), request_body)
+                .with_headers(request_headers)
+                .with_environment(RuntimeEnvironment::unknown())
+                .with_optional_abort_signal(abort_signal.clone()),
+            move |request| (transport)(request),
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    fal_speech_response,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_json_error_response_handler(
+                    response.json_error_response_handler_options(request),
+                    fal_error_response,
+                    fal_error_message,
+                    |_, _| None,
+                ))
+            },
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let message = fal_handled_error_parts(error).0;
+                return fal_speech_result_from_error(&self.model_id, message, None, warnings);
+            }
+        };
+
+        let audio_url = response.value.audio.url;
+        let transport = Arc::clone(&self.transport);
+        let audio = match get_from_api(
+            GetFromApiOptions::new(audio_url)
+                .with_environment(RuntimeEnvironment::unknown())
+                .with_optional_abort_signal(abort_signal.clone()),
+            move |request| (transport)(request),
+            |request, response| {
+                create_binary_response_handler(response.binary_response_handler_options(request))
+                    .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_status_code_error_response_handler(
+                    response.status_code_error_response_handler_options(request),
+                ))
+            },
+        )
+        .await
+        {
+            Ok(audio) => audio.value,
+            Err(error) => {
+                let message = fal_handled_error_parts(error).0;
+                return fal_speech_result_from_error(&self.model_id, message, None, warnings);
+            }
+        };
+
+        let mut result = SpeechModelResult::new(
+            ai_sdk_rust::FileDataContent::Bytes(audio),
+            fal_speech_response_metadata(&self.model_id, response.response_headers, timestamp),
+        )
+        .with_request(SpeechModelRequest::new().with_body(JsonValue::String(request_body_text)));
+        result.warnings = warnings;
+        result
+    }
+}
+
+impl SpeechModel for FalSpeechModel {
+    type GenerateFuture<'a>
+        = FalSpeechGenerateFuture<'a>
+    where
+        Self: 'a;
+
+    fn provider(&self) -> &str {
+        FalSpeechModel::provider(self)
+    }
+
+    fn model_id(&self) -> &str {
+        FalSpeechModel::model_id(self)
+    }
+
+    fn do_generate(&self, options: SpeechModelCallOptions) -> Self::GenerateFuture<'_> {
+        Box::pin(self.do_generate_result(options))
+    }
+}
+
+impl FalTranscriptionModel {
+    fn new(
+        model_id: impl Into<String>,
+        settings: FalProviderSettings,
+        transport: FalTransport,
+        current_date: FalDateProvider,
+    ) -> Self {
+        Self {
+            model_id: model_id.into(),
+            settings,
+            transport,
+            current_date,
+        }
+    }
+
+    /// Returns the provider-specific model id.
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    /// Returns the provider id for this model.
+    pub fn provider(&self) -> &str {
+        "fal.transcription"
+    }
+
+    /// Returns a copy of this model that uses the supplied HTTP transport.
+    pub fn with_transport(mut self, transport: FalTransport) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    fn queue_url(&self) -> String {
+        format!("https://queue.fal.run/fal-ai/{}", self.model_id)
+    }
+
+    fn request_url(&self, request_id: &str) -> String {
+        format!(
+            "https://queue.fal.run/fal-ai/{}/requests/{request_id}",
+            self.model_id
+        )
+    }
+
+    fn request_headers(
+        &self,
+        call_headers: Option<&Headers>,
+    ) -> Result<BTreeMap<String, Option<String>>, LoadApiKeyError> {
+        Ok(combine_headers([
+            Some(fal_provider_header_entries(&self.settings)?),
+            optional_headers(call_headers),
+        ]))
+    }
+
+    async fn do_generate_result(
+        &self,
+        options: TranscriptionModelCallOptions,
+    ) -> TranscriptionModelResult {
+        let timestamp = (self.current_date)();
+        let abort_signal = options.abort_signal.clone();
+        let warnings = Vec::new();
+        let body = match fal_transcription_request_body(&options) {
+            Ok(body) => body,
+            Err(error) => {
+                return fal_transcription_result_from_error(
+                    &self.model_id,
+                    error,
+                    None,
+                    warnings,
+                    timestamp,
+                );
+            }
+        };
+        let request_headers = match self.request_headers(options.headers.as_ref()) {
+            Ok(headers) => headers,
+            Err(error) => {
+                return fal_transcription_result_from_error(
+                    &self.model_id,
+                    error.to_string(),
+                    None,
+                    warnings,
+                    timestamp,
+                );
+            }
+        };
+
+        let transport = Arc::clone(&self.transport);
+        let queue_response = match post_json_to_api(
+            PostJsonToApiOptions::new(self.queue_url(), body)
+                .with_headers(request_headers.clone())
+                .with_environment(RuntimeEnvironment::unknown())
+                .with_optional_abort_signal(abort_signal.clone()),
+            move |request| (transport)(request),
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    fal_job_response,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_json_error_response_handler(
+                    response.json_error_response_handler_options(request),
+                    fal_error_response,
+                    fal_error_message,
+                    |_, _| None,
+                ))
+            },
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let (message, headers) = fal_handled_error_parts(error);
+                return fal_transcription_result_from_error(
+                    &self.model_id,
+                    message,
+                    headers,
+                    warnings,
+                    timestamp,
+                );
+            }
+        };
+
+        let request_id = queue_response.value.request_id.unwrap_or_default();
+        let request_url = self.request_url(&request_id);
+
+        let final_response = match self
+            .poll_transcription(request_url, request_headers, abort_signal)
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                return fal_transcription_result_from_error(
+                    &self.model_id,
+                    error,
+                    queue_response.response_headers,
+                    warnings,
+                    timestamp,
+                );
+            }
+        };
+
+        fal_transcription_result_from_response(
+            &self.model_id,
+            final_response.value,
+            final_response.response_headers,
+            warnings,
+            timestamp,
+        )
+    }
+
+    async fn poll_transcription(
+        &self,
+        request_url: String,
+        headers: BTreeMap<String, Option<String>>,
+        abort_signal: Option<ProviderAbortSignal>,
+    ) -> Result<ai_sdk_rust::ResponseHandlerResult<FalTranscriptionResponse>, String> {
+        let start = Instant::now();
+        let timeout_millis: u64 = 60_000;
+        let poll_interval_millis: u64 = 1_000;
+
+        loop {
+            let transport = Arc::clone(&self.transport);
+            match get_from_api(
+                GetFromApiOptions::new(request_url.clone())
+                    .with_headers(headers.clone())
+                    .with_environment(RuntimeEnvironment::unknown())
+                    .with_optional_abort_signal(abort_signal.clone()),
+                move |request| (transport)(request),
+                |request, response| {
+                    create_json_response_handler(
+                        response.json_response_handler_options(request),
+                        fal_transcription_response,
+                    )
+                    .map_err(ProviderApiResponseHandlerError::from)
+                },
+                |request, response| {
+                    Ok(create_json_error_response_handler(
+                        response.json_error_response_handler_options(request),
+                        fal_transcription_detail_response,
+                        fal_transcription_detail_message,
+                        |_, _| None,
+                    ))
+                },
+            )
+            .await
+            {
+                Ok(response) => return Ok(response),
+                Err(error) => {
+                    let message = fal_handled_error_parts(error).0;
+                    if message != "Request is still in progress" {
+                        return Err(message);
+                    }
+                }
+            }
+
+            if start.elapsed().as_millis() > u128::from(timeout_millis) {
+                return Err("Transcription request timed out after 60 seconds".to_string());
+            }
+
+            let mut delay_options = DelayOptions::new();
+            if let Some(abort_signal) = abort_signal.clone() {
+                delay_options = delay_options.with_abort_signal(abort_signal);
+            }
+            delay_with_options(Some(poll_interval_millis as i64), delay_options)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+    }
+}
+
+impl TranscriptionModel for FalTranscriptionModel {
+    type GenerateFuture<'a>
+        = FalTranscriptionGenerateFuture<'a>
+    where
+        Self: 'a;
+
+    fn provider(&self) -> &str {
+        FalTranscriptionModel::provider(self)
+    }
+
+    fn model_id(&self) -> &str {
+        FalTranscriptionModel::model_id(self)
+    }
+
+    fn do_generate(&self, options: TranscriptionModelCallOptions) -> Self::GenerateFuture<'_> {
+        Box::pin(self.do_generate_result(options))
+    }
+}
+
+impl ProviderWithSpeechModel for FalProvider {
+    type SpeechModel = FalSpeechModel;
+
+    fn speech_model(&self, model_id: &str) -> Result<Self::SpeechModel, NoSuchModelError> {
+        Ok(FalProvider::speech(self, model_id))
+    }
+}
+
+impl ProviderWithTranscriptionModel for FalProvider {
+    type TranscriptionModel = FalTranscriptionModel;
+
+    fn transcription_model(
+        &self,
+        model_id: &str,
+    ) -> Result<Self::TranscriptionModel, NoSuchModelError> {
+        Ok(FalProvider::transcription(self, model_id))
+    }
+}
+
 /// Creates a fal provider with explicit settings.
 pub fn create_fal(settings: FalProviderSettings) -> FalProvider {
     FalProvider::from_settings(settings)
@@ -904,6 +1350,42 @@ struct FalErrorBody {
 struct FalPollOverrides {
     poll_interval_millis: Option<u64>,
     poll_timeout_millis: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct FalSpeechResponse {
+    audio: FalSpeechAudio,
+    #[serde(default)]
+    duration_ms: Option<f64>,
+    #[serde(default)]
+    request_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct FalSpeechAudio {
+    url: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct FalTranscriptionResponse {
+    text: String,
+    #[serde(default)]
+    chunks: Option<Vec<FalTranscriptionChunk>>,
+    #[serde(default)]
+    inferred_languages: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct FalTranscriptionChunk {
+    text: String,
+    #[serde(default)]
+    timestamp: Option<Vec<f64>>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct FalTranscriptionDetail {
+    #[serde(default)]
+    detail: Option<JsonValue>,
 }
 
 fn fal_image_request_body(
@@ -1314,6 +1796,268 @@ fn fal_error_response(value: &JsonValue) -> Result<FalErrorResponse, serde_json:
     serde_json::from_value(value.clone())
 }
 
+fn fal_speech_response(value: &JsonValue) -> Result<FalSpeechResponse, serde_json::Error> {
+    serde_json::from_value(value.clone())
+}
+
+fn fal_transcription_response(
+    value: &JsonValue,
+) -> Result<FalTranscriptionResponse, serde_json::Error> {
+    serde_json::from_value(value.clone())
+}
+
+fn fal_transcription_detail_response(
+    value: &JsonValue,
+) -> Result<FalTranscriptionDetail, serde_json::Error> {
+    serde_json::from_value(value.clone())
+}
+
+fn fal_transcription_detail_message(detail: &FalTranscriptionDetail) -> String {
+    match detail.detail.as_ref().and_then(JsonValue::as_str) {
+        // Upstream treats this status update as a "still in progress" signal and
+        // keeps polling rather than surfacing it as a real error.
+        Some("Request is still in progress") => "Request is still in progress".to_string(),
+        Some(other) => other.to_string(),
+        None => "Unknown fal transcription error".to_string(),
+    }
+}
+
+/// Builds the fal speech request body and warnings, mirroring the upstream
+/// `FalSpeechModel.getArgs` logic.
+fn fal_speech_request_body(
+    options: &SpeechModelCallOptions,
+) -> Result<(JsonValue, Vec<Warning>), String> {
+    let mut warnings = Vec::new();
+    let fal_options = parse_provider_options("fal", options.provider_options.as_ref(), |value| {
+        Ok::<JsonValue, serde_json::Error>(value.clone())
+    })
+    .map_err(|error| error.to_string())?;
+
+    let mut body = JsonObject::new();
+    body.insert("text".to_string(), JsonValue::String(options.text.clone()));
+    let output_format = if options.output_format.as_deref() == Some("hex") {
+        "hex"
+    } else {
+        "url"
+    };
+    body.insert(
+        "output_format".to_string(),
+        JsonValue::String(output_format.to_string()),
+    );
+    if let Some(voice) = options.voice.as_ref() {
+        body.insert("voice".to_string(), JsonValue::String(voice.clone()));
+    }
+    if let Some(speed) = options.speed {
+        body.insert("speed".to_string(), JsonValue::from(speed));
+    }
+    if let Some(JsonValue::Object(fal_options)) = fal_options {
+        for (key, value) in fal_options {
+            body.insert(key, value);
+        }
+    }
+
+    if options.language.is_some() {
+        warnings.push(Warning::Unsupported {
+            feature: "language".to_string(),
+            details: Some(
+                "fal speech models don't support 'language' directly; consider providerOptions.fal.language_boost"
+                    .to_string(),
+            ),
+        });
+    }
+
+    if let Some(output_format) = options.output_format.as_deref() {
+        if output_format != "url" && output_format != "hex" {
+            warnings.push(Warning::Unsupported {
+                feature: "outputFormat".to_string(),
+                details: Some(format!(
+                    "Unsupported outputFormat: {output_format}. Using 'url' instead."
+                )),
+            });
+        }
+    }
+
+    Ok((JsonValue::Object(body), warnings))
+}
+
+fn fal_speech_response_metadata(
+    model_id: &str,
+    headers: Option<Headers>,
+    timestamp: OffsetDateTime,
+) -> SpeechModelResponse {
+    let mut response = SpeechModelResponse::new(timestamp, model_id);
+    if let Some(headers) = headers {
+        for (name, value) in headers {
+            response = response.with_header(name, value);
+        }
+    }
+    response
+}
+
+fn fal_speech_result_from_error(
+    model_id: &str,
+    message: String,
+    headers: Option<Headers>,
+    warnings: Vec<Warning>,
+) -> SpeechModelResult {
+    let timestamp = OffsetDateTime::from_unix_timestamp(0).expect("unix epoch is valid");
+    let mut result = SpeechModelResult::new(
+        ai_sdk_rust::FileDataContent::Bytes(Vec::new()),
+        fal_speech_response_metadata(model_id, headers, timestamp),
+    );
+    result.warnings = warnings;
+    result = result.with_warning(Warning::Other { message });
+    result
+}
+
+/// Builds the fal transcription request body (without `audio_url`), mirroring
+/// the upstream `FalTranscriptionModel.getArgs` defaults plus provider options.
+fn fal_transcription_request_body(
+    options: &TranscriptionModelCallOptions,
+) -> Result<JsonValue, String> {
+    let fal_options = parse_provider_options("fal", options.provider_options.as_ref(), |value| {
+        Ok::<JsonValue, serde_json::Error>(value.clone())
+    })
+    .map_err(|error| error.to_string())?;
+
+    let mut body = JsonObject::new();
+    body.insert(
+        "task".to_string(),
+        JsonValue::String("transcribe".to_string()),
+    );
+    body.insert("diarize".to_string(), JsonValue::Bool(true));
+    body.insert(
+        "chunk_level".to_string(),
+        JsonValue::String("word".to_string()),
+    );
+
+    if let Some(JsonValue::Object(fal_options)) = fal_options {
+        if let Some(language) = fal_options.get("language") {
+            body.insert("language".to_string(), language.clone());
+        }
+        if let Some(version) = fal_options.get("version") {
+            body.insert("version".to_string(), version.clone());
+        }
+        if let Some(batch_size) = fal_options.get("batchSize") {
+            body.insert("batch_size".to_string(), batch_size.clone());
+        }
+        if let Some(num_speakers) = fal_options.get("numSpeakers") {
+            body.insert("num_speakers".to_string(), num_speakers.clone());
+        }
+        if let Some(JsonValue::Bool(diarize)) = fal_options.get("diarize") {
+            body.insert("diarize".to_string(), JsonValue::Bool(*diarize));
+        }
+        if let Some(JsonValue::String(chunk_level)) = fal_options.get("chunkLevel") {
+            body.insert(
+                "chunk_level".to_string(),
+                JsonValue::String(chunk_level.clone()),
+            );
+        }
+    }
+
+    let base64_audio = convert_to_base64(&options.audio);
+    let audio_url = format!("data:{};base64,{base64_audio}", options.media_type);
+    body.insert("audio_url".to_string(), JsonValue::String(audio_url));
+
+    Ok(JsonValue::Object(body))
+}
+
+fn fal_transcription_response_metadata(
+    model_id: &str,
+    headers: Option<Headers>,
+    timestamp: OffsetDateTime,
+) -> TranscriptionModelResponse {
+    let mut response = TranscriptionModelResponse::new(timestamp, model_id);
+    if let Some(headers) = headers {
+        for (name, value) in headers {
+            response = response.with_header(name, value);
+        }
+    }
+    response
+}
+
+fn fal_transcription_segments(
+    response: &FalTranscriptionResponse,
+) -> Vec<TranscriptionModelSegment> {
+    response
+        .chunks
+        .as_ref()
+        .map(|chunks| {
+            chunks
+                .iter()
+                .map(|chunk| {
+                    let start = chunk
+                        .timestamp
+                        .as_ref()
+                        .and_then(|values| values.first().copied())
+                        .unwrap_or(0.0);
+                    let end = chunk
+                        .timestamp
+                        .as_ref()
+                        .and_then(|values| values.get(1).copied())
+                        .unwrap_or(0.0);
+                    TranscriptionModelSegment::new(chunk.text.clone(), start, end)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn fal_transcription_duration(response: &FalTranscriptionResponse) -> Option<f64> {
+    response
+        .chunks
+        .as_ref()
+        .and_then(|chunks| chunks.last())
+        .and_then(|chunk| chunk.timestamp.as_ref())
+        .and_then(|values| values.get(1).copied())
+}
+
+fn fal_transcription_result_from_response(
+    model_id: &str,
+    response: FalTranscriptionResponse,
+    headers: Option<Headers>,
+    warnings: Vec<Warning>,
+    timestamp: OffsetDateTime,
+) -> TranscriptionModelResult {
+    let segments = fal_transcription_segments(&response);
+    let language = response
+        .inferred_languages
+        .as_ref()
+        .and_then(|languages| languages.first().cloned());
+    let duration = fal_transcription_duration(&response);
+
+    let mut result = TranscriptionModelResult::new(
+        response.text,
+        segments,
+        fal_transcription_response_metadata(model_id, headers, timestamp),
+    );
+    if let Some(language) = language {
+        result = result.with_language(language);
+    }
+    if let Some(duration) = duration {
+        result = result.with_duration_in_seconds(duration);
+    }
+    result.warnings = warnings;
+    result
+}
+
+fn fal_transcription_result_from_error(
+    model_id: &str,
+    message: String,
+    headers: Option<Headers>,
+    warnings: Vec<Warning>,
+    timestamp: OffsetDateTime,
+) -> TranscriptionModelResult {
+    let mut result = TranscriptionModelResult::new(
+        String::new(),
+        Vec::new(),
+        fal_transcription_response_metadata(model_id, headers, timestamp),
+    );
+    result.warnings = warnings;
+    result = result.with_warning(Warning::Other { message });
+    result
+}
+
 fn fal_error_message(error: &FalErrorResponse) -> String {
     if let Some(body) = error.error.as_ref() {
         return body.message.clone();
@@ -1649,12 +2393,13 @@ mod tests {
     use super::{
         FalProviderSettings, FalTransport, FalTransportFuture, create_fal, fal_error_message,
         fal_error_response, fal_image_metadata, fal_image_request_body, fal_image_response,
-        fal_video_request_body,
+        fal_speech_request_body, fal_transcription_request_body, fal_video_request_body,
     };
     use ai_sdk_rust::{
         FileDataContent, ImageModel, ImageModelCallOptions, ImageModelFile, ModelType, Provider,
         ProviderAbortController, ProviderApiRequest, ProviderApiRequestBody,
         ProviderApiRequestMethod, ProviderApiResponse, ProviderOptions, SpecificationVersion,
+        SpeechModel, SpeechModelCallOptions, TranscriptionModel, TranscriptionModelCallOptions,
         VideoModel, VideoModelCallOptions, Warning,
     };
     use serde_json::json;
@@ -2675,5 +3420,323 @@ mod tests {
                 .and_then(|metadata| metadata.extra.get("errorMessage")),
             Some(&json!("body.prompt: invalid"))
         );
+    }
+
+    fn speech_transport(
+        requests: Arc<Mutex<Vec<ProviderApiRequest>>>,
+        json_headers: Vec<(String, String)>,
+    ) -> FalTransport {
+        Arc::new(move |request| -> FalTransportFuture {
+            requests
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .push(request.clone());
+            let response = match request.method {
+                ProviderApiRequestMethod::Post => {
+                    let mut response = json_response(json!({
+                        "audio": { "url": "https://fal.media/files/test.mp3" },
+                        "duration_ms": 1234
+                    }));
+                    if !json_headers.is_empty() {
+                        response = response.with_headers(json_headers.iter().cloned().collect());
+                    }
+                    response
+                }
+                ProviderApiRequestMethod::Get => {
+                    ProviderApiResponse::bytes(200, "OK", vec![0_u8; 100])
+                }
+            };
+            Box::pin(ready(Ok(response)))
+        })
+    }
+
+    #[test]
+    fn fal_speech_model_passes_text_and_default_output_format() {
+        let (body, warnings) =
+            fal_speech_request_body(&SpeechModelCallOptions::new("Hello from the AI SDK!"))
+                .expect("speech request body maps");
+
+        assert_eq!(body["text"], json!("Hello from the AI SDK!"));
+        assert_eq!(body["output_format"], json!("url"));
+        assert!(warnings.is_empty());
+
+        // hex output format is preserved, anything else is coerced to url.
+        let (hex_body, _) =
+            fal_speech_request_body(&SpeechModelCallOptions::new("hi").with_output_format("hex"))
+                .expect("hex request body maps");
+        assert_eq!(hex_body["output_format"], json!("hex"));
+    }
+
+    #[test]
+    fn fal_speech_model_passes_headers() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let transport = speech_transport(Arc::clone(&requests), Vec::new());
+        let provider = create_fal(
+            FalProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_header("Custom-Provider-Header", "provider-header-value"),
+        )
+        .with_transport(transport);
+
+        let _ = poll_ready(
+            provider.speech("fal-ai/minimax/speech-02-hd").do_generate(
+                SpeechModelCallOptions::new("Hello from the AI SDK!")
+                    .with_header("Custom-Request-Header", "request-header-value"),
+            ),
+        );
+
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        let post = &requests[0];
+        assert_eq!(
+            post.headers.get("authorization"),
+            Some(&"Key test-api-key".to_string())
+        );
+        assert_eq!(
+            post.headers.get("custom-provider-header"),
+            Some(&"provider-header-value".to_string())
+        );
+        assert_eq!(
+            post.headers.get("custom-request-header"),
+            Some(&"request-header-value".to_string())
+        );
+    }
+
+    #[test]
+    fn fal_speech_model_returns_audio_data() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let transport = speech_transport(Arc::clone(&requests), Vec::new());
+        let provider = create_fal(FalProviderSettings::new().with_api_key("test-api-key"))
+            .with_transport(transport);
+
+        let result = poll_ready(
+            provider
+                .speech("fal-ai/minimax/speech-02-hd")
+                .do_generate(SpeechModelCallOptions::new("Hello from the AI SDK!")),
+        );
+
+        assert_eq!(result.audio, FileDataContent::Bytes(vec![0_u8; 100]));
+        // The audio is fetched from the URL returned by the JSON response.
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].method, ProviderApiRequestMethod::Get);
+        assert_eq!(requests[1].url.as_str(), "https://fal.media/files/test.mp3");
+    }
+
+    #[test]
+    fn fal_speech_model_includes_response_timestamp_model_id_and_headers() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let transport = speech_transport(
+            Arc::clone(&requests),
+            vec![("x-request-id".to_string(), "test-request-id".to_string())],
+        );
+        let provider = create_fal(FalProviderSettings::new().with_api_key("test-api-key"))
+            .with_transport(transport)
+            .with_current_date(fixed_timestamp);
+
+        let result = poll_ready(
+            provider
+                .speech("fal-ai/minimax/speech-02-hd")
+                .do_generate(SpeechModelCallOptions::new("Hello from the AI SDK!")),
+        );
+
+        assert_eq!(result.response.timestamp, fixed_timestamp());
+        assert_eq!(result.response.model_id, "fal-ai/minimax/speech-02-hd");
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id")),
+            Some(&"test-request-id".to_string())
+        );
+    }
+
+    #[test]
+    fn fal_speech_model_includes_warnings_for_unsupported_settings() {
+        let (_, warnings) = fal_speech_request_body(
+            &SpeechModelCallOptions::new("Hello from the AI SDK!")
+                .with_language("en")
+                .with_output_format("wav"),
+        )
+        .expect("speech request body maps");
+
+        assert!(warnings.len() >= 2);
+        assert!(warnings.iter().any(|warning| matches!(
+            warning,
+            Warning::Unsupported { feature, .. } if feature == "language"
+        )));
+        assert!(warnings.iter().any(|warning| matches!(
+            warning,
+            Warning::Unsupported { feature, .. } if feature == "outputFormat"
+        )));
+    }
+
+    fn transcription_transport(
+        requests: Arc<Mutex<Vec<ProviderApiRequest>>>,
+        result_headers: Vec<(String, String)>,
+    ) -> FalTransport {
+        Arc::new(move |request| -> FalTransportFuture {
+            requests
+                .lock()
+                .expect("request list mutex is not poisoned")
+                .push(request.clone());
+            let response = match request.method {
+                ProviderApiRequestMethod::Post => json_response(json!({
+                    "request_id": "test-id"
+                })),
+                ProviderApiRequestMethod::Get => {
+                    let mut response = json_response(json!({
+                        "text": "Hello from the Versal AISDK.",
+                        "chunks": [
+                            { "text": "Hello", "timestamp": [0.0, 0.5] },
+                            { "text": "world", "timestamp": [0.5, 1.0] }
+                        ],
+                        "inferred_languages": ["en"]
+                    }));
+                    if !result_headers.is_empty() {
+                        response = response.with_headers(result_headers.iter().cloned().collect());
+                    }
+                    response
+                }
+            };
+            Box::pin(ready(Ok(response)))
+        })
+    }
+
+    fn sample_audio_options() -> TranscriptionModelCallOptions {
+        TranscriptionModelCallOptions::new(FileDataContent::Bytes(vec![1, 2, 3, 4]), "audio/wav")
+    }
+
+    #[test]
+    fn fal_transcription_model_passes_the_model() {
+        let body = fal_transcription_request_body(&sample_audio_options())
+            .expect("transcription request body maps");
+
+        assert_eq!(body["task"], json!("transcribe"));
+        assert_eq!(body["diarize"], json!(true));
+        assert_eq!(body["chunk_level"], json!("word"));
+        let audio_url = body["audio_url"].as_str().expect("audio_url is a string");
+        assert!(audio_url.starts_with("data:audio/"));
+        assert!(audio_url.contains(";base64,"));
+    }
+
+    #[test]
+    fn fal_transcription_model_passes_headers() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let transport = transcription_transport(Arc::clone(&requests), Vec::new());
+        let provider = create_fal(
+            FalProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_header("Custom-Provider-Header", "provider-header-value"),
+        )
+        .with_transport(transport);
+
+        let _ = poll_ready(provider.transcription("wizper").do_generate(
+            sample_audio_options().with_header("Custom-Request-Header", "request-header-value"),
+        ));
+
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        let post = &requests[0];
+        assert_eq!(
+            post.headers.get("authorization"),
+            Some(&"Key test-api-key".to_string())
+        );
+        assert_eq!(
+            post.headers.get("custom-provider-header"),
+            Some(&"provider-header-value".to_string())
+        );
+        assert_eq!(
+            post.headers.get("custom-request-header"),
+            Some(&"request-header-value".to_string())
+        );
+        assert_eq!(post.url.as_str(), "https://queue.fal.run/fal-ai/wizper");
+    }
+
+    #[test]
+    fn fal_transcription_model_extracts_transcription_text() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let transport = transcription_transport(Arc::clone(&requests), Vec::new());
+        let provider = create_fal(FalProviderSettings::new().with_api_key("test-api-key"))
+            .with_transport(transport);
+
+        let result = poll_ready(
+            provider
+                .transcription("wizper")
+                .do_generate(sample_audio_options()),
+        );
+
+        assert_eq!(result.text, "Hello from the Versal AISDK.");
+        assert_eq!(result.segments.len(), 2);
+        assert_eq!(result.segments[0].text, "Hello");
+        assert_eq!(result.segments[0].start_second, 0.0);
+        assert_eq!(result.segments[0].end_second, 0.5);
+        assert_eq!(result.language.as_deref(), Some("en"));
+        assert_eq!(result.duration_in_seconds, Some(1.0));
+        // The poll request targets the queued request endpoint.
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        assert_eq!(
+            requests[1].url.as_str(),
+            "https://queue.fal.run/fal-ai/wizper/requests/test-id"
+        );
+    }
+
+    #[test]
+    fn fal_transcription_model_includes_response_timestamp_model_id_and_headers() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let transport = transcription_transport(
+            Arc::clone(&requests),
+            vec![
+                ("x-request-id".to_string(), "test-request-id".to_string()),
+                ("x-ratelimit-remaining".to_string(), "123".to_string()),
+            ],
+        );
+        let provider = create_fal(FalProviderSettings::new().with_api_key("test-api-key"))
+            .with_transport(transport)
+            .with_current_date(fixed_timestamp);
+
+        let result = poll_ready(
+            provider
+                .transcription("wizper")
+                .do_generate(sample_audio_options()),
+        );
+
+        assert_eq!(result.response.timestamp, fixed_timestamp());
+        assert_eq!(result.response.model_id, "wizper");
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id")),
+            Some(&"test-request-id".to_string())
+        );
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-ratelimit-remaining")),
+            Some(&"123".to_string())
+        );
+    }
+
+    #[test]
+    fn fal_transcription_model_uses_real_date_when_no_custom_provider() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let transport = transcription_transport(Arc::clone(&requests), Vec::new());
+        // Inject a fixed date provider to assert the model uses the configured
+        // current-date provider for the response timestamp and model id.
+        let provider = create_fal(FalProviderSettings::new().with_api_key("test-api-key"))
+            .with_transport(transport)
+            .with_current_date(fixed_timestamp);
+
+        let result = poll_ready(
+            provider
+                .transcription("wizper")
+                .do_generate(sample_audio_options()),
+        );
+
+        assert_eq!(result.response.timestamp, fixed_timestamp());
+        assert_eq!(result.response.model_id, "wizper");
     }
 }

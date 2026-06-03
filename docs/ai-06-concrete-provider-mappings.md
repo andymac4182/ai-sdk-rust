@@ -205,6 +205,18 @@ the strict inventory generator.
 | `packages/fal/src/fal-video-model.test.ts` | should timeout after pollTimeoutMs | `fal_video_model_polls_until_ready_and_times_out` | none |
 | `packages/fal/src/fal-video-model.test.ts` | should respect abort signal | `fal_video_model_respects_abort_signal_during_polling` | none |
 | `packages/fal/src/fal-video-model.test.ts` | should default to video/mp4 when content_type is not provided | `fal_video_model_polls_until_ready_and_times_out` | none |
+| `packages/fal/src/fal-image-model.test.ts` | should handle null file_name and file_size values | `fal_image_model_parses_single_multiple_null_and_empty_metadata_responses` | none |
+| `packages/fal/src/fal-image-model.test.ts` | should handle null width and height values with images array only | `fal_image_model_parses_single_multiple_null_and_empty_metadata_responses` | none |
+| `packages/fal/src/fal-speech-model.test.ts` | should pass text and default output_format | `fal_speech_model_passes_text_and_default_output_format` | none |
+| `packages/fal/src/fal-speech-model.test.ts` | should pass headers | `fal_speech_model_passes_headers` | none |
+| `packages/fal/src/fal-speech-model.test.ts` | should return audio data | `fal_speech_model_returns_audio_data` | none |
+| `packages/fal/src/fal-speech-model.test.ts` | should include response data with timestamp, modelId and headers | `fal_speech_model_includes_response_timestamp_model_id_and_headers` | none |
+| `packages/fal/src/fal-speech-model.test.ts` | should include warnings for unsupported settings | `fal_speech_model_includes_warnings_for_unsupported_settings` | none |
+| `packages/fal/src/fal-transcription-model.test.ts` | should pass the model | `fal_transcription_model_passes_the_model` | none |
+| `packages/fal/src/fal-transcription-model.test.ts` | should pass headers | `fal_transcription_model_passes_headers` | none |
+| `packages/fal/src/fal-transcription-model.test.ts` | should extract the transcription text | `fal_transcription_model_extracts_transcription_text` | none |
+| `packages/fal/src/fal-transcription-model.test.ts` | should include response data with timestamp, modelId and headers | `fal_transcription_model_includes_response_timestamp_model_id_and_headers` | none |
+| `packages/fal/src/fal-transcription-model.test.ts` | should use real date when no custom date provider is specified | `fal_transcription_model_uses_real_date_when_no_custom_provider` | none |
 
 ## KlingAI Exact Case Map
 
