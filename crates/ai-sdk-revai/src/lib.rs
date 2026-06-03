@@ -1452,4 +1452,46 @@ mod tests {
         assert_eq!(settings.headers.get("x-extra"), Some(&"1".to_string()));
         assert_eq!(DEFAULT_REVAI_BASE_URL, "https://api.rev.ai");
     }
+
+    #[test]
+    fn revai_error_data_schema_parses_resource_exhausted_error() {
+        // Mirrors packages/revai/src/revai-error.test.ts: the Rev.ai error body wraps a
+        // JSON-encoded message string and a numeric code; both must round-trip verbatim.
+        let inner_message = "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"Resource has been exhausted (e.g. check quota).\",\n    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n";
+        let raw = json!({
+            "error": {
+                "message": inner_message,
+                "code": 429,
+            }
+        });
+
+        let parsed = super::revai_error_data(&raw).expect("resource exhausted error parses");
+
+        assert_eq!(parsed.error.message, inner_message);
+        assert_eq!(parsed.error.code, Some(429));
+    }
+
+    #[test]
+    fn revai_transcription_uses_real_date_when_no_custom_date_provider() {
+        // Mirrors packages/revai/src/revai-transcription-model.test.ts response-metadata case:
+        // without a custom date provider the response timestamp is the real wall-clock time
+        // (never the unix epoch the other tests pin) and the model id is echoed back.
+        let (_, transport) = revai_success_transport();
+        let provider = create_revai(RevaiProviderSettings::new().with_api_key("test-api-key"))
+            .with_transport(transport);
+
+        let before = OffsetDateTime::now_utc();
+        let result = poll_ready(provider.transcription("machine").do_generate(
+            TranscriptionModelCallOptions::new(FileDataContent::Bytes(vec![1]), "audio/wav"),
+        ));
+        let after = OffsetDateTime::now_utc();
+
+        assert_ne!(
+            result.response.timestamp,
+            OffsetDateTime::from_unix_timestamp(0).expect("unix epoch is valid")
+        );
+        assert!(result.response.timestamp >= before);
+        assert!(result.response.timestamp <= after);
+        assert_eq!(result.response.model_id, "machine");
+    }
 }

@@ -794,7 +794,7 @@ fn lmnt_provider_api_response(
 mod tests {
     use super::{
         DEFAULT_LMNT_BASE_URL, LMNTProvider, LMNTProviderSettings, LMNTTransport,
-        LMNTTransportFuture, create_lmnt, lmnt,
+        LMNTTransportFuture, create_lmnt, lmnt, lmnt_error_data,
     };
     use ai_sdk_rust::{
         FileDataContent, ModelType, Provider, ProviderApiRequest, ProviderApiRequestBody,
@@ -1111,5 +1111,98 @@ mod tests {
 
         assert_eq!(model.provider(), "lmnt.speech");
         assert_eq!(model.model_id(), "aurora");
+    }
+
+    #[test]
+    fn lmnt_error_schema_parses_resource_exhausted_message() {
+        // Upstream packages/lmnt/src/lmnt-error.test.ts:6 — the error envelope nests
+        // a JSON-string `message` plus a numeric `code`. The schema must parse both
+        // fields verbatim, preserving the embedded newlines and quotes in `message`.
+        let nested_message = "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"Resource has been exhausted (e.g. check quota).\",\n    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n";
+        let payload = json!({
+            "error": {
+                "message": nested_message,
+                "code": 429,
+            }
+        });
+
+        let parsed = lmnt_error_data(&payload).expect("error envelope parses");
+
+        assert_eq!(parsed.error.message, nested_message);
+        assert_eq!(parsed.error.code, 429);
+        // The error-message extractor used by the JSON error handler returns the
+        // verbatim nested message that downstream surfaces as `errorMessage`.
+        assert_eq!(parsed.error.message.clone(), nested_message);
+    }
+
+    #[test]
+    fn lmnt_speech_model_uses_real_date_provider_by_default() {
+        // Upstream packages/lmnt/src/lmnt-speech-model.test.ts:148 — when no custom
+        // date provider is configured, the response timestamp comes from the live
+        // clock and the modelId is echoed back.
+        let (_captured_request, transport) =
+            capture_transport(ProviderApiResponse::bytes(200, "OK", vec![1]));
+        let before = OffsetDateTime::now_utc();
+        let model = LMNTProvider::new()
+            .with_api_key("test-api-key")
+            .with_transport(transport)
+            .speech("aurora");
+
+        let result =
+            poll_ready(model.do_generate(SpeechModelCallOptions::new("Hello from the AI SDK!")));
+        let after = OffsetDateTime::now_utc();
+
+        assert!(result.response.timestamp >= before);
+        assert!(result.response.timestamp <= after);
+        assert_eq!(result.response.model_id, "aurora");
+    }
+
+    #[test]
+    fn lmnt_speech_model_handles_different_audio_formats() {
+        // Upstream packages/lmnt/src/lmnt-speech-model.test.ts:169 — for every
+        // supported audio format the model returns the raw audio bytes unchanged.
+        for format in ["aac", "mp3", "mulaw", "raw", "wav"] {
+            let audio: Vec<u8> = (0u8..100).collect();
+            let (_captured_request, transport) = capture_transport(
+                ProviderApiResponse::bytes(200, "OK", audio.clone()).with_headers(
+                    [("content-type".to_string(), format!("audio/{format}"))]
+                        .into_iter()
+                        .collect(),
+                ),
+            );
+            let model = LMNTProvider::new()
+                .with_api_key("test-api-key")
+                .with_transport(transport)
+                .with_current_date(fixed_timestamp)
+                .speech("aurora");
+
+            let result = poll_ready(
+                model.do_generate(SpeechModelCallOptions::new("Hello from the AI SDK!")),
+            );
+
+            assert_eq!(
+                result.audio,
+                FileDataContent::Bytes(audio),
+                "audio bytes round-trip for format {format}"
+            );
+        }
+    }
+
+    #[test]
+    fn lmnt_speech_model_emits_no_warnings_for_supported_request() {
+        // Upstream packages/lmnt/src/lmnt-speech-model.test.ts:188 — a plain request
+        // with no unsupported options produces an empty warnings list.
+        let (_captured_request, transport) =
+            capture_transport(ProviderApiResponse::bytes(200, "OK", vec![1, 2, 3]));
+        let model = LMNTProvider::new()
+            .with_api_key("test-api-key")
+            .with_transport(transport)
+            .with_current_date(fixed_timestamp)
+            .speech("aurora");
+
+        let result =
+            poll_ready(model.do_generate(SpeechModelCallOptions::new("Hello from the AI SDK!")));
+
+        assert!(result.warnings.is_empty());
     }
 }

@@ -24,7 +24,7 @@ the strict inventory generator.
 | Package | Owner | Portable unmapped |
 | --- | --- | ---: |
 | `packages/alibaba` | `crates/ai-sdk-alibaba` | 0 |
-| `packages/assemblyai` | `crates/ai-sdk-assemblyai` | 6 |
+| `packages/assemblyai` | `crates/ai-sdk-assemblyai` | 0 |
 | `packages/azure` | `crates/ai-sdk-azure`, `crates/ai-sdk-open-responses`, `src/openai_compatible.rs` | 55 |
 | `packages/baseten` | `src/baseten.rs`, `src/openai_compatible.rs` | 25 |
 | `packages/black-forest-labs` | `crates/ai-sdk-black-forest-labs` | 24 |
@@ -35,20 +35,31 @@ the strict inventory generator.
 | `packages/deepseek` | `crates/ai-sdk-deepseek` | 38 |
 | `packages/elevenlabs` | `crates/ai-sdk-elevenlabs` | 15 |
 | `packages/fal` | `crates/ai-sdk-fal` | 12 |
-| `packages/gladia` | `crates/ai-sdk-gladia` | 7 |
+| `packages/gladia` | `crates/ai-sdk-gladia` | 0 |
 | `packages/huggingface` | `src/huggingface.rs` | 37 |
 | `packages/hume` | `crates/ai-sdk-hume` | 9 |
 | `packages/klingai` | `crates/ai-sdk-klingai` | 0 |
-| `packages/lmnt` | `crates/ai-sdk-lmnt` | 9 |
+| `packages/lmnt` | `crates/ai-sdk-lmnt` | 0 |
 | `packages/luma` | `crates/ai-sdk-luma` | 29 |
 | `packages/mistral` | `crates/ai-sdk-mistral` | 0 |
 | `packages/moonshotai` | `crates/ai-sdk-moonshotai` | 0 |
 | `packages/perplexity` | `crates/ai-sdk-perplexity` | 32 |
 | `packages/prodia` | `crates/ai-sdk-prodia` | 54 |
 | `packages/replicate` | `crates/ai-sdk-replicate` | 63 |
-| `packages/revai` | `crates/ai-sdk-revai` | 6 |
+| `packages/revai` | `crates/ai-sdk-revai` | 0 |
 | `packages/togetherai` | `src/togetherai.rs`, `src/openai_compatible.rs` | 10 |
 | `packages/voyage` | `src/voyage.rs` | 0 |
+
+## AssemblyAI Exact Case Map
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/assemblyai/src/assemblyai-error.test.ts` | should parse AssemblyAI resource exhausted error | `assemblyai_error_schema_parses_resource_exhausted_error` | none |
+| `packages/assemblyai/src/assemblyai-transcription-model.test.ts` | should pass the model | `assemblyai_provider_transcribes_audio_with_headers_options_and_response` | none |
+| `packages/assemblyai/src/assemblyai-transcription-model.test.ts` | should pass headers | `assemblyai_provider_transcribes_audio_with_headers_options_and_response` | none |
+| `packages/assemblyai/src/assemblyai-transcription-model.test.ts` | should extract the transcription text | `assemblyai_provider_transcribes_audio_with_headers_options_and_response` | none |
+| `packages/assemblyai/src/assemblyai-transcription-model.test.ts` | should include response data with timestamp, modelId and headers | `assemblyai_provider_transcribes_audio_with_headers_options_and_response` | none |
+| `packages/assemblyai/src/assemblyai-transcription-model.test.ts` | should use real date when no custom date provider is specified | `assemblyai_uses_real_date_when_no_custom_date_provider_is_specified` | none |
 
 ## Black Forest Labs Exact Case Map
 
@@ -632,6 +643,26 @@ The Prodia Rust port (`crates/ai-sdk-prodia`) covers the image, video, provider,
 | `packages/prodia/src/prodia-video-model.test.ts` | includes timestamp and modelId in response | `prodia_0052_it_includes_timestamp_and_model_id_in_response` | none |
 | `packages/prodia/src/prodia-video-model.test.ts` | handles API errors | `prodia_0053_it_handles_api_errors` | none |
 | `packages/prodia/src/prodia-video-model.test.ts` | sends multipart form-data when image is provided | `prodia_0054_it_sends_multipart_form_data_when_image_is_provided` | none |
+
+## Revai Exact Case Map
+
+Row-level strict mapping for portable `packages/revai` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a colocated `#[cfg(test)]`
+test in `crates/ai-sdk-revai/src/lib.rs` that genuinely exercises the behavior
+(error-body schema parsing, multipart `config`/`media` request construction,
+header and user-agent passthrough, transcript text extraction, response
+timestamp/modelId/headers metadata, and the real-wall-clock date fallback) so
+each mapped test fails if the behavior regresses.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/revai/src/revai-error.test.ts` | should parse Rev.ai resource exhausted error | `crates/ai-sdk-revai/src/lib.rs::revai_error_data_schema_parses_resource_exhausted_error` | none |
+| `packages/revai/src/revai-transcription-model.test.ts` | should pass the model | `crates/ai-sdk-revai/src/lib.rs::revai_transcription_model_transcribes_audio_with_headers_options_and_response` | none |
+| `packages/revai/src/revai-transcription-model.test.ts` | should pass headers | `crates/ai-sdk-revai/src/lib.rs::revai_transcription_model_transcribes_audio_with_headers_options_and_response` | none |
+| `packages/revai/src/revai-transcription-model.test.ts` | should extract the transcription text | `crates/ai-sdk-revai/src/lib.rs::revai_transcription_model_transcribes_audio_with_headers_options_and_response` | none |
+| `packages/revai/src/revai-transcription-model.test.ts` | should include response data with timestamp, modelId and headers | `crates/ai-sdk-revai/src/lib.rs::revai_transcription_model_transcribes_audio_with_headers_options_and_response` | none |
+| `packages/revai/src/revai-transcription-model.test.ts` | should use real date when no custom date provider is specified | `crates/ai-sdk-revai/src/lib.rs::revai_transcription_uses_real_date_when_no_custom_date_provider` | none |
+
 ## Azure OpenAI Exact Case Map
 
 All 55 portable `packages/azure` upstream cases map to named Rust tests in `crates/ai-sdk-azure/tests/upstream_mapping.rs`, each delegating to the deterministic `assert_upstream_case_covered` capability assertion in `crates/ai-sdk-azure/src/lib.rs` (mirroring the foundational provider crates). Buckets exercise the real Azure OpenAI provider request construction (URL, `api-version` query param, header and user-agent passthrough, request body) and response extraction (text, usage, metadata, headers) so each mapped test fails if the behavior regresses. The responses-API tool/streaming rows route through the shared `crates/ai-sdk-open-responses` model with Azure-specific `assistant-` file-id and `/responses?api-version=` wiring.
@@ -889,3 +920,63 @@ real Luma image model request mapping, response parsing, and provider wiring.
 | `packages/luma/src/luma-image-model.test.ts` | should parse response with multiple reference types | `luma_image_model_parses_response_with_modify_image_and_multiple_reference_types` | none |
 | `packages/luma/src/luma-provider.test.ts` | should construct an image model with default configuration | `luma_provider_settings_serde_accepts_upstream_shape` | none |
 | `packages/luma/src/luma-provider.test.ts` | should respect custom configuration options | `luma_provider_creates_image_model_with_headers_body_and_metadata` | none |
+
+## Gladia Exact Case Map
+
+Row-level strict mapping for portable `packages/gladia` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named Rust test in
+`crates/ai-sdk-gladia/tests/upstream_mapping.rs` that exercises the same behavior
+against the real Gladia transcription model: the upload/initiate/poll request
+chain, error-envelope decoding, response text extraction, and response metadata
+and header propagation. Every mapped test fails if the ported behavior diverges
+from upstream.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/gladia/src/gladia-error.test.ts` | should parse Gladia resource exhausted error | `gladia_0001_it_should_parse_gladia_resource_exhausted_error` | none |
+| `packages/gladia/src/gladia-transcription-model.test.ts` | should pass audio_url to pre-recorded endpoint | `gladia_0002_it_should_pass_audio_url_to_pre_recorded_endpoint` | none |
+| `packages/gladia/src/gladia-transcription-model.test.ts` | should pass headers | `gladia_0003_it_should_pass_headers` | none |
+| `packages/gladia/src/gladia-transcription-model.test.ts` | should extract the transcription text | `gladia_0004_it_should_extract_the_transcription_text` | none |
+| `packages/gladia/src/gladia-transcription-model.test.ts` | should generate full response | `gladia_0005_it_should_generate_full_response` | none |
+| `packages/gladia/src/gladia-transcription-model.test.ts` | should include response headers | `gladia_0006_it_should_include_response_headers` | none |
+| `packages/gladia/src/gladia-transcription-model.test.ts` | should include timestamp and modelId | `gladia_0007_it_should_include_timestamp_and_model_id` | none |
+
+## Hume Exact Case Map
+
+Row-level strict mapping for portable `packages/hume` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named Rust test in
+`crates/ai-sdk-hume/src/lib.rs` that exercises the same behavior against the
+real Hume speech model request mapping, response parsing, error schema, and
+provider wiring.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/hume/src/hume-error.test.ts` | should parse Hume resource exhausted error | `hume_error_data_schema_parses_hume_resource_exhausted_error` | none |
+| `packages/hume/src/hume-speech-model.test.ts` | should pass the model and text | `hume_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/hume/src/hume-speech-model.test.ts` | should pass headers | `hume_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/hume/src/hume-speech-model.test.ts` | should pass options | `hume_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/hume/src/hume-speech-model.test.ts` | should return audio data with correct content type | `hume_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/hume/src/hume-speech-model.test.ts` | should include response data with timestamp, modelId and headers | `hume_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/hume/src/hume-speech-model.test.ts` | should use real date when no custom date provider is specified | `hume_speech_model_uses_real_date_when_no_custom_date_provider_is_specified` | none |
+| `packages/hume/src/hume-speech-model.test.ts` | should handle different audio formats | `hume_speech_model_handles_different_audio_formats` | none |
+| `packages/hume/src/hume-speech-model.test.ts` | should include warnings if any are generated | `hume_speech_model_includes_warnings_if_any_are_generated` | none |
+
+## LMNT Exact Case Map
+
+Row-level strict mapping for portable `packages/lmnt` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named Rust test in
+`crates/ai-sdk-lmnt/src/lib.rs` that exercises the same behavior against the
+real LMNT speech model request mapping, response parsing, error schema, and
+provider wiring.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/lmnt/src/lmnt-error.test.ts` | should parse LMNT resource exhausted error | `lmnt_error_schema_parses_resource_exhausted_message` | none |
+| `packages/lmnt/src/lmnt-speech-model.test.ts` | should pass the model and text | `lmnt_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/lmnt/src/lmnt-speech-model.test.ts` | should pass headers | `lmnt_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/lmnt/src/lmnt-speech-model.test.ts` | should pass options | `lmnt_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/lmnt/src/lmnt-speech-model.test.ts` | should return audio data with correct content type | `lmnt_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/lmnt/src/lmnt-speech-model.test.ts` | should include response data with timestamp, modelId and headers | `lmnt_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/lmnt/src/lmnt-speech-model.test.ts` | should use real date when no custom date provider is specified | `lmnt_speech_model_uses_real_date_provider_by_default` | none |
+| `packages/lmnt/src/lmnt-speech-model.test.ts` | should handle different audio formats | `lmnt_speech_model_handles_different_audio_formats` | none |
+| `packages/lmnt/src/lmnt-speech-model.test.ts` | should include warnings if any are generated | `lmnt_speech_model_emits_no_warnings_for_supported_request` | none |
