@@ -352,6 +352,8 @@ pub use openai_compatible::{
     OpenAICompatibleModelListResponse, OpenAICompatibleProvider, OpenAICompatibleProviderSettings,
     OpenAICompatibleTransport, OpenAICompatibleTransportFuture, create_openai_compatible,
 };
+#[allow(deprecated)]
+pub use prompt::prepare_call_settings;
 pub use prompt::{
     ConvertedLanguageModelV4FilePart, Instructions, InvalidDataContentError,
     InvalidMessageRoleError, LanguageModelCallSettings, MessageConversionError, Prompt,
