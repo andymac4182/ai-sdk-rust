@@ -1182,6 +1182,40 @@ Content-Length: {}\r\n\
     }
 
     #[test]
+    fn response_controller_creates_with_stream_access() {
+        // Mirrors `new TestResponseController()` exposing a `stream` (ReadableStream)
+        // in the upstream `with-vitest` test. The Rust controller's stream surface is
+        // its chunk buffer, which starts empty, accepts writes, and can back a
+        // controlled-stream response.
+        let mut controller = TestResponseController::new();
+        assert!(controller.chunks().is_empty());
+        assert_eq!(controller.error_message(), None);
+        assert!(!controller.is_closed());
+
+        controller.write("chunk1");
+        controller.write("chunk2");
+        controller.close();
+        assert_eq!(
+            controller.chunks(),
+            &["chunk1".to_string(), "chunk2".to_string()]
+        );
+
+        let mut server = create_test_server([(
+            "https://api.example.com/controlled",
+            UrlHandler::new(UrlResponse::controlled_stream(controller)),
+        )]);
+        assert_eq!(
+            server
+                .handle(
+                    "https://api.example.com/controlled",
+                    TestRequest::new("GET", "https://api.example.com/controlled"),
+                )
+                .body,
+            RenderedBody::StreamChunks(vec!["chunk1".to_string(), "chunk2".to_string()])
+        );
+    }
+
+    #[test]
     fn response_controller_records_writes_errors_and_close() {
         let mut controller = TestResponseController::new();
         controller.write("chunk1");
