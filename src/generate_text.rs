@@ -10102,6 +10102,218 @@ mod tests {
     }
 
     #[test]
+    fn collect_tool_approvals_should_return_processed_approval_with_denied_response_and_tool_result()
+     {
+        let messages = vec![
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call-1",
+                    "tool1",
+                    json!({ "value": "test-input" }),
+                )),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new("approval-id-1", "call-1"),
+                ),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolApprovalResponse(
+                    LanguageModelToolApprovalResponsePart::new("approval-id-1", false)
+                        .with_reason("test-reason"),
+                ),
+                LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "call-1",
+                    "tool1",
+                    LanguageModelToolResultOutput::execution_denied().with_reason("test-reason"),
+                )),
+            ])),
+        ];
+
+        let approvals = collect_tool_approvals(&messages).expect("approvals collect");
+
+        // A response whose tool call already has a result in the final tool
+        // message is treated as processed and omitted from both lists.
+        assert!(approvals.approved_tool_approvals.is_empty());
+        assert!(approvals.denied_tool_approvals.is_empty());
+    }
+
+    #[test]
+    fn collect_tool_approvals_should_work_for_two_approvals_two_rejections_one_approval_with_tool_result_one_rejection_with_tool_result()
+     {
+        let assistant = LanguageModelAssistantMessage::new(vec![
+            LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                "call-approval-1",
+                "tool1",
+                json!({ "value": "test-input-1" }),
+            )),
+            LanguageModelAssistantContentPart::ToolApprovalRequest(
+                LanguageModelToolApprovalRequestPart::new("approval-id-1", "call-approval-1"),
+            ),
+            LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                "call-approval-2",
+                "tool1",
+                json!({ "value": "test-input-2" }),
+            )),
+            LanguageModelAssistantContentPart::ToolApprovalRequest(
+                LanguageModelToolApprovalRequestPart::new("approval-id-2", "call-approval-2"),
+            ),
+            LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                "call-approval-3",
+                "tool1",
+                json!({ "value": "test-input-3" }),
+            )),
+            LanguageModelAssistantContentPart::ToolApprovalRequest(
+                LanguageModelToolApprovalRequestPart::new("approval-id-3", "call-approval-3"),
+            ),
+            LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                "call-approval-4",
+                "tool1",
+                json!({ "value": "test-input-4" }),
+            )),
+            LanguageModelAssistantContentPart::ToolApprovalRequest(
+                LanguageModelToolApprovalRequestPart::new("approval-id-4", "call-approval-4"),
+            ),
+            LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                "call-approval-5",
+                "tool1",
+                json!({ "value": "test-input-5" }),
+            )),
+            LanguageModelAssistantContentPart::ToolApprovalRequest(
+                LanguageModelToolApprovalRequestPart::new("approval-id-5", "call-approval-5"),
+            ),
+            LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                "call-approval-6",
+                "tool1",
+                json!({ "value": "test-input-6" }),
+            )),
+            LanguageModelAssistantContentPart::ToolApprovalRequest(
+                LanguageModelToolApprovalRequestPart::new("approval-id-6", "call-approval-6"),
+            ),
+        ]);
+
+        let tool = LanguageModelToolMessage::new(vec![
+            LanguageModelToolContentPart::ToolApprovalResponse(
+                LanguageModelToolApprovalResponsePart::new("approval-id-1", true),
+            ),
+            LanguageModelToolContentPart::ToolApprovalResponse(
+                LanguageModelToolApprovalResponsePart::new("approval-id-2", true),
+            ),
+            LanguageModelToolContentPart::ToolApprovalResponse(
+                LanguageModelToolApprovalResponsePart::new("approval-id-3", false)
+                    .with_reason("test-reason"),
+            ),
+            LanguageModelToolContentPart::ToolApprovalResponse(
+                LanguageModelToolApprovalResponsePart::new("approval-id-4", false),
+            ),
+            LanguageModelToolContentPart::ToolApprovalResponse(
+                LanguageModelToolApprovalResponsePart::new("approval-id-5", true),
+            ),
+            LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                "call-approval-5",
+                "tool1",
+                LanguageModelToolResultOutput::text("test-output-5"),
+            )),
+            LanguageModelToolContentPart::ToolApprovalResponse(
+                LanguageModelToolApprovalResponsePart::new("approval-id-6", false),
+            ),
+            LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                "call-approval-6",
+                "tool1",
+                LanguageModelToolResultOutput::execution_denied(),
+            )),
+        ]);
+
+        let messages = vec![
+            LanguageModelMessage::Assistant(assistant),
+            LanguageModelMessage::Tool(tool),
+        ];
+
+        let approvals = collect_tool_approvals(&messages).expect("approvals collect");
+
+        assert_eq!(
+            serde_json::to_value(&approvals).expect("approvals serialize"),
+            json!({
+                "approvedToolApprovals": [
+                    {
+                        "approvalRequest": {
+                            "type": "tool-approval-request",
+                            "approvalId": "approval-id-1",
+                            "toolCallId": "call-approval-1"
+                        },
+                        "approvalResponse": {
+                            "type": "tool-approval-response",
+                            "approvalId": "approval-id-1",
+                            "approved": true
+                        },
+                        "toolCall": {
+                            "type": "tool-call",
+                            "toolCallId": "call-approval-1",
+                            "toolName": "tool1",
+                            "input": { "value": "test-input-1" }
+                        }
+                    },
+                    {
+                        "approvalRequest": {
+                            "type": "tool-approval-request",
+                            "approvalId": "approval-id-2",
+                            "toolCallId": "call-approval-2"
+                        },
+                        "approvalResponse": {
+                            "type": "tool-approval-response",
+                            "approvalId": "approval-id-2",
+                            "approved": true
+                        },
+                        "toolCall": {
+                            "type": "tool-call",
+                            "toolCallId": "call-approval-2",
+                            "toolName": "tool1",
+                            "input": { "value": "test-input-2" }
+                        }
+                    }
+                ],
+                "deniedToolApprovals": [
+                    {
+                        "approvalRequest": {
+                            "type": "tool-approval-request",
+                            "approvalId": "approval-id-3",
+                            "toolCallId": "call-approval-3"
+                        },
+                        "approvalResponse": {
+                            "type": "tool-approval-response",
+                            "approvalId": "approval-id-3",
+                            "approved": false,
+                            "reason": "test-reason"
+                        },
+                        "toolCall": {
+                            "type": "tool-call",
+                            "toolCallId": "call-approval-3",
+                            "toolName": "tool1",
+                            "input": { "value": "test-input-3" }
+                        }
+                    },
+                    {
+                        "approvalRequest": {
+                            "type": "tool-approval-request",
+                            "approvalId": "approval-id-4",
+                            "toolCallId": "call-approval-4"
+                        },
+                        "approvalResponse": {
+                            "type": "tool-approval-response",
+                            "approvalId": "approval-id-4",
+                            "approved": false
+                        },
+                        "toolCall": {
+                            "type": "tool-call",
+                            "toolCallId": "call-approval-4",
+                            "toolName": "tool1",
+                            "input": { "value": "test-input-4" }
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
     fn no_output_generated_error_matches_upstream_default_message() {
         let error = NoOutputGeneratedError::new();
 
