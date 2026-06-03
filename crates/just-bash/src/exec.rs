@@ -1347,13 +1347,25 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
             exit_code: 1,
             ..CommandResult::default()
         },
-        "exit" => CommandResult {
-            exit_code: tokens
-                .get(1)
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(0),
-            exit_requested: true,
-            ..CommandResult::default()
+        "exit" => match tokens.get(1) {
+            Some(value) => match value.parse::<i64>() {
+                Ok(code) => CommandResult {
+                    exit_code: code.rem_euclid(256) as i32,
+                    exit_requested: true,
+                    ..CommandResult::default()
+                },
+                Err(_) => CommandResult {
+                    stderr: format!("bash: exit: {value}: numeric argument required\n"),
+                    exit_code: 2,
+                    exit_requested: true,
+                    ..CommandResult::default()
+                },
+            },
+            None => CommandResult {
+                exit_code: 0,
+                exit_requested: true,
+                ..CommandResult::default()
+            },
         },
         "pwd" => stdout_result(format!("{}\n", state.cwd)),
         "echo" => command_echo(&tokens[1..]),
@@ -1367,8 +1379,19 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
             CommandResult::default()
         }
         "unset" => {
+            let mut mode_functions = false;
             for arg in &tokens[1..] {
-                state.env.remove(arg);
+                match arg.as_str() {
+                    "-f" => mode_functions = true,
+                    "-v" => mode_functions = false,
+                    name => {
+                        if mode_functions {
+                            state.functions.remove(name);
+                        } else {
+                            state.env.remove(name);
+                        }
+                    }
+                }
             }
             CommandResult::default()
         }
@@ -6098,6 +6121,11 @@ struct RgOptions {
     globs: Vec<String>,
     type_includes: Vec<String>,
     type_excludes: Vec<String>,
+    ignore_files: Vec<String>,
+    stats: bool,
+    explicit_after: Option<usize>,
+    explicit_before: Option<usize>,
+    explicit_context: Option<usize>,
 }
 
 impl Default for RgOptions {
@@ -6131,6 +6159,11 @@ impl Default for RgOptions {
             globs: Vec::new(),
             type_includes: Vec::new(),
             type_excludes: Vec::new(),
+            ignore_files: Vec::new(),
+            stats: false,
+            explicit_after: None,
+            explicit_before: None,
+            explicit_context: None,
         }
     }
 }
@@ -6176,12 +6209,44 @@ fn parse_rg_args(args: &[String]) -> Result<RgParseResult, CommandResult> {
         index += 1;
     }
 
+    rg_resolve_context(&mut options);
+
     Ok(RgParseResult::Search(Box::new(RgRequest {
         options,
         patterns,
         pattern_files,
         roots,
     })))
+}
+
+fn rg_set_explicit_after(options: &mut RgOptions, value: usize) {
+    options.explicit_after = Some(options.explicit_after.map_or(value, |prev| prev.max(value)));
+}
+
+fn rg_set_explicit_before(options: &mut RgOptions, value: usize) {
+    options.explicit_before = Some(
+        options
+            .explicit_before
+            .map_or(value, |prev| prev.max(value)),
+    );
+}
+
+/// Resolve -A/-B/-C context with ripgrep MAX precedence: after = max(A, C),
+/// before = max(B, C). -A and -B take precedence over -C on their own side
+/// regardless of argument order; -C overwrites prior -C values.
+fn rg_resolve_context(options: &mut RgOptions) {
+    if options.explicit_after.is_some() || options.explicit_context.is_some() {
+        options.after_context = options
+            .explicit_after
+            .unwrap_or(0)
+            .max(options.explicit_context.unwrap_or(0));
+    }
+    if options.explicit_before.is_some() || options.explicit_context.is_some() {
+        options.before_context = options
+            .explicit_before
+            .unwrap_or(0)
+            .max(options.explicit_context.unwrap_or(0));
+    }
 }
 
 fn parse_rg_option(
@@ -6217,7 +6282,18 @@ fn parse_rg_option(
         "--text" => options.text = true,
         "--include-zero" => options.include_zero = true,
         "--heading" => options.heading = true,
-        "--pcre2" => return Err(stderr_result(2, "rg: PCRE2 is not available\n")),
+        "--stats" => options.stats = true,
+        "--ignore-file" => {
+            options
+                .ignore_files
+                .push(rg_option_value(args, index, "--ignore-file")?)
+        }
+        "--pcre2" => {
+            return Err(stderr_result(
+                1,
+                "rg: PCRE2 is not supported. Use standard regex syntax instead.\n",
+            ));
+        }
         "--regexp" => patterns.push(rg_option_value(args, index, "--regexp")?),
         "--sort" => {
             rg_option_value(args, index, "--sort")?;
@@ -6244,22 +6320,26 @@ fn parse_rg_option(
             )?));
         }
         "--after-context" => {
-            options.after_context =
-                rg_parse_usize(&rg_option_value(args, index, "--after-context")?);
+            let value = rg_parse_usize(&rg_option_value(args, index, "--after-context")?);
+            rg_set_explicit_after(options, value);
         }
         "--before-context" => {
-            options.before_context =
-                rg_parse_usize(&rg_option_value(args, index, "--before-context")?);
+            let value = rg_parse_usize(&rg_option_value(args, index, "--before-context")?);
+            rg_set_explicit_before(options, value);
         }
         "--context" => {
             let value = rg_parse_usize(&rg_option_value(args, index, "--context")?);
-            options.before_context = value;
-            options.after_context = value;
+            options.explicit_context = Some(value);
         }
         "--context-separator" => {
             options.context_separator = rg_option_value(args, index, "--context-separator")?;
         }
-        "-P" => return Err(stderr_result(2, "rg: PCRE2 is not available\n")),
+        "-P" => {
+            return Err(stderr_result(
+                1,
+                "rg: PCRE2 is not supported. Use standard regex syntax instead.\n",
+            ));
+        }
         "-n" => options.line_number = Some(true),
         "-N" => options.line_number = Some(false),
         "-i" => options.ignore_case = Some(true),
@@ -6288,12 +6368,17 @@ fn parse_rg_option(
             .push(rg_option_value(args, index, "-T")?),
         "-m" => options.max_count = Some(rg_parse_usize(&rg_option_value(args, index, "-m")?)),
         "-d" => options.max_depth = Some(rg_parse_usize(&rg_option_value(args, index, "-d")?)),
-        "-A" => options.after_context = rg_parse_usize(&rg_option_value(args, index, "-A")?),
-        "-B" => options.before_context = rg_parse_usize(&rg_option_value(args, index, "-B")?),
+        "-A" => {
+            let value = rg_parse_usize(&rg_option_value(args, index, "-A")?);
+            rg_set_explicit_after(options, value);
+        }
+        "-B" => {
+            let value = rg_parse_usize(&rg_option_value(args, index, "-B")?);
+            rg_set_explicit_before(options, value);
+        }
         "-C" => {
             let value = rg_parse_usize(&rg_option_value(args, index, "-C")?);
-            options.before_context = value;
-            options.after_context = value;
+            options.explicit_context = Some(value);
         }
         _ if arg.starts_with("--regexp=") => {
             patterns.push(arg["--regexp=".len()..].to_string());
@@ -6318,15 +6403,15 @@ fn parse_rg_option(
             options.max_depth = Some(rg_parse_usize(&arg["--max-depth=".len()..]));
         }
         _ if arg.starts_with("--after-context=") => {
-            options.after_context = rg_parse_usize(&arg["--after-context=".len()..]);
+            let value = rg_parse_usize(&arg["--after-context=".len()..]);
+            rg_set_explicit_after(options, value);
         }
         _ if arg.starts_with("--before-context=") => {
-            options.before_context = rg_parse_usize(&arg["--before-context=".len()..]);
+            let value = rg_parse_usize(&arg["--before-context=".len()..]);
+            rg_set_explicit_before(options, value);
         }
         _ if arg.starts_with("--context=") => {
-            let value = rg_parse_usize(&arg["--context=".len()..]);
-            options.before_context = value;
-            options.after_context = value;
+            options.explicit_context = Some(rg_parse_usize(&arg["--context=".len()..]));
         }
         _ if arg.starts_with("--context-separator=") => {
             options.context_separator = arg["--context-separator=".len()..].to_string();
@@ -6344,17 +6429,16 @@ fn parse_rg_option(
             options.max_depth = Some(rg_parse_usize(&arg[2..]));
         }
         _ if arg.starts_with("-A") && arg.len() > 2 => {
-            options.after_context = rg_parse_usize(&arg[2..]);
+            rg_set_explicit_after(options, rg_parse_usize(&arg[2..]));
         }
         _ if arg.starts_with("-B") && arg.len() > 2 => {
-            options.before_context = rg_parse_usize(&arg[2..]);
+            rg_set_explicit_before(options, rg_parse_usize(&arg[2..]));
         }
         _ if arg.starts_with("-C") && arg.len() > 2 => {
-            let value = rg_parse_usize(&arg[2..]);
-            options.before_context = value;
-            options.after_context = value;
+            options.explicit_context = Some(rg_parse_usize(&arg[2..]));
         }
         _ if arg.starts_with("-e") && arg.len() > 2 => patterns.push(arg[2..].to_string()),
+        _ if arg.starts_with("-f") && arg.len() > 2 => pattern_files.push(arg[2..].to_string()),
         _ if arg.starts_with("-g") && arg.len() > 2 => options.globs.push(arg[2..].to_string()),
         _ if arg.starts_with("-t") && arg.len() > 2 => {
             options.type_includes.push(arg[2..].to_string());
@@ -6510,11 +6594,18 @@ fn rg_inputs(state: &ExecState<'_>, request: &RgRequest) -> Result<Vec<RgInput>,
         .fs
         .lock()
         .map_err(|_| "filesystem lock poisoned".to_string())?;
-    let ignore_rules = if request.options.no_ignore {
+    let mut ignore_rules = if request.options.no_ignore {
         Vec::new()
     } else {
         rg_ignore_rules(&fs)
     };
+    for ignore_file in &request.options.ignore_files {
+        let resolved = resolve_path(&state.cwd, ignore_file);
+        let Ok(content) = fs.read_file(&resolved) else {
+            continue;
+        };
+        rg_parse_ignore_content(&content, &state.cwd, &mut ignore_rules);
+    }
     let roots = if request.roots.is_empty() {
         vec![state.cwd.clone()]
     } else {
@@ -6734,31 +6825,35 @@ fn rg_ignore_rules(fs: &VirtualFileSystem) -> Vec<RgIgnoreRule> {
         let base = path
             .rsplit_once('/')
             .map_or("/", |(base, _)| if base.is_empty() { "/" } else { base });
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let (negated, line) = line
-                .strip_prefix('!')
-                .map_or((false, line), |line| (true, line));
-            let directory_only = line.ends_with('/');
-            let line = line.trim_end_matches('/');
-            let rooted = line.starts_with('/');
-            let pattern = line.trim_start_matches('/').to_string();
-            if pattern.is_empty() {
-                continue;
-            }
-            rules.push(RgIgnoreRule {
-                base: base.to_string(),
-                pattern,
-                negated,
-                directory_only,
-                rooted,
-            });
-        }
+        rg_parse_ignore_content(&content, base, &mut rules);
     }
     rules
+}
+
+fn rg_parse_ignore_content(content: &str, base: &str, rules: &mut Vec<RgIgnoreRule>) {
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (negated, line) = line
+            .strip_prefix('!')
+            .map_or((false, line), |line| (true, line));
+        let directory_only = line.ends_with('/');
+        let line = line.trim_end_matches('/');
+        let rooted = line.starts_with('/');
+        let pattern = line.trim_start_matches('/').to_string();
+        if pattern.is_empty() {
+            continue;
+        }
+        rules.push(RgIgnoreRule {
+            base: base.to_string(),
+            pattern,
+            negated,
+            directory_only,
+            rooted,
+        });
+    }
 }
 
 fn rg_is_ignored(path: &str, rules: &[RgIgnoreRule]) -> bool {
@@ -6873,8 +6968,16 @@ fn rg_render_search(
 ) -> CommandResult {
     let mut stdout = String::new();
     let mut total_matches = 0;
+    let mut stats_matched_lines = 0usize;
+    let mut files_with_match = 0usize;
+    let mut bytes_searched = 0usize;
     for input in inputs {
+        bytes_searched += input.text.len();
         let line_matches = rg_line_matches(input, matchers, &request.options);
+        if !line_matches.is_empty() {
+            files_with_match += 1;
+            stats_matched_lines += line_matches.len();
+        }
         let file_match_count = if request.options.count_matches {
             line_matches
                 .iter()
@@ -6910,6 +7013,13 @@ fn rg_render_search(
             continue;
         }
         rg_push_matches(&mut stdout, request, input, &line_matches);
+    }
+    if request.options.stats {
+        stdout.push_str(&format!(
+            "\n{stats_matched_lines} matches\n{stats_matched_lines} matched lines\n\
+{files_with_match} files contained matches\n{} files searched\n{bytes_searched} bytes searched\n",
+            inputs.len()
+        ));
     }
     CommandResult {
         exit_code: if total_matches == 0 { 1 } else { 0 },
@@ -21698,5 +21808,307 @@ mod tests {
             .stdout,
             "file-x\nfile-y\n"
         );
+    }
+
+    // --- Upstream parity: interpreter/builtins cd/exit/export/unset ---
+    // Each test below mirrors exactly one upstream Vitest `it(...)` case in
+    // packages/just-bash/src/interpreter/builtins/{cd,exit,export,unset}.test.ts.
+
+    // cd.test.ts
+    #[test]
+    fn builtins_cd_changes_to_specified_directory() {
+        let bash = JustBashSession::new();
+        bash.exec("mkdir -p /tmp/testdir", JustBashExecOptions::new());
+        let r = bash.exec("cd /tmp/testdir; pwd", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "/tmp/testdir\n");
+    }
+
+    #[test]
+    fn builtins_cd_changes_to_home_without_argument() {
+        let bash =
+            JustBashSession::with_options(JustBashSessionOptions::new().with_env("HOME", "/tmp"));
+        let r = bash.exec("cd; pwd", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "/tmp\n");
+    }
+
+    #[test]
+    fn builtins_cd_updates_pwd_environment_variable() {
+        let bash = JustBashSession::new();
+        bash.exec("mkdir -p /tmp/pwdtest", JustBashExecOptions::new());
+        let r = bash.exec("cd /tmp/pwdtest; echo $PWD", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "/tmp/pwdtest\n");
+    }
+
+    #[test]
+    fn builtins_cd_updates_oldpwd_environment_variable() {
+        let bash = JustBashSession::new();
+        bash.exec("mkdir -p /tmp/dir1 /tmp/dir2", JustBashExecOptions::new());
+        let r = bash.exec(
+            "cd /tmp/dir1; cd /tmp/dir2; echo $OLDPWD",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "/tmp/dir1\n");
+    }
+
+    #[test]
+    fn builtins_cd_handles_cd_dash() {
+        let bash = JustBashSession::new();
+        bash.exec("mkdir -p /tmp/orig /tmp/new", JustBashExecOptions::new());
+        let r = bash.exec(
+            "cd /tmp/orig; cd /tmp/new; cd -; pwd",
+            JustBashExecOptions::new(),
+        );
+        assert!(r.stdout.contains("/tmp/orig"), "got {:?}", r.stdout);
+    }
+
+    #[test]
+    fn builtins_cd_handles_dotdot() {
+        let bash = JustBashSession::new();
+        bash.exec("mkdir -p /tmp/parent/child", JustBashExecOptions::new());
+        let r = bash.exec(
+            "cd /tmp/parent/child; cd ..; pwd",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "/tmp/parent\n");
+    }
+
+    #[test]
+    fn builtins_cd_handles_absolute_path() {
+        let bash = JustBashSession::new();
+        let r = bash.exec("cd /tmp; pwd", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "/tmp\n");
+    }
+
+    #[test]
+    fn builtins_cd_does_not_change_real_process_cwd() {
+        let before = std::env::current_dir().unwrap();
+        let bash = JustBashSession::new();
+        bash.exec("cd /tmp", JustBashExecOptions::new());
+        assert_eq!(std::env::current_dir().unwrap(), before);
+    }
+
+    #[test]
+    fn builtins_cd_errors_on_nonexistent_directory() {
+        let bash = JustBashSession::new();
+        let r = bash.exec("cd /nonexistent/directory", JustBashExecOptions::new());
+        assert!(r.stderr.contains("No such file or directory"));
+        assert_eq!(r.exit_code, 1);
+    }
+
+    #[test]
+    fn builtins_cd_errors_when_cd_to_a_file() {
+        let bash = JustBashSession::new();
+        bash.exec("touch /tmp/testfile", JustBashExecOptions::new());
+        let r = bash.exec("cd /tmp/testfile", JustBashExecOptions::new());
+        assert!(r.stderr.contains("Not a directory"));
+        assert_eq!(r.exit_code, 1);
+    }
+
+    // exit.test.ts
+    #[test]
+    fn builtins_exit_with_code_0_by_default() {
+        let bash = JustBashSession::new();
+        assert_eq!(bash.exec("exit", JustBashExecOptions::new()).exit_code, 0);
+    }
+
+    #[test]
+    fn builtins_exit_with_specified_code() {
+        let bash = JustBashSession::new();
+        assert_eq!(
+            bash.exec("exit 42", JustBashExecOptions::new()).exit_code,
+            42
+        );
+    }
+
+    #[test]
+    fn builtins_exit_with_code_1() {
+        let bash = JustBashSession::new();
+        assert_eq!(bash.exec("exit 1", JustBashExecOptions::new()).exit_code, 1);
+    }
+
+    #[test]
+    fn builtins_exit_stops_execution_after_exit() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "echo before; exit 0; echo after",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "before\n");
+        assert!(!r.stdout.contains("after"));
+    }
+
+    #[test]
+    fn builtins_exit_wraps_code_256_to_0() {
+        let bash = JustBashSession::new();
+        assert_eq!(
+            bash.exec("exit 256", JustBashExecOptions::new()).exit_code,
+            0
+        );
+    }
+
+    #[test]
+    fn builtins_exit_wraps_code_257_to_1() {
+        let bash = JustBashSession::new();
+        assert_eq!(
+            bash.exec("exit 257", JustBashExecOptions::new()).exit_code,
+            1
+        );
+    }
+
+    #[test]
+    fn builtins_exit_handles_negative_codes() {
+        let bash = JustBashSession::new();
+        assert_eq!(
+            bash.exec("exit -1", JustBashExecOptions::new()).exit_code,
+            255
+        );
+    }
+
+    #[test]
+    fn builtins_exit_errors_on_non_numeric_argument() {
+        let bash = JustBashSession::new();
+        let r = bash.exec("exit abc", JustBashExecOptions::new());
+        assert!(r.stderr.contains("numeric argument required"));
+        assert_eq!(r.exit_code, 2);
+    }
+
+    #[test]
+    fn builtins_exit_from_function() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "myfunc() { echo \"in func\"; exit 5; echo \"never\"; }; myfunc; echo \"also never\"",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "in func\n");
+        assert_eq!(r.exit_code, 5);
+    }
+
+    // export.test.ts
+    #[test]
+    fn builtins_export_sets_variable_with_name_value() {
+        let bash = JustBashSession::new();
+        let r = bash.exec("export FOO=bar; echo $FOO", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "bar\n");
+    }
+
+    #[test]
+    fn builtins_export_sets_multiple_variables() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "export FOO=bar BAZ=qux; echo $FOO $BAZ",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "bar qux\n");
+    }
+
+    #[test]
+    fn builtins_export_handles_value_with_equals_sign() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "export URL=http://example.com?foo=bar; echo $URL",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "http://example.com?foo=bar\n");
+    }
+
+    #[test]
+    fn builtins_export_creates_empty_variable_when_name_has_no_value() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "export EMPTY; test -z \"$EMPTY\" && echo empty",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "empty\n");
+    }
+
+    #[test]
+    fn builtins_export_variable_available_in_same_exec() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "export GREETING=hello; echo $GREETING world",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "hello world\n");
+    }
+
+    #[test]
+    fn builtins_export_works_with_conditional() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "export DEBUG=1; [ \"$DEBUG\" = \"1\" ] && echo debug_on",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "debug_on\n");
+    }
+
+    // unset.test.ts
+    #[test]
+    fn builtins_unset_a_variable() {
+        let bash =
+            JustBashSession::with_options(JustBashSessionOptions::new().with_env("VAR", "value"));
+        let r = bash.exec(
+            "echo \"before: $VAR\"\nunset VAR\necho \"after: $VAR\"",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "before: value\nafter: \n");
+    }
+
+    #[test]
+    fn builtins_unset_multiple_variables() {
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_env("A", "1")
+                .with_env("B", "2")
+                .with_env("C", "3"),
+        );
+        let r = bash.exec(
+            "unset A B\necho \"A=$A B=$B C=$C\"",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "A= B= C=3\n");
+    }
+
+    #[test]
+    fn builtins_unset_succeeds_silently_for_nonexistent_variable() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "unset NONEXISTENT\necho \"done\"",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "done\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn builtins_unset_variable_with_v_flag() {
+        let bash =
+            JustBashSession::with_options(JustBashSessionOptions::new().with_env("VAR", "value"));
+        let r = bash.exec(
+            "unset -v VAR\necho \"VAR=$VAR\"",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "VAR=\n");
+    }
+
+    #[test]
+    fn builtins_unset_a_function_with_f_flag() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "myfunc() { echo \"hello\"; }\nmyfunc\nunset -f myfunc\nmyfunc",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "hello\n");
+        assert!(r.stderr.contains("command not found"));
+    }
+
+    #[test]
+    fn builtins_unset_succeeds_silently_for_nonexistent_function() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "unset -f nonexistent_func\necho \"done\"",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "done\n");
+        assert_eq!(r.exit_code, 0);
     }
 }
