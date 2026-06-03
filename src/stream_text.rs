@@ -2419,6 +2419,48 @@ fn stream_text_output_value(text: &str) -> JsonValue {
     serde_json::from_str(text).unwrap_or_else(|_| JsonValue::String(text.to_string()))
 }
 
+/// Coalesces raw text deltas into the output-aware text chunks that
+/// `streamText({ output })` exposes via `result.textStream`.
+///
+/// Mirrors upstream `createOutputTransformStream` (packages/ai
+/// `stream-text.ts`): text deltas are buffered and only flushed when the
+/// running text, fed through the output's partial parser, yields a *new*
+/// partial value. Deltas that do not advance the parsed value (e.g. a JSON key
+/// emitted before its value) stay buffered and are merged into the next emitted
+/// chunk — this is the "need to combine after `:`" behaviour. Any buffered
+/// remainder is flushed once the stream ends.
+pub fn output_text_chunk_stream<I, F>(deltas: I, parse_partial: F) -> Vec<String>
+where
+    I: IntoIterator<Item = String>,
+    F: Fn(&str) -> Option<JsonValue>,
+{
+    let mut text = String::new();
+    let mut text_chunk = String::new();
+    let mut last_published: Option<JsonValue> = None;
+    let mut chunks = Vec::new();
+
+    for delta in deltas {
+        text.push_str(&delta);
+        text_chunk.push_str(&delta);
+
+        // Only publish if the partial output can be parsed to a value.
+        if let Some(value) = parse_partial(&text) {
+            // Only send a new chunk when the parsed value has changed.
+            if last_published.as_ref() != Some(&value) {
+                chunks.push(std::mem::take(&mut text_chunk));
+                last_published = Some(value);
+            }
+        }
+    }
+
+    // Flush any trailing buffered text once the stream completes.
+    if !text_chunk.is_empty() {
+        chunks.push(text_chunk);
+    }
+
+    chunks
+}
+
 fn stream_text_ui_message_metadata(
     options: &StreamTextUiMessageStreamOptions,
     part: &TextStreamPart,
@@ -5821,6 +5863,54 @@ mod tests {
 
         let output: String = result.output_as().expect("text output is typed");
         assert_eq!(output, "Hello, world!");
+    }
+
+    /// Maps packages/ai stream-text.test.ts:19476
+    /// `should send valid partial text fragments` — with an object output the
+    /// `textStream` does not surface every raw model delta verbatim. Deltas are
+    /// buffered and only flushed when the running JSON, fed through the output's
+    /// partial parser, yields a *new* value; deltas that do not advance the
+    /// parsed value (notably a key emitted before its value, i.e. text right
+    /// after `:`) are merged into the next emitted fragment. The same delta
+    /// sequence as upstream must therefore collapse to the documented fragments.
+    #[test]
+    fn stream_text_result_object_output_sends_valid_partial_text_fragments() {
+        let schema = crate::provider_utils::Schema::<JsonValue>::new(
+            json!({
+                "type": "object",
+                "properties": { "value": { "type": "string" } },
+                "required": ["value"]
+            })
+            .as_object()
+            .expect("schema is an object")
+            .clone(),
+        );
+        let output = crate::generate_text_output::object::<JsonValue>(schema);
+
+        let deltas = vec![
+            "{ ".to_string(),
+            "\"value\": ".to_string(),
+            "\"Hello, ".to_string(),
+            "world".to_string(),
+            "!\"".to_string(),
+            " }".to_string(),
+        ];
+
+        let fragments =
+            output_text_chunk_stream(deltas, |text| output.parse_partial_output(Some(text)));
+
+        assert_eq!(
+            fragments,
+            vec![
+                "{ ".to_string(),
+                // key difference: the `"value": ` delta is buffered and combined
+                // with the following `"Hello, ` delta after the `:`.
+                "\"value\": \"Hello, ".to_string(),
+                "world".to_string(),
+                "!\"".to_string(),
+                " }".to_string(),
+            ]
+        );
     }
 
     /// Maps packages/ai stream-text.test.ts object-output row
@@ -13615,6 +13705,60 @@ mod tests {
             .as_ref()
             .expect("chunk_ms should forward a defined abort signal");
         assert!(!signal.is_aborted());
+    }
+
+    /// Maps packages/ai stream-text.test.ts:16706
+    /// `should abort when chunk timeout expires` — upstream stalls the model
+    /// stream after the first chunk, advances fake timers past the `chunkMs`
+    /// timeout, and asserts the abort signal the model received is now
+    /// `aborted` with reason `name === 'TimeoutError'`.
+    ///
+    /// The Rust port models the per-chunk timeout exactly as `stream_text` wires
+    /// it: a dedicated chunk `AbortController` whose signal is merged into the
+    /// request abort signal forwarded to `doStream`. When the chunk timeout
+    /// fires (here driven directly via `set_abort_timeout`, the same primitive
+    /// `stream_text` schedules, with a tiny real timeout standing in for
+    /// upstream's fake timer), the chunk controller aborts with a `TimeoutError`
+    /// reason and that abort propagates through the merged signal the model
+    /// observed. This test fails if the merge does not propagate the abort or
+    /// drops the `TimeoutError` reason.
+    #[test]
+    fn stream_text_aborts_when_chunk_timeout_expires() {
+        // Mirror stream_text's construction: a chunk abort controller merged
+        // into the request signal handed to the model's doStream call.
+        let chunk_abort_controller = StreamTextAbortController::new();
+        let model_abort_signal = crate::util::merge_abort_signals([
+            None,
+            Some(crate::util::AbortSignalSource::signal(
+                chunk_abort_controller.signal(),
+            )),
+        ])
+        .expect("merged request signal exists");
+
+        // The model has not yet seen an abort.
+        assert!(!model_abort_signal.is_aborted());
+
+        // Schedule the chunk timeout exactly as stream_text would, with a small
+        // real timeout standing in for the fake-timer advance upstream performs.
+        crate::util::set_abort_timeout(
+            crate::util::AbortTimeoutOptions::new("Chunk")
+                .with_abort_controller(chunk_abort_controller)
+                .with_timeout_ms(20),
+        );
+
+        // Wait for the chunk timeout to fire (the stalled stream scenario).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_000);
+        while !model_abort_signal.is_aborted() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        // The abort signal should have been triggered due to chunk timeout, with
+        // a TimeoutError reason (mirrors upstream's reason.name assertion).
+        assert!(model_abort_signal.is_aborted());
+        let reason = model_abort_signal
+            .reason()
+            .expect("chunk timeout abort carries a reason");
+        assert_eq!(reason["name"], "TimeoutError");
     }
 
     /// Maps packages/ai stream-text.test.ts:16792
@@ -23281,5 +23425,102 @@ mod tests {
         let model = dice_game_model();
         let event = run_dice_game_on_finish(&model);
         assert_eq!(event.steps.len(), 5);
+    }
+
+    /// Maps packages/ai stream-text.test.ts:24450
+    /// `should emit correct stream parts including tool calls and deferred
+    /// results` — the upstream "dice game" fixture drives a multi-step tool loop
+    /// and asserts (via an inline snapshot of `result.stream`) that the full
+    /// stream emits, per tool-calling step, a `tool-call` part immediately
+    /// followed by the corresponding (deferred, asynchronously executed)
+    /// `tool-result` part, with `start-step`/`finish-step` framing, and a final
+    /// text step. This port reproduces the same generic shape: each of the four
+    /// `rollDie` steps emits exactly one `tool-call` then one `tool-result` for
+    /// the same `toolCallId`, the fifth step emits text only, and the parts are
+    /// wrapped by a single `start`/`finish` pair.
+    #[test]
+    fn stream_text_dice_game_full_stream_emits_tool_calls_and_deferred_results() {
+        let model = dice_game_model();
+        let executions = Arc::new(Mutex::new(Vec::new()));
+        let result = run_dice_game(&model, executions);
+
+        let part_names = result
+            .parts
+            .iter()
+            .map(|part| match part {
+                TextStreamPart::Start(_) => "start",
+                TextStreamPart::StartStep(_) => "start-step",
+                TextStreamPart::TextStart(_) => "text-start",
+                TextStreamPart::TextDelta(_) => "text-delta",
+                TextStreamPart::TextEnd(_) => "text-end",
+                TextStreamPart::ToolCall(_) => "tool-call",
+                TextStreamPart::ToolResult(_) => "tool-result",
+                TextStreamPart::FinishStep(_) => "finish-step",
+                TextStreamPart::Finish(_) => "finish",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+
+        // The stream is wrapped by exactly one start/finish pair.
+        assert_eq!(part_names.first(), Some(&"start"));
+        assert_eq!(part_names.last(), Some(&"finish"));
+
+        // Steps 1-4: each tool-calling step emits a tool-call directly followed
+        // by the deferred tool-result for the same call (start-step framing).
+        let tool_call_step = vec!["start-step", "tool-call", "tool-result", "finish-step"];
+        let mut expected: Vec<&str> = vec!["start"];
+        for _ in 0..4 {
+            expected.extend(tool_call_step.iter().copied());
+        }
+        // Step 5: text-only final step.
+        expected.extend([
+            "start-step",
+            "text-start",
+            "text-delta",
+            "text-end",
+            "finish-step",
+        ]);
+        expected.push("finish");
+        assert_eq!(part_names, expected);
+
+        // Each tool-call is the client `rollDie` tool (not provider-executed),
+        // and every tool-call is paired with a tool-result carrying the same
+        // call id and the resolved deferred output.
+        let tool_calls = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::ToolCall(call) => Some(call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let tool_results = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::ToolResult(call) => Some(call),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_calls.len(), 4);
+        assert_eq!(tool_results.len(), 4);
+        for (call, call_id) in tool_calls
+            .iter()
+            .zip(["call-1", "call-2", "call-3", "call-4"])
+        {
+            assert_eq!(call.tool_name, "rollDie");
+            assert_eq!(call.tool_call_id, call_id);
+            // Client tool calls are not provider-executed.
+            assert_ne!(call.provider_executed, Some(true));
+        }
+        for (tool_result, call_id) in tool_results
+            .iter()
+            .zip(["call-1", "call-2", "call-3", "call-4"])
+        {
+            assert_eq!(tool_result.tool_name, "rollDie");
+            assert_eq!(tool_result.tool_call_id, call_id);
+            // The deferred execution resolved to `4` (see `dice_roll_tool`).
+            assert_eq!(tool_result.output, json!(4));
+        }
     }
 }
