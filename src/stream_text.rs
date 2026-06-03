@@ -12345,6 +12345,39 @@ mod tests {
         assert!(stream_calls[0].abort_signal.is_none());
     }
 
+    /// Maps packages/ai stream-text.test.ts `timeout` row
+    /// `should support both totalMs and stepMs together` — a timeout that
+    /// configures both `total_ms` and `step_ms` still forwards a (total-derived)
+    /// abort signal to the model call.
+    #[test]
+    fn stream_text_supports_total_ms_and_step_ms_together() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_timeout(
+                TimeoutConfiguration::detailed(
+                    TimeoutConfigurationOptions::new()
+                        .with_total_ms(10_000)
+                        .with_step_ms(5_000),
+                ),
+            ),
+        ));
+
+        assert_eq!(result.text, "Hello");
+        let stream_calls = model.stream_calls();
+        assert_eq!(stream_calls.len(), 1);
+        assert!(stream_calls[0].abort_signal.is_some());
+    }
+
     #[test]
     fn stream_text_passes_undefined_when_timeout_object_has_no_total_ms() {
         let model =
@@ -18444,6 +18477,195 @@ mod tests {
 
         assert_eq!(error_chunk.0, "call-1");
         assert!(error_chunk.1.contains("test error"));
+    }
+
+    /// Maps packages/ai stream-text.test.ts `provider-executed tools` row
+    /// `should include provider-executed tool call and result content` — a
+    /// provider-executed tool call streamed alongside its provider-supplied
+    /// result is surfaced in the result content (and tool-call/tool-result
+    /// collections) carrying `provider_executed: true`, including an errored
+    /// provider result.
+    #[test]
+    fn stream_text_includes_provider_executed_tool_call_and_result_content() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new("call-1", "web_search", r#"{"value":"value"}"#)
+                        .with_provider_executed(true),
+                ),
+                LanguageModelStreamPart::ToolResult(LanguageModelToolResult::new(
+                    "call-1",
+                    "web_search",
+                    NonNullJsonValue::new(json!({ "value": "result1" }))
+                        .expect("provider result is non-null"),
+                )),
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new("call-2", "web_search", r#"{"value":"value"}"#)
+                        .with_provider_executed(true),
+                ),
+                LanguageModelStreamPart::ToolResult(
+                    LanguageModelToolResult::new(
+                        "call-2",
+                        "web_search",
+                        NonNullJsonValue::new(json!("ERROR")).expect("provider result is non-null"),
+                    )
+                    .with_is_error(true),
+                ),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_for_tool = Arc::clone(&executed);
+        let input_schema = execute_tools_value_schema();
+        let output_schema = input_schema.clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_tool(
+                Tool::provider_executed(
+                    "web_search",
+                    "test.web_search",
+                    JsonObject::new(),
+                    input_schema,
+                    output_schema,
+                )
+                .with_execute(move |_input, _options| {
+                    let executed = Arc::clone(&executed_for_tool);
+                    async move {
+                        executed.store(true, Ordering::SeqCst);
+                        Ok(json!("should-not-execute"))
+                    }
+                }),
+            ),
+        ));
+
+        // Provider-executed tools are never invoked locally.
+        assert!(!executed.load(Ordering::SeqCst));
+
+        assert_eq!(result.tool_calls.len(), 2);
+        assert!(
+            result
+                .tool_calls
+                .iter()
+                .all(|call| call.provider_executed == Some(true))
+        );
+        assert_eq!(result.tool_calls[0].tool_call_id, "call-1");
+        assert_eq!(result.tool_calls[0].tool_name, "web_search");
+        assert_eq!(result.tool_calls[0].input, json!({ "value": "value" }));
+
+        assert_eq!(result.tool_results.len(), 2);
+        assert!(
+            result
+                .tool_results
+                .iter()
+                .all(|res| res.provider_executed == Some(true))
+        );
+        assert_eq!(result.tool_results[0].tool_call_id, "call-1");
+        assert_eq!(result.tool_results[0].output, json!({ "value": "result1" }));
+        assert_eq!(result.tool_results[0].is_error, None);
+        assert_eq!(result.tool_results[1].tool_call_id, "call-2");
+        assert_eq!(result.tool_results[1].is_error, Some(true));
+    }
+
+    /// Maps packages/ai stream-text.test.ts `provider-executed tools` row
+    /// `should only execute a single step` — provider-executed tool results are
+    /// settled within the same model call, so the loop does not start a second
+    /// step.
+    #[test]
+    fn stream_text_provider_executed_tool_results_run_in_a_single_step() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new("call-1", "web_search", r#"{"value":"value"}"#)
+                        .with_provider_executed(true),
+                ),
+                LanguageModelStreamPart::ToolResult(LanguageModelToolResult::new(
+                    "call-1",
+                    "web_search",
+                    NonNullJsonValue::new(json!({ "value": "result1" }))
+                        .expect("provider result is non-null"),
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let input_schema = execute_tools_value_schema();
+        let output_schema = input_schema.clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_tool(
+                Tool::provider_executed(
+                    "web_search",
+                    "test.web_search",
+                    JsonObject::new(),
+                    input_schema,
+                    output_schema,
+                ),
+            ),
+        ));
+
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(model.stream_calls().len(), 1);
+    }
+
+    /// Maps packages/ai stream-text.test.ts `tool execution errors` row
+    /// `should include the error part in the step stream` — a local tool whose
+    /// execution fails records an errored tool-result on the step (with
+    /// `is_error` set and the failure message in the output).
+    #[test]
+    fn stream_text_step_includes_tool_error_part() {
+        let model = execute_tools_single_call_model("tool1");
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_tool(
+                Tool::new("tool1", execute_tools_value_schema()).with_execute(
+                    |_input, _options| async move {
+                        Err::<JsonValue, ToolExecutionError>(ToolExecutionError::new("test error"))
+                    },
+                ),
+            ),
+        ));
+
+        assert_eq!(result.steps.len(), 1);
+        let step = &result.steps[0];
+        assert_eq!(step.tool_results.len(), 1);
+        let error_result = &step.tool_results[0];
+        assert_eq!(error_result.tool_call_id, "call-1");
+        assert_eq!(error_result.tool_name, "tool1");
+        assert_eq!(error_result.is_error, Some(true));
+        assert!(
+            error_result
+                .output
+                .as_str()
+                .expect("error output is a string")
+                .contains("test error")
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts `options.output` text-output row
+    /// `should resolve output promise with the correct content` — the default
+    /// text output resolves to the full accumulated text.
+    #[test]
+    fn stream_text_text_output_resolves_to_full_text() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello, ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+
+        assert_eq!(
+            result
+                .output_as::<String>()
+                .expect("text output resolves to a string"),
+            "Hello, world!".to_string()
+        );
     }
 
     #[test]
