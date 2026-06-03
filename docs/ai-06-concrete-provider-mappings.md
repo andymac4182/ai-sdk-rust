@@ -1048,3 +1048,22 @@ capture transports.
 | `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should include response data with timestamp, modelId and headers | `elevenlabs_transcription_model_sends_form_options_and_maps_response` | none |
 | `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should use real date when no custom date provider is specified | `elevenlabs_transcription_model_uses_real_date_when_no_custom_date_provider_is_specified` | none |
 | `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should work when no additional formats are returned | `elevenlabs_transcription_model_applies_upstream_defaults_when_options_object_is_present` | none |
+
+## Test Server Exact Case Map
+
+Row-level strict mapping for portable `packages/test-server` cases from
+`packages/test-server/src/with-vitest.test.ts`, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a colocated `#[cfg(test)]`
+test in `crates/ai-sdk-test-server/src/lib.rs` that genuinely exercises the
+behavior (the `create_test_server` factory exposing `urls`/`calls` with an empty
+initial call log, in-place response mutation, the distinct response types, and
+the `TestResponseController` stream surface plus its write/error/close methods)
+so each mapped test fails if the behavior regresses.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/test-server/src/with-vitest.test.ts` | should create a test server with basic functionality | `crates/ai-sdk-test-server/src/lib.rs::create_test_server_exposes_urls_and_empty_calls` | none |
+| `packages/test-server/src/with-vitest.test.ts` | should handle response mutations | `crates/ai-sdk-test-server/src/lib.rs::create_test_server_supports_response_mutations_and_reset` | none |
+| `packages/test-server/src/with-vitest.test.ts` | should support different response types | `crates/ai-sdk-test-server/src/lib.rs::create_test_server_supports_response_types` | none |
+| `packages/test-server/src/with-vitest.test.ts` | should create a controller with stream access | `crates/ai-sdk-test-server/src/lib.rs::response_controller_creates_with_stream_access` | none |
+| `packages/test-server/src/with-vitest.test.ts` | should have write, error, and close methods | `crates/ai-sdk-test-server/src/lib.rs::response_controller_records_writes_errors_and_close` | none |
