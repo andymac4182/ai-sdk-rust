@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use ai_sdk_rust::{
-    FetchErrorInfo, GetFromApiOptions, HandledFetchError, Headers, ImageModel,
+    FetchErrorInfo, FileDataContent, GetFromApiOptions, HandledFetchError, Headers, ImageModel,
     ImageModelCallOptions, ImageModelProviderMetadata, ImageModelProviderMetadataEntry,
     ImageModelResponse, ImageModelResult, JsonObject, JsonValue, LoadApiKeyError,
     LoadApiKeyOptions, ModelType, NoSuchModelError, OpenAICompatibleChatLanguageModel,
@@ -14,8 +14,8 @@ use ai_sdk_rust::{
     ResponseHandlerResult, RuntimeEnvironment, VideoModel, VideoModelCallOptions, VideoModelFile,
     VideoModelResponse, VideoModelResult, VideoModelVideoData, Warning, combine_headers,
     convert_base64_to_bytes, create_binary_response_handler, create_json_error_response_handler,
-    get_from_api, load_api_key, parse_provider_options, post_to_api, with_user_agent_suffix,
-    without_trailing_slash,
+    detect_media_type, get_from_api, get_top_level_media_type, is_full_media_type, load_api_key,
+    parse_provider_options, post_to_api, with_user_agent_suffix, without_trailing_slash,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -97,6 +97,217 @@ pub struct ProdiaVideoModel {
     settings: ProdiaProviderSettings,
     transport: ProdiaTransport,
     current_date: ProdiaDateProvider,
+}
+
+/// Prodia language model.
+///
+/// Exposes the upstream `ProdiaLanguageModel` identity surface
+/// (`prodia-language-model.ts`): a fixed `v4` specification version, an empty
+/// `supportedUrls` map, and the `prodia.language` provider id.
+#[derive(Clone)]
+pub struct ProdiaLanguageModel {
+    model_id: String,
+    base_url: String,
+    settings: ProdiaProviderSettings,
+    transport: ProdiaTransport,
+    current_date: ProdiaDateProvider,
+}
+
+impl ProdiaLanguageModel {
+    fn new(
+        model_id: impl Into<String>,
+        base_url: impl Into<String>,
+        settings: ProdiaProviderSettings,
+        transport: ProdiaTransport,
+        current_date: ProdiaDateProvider,
+    ) -> Self {
+        Self {
+            model_id: model_id.into(),
+            base_url: base_url.into(),
+            settings,
+            transport,
+            current_date,
+        }
+    }
+
+    /// The model id (e.g. `inference.nano-banana.img2img.v2`).
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    /// The provider id, always `prodia.language`.
+    pub fn provider(&self) -> &str {
+        "prodia.language"
+    }
+
+    /// The language model specification version, always `v4`.
+    pub fn specification_version(&self) -> &str {
+        "v4"
+    }
+
+    /// The supported URL patterns: Prodia language models support none.
+    pub fn supported_urls(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        std::collections::BTreeMap::new()
+    }
+
+    fn job_url(&self) -> String {
+        format!("{}/job?price=true", self.base_url)
+    }
+
+    fn request_headers(
+        &self,
+        call_headers: Option<&Headers>,
+    ) -> Result<BTreeMap<String, Option<String>>, LoadApiKeyError> {
+        Ok(combine_headers([
+            Some(prodia_provider_header_entries(&self.settings)?),
+            optional_headers(call_headers),
+            Some(vec![(
+                "Accept".to_string(),
+                Some("multipart/form-data".to_string()),
+            )]),
+        ]))
+    }
+
+    /// Runs a Prodia language model generation: builds the job request, posts it
+    /// through the configured transport, and parses the multipart response into
+    /// content parts, warnings, provider metadata, and response metadata
+    /// (`prodia-language-model.ts` `doGenerate`).
+    async fn do_generate_content(
+        &self,
+        messages: Vec<ProdiaLanguageMessage>,
+        flags: ProdiaLanguageCallFlags,
+        provider_options: Option<&ai_sdk_rust::ProviderOptions>,
+    ) -> ProdiaLanguageGenerateResult {
+        let timestamp = (self.current_date)();
+        let mut warnings = prodia_language_warnings(flags);
+
+        let language_options =
+            match parse_provider_options("prodia", provider_options, prodia_language_model_options)
+            {
+                Ok(options) => options.unwrap_or_default(),
+                Err(error) => {
+                    return ProdiaLanguageGenerateResult::error(error.to_string(), None, warnings);
+                }
+            };
+
+        let prompt_text = prodia_language_prompt_text(&messages);
+        let request_body = prodia_language_request_body(
+            &self.model_id,
+            &prompt_text,
+            language_options.aspect_ratio.as_deref(),
+        );
+
+        let request_headers = match self.request_headers(None) {
+            Ok(headers) => headers,
+            Err(error) => {
+                return ProdiaLanguageGenerateResult::error(error.to_string(), None, warnings);
+            }
+        };
+
+        let post_options = PostToApiOptions::new(
+            self.job_url(),
+            ProviderApiRequestBody::text(request_body.to_string()),
+            request_body,
+        )
+        .with_headers(request_headers)
+        .with_environment(RuntimeEnvironment::unknown());
+
+        let transport = Arc::clone(&self.transport);
+        let result = post_to_api(
+            post_options,
+            move |request| (transport)(request),
+            prodia_language_response_handler,
+            |request, response| {
+                Ok(create_json_error_response_handler(
+                    response.json_error_response_handler_options(request),
+                    prodia_error_response,
+                    prodia_error_message,
+                    |_, _| None,
+                ))
+            },
+        )
+        .await;
+
+        match result {
+            Ok(result) => {
+                let (job_result, content) = result.value;
+                ProdiaLanguageGenerateResult {
+                    content,
+                    finish_reason: "stop".to_string(),
+                    warnings: std::mem::take(&mut warnings),
+                    provider_metadata: Some(prodia_provider_metadata(job_result)),
+                    response_metadata: prodia_image_response_metadata(
+                        &self.model_id,
+                        result.response_headers,
+                        timestamp,
+                    ),
+                    error: None,
+                }
+            }
+            Err(error) => {
+                let (message, headers) = prodia_handled_error_parts(error);
+                ProdiaLanguageGenerateResult::error(message, headers, warnings)
+            }
+        }
+    }
+}
+
+/// The outcome of a Prodia language model `doGenerate` call.
+#[derive(Clone, Debug)]
+struct ProdiaLanguageGenerateResult {
+    content: Vec<ProdiaLanguageContent>,
+    finish_reason: String,
+    warnings: Vec<Warning>,
+    provider_metadata: Option<JsonObject>,
+    response_metadata: ImageModelResponse,
+    error: Option<String>,
+}
+
+impl ProdiaLanguageGenerateResult {
+    fn error(message: String, headers: Option<Headers>, warnings: Vec<Warning>) -> Self {
+        Self {
+            content: Vec::new(),
+            finish_reason: "stop".to_string(),
+            warnings,
+            provider_metadata: None,
+            response_metadata: prodia_image_response_metadata(
+                "",
+                headers,
+                OffsetDateTime::from_unix_timestamp(0).expect("unix epoch is valid"),
+            ),
+            error: Some(message),
+        }
+    }
+}
+
+fn prodia_language_response_handler(
+    request: &ProviderApiRequest,
+    response: &ProviderApiResponse,
+) -> Result<
+    ResponseHandlerResult<(ProdiaJobResult, Vec<ProdiaLanguageContent>)>,
+    ProviderApiResponseHandlerError,
+> {
+    let _ = request;
+    let content_type = response
+        .headers
+        .get("content-type")
+        .or_else(|| response.headers.get("Content-Type"))
+        .cloned()
+        .unwrap_or_default();
+    let body = response
+        .body
+        .as_ref()
+        .map(|body| match body {
+            ai_sdk_rust::ProviderApiResponseBody::Text { content } => content.as_bytes().to_vec(),
+            ai_sdk_rust::ProviderApiResponseBody::Bytes { content } => content.clone(),
+        })
+        .ok_or_else(|| ProviderApiResponseHandlerError::Other {
+            message: "Prodia response body is empty".to_string(),
+        })?;
+    let (job_result, content) = prodia_language_multipart_content(&content_type, &body)
+        .map_err(|message| ProviderApiResponseHandlerError::Other { message })?;
+    Ok(ResponseHandlerResult::new((job_result, content))
+        .with_response_headers(response.headers.clone()))
 }
 
 /// Future returned by an injected Prodia HTTP transport.
@@ -203,7 +414,20 @@ impl ProdiaProvider {
         ))
     }
 
-    /// Reports that the Prodia language surface is outside this media-generation slice.
+    /// Creates a Prodia language model (upstream `ProdiaProvider.languageModel`).
+    pub fn prodia_language_model(&self, model_id: impl Into<String>) -> ProdiaLanguageModel {
+        ProdiaLanguageModel::new(
+            model_id,
+            self.base_url.clone(),
+            self.settings.clone(),
+            Arc::clone(&self.transport),
+            Arc::clone(&self.current_date),
+        )
+    }
+
+    /// Reports that the Prodia language surface is outside the media-generation
+    /// `Provider` trait. The concrete language model is available via
+    /// [`ProdiaProvider::prodia_language_model`].
     pub fn language_model(
         &self,
         model_id: impl Into<String>,
@@ -919,6 +1143,326 @@ fn prodia_video_request_body(
     body.insert("type".to_string(), JsonValue::String(model_id.to_string()));
     body.insert("config".to_string(), JsonValue::Object(config));
     Ok((JsonValue::Object(body), warnings))
+}
+
+/// Provider options accepted by the Prodia language model surface
+/// (`prodia-language-model-options.ts`). Only `aspectRatio` is supported, and
+/// it is constrained to the upstream enum of valid aspect ratios.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProdiaLanguageModelOptions {
+    #[serde(default)]
+    aspect_ratio: Option<String>,
+}
+
+const PRODIA_LANGUAGE_ASPECT_RATIOS: &[&str] = &[
+    "1:1", "2:3", "3:2", "4:5", "5:4", "4:7", "7:4", "9:16", "16:9", "9:21", "21:9",
+];
+
+impl ProdiaLanguageModelOptions {
+    fn validate(&self) -> Result<(), String> {
+        if let Some(aspect_ratio) = self.aspect_ratio.as_deref() {
+            if !PRODIA_LANGUAGE_ASPECT_RATIOS.contains(&aspect_ratio) {
+                return Err(format!("invalid aspectRatio: {aspect_ratio}"));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn prodia_language_model_options(value: &JsonValue) -> Result<ProdiaLanguageModelOptions, String> {
+    let options = serde_json::from_value::<ProdiaLanguageModelOptions>(value.clone())
+        .map_err(|error| error.to_string())?;
+    options.validate()?;
+    Ok(options)
+}
+
+/// A single message in the language model prompt, in the minimal shape the
+/// Prodia language model consumes (`prodia-language-model.ts` `doGenerate`).
+#[derive(Clone, Debug)]
+enum ProdiaLanguageMessage {
+    System { content: String },
+    User { content: Vec<ProdiaLanguagePart> },
+}
+
+#[derive(Clone, Debug)]
+enum ProdiaLanguagePart {
+    Text {
+        text: String,
+    },
+    File {
+        media_type: String,
+        data: FileDataContent,
+    },
+}
+
+/// Extracts the text prompt from the language model messages, mirroring the
+/// upstream behavior: the text comes from the *last* user message (its text
+/// parts joined by newlines), and any system message is prepended with a
+/// newline separator.
+fn prodia_language_prompt_text(messages: &[ProdiaLanguageMessage]) -> String {
+    let mut system_message = String::new();
+    for message in messages {
+        if let ProdiaLanguageMessage::System { content } = message {
+            system_message = content.clone();
+        }
+    }
+
+    let mut prompt = String::new();
+    for message in messages.iter().rev() {
+        if let ProdiaLanguageMessage::User { content } = message {
+            for part in content {
+                if let ProdiaLanguagePart::Text { text } = part {
+                    if prompt.is_empty() {
+                        prompt = text.clone();
+                    } else {
+                        prompt.push('\n');
+                        prompt.push_str(text);
+                    }
+                }
+            }
+            break;
+        }
+    }
+
+    if !system_message.is_empty() {
+        prompt = format!("{system_message}\n{prompt}");
+    }
+    prompt
+}
+
+/// Extracts the first image file part from the last user message and resolves
+/// its media type. Mirrors the upstream rules: a full media type (e.g.
+/// `image/png`) is used verbatim; a top-level-only `image` media type is
+/// upgraded via signature detection, falling back to the default `image/png`
+/// when bytes are undetectable.
+fn prodia_language_image(messages: &[ProdiaLanguageMessage]) -> Option<(Vec<u8>, String)> {
+    for message in messages.iter().rev() {
+        if let ProdiaLanguageMessage::User { content } = message {
+            for part in content {
+                if let ProdiaLanguagePart::File { media_type, data } = part {
+                    if get_top_level_media_type(media_type) != "image" {
+                        continue;
+                    }
+                    let bytes = match data {
+                        FileDataContent::Bytes(bytes) => bytes.clone(),
+                        FileDataContent::Base64(base64) => convert_base64_to_bytes(base64).ok()?,
+                    };
+                    let resolved_media_type = if is_full_media_type(media_type) {
+                        media_type.clone()
+                    } else {
+                        detect_media_type(data, Some(get_top_level_media_type(media_type)))
+                            .map(str::to_string)
+                            .unwrap_or_else(|| "image/png".to_string())
+                    };
+                    return Some((bytes, resolved_media_type));
+                }
+            }
+            return None;
+        }
+    }
+    None
+}
+
+/// Builds the Prodia language model job request body. The config always carries
+/// `include_messages: true` and optionally `aspect_ratio` from provider
+/// options (`prodia-language-model.ts`).
+fn prodia_language_request_body(
+    model_id: &str,
+    prompt_text: &str,
+    aspect_ratio: Option<&str>,
+) -> JsonValue {
+    let mut config = JsonObject::new();
+    config.insert(
+        "prompt".to_string(),
+        JsonValue::String(prompt_text.to_string()),
+    );
+    config.insert("include_messages".to_string(), JsonValue::Bool(true));
+    if let Some(aspect_ratio) = aspect_ratio {
+        config.insert(
+            "aspect_ratio".to_string(),
+            JsonValue::String(aspect_ratio.to_string()),
+        );
+    }
+
+    let mut body = JsonObject::new();
+    body.insert("type".to_string(), JsonValue::String(model_id.to_string()));
+    body.insert("config".to_string(), JsonValue::Object(config));
+    JsonValue::Object(body)
+}
+
+/// Call parameters that map to "unsupported feature" warnings on the Prodia
+/// language model (`prodia-language-model.ts` `doGenerate`). `true` means the
+/// caller set the corresponding option.
+#[derive(Clone, Copy, Debug, Default)]
+struct ProdiaLanguageCallFlags {
+    temperature: bool,
+    top_p: bool,
+    top_k: bool,
+    max_output_tokens: bool,
+    stop_sequences: bool,
+    presence_penalty: bool,
+    frequency_penalty: bool,
+    tools: bool,
+    tool_choice: bool,
+    /// A non-text response format was requested.
+    non_text_response_format: bool,
+    /// Custom reasoning configuration was requested.
+    custom_reasoning: bool,
+}
+
+/// Produces the warnings emitted for unsupported language model features, in
+/// the same order as the upstream implementation.
+fn prodia_language_warnings(flags: ProdiaLanguageCallFlags) -> Vec<Warning> {
+    let mut warnings = Vec::new();
+    let mut push = |feature: &str| {
+        warnings.push(Warning::Unsupported {
+            feature: feature.to_string(),
+            details: None,
+        });
+    };
+    if flags.temperature {
+        push("temperature");
+    }
+    if flags.top_p {
+        push("topP");
+    }
+    if flags.top_k {
+        push("topK");
+    }
+    if flags.max_output_tokens {
+        push("maxOutputTokens");
+    }
+    if flags.stop_sequences {
+        push("stopSequences");
+    }
+    if flags.presence_penalty {
+        push("presencePenalty");
+    }
+    if flags.frequency_penalty {
+        push("frequencyPenalty");
+    }
+    if flags.tools {
+        push("tools");
+    }
+    if flags.tool_choice {
+        push("toolChoice");
+    }
+    if flags.non_text_response_format {
+        push("responseFormat");
+    }
+    if flags.custom_reasoning {
+        warnings.push(Warning::Unsupported {
+            feature: "reasoning".to_string(),
+            details: Some("This provider does not support reasoning configuration.".to_string()),
+        });
+    }
+    warnings
+}
+
+/// A single content item produced by the Prodia language model response.
+#[derive(Clone, Debug, PartialEq)]
+enum ProdiaLanguageContent {
+    Text { text: String },
+    File { media_type: String, data: Vec<u8> },
+}
+
+/// Parses a Prodia language model multipart response into a job result and the
+/// ordered list of text/file content parts (`prodia-language-model.ts`
+/// `createLanguageMultipartResponseHandler`).
+fn prodia_language_multipart_content(
+    content_type: &str,
+    body: &[u8],
+) -> Result<(ProdiaJobResult, Vec<ProdiaLanguageContent>), String> {
+    let boundary = multipart_boundary(content_type).ok_or_else(|| {
+        format!("Prodia response missing multipart boundary in content-type: {content_type}")
+    })?;
+    let parts = parse_multipart(body, &boundary);
+
+    let mut job_result: Option<ProdiaJobResult> = None;
+    let mut content: Vec<ProdiaLanguageContent> = Vec::new();
+
+    for part in parts {
+        let content_disposition = part
+            .headers
+            .get("content-disposition")
+            .cloned()
+            .unwrap_or_default();
+        let part_content_type = part
+            .headers
+            .get("content-type")
+            .cloned()
+            .unwrap_or_default();
+
+        if content_disposition.contains("name=\"job\"") {
+            job_result = Some(
+                serde_json::from_slice::<ProdiaJobResult>(&part.body)
+                    .map_err(|error| error.to_string())?,
+            );
+        } else if content_disposition.contains("name=\"output\"") {
+            if part_content_type.starts_with("text/") {
+                content.push(ProdiaLanguageContent::Text {
+                    text: String::from_utf8_lossy(&part.body).to_string(),
+                });
+            } else {
+                content.push(ProdiaLanguageContent::File {
+                    media_type: if part_content_type.is_empty() {
+                        "application/octet-stream".to_string()
+                    } else {
+                        part_content_type
+                    },
+                    data: part.body,
+                });
+            }
+        }
+    }
+
+    let job_result = job_result
+        .ok_or_else(|| "Prodia language multipart response missing job part".to_string())?;
+    Ok((job_result, content))
+}
+
+/// Stream part emitted when wrapping a Prodia language `doGenerate` result into
+/// a stream (`prodia-language-model.ts` `doStream`).
+#[derive(Clone, Debug, PartialEq)]
+enum ProdiaLanguageStreamPart {
+    StreamStart,
+    ResponseMetadata,
+    TextStart,
+    TextDelta { delta: String },
+    TextEnd,
+    File { media_type: String },
+    Finish,
+}
+
+/// Wraps language content into the stream-part sequence the upstream `doStream`
+/// produces: stream-start, response-metadata, then text-start/delta/end per
+/// text part (and a file part per file), finishing with `finish`.
+fn prodia_language_stream_parts(
+    content: &[ProdiaLanguageContent],
+) -> Vec<ProdiaLanguageStreamPart> {
+    let mut parts = vec![
+        ProdiaLanguageStreamPart::StreamStart,
+        ProdiaLanguageStreamPart::ResponseMetadata,
+    ];
+    for item in content {
+        match item {
+            ProdiaLanguageContent::Text { text } => {
+                parts.push(ProdiaLanguageStreamPart::TextStart);
+                parts.push(ProdiaLanguageStreamPart::TextDelta {
+                    delta: text.clone(),
+                });
+                parts.push(ProdiaLanguageStreamPart::TextEnd);
+            }
+            ProdiaLanguageContent::File { media_type, .. } => {
+                parts.push(ProdiaLanguageStreamPart::File {
+                    media_type: media_type.clone(),
+                });
+            }
+        }
+    }
+    parts.push(ProdiaLanguageStreamPart::Finish);
+    parts
 }
 
 fn prodia_image_model_options(value: &JsonValue) -> Result<ProdiaImageModelOptions, String> {
@@ -2074,8 +2618,532 @@ pub fn assert_upstream_case_covered(case_id: &str, capability: &str) {
                 "{case_id}"
             );
         }
+        // Language model exposes provider/model/specVersion/supportedUrls.
+        "language_identity" => {
+            let provider = create_prodia(ProdiaProviderSettings::new().with_api_key("test-key"));
+            let model = provider.prodia_language_model("inference.nano-banana.img2img.v2");
+            assert_eq!(model.provider(), "prodia.language", "{case_id}");
+            assert_eq!(
+                model.model_id(),
+                "inference.nano-banana.img2img.v2",
+                "{case_id}"
+            );
+            assert_eq!(model.specification_version(), "v4", "{case_id}");
+            assert!(model.supported_urls().is_empty(), "{case_id}");
+        }
+        // Provider creates language models via .prodia_language_model.
+        "language_provider_create" => {
+            let provider = create_prodia(
+                ProdiaProviderSettings::new()
+                    .with_api_key("test-key")
+                    .with_base_url("https://api.example.com/v2"),
+            );
+            let model = provider.prodia_language_model("inference.nano-banana.img2img.v2");
+            assert_eq!(model.provider(), "prodia.language", "{case_id}");
+            assert_eq!(
+                model.model_id(),
+                "inference.nano-banana.img2img.v2",
+                "{case_id}"
+            );
+            assert_eq!(
+                model.job_url(),
+                "https://api.example.com/v2/job?price=true",
+                "{case_id}"
+            );
+        }
+        // Extracts text from the last user message; request body carries it.
+        "language_request_basic" => {
+            let messages = vec![ProdiaLanguageMessage::User {
+                content: vec![
+                    ProdiaLanguagePart::File {
+                        media_type: "image/png".to_string(),
+                        data: FileDataContent::Bytes(vec![1, 2, 3]),
+                    },
+                    ProdiaLanguagePart::Text {
+                        text: "Describe this image".to_string(),
+                    },
+                ],
+            }];
+            let prompt = prodia_language_prompt_text(&messages);
+            assert_eq!(prompt, "Describe this image", "{case_id}");
+            let body =
+                prodia_language_request_body("inference.nano-banana.img2img.v2", &prompt, None);
+            assert_eq!(
+                body["type"],
+                json!("inference.nano-banana.img2img.v2"),
+                "{case_id}"
+            );
+            assert_eq!(
+                body["config"]["prompt"],
+                json!("Describe this image"),
+                "{case_id}"
+            );
+        }
+        // Top-level-only "image" mediaType detects full MIME from PNG bytes.
+        "language_image_full_mime" => {
+            let png_bytes = vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+            let messages = vec![ProdiaLanguageMessage::User {
+                content: vec![ProdiaLanguagePart::File {
+                    media_type: "image".to_string(),
+                    data: FileDataContent::Bytes(png_bytes.clone()),
+                }],
+            }];
+            let (bytes, media_type) = prodia_language_image(&messages).expect("image part present");
+            assert_eq!(bytes, png_bytes, "{case_id}");
+            assert_eq!(media_type, "image/png", "{case_id}");
+        }
+        // Top-level-only "image" mediaType with undetectable bytes keeps default.
+        "language_image_undetectable" => {
+            let messages = vec![ProdiaLanguageMessage::User {
+                content: vec![ProdiaLanguagePart::File {
+                    media_type: "image".to_string(),
+                    data: FileDataContent::Bytes(vec![0x00, 0x01, 0x02]),
+                }],
+            }];
+            let (_bytes, media_type) =
+                prodia_language_image(&messages).expect("image part present");
+            assert_eq!(media_type, "image/png", "{case_id}");
+        }
+        // System message is prepended to the extracted user prompt.
+        "language_system_message" => {
+            let messages = vec![
+                ProdiaLanguageMessage::System {
+                    content: "You are an art critic.".to_string(),
+                },
+                ProdiaLanguageMessage::User {
+                    content: vec![ProdiaLanguagePart::Text {
+                        text: "Describe this.".to_string(),
+                    }],
+                },
+            ];
+            let prompt = prodia_language_prompt_text(&messages);
+            assert_eq!(
+                prompt, "You are an art critic.\nDescribe this.",
+                "{case_id}"
+            );
+        }
+        // Request config always carries include_messages: true.
+        "language_include_messages" => {
+            let body =
+                prodia_language_request_body("inference.nano-banana.img2img.v2", "Hello", None);
+            assert_eq!(body["config"]["include_messages"], json!(true), "{case_id}");
+        }
+        // aspectRatio provider option becomes config.aspect_ratio.
+        "language_aspect_ratio" => {
+            let options =
+                prodia_language_model_options(&json!({ "aspectRatio": "16:9" })).expect("valid");
+            let body = prodia_language_request_body(
+                "inference.nano-banana.img2img.v2",
+                "Describe",
+                options.aspect_ratio.as_deref(),
+            );
+            assert_eq!(body["config"]["aspect_ratio"], json!("16:9"), "{case_id}");
+            assert!(
+                prodia_language_model_options(&json!({ "aspectRatio": "bogus" })).is_err(),
+                "{case_id}"
+            );
+        }
+        // Unsupported LLM features emit warnings (surfaced via doGenerate).
+        "language_warnings" => {
+            let flags = ProdiaLanguageCallFlags {
+                temperature: true,
+                top_p: true,
+                top_k: true,
+                max_output_tokens: true,
+                stop_sequences: true,
+                presence_penalty: true,
+                frequency_penalty: true,
+                tools: true,
+                tool_choice: true,
+                non_text_response_format: true,
+                custom_reasoning: true,
+            };
+            let response = make_language_multipart_response(
+                json!({ "id": "job-lang-123" }),
+                Some("Done."),
+                None,
+            );
+            let provider = make_static_provider(response);
+            let result = poll_now(
+                provider
+                    .prodia_language_model("inference.nano-banana.img2img.v2")
+                    .do_generate_content(language_user_text("Describe"), flags, None),
+            );
+            let features: Vec<&str> = result
+                .warnings
+                .iter()
+                .filter_map(|warning| match warning {
+                    Warning::Unsupported { feature, .. } => Some(feature.as_str()),
+                    _ => None,
+                })
+                .collect();
+            for expected in [
+                "temperature",
+                "topP",
+                "topK",
+                "maxOutputTokens",
+                "stopSequences",
+                "presencePenalty",
+                "frequencyPenalty",
+                "tools",
+                "toolChoice",
+                "responseFormat",
+                "reasoning",
+            ] {
+                assert!(
+                    features.contains(&expected),
+                    "{case_id}: missing {expected}"
+                );
+            }
+        }
+        // Returns text content from a message.txt response part.
+        "language_text_content" => {
+            let response = make_language_multipart_response(
+                json!({ "id": "job-lang-123" }),
+                Some("This is a beautiful landscape."),
+                Some(b"test-image-bytes"),
+            );
+            let provider = make_static_provider(response);
+            let result = poll_now(
+                provider
+                    .prodia_language_model("inference.nano-banana.img2img.v2")
+                    .do_generate_content(
+                        language_user_text("Describe this image"),
+                        ProdiaLanguageCallFlags::default(),
+                        None,
+                    ),
+            );
+            let texts: Vec<&str> = result
+                .content
+                .iter()
+                .filter_map(|item| match item {
+                    ProdiaLanguageContent::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(texts, vec!["This is a beautiful landscape."], "{case_id}");
+        }
+        // Returns image content from an image.png response part.
+        "language_image_content" => {
+            let response = make_language_multipart_response(
+                json!({ "id": "job-lang-123" }),
+                Some("This is a beautiful landscape."),
+                Some(b"test-image-bytes"),
+            );
+            let provider = make_static_provider(response);
+            let result = poll_now(
+                provider
+                    .prodia_language_model("inference.nano-banana.img2img.v2")
+                    .do_generate_content(
+                        language_user_text("Describe this image"),
+                        ProdiaLanguageCallFlags::default(),
+                        None,
+                    ),
+            );
+            let files: Vec<(&str, &[u8])> = result
+                .content
+                .iter()
+                .filter_map(|item| match item {
+                    ProdiaLanguageContent::File { media_type, data } => {
+                        Some((media_type.as_str(), data.as_slice()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(files.len(), 1, "{case_id}");
+            assert_eq!(files[0].0, "image/png", "{case_id}");
+            assert_eq!(files[0].1, b"test-image-bytes", "{case_id}");
+        }
+        // Finish reason is always stop.
+        "language_finish_reason" => {
+            let response = make_language_multipart_response(
+                json!({ "id": "job-lang-123" }),
+                Some("Done."),
+                None,
+            );
+            let provider = make_static_provider(response);
+            let result = poll_now(
+                provider
+                    .prodia_language_model("inference.nano-banana.img2img.v2")
+                    .do_generate_content(
+                        language_user_text("Describe"),
+                        ProdiaLanguageCallFlags::default(),
+                        None,
+                    ),
+            );
+            assert_eq!(result.finish_reason, "stop", "{case_id}");
+        }
+        // Provider metadata mirrors the job result fields.
+        "language_provider_metadata" => {
+            let response = make_language_multipart_response(
+                json!({
+                    "id": "job-lang-123",
+                    "created_at": "2025-01-01T00:00:00Z",
+                    "updated_at": "2025-01-01T00:00:03Z",
+                    "config": { "seed": 7 },
+                    "metrics": { "elapsed": 1.5, "ips": 20.0 },
+                    "price": { "product": "nano-banana", "dollars": 0.01 }
+                }),
+                Some("Done."),
+                None,
+            );
+            let provider = make_static_provider(response);
+            let result = poll_now(
+                provider
+                    .prodia_language_model("inference.nano-banana.img2img.v2")
+                    .do_generate_content(
+                        language_user_text("Describe"),
+                        ProdiaLanguageCallFlags::default(),
+                        None,
+                    ),
+            );
+            let metadata = result.provider_metadata.expect("provider metadata present");
+            assert_eq!(
+                metadata.get("jobId"),
+                Some(&json!("job-lang-123")),
+                "{case_id}"
+            );
+            assert_eq!(metadata.get("seed"), Some(&json!(7)), "{case_id}");
+            assert_eq!(metadata.get("elapsed"), Some(&json!(1.5)), "{case_id}");
+            assert_eq!(
+                metadata.get("iterationsPerSecond"),
+                Some(&json!(20.0)),
+                "{case_id}"
+            );
+            assert_eq!(
+                metadata.get("createdAt"),
+                Some(&json!("2025-01-01T00:00:00Z")),
+                "{case_id}"
+            );
+            assert_eq!(
+                metadata.get("updatedAt"),
+                Some(&json!("2025-01-01T00:00:03Z")),
+                "{case_id}"
+            );
+            assert_eq!(metadata.get("dollars"), Some(&json!(0.01)), "{case_id}");
+        }
+        // Response metadata carries timestamp and modelId.
+        "language_response_metadata" => {
+            let response = make_language_multipart_response(
+                json!({ "id": "job-lang-123" }),
+                Some("Done."),
+                None,
+            );
+            let provider = create_prodia(
+                ProdiaProviderSettings::new()
+                    .with_api_key("test-key")
+                    .with_base_url("https://api.example.com/v2"),
+            )
+            .with_transport({
+                let response = Arc::new(response);
+                Arc::new(move |_request| {
+                    let response = Arc::clone(&response);
+                    Box::pin(ready(Ok((*response).clone())))
+                })
+            })
+            .with_current_date(|| OffsetDateTime::from_unix_timestamp(1_748_736_000).unwrap());
+            let result = poll_now(
+                provider
+                    .prodia_language_model("inference.nano-banana.img2img.v2")
+                    .do_generate_content(
+                        language_user_text("Describe"),
+                        ProdiaLanguageCallFlags::default(),
+                        None,
+                    ),
+            );
+            assert_eq!(
+                result.response_metadata.timestamp,
+                OffsetDateTime::from_unix_timestamp(1_748_736_000).unwrap(),
+                "{case_id}"
+            );
+            assert_eq!(
+                result.response_metadata.model_id, "inference.nano-banana.img2img.v2",
+                "{case_id}"
+            );
+        }
+        // API errors surface the upstream `detail` message.
+        "language_api_error" => {
+            let response = ProviderApiResponse::text(
+                400,
+                "Bad Request",
+                json!({ "message": "Bad request", "detail": "Missing input image" }).to_string(),
+            );
+            let provider = make_static_provider(response);
+            let result = poll_now(
+                provider
+                    .prodia_language_model("inference.nano-banana.img2img.v2")
+                    .do_generate_content(
+                        language_user_text("Describe"),
+                        ProdiaLanguageCallFlags::default(),
+                        None,
+                    ),
+            );
+            assert!(result.content.is_empty(), "{case_id}");
+            assert_eq!(
+                result.error.as_deref(),
+                Some("Missing input image"),
+                "{case_id}"
+            );
+        }
+        // Text-only response yields a single text content item.
+        "language_text_only" => {
+            let response = make_language_multipart_response(
+                json!({ "id": "job-lang-123" }),
+                Some("Just a text response"),
+                None,
+            );
+            let provider = make_static_provider(response);
+            let result = poll_now(
+                provider
+                    .prodia_language_model("inference.nano-banana.img2img.v2")
+                    .do_generate_content(
+                        language_user_text("Describe"),
+                        ProdiaLanguageCallFlags::default(),
+                        None,
+                    ),
+            );
+            assert_eq!(result.content.len(), 1, "{case_id}");
+            assert!(
+                matches!(result.content[0], ProdiaLanguageContent::Text { .. }),
+                "{case_id}"
+            );
+        }
+        // doStream wraps the doGenerate content into ordered stream parts.
+        "language_stream_parts" => {
+            let content = vec![
+                ProdiaLanguageContent::Text {
+                    text: "Stream test response".to_string(),
+                },
+                ProdiaLanguageContent::File {
+                    media_type: "image/png".to_string(),
+                    data: b"stream-image-bytes".to_vec(),
+                },
+            ];
+            let parts = prodia_language_stream_parts(&content);
+            assert_eq!(parts[0], ProdiaLanguageStreamPart::StreamStart, "{case_id}");
+            assert_eq!(
+                parts[1],
+                ProdiaLanguageStreamPart::ResponseMetadata,
+                "{case_id}"
+            );
+            assert_eq!(parts[2], ProdiaLanguageStreamPart::TextStart, "{case_id}");
+            assert_eq!(
+                parts[3],
+                ProdiaLanguageStreamPart::TextDelta {
+                    delta: "Stream test response".to_string()
+                },
+                "{case_id}"
+            );
+            assert_eq!(parts[4], ProdiaLanguageStreamPart::TextEnd, "{case_id}");
+            assert_eq!(
+                parts[5],
+                ProdiaLanguageStreamPart::File {
+                    media_type: "image/png".to_string()
+                },
+                "{case_id}"
+            );
+            assert_eq!(
+                parts.last(),
+                Some(&ProdiaLanguageStreamPart::Finish),
+                "{case_id}"
+            );
+        }
+        // Provider + request header merge for the language model.
+        "language_headers_merge" => {
+            let provider = create_prodia(
+                ProdiaProviderSettings::new()
+                    .with_api_key("test-key")
+                    .with_header("Custom-Provider-Header", "provider-value"),
+            );
+            let model = provider.prodia_language_model("inference.nano-banana.img2img.v2");
+            let mut call_headers = Headers::new();
+            call_headers.insert(
+                "Custom-Request-Header".to_string(),
+                "request-value".to_string(),
+            );
+            let headers = model
+                .request_headers(Some(&call_headers))
+                .expect("headers build");
+            assert_eq!(
+                headers
+                    .get("custom-provider-header")
+                    .and_then(|value| value.clone()),
+                Some("provider-value".to_string()),
+                "{case_id}"
+            );
+            assert_eq!(
+                headers
+                    .get("Custom-Request-Header")
+                    .and_then(|value| value.clone()),
+                Some("request-value".to_string()),
+                "{case_id}"
+            );
+            assert_eq!(
+                headers.get("authorization").and_then(|value| value.clone()),
+                Some("Bearer test-key".to_string()),
+                "{case_id}"
+            );
+            assert_eq!(
+                headers.get("Accept").and_then(|value| value.clone()),
+                Some("multipart/form-data".to_string()),
+                "{case_id}"
+            );
+        }
         other => panic!("unknown prodia upstream capability bucket: {other} ({case_id})"),
     }
+}
+
+/// Builds a Prodia language model multipart response containing a job JSON part
+/// and optional `message.txt` (text) / `image.png` (binary) output parts,
+/// mirroring the upstream test fixture.
+fn make_language_multipart_response(
+    job: serde_json::Value,
+    text_content: Option<&str>,
+    image_content: Option<&[u8]>,
+) -> ProviderApiResponse {
+    let boundary = "test-boundary-12345";
+    let job = job.to_string();
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"job\"; filename=\"job.json\"\r\nContent-Type: application/json\r\n\r\n",
+    );
+    body.extend_from_slice(job.as_bytes());
+    body.extend_from_slice(b"\r\n");
+    if let Some(text) = text_content {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"output\"; filename=\"message.txt\"\r\nContent-Type: text/plain\r\n\r\n",
+        );
+        body.extend_from_slice(text.as_bytes());
+        body.extend_from_slice(b"\r\n");
+    }
+    if let Some(image) = image_content {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"output\"; filename=\"image.png\"\r\nContent-Type: image/png\r\n\r\n",
+        );
+        body.extend_from_slice(image);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    ProviderApiResponse::bytes(200, "OK", body).with_headers(
+        [(
+            "content-type".to_string(),
+            format!("multipart/form-data; boundary={boundary}"),
+        )]
+        .into_iter()
+        .collect(),
+    )
+}
+
+/// Builds a single user message containing one text part.
+fn language_user_text(text: &str) -> Vec<ProdiaLanguageMessage> {
+    vec![ProdiaLanguageMessage::User {
+        content: vec![ProdiaLanguagePart::Text {
+            text: text.to_string(),
+        }],
+    }]
 }
 
 /// Builds a deterministic provider whose transport always returns `response`.
