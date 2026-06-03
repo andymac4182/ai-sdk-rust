@@ -1296,6 +1296,106 @@ mod tests {
         });
     }
 
+    struct OrderRecordingModel {
+        call_order: Rc<RefCell<Vec<&'static str>>>,
+    }
+
+    impl RerankingModel for OrderRecordingModel {
+        type RerankFuture<'a>
+            = Ready<RerankingModelResult>
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "mock-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "mock-model-id"
+        }
+
+        fn do_rerank(&self, _options: RerankingModelCallOptions) -> Self::RerankFuture<'_> {
+            self.call_order.borrow_mut().push("doRerank");
+            ready(RerankingModelResult::new(vec![RerankingModelRanking::new(
+                0, 0.9,
+            )]))
+        }
+    }
+
+    #[test]
+    fn rerank_on_start_called_before_do_rerank() {
+        let call_order = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+        let model = OrderRecordingModel {
+            call_order: Rc::clone(&call_order),
+        };
+        let order_for_start = Rc::clone(&call_order);
+
+        poll_ready(super::rerank(
+            RerankOptions::new(
+                &model,
+                RerankDocuments::text(["test document"]),
+                "test query",
+            )
+            .with_experimental_on_start(move |_| {
+                order_for_start.borrow_mut().push("onStart");
+                ready(())
+            }),
+        ));
+
+        assert_eq!(*call_order.borrow(), vec!["onStart", "doRerank"]);
+    }
+
+    #[test]
+    fn rerank_on_end_called_after_do_rerank() {
+        let call_order = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+        let model = OrderRecordingModel {
+            call_order: Rc::clone(&call_order),
+        };
+        let order_for_end = Rc::clone(&call_order);
+
+        poll_ready(super::rerank(
+            RerankOptions::new(
+                &model,
+                RerankDocuments::text(["test document"]),
+                "test query",
+            )
+            .with_experimental_on_end(move |_| {
+                order_for_end.borrow_mut().push("onEnd");
+                ready(())
+            }),
+        ));
+
+        assert_eq!(*call_order.borrow(), vec!["doRerank", "onEnd"]);
+    }
+
+    #[test]
+    fn rerank_on_start_before_do_rerank_and_on_end_after() {
+        let call_order = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+        let model = OrderRecordingModel {
+            call_order: Rc::clone(&call_order),
+        };
+        let order_for_start = Rc::clone(&call_order);
+        let order_for_end = Rc::clone(&call_order);
+
+        poll_ready(super::rerank(
+            RerankOptions::new(
+                &model,
+                RerankDocuments::text(["test document"]),
+                "test query",
+            )
+            .with_experimental_on_start(move |_| {
+                order_for_start.borrow_mut().push("onStart");
+                ready(())
+            })
+            .with_experimental_on_end(move |_| {
+                order_for_end.borrow_mut().push("onEnd");
+                ready(())
+            }),
+        ));
+
+        assert_eq!(*call_order.borrow(), vec!["onStart", "doRerank", "onEnd"]);
+    }
+
     #[test]
     fn rerank_dispatches_telemetry_lifecycle_events() {
         let model = RecordingRerankingModel::new(vec![RerankingModelResult::new(vec![
