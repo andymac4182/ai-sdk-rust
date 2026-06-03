@@ -513,7 +513,7 @@ pub use telemetry::{
 pub use text_stream_response::{
     TEXT_STREAM_CONTENT_TYPE, TextStreamResponse, TextStreamResponseInit,
     TextStreamResponseOptions, TextStreamResponseWriter, create_text_stream_response,
-    pipe_text_stream_to_response,
+    pipe_text_stream_to_response, to_text_stream,
 };
 pub use togetherai::{
     DEFAULT_TOGETHERAI_BASE_URL, TogetherAIImageModel, TogetherAIProvider,
