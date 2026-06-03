@@ -503,8 +503,9 @@ pub use subagents::{
 pub use telemetry::{
     AI_SDK_TELEMETRY_DIAGNOSTIC_CHANNEL, LegacyOpenTelemetryRecorder, OpenTelemetryRecorder,
     TelemetryDiagnosticMessage, TelemetryDiagnosticSubscription, TelemetryDispatcher,
-    TelemetryEvent, TelemetryEventKind, TelemetryExecuteToolOptions, TelemetryIntegration,
-    TelemetryOptions, create_legacy_open_telemetry_integration, create_open_telemetry_integration,
+    TelemetryEvent, TelemetryEventKind, TelemetryExecuteLanguageModelCallOptions,
+    TelemetryExecuteToolOptions, TelemetryIntegration, TelemetryOptions,
+    create_legacy_open_telemetry_integration, create_open_telemetry_integration,
     create_telemetry_dispatcher, get_global_telemetry_integrations, register_telemetry,
     register_telemetry_integration, reset_telemetry_state_for_tests,
     subscribe_telemetry_diagnostics,
