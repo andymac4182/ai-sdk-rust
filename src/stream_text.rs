@@ -5836,6 +5836,62 @@ mod tests {
         );
     }
 
+    /// Maps packages/ai stream-text.test.ts:19630
+    /// `should call onFinish with the correct content` — for object output the
+    /// `onFinish` event carries the final step content as a single text part
+    /// holding the raw JSON object string (object output does not strip the
+    /// surrounding JSON from the emitted content).
+    #[test]
+    fn stream_text_result_object_output_on_finish_receives_raw_object_text_content() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "{ ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "\"value\": ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "\"Hello, ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!\" ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "}")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let finish_events = Arc::new(Mutex::new(Vec::<GenerateTextFinishEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("prompt")]).with_on_finish(
+                move |event| {
+                    let finish_events = Arc::clone(&finish_events_for_callback);
+                    async move {
+                        finish_events
+                            .lock()
+                            .expect("finish events lock")
+                            .push(event);
+                    }
+                },
+            ),
+        ));
+
+        result.consume_stream();
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        let event = &finish_events[0];
+
+        assert_eq!(event.text, "{ \"value\": \"Hello, world!\" }");
+        assert!(!event.call_id.is_empty());
+        assert_eq!(event.content.len(), 1);
+        match &event.content[0] {
+            GenerateTextContentPart::Text(text) => {
+                assert_eq!(text.text, "{ \"value\": \"Hello, world!\" }");
+            }
+            other => panic!("expected a single text content part, got {other:?}"),
+        }
+    }
+
     #[derive(Default)]
     struct MockStreamTextUiMessageResponse {
         status: Option<u16>,
@@ -13194,6 +13250,50 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(events[0].steps.is_empty());
         assert_eq!(events[0].reason, Some(json!("client-disconnected")));
+    }
+
+    /// Maps packages/ai stream-text.test.ts:16387
+    /// `should throw Timeout error when abort signal is aborted` — when the
+    /// caller's `abortSignal` is aborted (with no explicit reason) before the
+    /// delayed `doStream` resolves, the stream terminates with an abort outcome:
+    /// no text is produced, no step completes, and the abort part carries the
+    /// default (reasonless) AbortError signal rather than a model result.
+    #[test]
+    fn stream_text_aborts_when_abort_signal_aborted_before_do_stream_resolves() {
+        let delayed = Arc::new(DelayedPromise::<()>::new());
+        let model = DelayedStreamLanguageModel::new(Arc::clone(&delayed));
+        let abort_controller = StreamTextAbortController::new();
+        let abort_signal = abort_controller.signal();
+
+        let mut result = Box::pin(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_abort_signal(abort_signal.clone()),
+        ));
+
+        assert!(matches!(poll_once(result.as_mut()), Poll::Pending));
+
+        // Abort without a reason (mirrors upstream `abortController.abort()`),
+        // then let the delayed doStream resolve.
+        abort_controller.abort();
+        delayed.resolve(());
+
+        let result = loop {
+            match poll_once(result.as_mut()) {
+                Poll::Ready(result) => break result,
+                Poll::Pending => continue,
+            }
+        };
+
+        assert_eq!(result.text, "");
+        assert_eq!(result.steps.len(), 0);
+        assert_eq!(
+            serde_json::to_value(&result.parts).expect("parts serialize"),
+            json!([
+                { "type": "start" },
+                { "type": "start-step", "request": {}, "warnings": [] },
+                { "type": "abort" }
+            ])
+        );
     }
 
     #[test]
