@@ -18221,4 +18221,1182 @@ mod tests {
                 .contains("Sync tool failed!")
         );
     }
+
+    // Upstream: stream-text.test.ts result.onFinish "should send sources"
+    // (packages-ai-1148). Sources emitted by the model reach the onFinish event.
+    #[test]
+    fn stream_text_on_finish_event_sends_sources() {
+        let first_source = LanguageModelSource::Url(
+            LanguageModelUrlSource::new("123", "https://example.com").with_title("Example"),
+        );
+        let second_source = LanguageModelSource::Url(
+            LanguageModelUrlSource::new("456", "https://example.com/2").with_title("Example 2"),
+        );
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Source(first_source.clone()),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Source(second_source.clone()),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let finish_events = Arc::new(Mutex::new(Vec::<GenerateTextFinishEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let _result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("prompt")]).with_on_finish(
+                move |event| {
+                    let finish_events = Arc::clone(&finish_events_for_callback);
+                    async move {
+                        finish_events.lock().expect("finish lock").push(event);
+                    }
+                },
+            ),
+        ));
+
+        let finish_events = finish_events.lock().expect("finish lock");
+        assert_eq!(finish_events.len(), 1);
+        assert_eq!(finish_events[0].sources, vec![first_source, second_source]);
+    }
+
+    // Upstream: stream-text.test.ts result.onFinish "should send files"
+    // (packages-ai-1150). Files emitted by the model reach the onFinish event.
+    #[test]
+    fn stream_text_on_finish_event_sends_files() {
+        let first_file = data_file("Hello World");
+        let second_file = LanguageModelFile::new(
+            "image/jpeg",
+            LanguageModelFileData::Data {
+                data: FileDataContent::Base64("QkFVRw==".to_string()),
+            },
+        );
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::File(first_file.clone()),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::File(second_file.clone()),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let finish_events = Arc::new(Mutex::new(Vec::<GenerateTextFinishEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let _result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("prompt")]).with_on_finish(
+                move |event| {
+                    let finish_events = Arc::clone(&finish_events_for_callback);
+                    async move {
+                        finish_events.lock().expect("finish lock").push(event);
+                    }
+                },
+            ),
+        ));
+
+        let finish_events = finish_events.lock().expect("finish lock");
+        assert_eq!(finish_events.len(), 1);
+        let files: Vec<(String, String)> = finish_events[0]
+            .files
+            .iter()
+            .map(|file| (file.media_type().to_string(), file.base64()))
+            .collect();
+        assert_eq!(
+            files,
+            vec![
+                ("text/plain".to_string(), "Hello World".to_string()),
+                ("image/jpeg".to_string(), "QkFVRw==".to_string()),
+            ]
+        );
+    }
+
+    // Upstream: stream-text.test.ts result.onFinish "should send custom parts"
+    // (packages-ai-1149). Custom provider content is aggregated in the result.
+    #[test]
+    fn stream_text_on_finish_aggregates_custom_parts() {
+        let provider_metadata = ProviderMetadata::from([(
+            "openai".to_string(),
+            Map::from_iter([("itemId".to_string(), json!("cmp_123"))]),
+        )]);
+        let custom_part = LanguageModelCustomContent::new("openai.compaction")
+            .with_provider_metadata(provider_metadata);
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello!")),
+            LanguageModelStreamPart::Custom(custom_part.clone()),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+        assert_eq!(result.custom_parts, vec![custom_part]);
+    }
+
+    // Upstream: stream-text.test.ts result.response.messages
+    // "should contain assistant response message when there are no tool calls"
+    // (packages-ai-1152). A text-only response yields a single assistant message.
+    #[test]
+    fn stream_text_response_messages_contain_assistant_message_without_tool_calls() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello, ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+        assert_eq!(result.response_messages.len(), 1);
+        let message = &result.response_messages[0];
+        let LanguageModelMessage::Assistant(assistant) = message else {
+            panic!("expected assistant message, got {message:?}");
+        };
+        assert_eq!(assistant.content.len(), 1);
+        let LanguageModelAssistantContentPart::Text(text) = &assistant.content[0] else {
+            panic!("expected text content part");
+        };
+        assert_eq!(text.text, "Hello, world!");
+    }
+
+    // Upstream: stream-text.test.ts result.responseMessages "should contain reasoning"
+    // (packages-ai-1073). Reasoning parts streamed by the model are carried into
+    // the assistant response message as reasoning content parts.
+    #[test]
+    fn stream_text_response_messages_contain_reasoning() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("r1")),
+            LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                "r1",
+                "I will open the conversation with witty banter.",
+            )),
+            LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("r1")),
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello!")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+        let LanguageModelMessage::Assistant(assistant) = &result.response_messages[0] else {
+            panic!("expected assistant message");
+        };
+        let reasoning_parts = assistant
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelAssistantContentPart::Reasoning(reasoning) => Some(reasoning),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reasoning_parts.len(), 1);
+        assert_eq!(
+            reasoning_parts[0].text,
+            "I will open the conversation with witty banter."
+        );
+    }
+
+    // Upstream: stream-text.test.ts options.onChunk
+    // "should include custom parts in onChunk events" (packages-ai-1145).
+    #[test]
+    fn stream_text_on_chunk_includes_custom_parts() {
+        let provider_metadata = ProviderMetadata::from([(
+            "openai".to_string(),
+            Map::from_iter([("itemId".to_string(), json!("cmp_123"))]),
+        )]);
+        let custom_part = LanguageModelCustomContent::new("openai.compaction")
+            .with_provider_metadata(provider_metadata);
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello!")),
+                LanguageModelStreamPart::Custom(custom_part.clone()),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let chunks = Arc::new(Mutex::new(Vec::<TextStreamPart>::new()));
+        let chunks_for_callback = Arc::clone(&chunks);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("prompt")]).with_on_chunk(
+                move |event| {
+                    let chunks = Arc::clone(&chunks_for_callback);
+                    async move {
+                        chunks.lock().expect("chunks lock").push(event.chunk);
+                    }
+                },
+            ),
+        ));
+        let _ = result.text;
+
+        let chunks = chunks.lock().expect("chunks lock");
+        let custom_chunks = chunks
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::Custom(part) => Some(part.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(custom_chunks, vec![custom_part]);
+    }
+
+    // Upstream: stream-text.test.ts options.experimental_onStart
+    // "should be called before doStream" (packages-ai-1110). The onStart callback
+    // runs before the model's doStream is invoked.
+    #[test]
+    fn stream_text_on_start_runs_before_do_stream() {
+        struct RecordingStreamModel {
+            call_order: Arc<Mutex<Vec<&'static str>>>,
+        }
+
+        impl LanguageModel for RecordingStreamModel {
+            type SupportedUrlsFuture<'a>
+                = std::future::Ready<LanguageModelSupportedUrls>
+            where
+                Self: 'a;
+            type GenerateFuture<'a>
+                = std::future::Ready<LanguageModelGenerateResult>
+            where
+                Self: 'a;
+            type Stream = Vec<LanguageModelStreamPart>;
+            type StreamFuture<'a>
+                = std::future::Ready<LanguageModelStreamResult<Self::Stream>>
+            where
+                Self: 'a;
+
+            fn provider(&self) -> &str {
+                "mock-provider"
+            }
+
+            fn model_id(&self) -> &str {
+                "mock-model-id"
+            }
+
+            fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+                ready(LanguageModelSupportedUrls::default())
+            }
+
+            fn do_generate(&self, _options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+                ready(LanguageModelGenerateResult::new(
+                    Vec::<LanguageModelContent>::new(),
+                    finish_reason(),
+                    LanguageModelUsage::default(),
+                ))
+            }
+
+            fn do_stream(&self, _options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+                self.call_order.lock().expect("order lock").push("doStream");
+                ready(stream_result_hello())
+            }
+        }
+
+        let call_order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let call_order_for_callback = Arc::clone(&call_order);
+        let model = RecordingStreamModel {
+            call_order: Arc::clone(&call_order),
+        };
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_on_start(
+                move |_event| {
+                    let call_order = Arc::clone(&call_order_for_callback);
+                    async move {
+                        call_order.lock().expect("order lock").push("onStart");
+                    }
+                },
+            ),
+        ));
+        let _ = result.text;
+
+        let call_order = call_order.lock().expect("order lock");
+        assert_eq!(*call_order, vec!["onStart", "doStream"]);
+    }
+
+    // Upstream: stream-text.test.ts options.onError
+    // "should not prevent error from being forwarded" (packages-ai-1151). When the
+    // model throws, the error is surfaced on the full stream even with an onError
+    // handler present.
+    #[test]
+    fn stream_text_on_error_does_not_prevent_error_from_being_forwarded() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::Error(LanguageModelErrorStreamPart::new(
+                    json!({ "message": "test error" }),
+                )),
+            ]));
+        let errors = Arc::new(Mutex::new(Vec::<JsonValue>::new()));
+        let errors_for_callback = Arc::clone(&errors);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_on_error(
+                move |event| {
+                    let errors = Arc::clone(&errors_for_callback);
+                    async move {
+                        errors.lock().expect("errors lock").push(event.error);
+                    }
+                },
+            ),
+        ));
+
+        let error_parts = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::Error(part) => Some(part.error.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(error_parts.len(), 1);
+        assert_eq!(error_parts[0], json!({ "message": "test error" }));
+        assert_eq!(errors.lock().expect("errors lock").len(), 1);
+    }
+
+    // Upstream: stream-text.test.ts options model-call callbacks
+    // "should fire the model-call callbacks before tool execution and step finish"
+    // (packages-ai-1124). The step-start, language-model-call-start/end,
+    // tool-execution-start/end, and step-finish callbacks fire in order.
+    #[test]
+    fn stream_text_model_call_callbacks_fire_before_tool_execution_and_step_finish() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "testTool",
+                    r#"{"value":"abc"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "done")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+
+        let call_order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let push = |order: &Arc<Mutex<Vec<&'static str>>>, label: &'static str| {
+            order.lock().expect("order lock").push(label);
+        };
+        let o_step_start = Arc::clone(&call_order);
+        let o_call_start = Arc::clone(&call_order);
+        let o_call_end = Arc::clone(&call_order);
+        let o_tool_start = Arc::clone(&call_order);
+        let o_tool_end = Arc::clone(&call_order);
+        let o_step_finish = Arc::clone(&call_order);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("testTool", execute_tools_value_schema()).with_execute(
+                        |input, _options| async move {
+                            Ok(json!(format!(
+                                "{}-result",
+                                input["value"].as_str().expect("value is a string")
+                            )))
+                        },
+                    ),
+                )
+                .with_max_steps(2)
+                .with_on_step_start(move |_event| {
+                    push(&o_step_start, "onStepStart");
+                    async {}
+                })
+                .with_experimental_on_language_model_call_start(move |_event| {
+                    push(&o_call_start, "onLanguageModelCallStart");
+                    async {}
+                })
+                .with_experimental_on_language_model_call_end(move |_event| {
+                    push(&o_call_end, "onLanguageModelCallEnd");
+                    async {}
+                })
+                .with_on_tool_execution_start(move |_event| {
+                    push(&o_tool_start, "onToolExecutionStart");
+                    async {}
+                })
+                .with_on_tool_execution_end(move |_event| {
+                    push(&o_tool_end, "onToolExecutionEnd");
+                    async {}
+                })
+                .with_on_step_finish(move |_event| {
+                    push(&o_step_finish, "onStepFinish");
+                    async {}
+                }),
+        ));
+        result.consume_stream();
+
+        let call_order = call_order.lock().expect("order lock");
+        // The first step calls the model, executes the tool, then finishes the
+        // step; the model-call callbacks must precede tool execution and the step
+        // finish callback.
+        let first_six = &call_order[..6];
+        assert_eq!(
+            first_six,
+            [
+                "onStepStart",
+                "onLanguageModelCallStart",
+                "onLanguageModelCallEnd",
+                "onToolExecutionStart",
+                "onToolExecutionEnd",
+                "onStepFinish",
+            ]
+        );
+    }
+
+    // Upstream: stream-text.test.ts options.onStepStart
+    // "should be called once per step in a multi-step tool loop" (packages-ai-1116).
+    #[test]
+    fn stream_text_on_step_start_called_once_per_step_in_multi_step_loop() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "testTool",
+                    r#"{"value":"abc"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "done")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+        let step_numbers = Arc::new(Mutex::new(Vec::<usize>::new()));
+        let step_numbers_for_callback = Arc::clone(&step_numbers);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("testTool", execute_tools_value_schema())
+                        .with_execute(|_input, _options| async move { Ok(json!("tool-result")) }),
+                )
+                .with_max_steps(2)
+                .with_on_step_start(move |event| {
+                    let step_numbers = Arc::clone(&step_numbers_for_callback);
+                    async move {
+                        step_numbers
+                            .lock()
+                            .expect("step numbers lock")
+                            .push(event.step_number);
+                    }
+                }),
+        ));
+        result.consume_stream();
+
+        assert_eq!(*step_numbers.lock().expect("step numbers lock"), vec![0, 1]);
+    }
+
+    // Upstream: stream-text.test.ts options.onToolExecutionStart
+    // "should be called before tool execution" (packages-ai-1129).
+    #[test]
+    fn stream_text_on_tool_execution_start_runs_before_tool_execution() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "testTool",
+                    r#"{"value":"abc"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let call_order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let order_for_start = Arc::clone(&call_order);
+        let order_for_execute = Arc::clone(&call_order);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("testTool", execute_tools_value_schema()).with_execute(
+                        move |_input, _options| {
+                            let order_for_execute = Arc::clone(&order_for_execute);
+                            async move {
+                                order_for_execute
+                                    .lock()
+                                    .expect("order lock")
+                                    .push("execute");
+                                Ok(json!("tool-result"))
+                            }
+                        },
+                    ),
+                )
+                .with_on_tool_execution_start(move |_event| {
+                    let order_for_start = Arc::clone(&order_for_start);
+                    async move {
+                        order_for_start
+                            .lock()
+                            .expect("order lock")
+                            .push("onToolExecutionStart");
+                    }
+                }),
+        ));
+        result.consume_stream();
+
+        let call_order = call_order.lock().expect("order lock");
+        let start_index = call_order
+            .iter()
+            .position(|label| *label == "onToolExecutionStart")
+            .expect("start fired");
+        let execute_index = call_order
+            .iter()
+            .position(|label| *label == "execute")
+            .expect("execute ran");
+        assert!(start_index < execute_index);
+    }
+
+    // Upstream: stream-text.test.ts options.onEnd "should send correct information"
+    // (packages-ai-1147). The onFinish callback receives the final text, finish
+    // reason, and usage.
+    #[test]
+    fn stream_text_on_finish_sends_correct_information() {
+        let model = MockLanguageModel::new().with_stream_result(stream_result_hello());
+        let finish_events = Arc::new(Mutex::new(Vec::<GenerateTextFinishEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_on_finish(
+                move |event| {
+                    let finish_events = Arc::clone(&finish_events_for_callback);
+                    async move {
+                        finish_events.lock().expect("finish lock").push(event);
+                    }
+                },
+            ),
+        ));
+        let _ = result.text;
+
+        let finish_events = finish_events.lock().expect("finish lock");
+        assert_eq!(finish_events.len(), 1);
+        let event = &finish_events[0];
+        assert_eq!(event.text, "Hello, world!");
+        assert_eq!(event.finish_reason, FinishReason::Stop);
+        assert_eq!(event.usage, usage());
+    }
+
+    // Upstream: stream-text.test.ts options tool callbacks
+    // "should fire tool call callbacks for each tool in a multi-step loop"
+    // (packages-ai-1143). Each step with a tool call fires the tool start/end
+    // callbacks, so a two-step loop fires both twice.
+    #[test]
+    fn stream_text_tool_callbacks_fire_for_each_tool_in_multi_step_loop() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "testTool",
+                    r#"{"value":"a"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-2",
+                    "testTool",
+                    r#"{"value":"b"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "done")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+        let starts = Arc::new(AtomicUsize::new(0));
+        let ends = Arc::new(AtomicUsize::new(0));
+        let starts_for_callback = Arc::clone(&starts);
+        let ends_for_callback = Arc::clone(&ends);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("testTool", execute_tools_value_schema())
+                        .with_execute(|_input, _options| async move { Ok(json!("tool-result")) }),
+                )
+                .with_max_steps(3)
+                .with_on_tool_execution_start(move |_event| {
+                    let starts = Arc::clone(&starts_for_callback);
+                    async move {
+                        starts.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+                .with_on_tool_execution_end(move |_event| {
+                    let ends = Arc::clone(&ends_for_callback);
+                    async move {
+                        ends.fetch_add(1, Ordering::SeqCst);
+                    }
+                }),
+        ));
+        result.consume_stream();
+
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+        assert_eq!(ends.load(Ordering::SeqCst), 2);
+    }
+
+    // Upstream: stream-text.test.ts options.onStepStart
+    // "should be called before doStream on each step" (packages-ai-1117). The
+    // step-start callback runs before the model's doStream on the step.
+    #[test]
+    fn stream_text_on_step_start_runs_before_do_stream() {
+        struct StepRecordingStreamModel {
+            call_order: Arc<Mutex<Vec<&'static str>>>,
+        }
+
+        impl LanguageModel for StepRecordingStreamModel {
+            type SupportedUrlsFuture<'a>
+                = std::future::Ready<LanguageModelSupportedUrls>
+            where
+                Self: 'a;
+            type GenerateFuture<'a>
+                = std::future::Ready<LanguageModelGenerateResult>
+            where
+                Self: 'a;
+            type Stream = Vec<LanguageModelStreamPart>;
+            type StreamFuture<'a>
+                = std::future::Ready<LanguageModelStreamResult<Self::Stream>>
+            where
+                Self: 'a;
+
+            fn provider(&self) -> &str {
+                "mock-provider"
+            }
+
+            fn model_id(&self) -> &str {
+                "mock-model-id"
+            }
+
+            fn supported_urls(&self) -> Self::SupportedUrlsFuture<'_> {
+                ready(LanguageModelSupportedUrls::default())
+            }
+
+            fn do_generate(&self, _options: LanguageModelCallOptions) -> Self::GenerateFuture<'_> {
+                ready(LanguageModelGenerateResult::new(
+                    Vec::<LanguageModelContent>::new(),
+                    finish_reason(),
+                    LanguageModelUsage::default(),
+                ))
+            }
+
+            fn do_stream(&self, _options: LanguageModelCallOptions) -> Self::StreamFuture<'_> {
+                self.call_order.lock().expect("order lock").push("doStream");
+                ready(stream_result_hello())
+            }
+        }
+
+        let call_order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let call_order_for_callback = Arc::clone(&call_order);
+        let model = StepRecordingStreamModel {
+            call_order: Arc::clone(&call_order),
+        };
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_on_step_start(
+                move |_event| {
+                    let call_order = Arc::clone(&call_order_for_callback);
+                    async move {
+                        call_order.lock().expect("order lock").push("onStepStart");
+                    }
+                },
+            ),
+        ));
+        let _ = result.text;
+
+        let call_order = call_order.lock().expect("order lock");
+        assert_eq!(*call_order, vec!["onStepStart", "doStream"]);
+    }
+
+    // Upstream: stream-text.test.ts options.onToolExecutionEnd
+    // "should pass context on success" (packages-ai-1140). The per-tool context
+    // from toolsContext reaches the tool-execution-end event on success.
+    #[test]
+    fn stream_text_on_tool_execution_end_passes_context_on_success() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "testTool",
+                    r#"{"value":"abc"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let mut tools_context = serde_json::Map::new();
+        tools_context.insert("testTool".to_string(), json!({ "context": "test" }));
+        let end_events = Arc::new(Mutex::new(Vec::<GenerateTextToolExecutionEndEvent>::new()));
+        let end_events_for_callback = Arc::clone(&end_events);
+
+        let _result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tools_context(tools_context)
+                .with_tool(
+                    Tool::new("testTool", execute_tools_value_schema())
+                        .with_execute(|_input, _options| async move { Ok(json!("ok")) }),
+                )
+                .with_on_tool_execution_end(move |event| {
+                    let events = Arc::clone(&end_events_for_callback);
+                    async move {
+                        events.lock().expect("events lock").push(event);
+                    }
+                }),
+        ));
+
+        let end_events = end_events.lock().expect("events lock");
+        assert_eq!(end_events.len(), 1);
+        assert_eq!(
+            end_events[0].tool_context,
+            Some(json!({ "context": "test" }))
+        );
+        assert_eq!(end_events[0].tool_output.is_error, None);
+    }
+
+    // Upstream: stream-text.test.ts options.onToolExecutionEnd
+    // "should pass context on error" (packages-ai-1141). The per-tool context
+    // reaches the tool-execution-end event even when the tool execution fails.
+    #[test]
+    fn stream_text_on_tool_execution_end_passes_context_on_error() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "testTool",
+                    r#"{"value":"abc"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let mut tools_context = serde_json::Map::new();
+        tools_context.insert("testTool".to_string(), json!({ "context": "test" }));
+        let end_events = Arc::new(Mutex::new(Vec::<GenerateTextToolExecutionEndEvent>::new()));
+        let end_events_for_callback = Arc::clone(&end_events);
+
+        let _result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tools_context(tools_context)
+                .with_tool(
+                    Tool::new("testTool", execute_tools_value_schema()).with_execute(
+                        |_input, _options| async move {
+                            Err::<JsonValue, ToolExecutionError>(ToolExecutionError::new(
+                                "tool execution failed",
+                            ))
+                        },
+                    ),
+                )
+                .with_on_tool_execution_end(move |event| {
+                    let events = Arc::clone(&end_events_for_callback);
+                    async move {
+                        events.lock().expect("events lock").push(event);
+                    }
+                }),
+        ));
+
+        let end_events = end_events.lock().expect("events lock");
+        assert_eq!(end_events.len(), 1);
+        assert_eq!(
+            end_events[0].tool_context,
+            Some(json!({ "context": "test" }))
+        );
+        assert_eq!(end_events[0].tool_output.is_error, Some(true));
+    }
+
+    // Upstream: stream-text.test.ts result.toUIMessageStream
+    // "should include tool metadata in ui message stream chunks" (packages-ai-1034).
+    // A dynamic tool's metadata is carried onto the tool-input-available chunk.
+    #[test]
+    fn stream_text_ui_message_stream_includes_tool_metadata() {
+        let metadata = json!({ "clientName": "MyMCPClient" })
+            .as_object()
+            .expect("metadata is an object")
+            .clone();
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "test-tool",
+                    r#"{ "value": "value" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_tool(
+                Tool::dynamic("test-tool", execute_tools_value_schema())
+                    .with_metadata(metadata.clone())
+                    .with_execute(|_input, _options| async move { Ok(json!("result")) }),
+            ),
+        ));
+
+        let chunks = serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize");
+        let chunks = chunks.as_array().expect("chunks is an array");
+        let available = chunks
+            .iter()
+            .find(|chunk| chunk["type"] == json!("tool-input-available"))
+            .expect("tool-input-available chunk present");
+        assert_eq!(available["toolName"], json!("test-tool"));
+        assert_eq!(available["dynamic"], json!(true));
+        assert_eq!(
+            available["toolMetadata"],
+            json!({ "clientName": "MyMCPClient" })
+        );
+    }
+
+    // Upstream: stream-text.test.ts options.onStepStart
+    // "should reflect model changes from prepareStep" (packages-ai-1119). When
+    // prepareStep swaps the model for the second step, the step-start events
+    // report the active step model for each step.
+    #[test]
+    fn stream_text_on_step_start_reflects_model_changes_from_prepare_step() {
+        let primary =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "testTool",
+                    r#"{"value":"abc"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let alternate = MockLanguageModel::new()
+            .with_provider("alternate-provider")
+            .with_model_id("alternate-model-id")
+            .with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "done")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let step_start_events = Arc::new(Mutex::new(Vec::<GenerateTextStepStartEvent>::new()));
+        let step_start_events_for_callback = Arc::clone(&step_start_events);
+        let alternate_model = &alternate;
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&primary, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("testTool", execute_tools_value_schema())
+                        .with_execute(|_input, _options| async move { Ok(json!("tool-result")) }),
+                )
+                .with_max_steps(2)
+                .with_prepare_step(move |options| {
+                    let switch = options.step_number == 1;
+                    async move {
+                        if switch {
+                            PrepareStepResult::new().with_model(alternate_model)
+                        } else {
+                            PrepareStepResult::new()
+                        }
+                    }
+                })
+                .with_on_step_start(move |event| {
+                    let events = Arc::clone(&step_start_events_for_callback);
+                    async move {
+                        events.lock().expect("events lock").push(event);
+                    }
+                }),
+        ));
+        result.consume_stream();
+
+        let events = step_start_events.lock().expect("events lock");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].provider, "mock-provider");
+        assert_eq!(events[0].model_id, "mock-model-id");
+        assert_eq!(events[1].provider, "alternate-provider");
+        assert_eq!(events[1].model_id, "alternate-model-id");
+    }
+
+    // Upstream: stream-text.test.ts result.onFinish
+    // "onFinishResult should expose deprecated AI SDK 6 final-step properties"
+    // (packages-ai-1164). The onFinish event mirrors the final step's reasoning,
+    // reasoning text, request, and response.
+    #[test]
+    fn stream_text_on_finish_exposes_final_step_properties() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("r1")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "r1", "thinking",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("r1")),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let finish_events = Arc::new(Mutex::new(Vec::<GenerateTextFinishEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_on_finish(
+                move |event| {
+                    let finish_events = Arc::clone(&finish_events_for_callback);
+                    async move {
+                        finish_events.lock().expect("finish lock").push(event);
+                    }
+                },
+            ),
+        ));
+        result.consume_stream();
+
+        let finish_events = finish_events.lock().expect("finish lock");
+        let event = &finish_events[0];
+        let final_step = result.steps.last().expect("final step present");
+        assert_eq!(event.reasoning_text, final_step.reasoning_text);
+        assert_eq!(event.reasoning_text.as_deref(), Some("thinking"));
+        assert_eq!(event.request, final_step.request);
+        assert_eq!(event.usage, final_step.usage);
+        assert_eq!(event.finish_reason, final_step.finish_reason);
+    }
+
+    // Upstream: stream-text.test.ts result.fullStream "should return events in order"
+    // (packages-ai-1144). The full stream emits its parts in deterministic order.
+    #[test]
+    fn stream_text_full_stream_returns_events_in_order() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("r1")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "r1", "why",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("r1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let result = poll_ready(stream_text(StreamTextOptions::new(
+            &model,
+            vec![user_message("test-input")],
+        )));
+
+        let part_names = result
+            .parts
+            .iter()
+            .map(|part| match part {
+                TextStreamPart::Start(_) => "start",
+                TextStreamPart::StartStep(_) => "start-step",
+                TextStreamPart::TextStart(_) => "text-start",
+                TextStreamPart::TextDelta(_) => "text-delta",
+                TextStreamPart::TextEnd(_) => "text-end",
+                TextStreamPart::ReasoningStart(_) => "reasoning-start",
+                TextStreamPart::ReasoningDelta(_) => "reasoning-delta",
+                TextStreamPart::ReasoningEnd(_) => "reasoning-end",
+                TextStreamPart::FinishStep(_) => "finish-step",
+                TextStreamPart::Finish(_) => "finish",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            part_names,
+            vec![
+                "start",
+                "start-step",
+                "text-start",
+                "text-delta",
+                "text-end",
+                "reasoning-start",
+                "reasoning-delta",
+                "reasoning-end",
+                "finish-step",
+                "finish",
+            ]
+        );
+    }
+
+    // Upstream: stream-text.test.ts result.onFinish (multi-step)
+    // "onFinish should send correct information" (packages-ai-1173). After a
+    // two-step tool loop, the onFinish event reports the final text, the summed
+    // total usage, and the response messages aggregated across all steps.
+    #[test]
+    fn stream_text_on_finish_sends_correct_information_across_steps() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": "value" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    two_step_usage_initial(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello, ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    two_step_usage_final(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+        let input_schema = json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let finish_events = Arc::new(Mutex::new(Vec::<GenerateTextFinishEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("tool1", input_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("result1")) }),
+                )
+                .with_max_steps(3)
+                .with_on_finish(move |event| {
+                    let finish_events = Arc::clone(&finish_events_for_callback);
+                    async move {
+                        finish_events.lock().expect("finish lock").push(event);
+                    }
+                }),
+        ));
+        result.consume_stream();
+
+        let finish_events = finish_events.lock().expect("finish lock");
+        assert_eq!(finish_events.len(), 1);
+        let event = &finish_events[0];
+        assert_eq!(event.text, "Hello, world!");
+        assert_eq!(event.steps.len(), 2);
+        assert_eq!(event.total_usage, result.total_usage);
+        // Response messages span all steps: assistant tool-call, tool result,
+        // then the final assistant text message.
+        assert!(event.response_messages.len() >= 3);
+        assert!(matches!(
+            event.response_messages.last(),
+            Some(LanguageModelMessage::Assistant(_))
+        ));
+        assert!(
+            event
+                .response_messages
+                .iter()
+                .any(|message| matches!(message, LanguageModelMessage::Tool(_)))
+        );
+    }
+
+    // Upstream: stream-text.test.ts result.toUIMessageStream (tool step)
+    // "should have correct ui message stream" (packages-ai-1169). A tool-executing
+    // step produces tool-input-available and tool-output-available ui chunks.
+    #[test]
+    fn stream_text_ui_message_stream_emits_tool_input_and_output_chunks() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": "value" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "done")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+        let input_schema = json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("tool1", input_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("result1")) }),
+                )
+                .with_max_steps(3),
+        ));
+
+        let chunks = serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize");
+        let chunks = chunks.as_array().expect("chunks is an array");
+        let types = chunks
+            .iter()
+            .map(|chunk| chunk["type"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            types.iter().any(|t| t == "tool-input-available"),
+            "tool-input-available chunk present, got {types:?}"
+        );
+        assert!(
+            types.iter().any(|t| t == "tool-output-available"),
+            "tool-output-available chunk present, got {types:?}"
+        );
+        let available = chunks
+            .iter()
+            .find(|chunk| chunk["type"] == json!("tool-input-available"))
+            .expect("tool-input-available chunk present");
+        assert_eq!(available["toolName"], json!("tool1"));
+        assert_eq!(available["input"], json!({ "value": "value" }));
+    }
 }
