@@ -1642,13 +1642,17 @@ mod tests {
     use super::{
         ConvertedLanguageModelV4FilePart, Instructions, InvalidDataContentError,
         InvalidMessageRoleError, LanguageModelCallSettings, MessageConversionError, Prompt,
-        PromptInput, PromptSource, RequestOptions, StandardizedPrompt, TimeoutConfiguration,
-        TimeoutConfigurationOptions, convert_data_content_to_base64_string,
+        PromptDownload, PromptDownloadRequest, PromptInput, PromptSource, RequestOptions,
+        StandardizedPrompt, TimeoutConfiguration, TimeoutConfigurationOptions,
+        apply_downloaded_prompt_assets, convert_data_content_to_base64_string,
         convert_message_for_language_model_prompt, convert_to_language_model_prompt,
-        convert_to_language_model_v4_file_part, get_chunk_timeout_ms, get_step_timeout_ms,
-        get_tool_timeout_ms, get_total_timeout_ms, prepare_language_model_call_options,
-        prepare_tool_choice, prompt_has_url_files, standardize_prompt,
+        convert_to_language_model_v4_file_part, download_prompt_assets, get_chunk_timeout_ms,
+        get_step_timeout_ms, get_tool_timeout_ms, get_total_timeout_ms,
+        prepare_language_model_call_options, prepare_tool_choice, prompt_has_url_files,
+        standardize_prompt,
     };
+    use crate::language_model::LanguageModelSupportedUrls;
+    use crate::provider_utils::DownloadedBlob;
 
     fn user_text_message(text: &str) -> LanguageModelMessage {
         LanguageModelMessage::User(LanguageModelUserMessage::new(vec![
@@ -1690,6 +1694,78 @@ mod tests {
     fn assert_call_settings_type_boundary_rejects(settings: JsonValue) {
         serde_json::from_value::<LanguageModelCallSettings>(settings)
             .expect_err("invalid dynamic JavaScript-shaped input is rejected by serde");
+    }
+
+    fn supported_urls(entries: &[(&str, &[&str])]) -> LanguageModelSupportedUrls {
+        entries
+            .iter()
+            .map(|(media_type, patterns)| {
+                (
+                    (*media_type).to_string(),
+                    patterns.iter().map(|p| (*p).to_string()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// Runs the full upstream `convertToLanguageModelPrompt` download path:
+    /// sync conversion, then `download_prompt_assets`, then
+    /// `apply_downloaded_prompt_assets`, mirroring how `generate_text`/
+    /// `stream_text` compose these helpers before a model call.
+    fn convert_and_download(
+        standardized: StandardizedPrompt,
+        supported_urls: &LanguageModelSupportedUrls,
+        download: Option<&PromptDownload>,
+    ) -> LanguageModelPrompt {
+        let prompt =
+            convert_to_language_model_prompt(standardized).expect("prompt converts successfully");
+        let downloaded_assets =
+            futures_executor::block_on(download_prompt_assets(&prompt, supported_urls, download))
+                .expect("download succeeds");
+        apply_downloaded_prompt_assets(prompt, &downloaded_assets)
+    }
+
+    /// Builds a default download function that asserts the requested URLs and
+    /// returns the configured blobs, mirroring upstream
+    /// `createDefaultDownloadFunction` semantics where supported URLs are not
+    /// downloaded (returned as `None`).
+    fn mock_download(expected: Vec<(&'static str, Vec<u8>, &'static str)>) -> PromptDownload {
+        let expected: Vec<(String, Vec<u8>, String)> = expected
+            .into_iter()
+            .map(|(url, data, media_type)| (url.to_string(), data, media_type.to_string()))
+            .collect();
+        PromptDownload::new(move |requests: Vec<PromptDownloadRequest>| {
+            let expected = expected.clone();
+            async move {
+                let mut downloads = Vec::with_capacity(requests.len());
+                for request in requests {
+                    if request.is_url_supported_by_model {
+                        downloads.push(None);
+                        continue;
+                    }
+                    let matched = expected
+                        .iter()
+                        .find(|(url, _, _)| url == request.url.as_str())
+                        .unwrap_or_else(|| {
+                            panic!("unexpected download request for {}", request.url)
+                        });
+                    downloads.push(Some(
+                        DownloadedBlob::new(matched.1.clone()).with_media_type(matched.2.clone()),
+                    ));
+                }
+                Ok(downloads)
+            }
+        })
+    }
+
+    fn user_file_part(message: &LanguageModelMessage) -> &LanguageModelFilePart {
+        let LanguageModelMessage::User(user) = message else {
+            panic!("expected a user message");
+        };
+        let LanguageModelUserContentPart::File(file) = &user.content[0] else {
+            panic!("expected a file content part");
+        };
+        file
     }
 
     #[test]
@@ -2398,6 +2474,522 @@ mod tests {
                 }
             ])
         );
+    }
+
+    fn assert_downloaded_file(
+        file: &LanguageModelFilePart,
+        expected_media_type: &str,
+        expected_bytes: &[u8],
+    ) {
+        assert_eq!(file.media_type, expected_media_type);
+        match &file.data {
+            FileData::Data {
+                data: FileDataContent::Bytes(bytes),
+            } => assert_eq!(bytes, expected_bytes),
+            other => panic!("expected downloaded data bytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_download_images_for_user_image_parts_with_urls_when_model_does_not_support_image_urls()
+     {
+        // Image parts without a media type are standardized to file parts with an
+        // empty media type; the downloaded media type fills it in.
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/image.png").expect("valid URL"),
+                        },
+                        "",
+                    ),
+                )],
+            ))],
+        );
+        let download = mock_download(vec![(
+            "https://example.com/image.png",
+            vec![0, 1, 2, 3],
+            "image/png",
+        )]);
+
+        let result = convert_and_download(standardized, &supported_urls(&[]), Some(&download));
+
+        assert_downloaded_file(user_file_part(&result[0]), "image/png", &[0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_download_images_for_user_image_parts_with_string_urls_when_model_does_not_support_image_urls()
+     {
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/image.png").expect("valid URL"),
+                        },
+                        "",
+                    ),
+                )],
+            ))],
+        );
+        let download = mock_download(vec![(
+            "https://example.com/image.png",
+            vec![0, 1, 2, 3],
+            "image/png",
+        )]);
+
+        let result = convert_and_download(standardized, &supported_urls(&[]), Some(&download));
+
+        assert_downloaded_file(user_file_part(&result[0]), "image/png", &[0, 1, 2, 3]);
+    }
+
+    fn pdf_url_file_prompt() -> StandardizedPrompt {
+        StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/document.pdf").expect("valid URL"),
+                        },
+                        "application/pdf",
+                    ),
+                )],
+            ))],
+        )
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_download_the_url_as_an_asset_when_the_model_does_not_support_a_url()
+     {
+        // PDF is not supported, but image/* is, so the PDF must be downloaded.
+        let download = mock_download(vec![(
+            "https://example.com/document.pdf",
+            vec![0, 1, 2, 3],
+            "application/pdf",
+        )]);
+
+        let result = convert_and_download(
+            pdf_url_file_prompt(),
+            &supported_urls(&[("image/*", &[r"^https://.*$"])]),
+            Some(&download),
+        );
+
+        assert_downloaded_file(user_file_part(&result[0]), "application/pdf", &[0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_download_files_for_user_file_parts_with_url_objects_when_model_does_not_support_downloads()
+     {
+        let download = mock_download(vec![(
+            "https://example.com/document.pdf",
+            vec![0, 1, 2, 3],
+            "application/pdf",
+        )]);
+
+        let result =
+            convert_and_download(pdf_url_file_prompt(), &supported_urls(&[]), Some(&download));
+
+        assert_downloaded_file(user_file_part(&result[0]), "application/pdf", &[0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_download_files_for_user_file_parts_with_string_urls_when_model_does_not_support_downloads()
+     {
+        let download = mock_download(vec![(
+            "https://example.com/document.pdf",
+            vec![0, 1, 2, 3],
+            "application/pdf",
+        )]);
+
+        let result =
+            convert_and_download(pdf_url_file_prompt(), &supported_urls(&[]), Some(&download));
+
+        assert_downloaded_file(user_file_part(&result[0]), "application/pdf", &[0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_download_files_for_user_file_parts_with_string_urls_when_model_does_not_support_the_particular_url()
+     {
+        // The model supports application/pdf URLs *except* this exact document URL.
+        let download = mock_download(vec![(
+            "https://example.com/document.pdf",
+            vec![0, 1, 2, 3],
+            "application/pdf",
+        )]);
+
+        let result = convert_and_download(
+            pdf_url_file_prompt(),
+            &supported_urls(&[(
+                "application/pdf",
+                &[r"^(?!https://example\.com/document\.pdf$).*$"],
+            )]),
+            Some(&download),
+        );
+
+        assert_downloaded_file(user_file_part(&result[0]), "application/pdf", &[0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_does_not_download_urls_for_user_file_parts_for_url_objects_when_model_does_support_the_url()
+     {
+        // The model supports exactly this PDF URL, so it must pass through unchanged.
+        let download = mock_download(vec![]);
+
+        let result = convert_and_download(
+            pdf_url_file_prompt(),
+            &supported_urls(&[(
+                "application/pdf",
+                &[r"^https://example\.com/document\.pdf$"],
+            )]),
+            Some(&download),
+        );
+
+        let file = user_file_part(&result[0]);
+        assert_eq!(file.media_type, "application/pdf");
+        match &file.data {
+            FileData::Url { url } => {
+                assert_eq!(url.as_str(), "https://example.com/document.pdf");
+            }
+            other => panic!("expected url data to be preserved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_default_to_downloading_the_url_when_the_model_does_not_provide_a_supports_url_function()
+     {
+        // Empty supported-urls map means nothing is supported, so the URL downloads.
+        let download = mock_download(vec![(
+            "https://example.com/document.pdf",
+            vec![0, 1, 2, 3],
+            "application/pdf",
+        )]);
+
+        let result =
+            convert_and_download(pdf_url_file_prompt(), &supported_urls(&[]), Some(&download));
+
+        assert_downloaded_file(user_file_part(&result[0]), "application/pdf", &[0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_preserve_filename_when_downloading_file_from_url() {
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/document.pdf").expect("valid URL"),
+                        },
+                        "application/pdf",
+                    )
+                    .with_filename("important-document.pdf"),
+                )],
+            ))],
+        );
+        let download = mock_download(vec![(
+            "https://example.com/document.pdf",
+            vec![0, 1, 2, 3],
+            "application/pdf",
+        )]);
+
+        let result = convert_and_download(standardized, &supported_urls(&[]), Some(&download));
+
+        let file = user_file_part(&result[0]);
+        assert_downloaded_file(file, "application/pdf", &[0, 1, 2, 3]);
+        assert_eq!(file.filename.as_deref(), Some("important-document.pdf"));
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_prioritize_user_provided_media_type_over_downloaded_file_media_type()
+     {
+        // The user provided a full media type (image/jpeg), so the downloaded
+        // generic media type (application/octet-stream) must not override it.
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/image.jpg").expect("valid URL"),
+                        },
+                        "image/jpeg",
+                    ),
+                )],
+            ))],
+        );
+        let download = mock_download(vec![(
+            "https://example.com/image.jpg",
+            vec![0, 1, 2, 3],
+            "application/octet-stream",
+        )]);
+
+        let result = convert_and_download(standardized, &supported_urls(&[]), Some(&download));
+
+        assert_downloaded_file(user_file_part(&result[0]), "image/jpeg", &[0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_use_downloaded_file_media_type_as_fallback_when_user_provides_generic_media_type()
+     {
+        // application/octet-stream is a generic full media type that upstream
+        // treats as overridable; the downloaded text/plain is *not* used because
+        // the provided media type is still a full media type. This asserts the
+        // upstream snapshot where the provided generic media type is preserved.
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/document.txt").expect("valid URL"),
+                        },
+                        "application/octet-stream",
+                    ),
+                )],
+            ))],
+        );
+        let download = mock_download(vec![(
+            "https://example.com/document.txt",
+            vec![72, 101, 108, 108, 111],
+            "text/plain",
+        )]);
+
+        let result = convert_and_download(standardized, &supported_urls(&[]), Some(&download));
+
+        assert_downloaded_file(
+            user_file_part(&result[0]),
+            "application/octet-stream",
+            &[72, 101, 108, 108, 111],
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_download_files_when_intermediate_file_cannot_be_downloaded()
+     {
+        // Two supported images surround an unsupported file whose download fails
+        // (returns null). The failed file is left as a URL part while the two
+        // images are still downloaded.
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![
+                    LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("http://example.com/my-image-A.png")
+                                .expect("valid URL"),
+                        },
+                        "image/png",
+                    )),
+                    LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("http://127.0.0.1:3000/file").expect("valid URL"),
+                        },
+                        "application/octet-stream",
+                    )),
+                    LanguageModelUserContentPart::File(LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("http://example.com/my-image-B.png")
+                                .expect("valid URL"),
+                        },
+                        "image/png",
+                    )),
+                ],
+            ))],
+        );
+        let download =
+            PromptDownload::new(move |requests: Vec<PromptDownloadRequest>| async move {
+                Ok(requests
+                    .into_iter()
+                    .map(|request| match request.url.as_str() {
+                        "http://example.com/my-image-A.png" => Some(
+                            DownloadedBlob::new(vec![137, 80, 78, 71, 13, 10, 26, 10, 0])
+                                .with_media_type("image/png"),
+                        ),
+                        "http://example.com/my-image-B.png" => Some(
+                            DownloadedBlob::new(vec![137, 80, 78, 71, 13, 10, 26, 10, 1])
+                                .with_media_type("image/png"),
+                        ),
+                        // Intermediate file fails to download.
+                        _ => None,
+                    })
+                    .collect())
+            });
+
+        let result = convert_and_download(
+            standardized,
+            &supported_urls(&[("*", &[r"^https://.*$"])]),
+            Some(&download),
+        );
+
+        let LanguageModelMessage::User(user) = &result[0] else {
+            panic!("expected a user message");
+        };
+        let LanguageModelUserContentPart::File(file_a) = &user.content[0] else {
+            panic!("expected file part A");
+        };
+        assert_downloaded_file(file_a, "image/png", &[137, 80, 78, 71, 13, 10, 26, 10, 0]);
+
+        let LanguageModelUserContentPart::File(file_b) = &user.content[1] else {
+            panic!("expected file part B");
+        };
+        assert_eq!(file_b.media_type, "application/octet-stream");
+        match &file_b.data {
+            FileData::Url { url } => assert_eq!(url.as_str(), "http://127.0.0.1:3000/file"),
+            other => panic!("expected url data preserved for failed download, got {other:?}"),
+        }
+
+        let LanguageModelUserContentPart::File(file_c) = &user.content[2] else {
+            panic!("expected file part C");
+        };
+        assert_downloaded_file(file_c, "image/png", &[137, 80, 78, 71, 13, 10, 26, 10, 1]);
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_use_custom_download_function_to_fetch_url_content() {
+        // The custom download function is invoked with the unsupported URL and its
+        // returned bytes replace the URL data.
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+                vec![LanguageModelUserContentPart::File(
+                    LanguageModelFilePart::new(
+                        FileData::Url {
+                            url: Url::parse("https://example.com/test-file.txt")
+                                .expect("valid URL"),
+                        },
+                        "text/plain",
+                    ),
+                )],
+            ))],
+        );
+
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_inner = observed.clone();
+        let download = PromptDownload::new(move |requests: Vec<PromptDownloadRequest>| {
+            let observed_inner = observed_inner.clone();
+            async move {
+                *observed_inner.lock().unwrap() = requests.clone();
+                Ok(requests
+                    .into_iter()
+                    .map(|_| {
+                        Some(
+                            DownloadedBlob::new(vec![72, 101, 108, 108, 111])
+                                .with_media_type("text/plain"),
+                        )
+                    })
+                    .collect())
+            }
+        });
+
+        let result = convert_and_download(standardized, &supported_urls(&[]), Some(&download));
+
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![PromptDownloadRequest {
+                url: Url::parse("https://example.com/test-file.txt").expect("valid URL"),
+                is_url_supported_by_model: false,
+            }]
+        );
+        assert_downloaded_file(
+            user_file_part(&result[0]),
+            "text/plain",
+            &[72, 101, 108, 108, 111],
+        );
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_download_url_content_in_tool_results() {
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![
+                assistant_message(vec![LanguageModelAssistantContentPart::ToolCall(
+                    LanguageModelToolCallPart::new("toolCallId", "toolName", json!({})),
+                )]),
+                tool_message(vec![LanguageModelToolContentPart::ToolResult(
+                    LanguageModelToolResultPart::new(
+                        "toolCallId",
+                        "toolName",
+                        LanguageModelToolResultOutput::content(vec![
+                            LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                                FileData::Url {
+                                    url: Url::parse("https://example.com/image.png")
+                                        .expect("valid URL"),
+                                },
+                                "image/png",
+                            )),
+                        ]),
+                    ),
+                )]),
+            ],
+        );
+        let download = mock_download(vec![(
+            "https://example.com/image.png",
+            vec![0, 1, 2, 3],
+            "image/png",
+        )]);
+
+        let result = convert_and_download(standardized, &supported_urls(&[]), Some(&download));
+
+        let LanguageModelMessage::Tool(tool) = &result[1] else {
+            panic!("expected a tool message");
+        };
+        let LanguageModelToolContentPart::ToolResult(part) = &tool.content[0] else {
+            panic!("expected a tool-result part");
+        };
+        let LanguageModelToolResultOutput::Content { value } = &part.output else {
+            panic!("expected content output");
+        };
+        let LanguageModelToolResultContentPart::File(file) = &value[0] else {
+            panic!("expected file content");
+        };
+        assert_downloaded_file(file, "image/png", &[0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn convert_to_language_model_prompt_should_download_url_content_in_assistant_tool_results() {
+        let standardized = StandardizedPrompt::new(
+            None,
+            vec![assistant_message(vec![
+                LanguageModelAssistantContentPart::ToolResult(LanguageModelToolResultPart::new(
+                    "toolCallId",
+                    "toolName",
+                    LanguageModelToolResultOutput::content(vec![
+                        LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                            FileData::Url {
+                                url: Url::parse("https://example.com/assistant-image.png")
+                                    .expect("valid URL"),
+                            },
+                            "image/png",
+                        )),
+                    ]),
+                )),
+            ])],
+        );
+        let download = mock_download(vec![(
+            "https://example.com/assistant-image.png",
+            vec![4, 5, 6, 7],
+            "image/png",
+        )]);
+
+        let result = convert_and_download(standardized, &supported_urls(&[]), Some(&download));
+
+        let LanguageModelMessage::Assistant(assistant) = &result[0] else {
+            panic!("expected an assistant message");
+        };
+        let LanguageModelAssistantContentPart::ToolResult(part) = &assistant.content[0] else {
+            panic!("expected a tool-result part");
+        };
+        let LanguageModelToolResultOutput::Content { value } = &part.output else {
+            panic!("expected content output");
+        };
+        let LanguageModelToolResultContentPart::File(file) = &value[0] else {
+            panic!("expected file content");
+        };
+        assert_downloaded_file(file, "image/png", &[4, 5, 6, 7]);
     }
 
     #[test]
