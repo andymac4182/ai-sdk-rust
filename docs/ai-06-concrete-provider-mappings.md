@@ -46,7 +46,7 @@ the strict inventory generator.
 | `packages/perplexity` | `crates/ai-sdk-perplexity` | 32 |
 | `packages/prodia` | `crates/ai-sdk-prodia` | 54 |
 | `packages/replicate` | `crates/ai-sdk-replicate` | 63 |
-| `packages/revai` | `crates/ai-sdk-revai` | 6 |
+| `packages/revai` | `crates/ai-sdk-revai` | 0 |
 | `packages/togetherai` | `src/togetherai.rs`, `src/openai_compatible.rs` | 10 |
 | `packages/voyage` | `src/voyage.rs` | 0 |
 
@@ -643,6 +643,26 @@ The Prodia Rust port (`crates/ai-sdk-prodia`) covers the image, video, provider,
 | `packages/prodia/src/prodia-video-model.test.ts` | includes timestamp and modelId in response | `prodia_0052_it_includes_timestamp_and_model_id_in_response` | none |
 | `packages/prodia/src/prodia-video-model.test.ts` | handles API errors | `prodia_0053_it_handles_api_errors` | none |
 | `packages/prodia/src/prodia-video-model.test.ts` | sends multipart form-data when image is provided | `prodia_0054_it_sends_multipart_form_data_when_image_is_provided` | none |
+
+## Revai Exact Case Map
+
+Row-level strict mapping for portable `packages/revai` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a colocated `#[cfg(test)]`
+test in `crates/ai-sdk-revai/src/lib.rs` that genuinely exercises the behavior
+(error-body schema parsing, multipart `config`/`media` request construction,
+header and user-agent passthrough, transcript text extraction, response
+timestamp/modelId/headers metadata, and the real-wall-clock date fallback) so
+each mapped test fails if the behavior regresses.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/revai/src/revai-error.test.ts` | should parse Rev.ai resource exhausted error | `crates/ai-sdk-revai/src/lib.rs::revai_error_data_schema_parses_resource_exhausted_error` | none |
+| `packages/revai/src/revai-transcription-model.test.ts` | should pass the model | `crates/ai-sdk-revai/src/lib.rs::revai_transcription_model_transcribes_audio_with_headers_options_and_response` | none |
+| `packages/revai/src/revai-transcription-model.test.ts` | should pass headers | `crates/ai-sdk-revai/src/lib.rs::revai_transcription_model_transcribes_audio_with_headers_options_and_response` | none |
+| `packages/revai/src/revai-transcription-model.test.ts` | should extract the transcription text | `crates/ai-sdk-revai/src/lib.rs::revai_transcription_model_transcribes_audio_with_headers_options_and_response` | none |
+| `packages/revai/src/revai-transcription-model.test.ts` | should include response data with timestamp, modelId and headers | `crates/ai-sdk-revai/src/lib.rs::revai_transcription_model_transcribes_audio_with_headers_options_and_response` | none |
+| `packages/revai/src/revai-transcription-model.test.ts` | should use real date when no custom date provider is specified | `crates/ai-sdk-revai/src/lib.rs::revai_transcription_uses_real_date_when_no_custom_date_provider` | none |
+
 ## Azure OpenAI Exact Case Map
 
 All 55 portable `packages/azure` upstream cases map to named Rust tests in `crates/ai-sdk-azure/tests/upstream_mapping.rs`, each delegating to the deterministic `assert_upstream_case_covered` capability assertion in `crates/ai-sdk-azure/src/lib.rs` (mirroring the foundational provider crates). Buckets exercise the real Azure OpenAI provider request construction (URL, `api-version` query param, header and user-agent passthrough, request body) and response extraction (text, usage, metadata, headers) so each mapped test fails if the behavior regresses. The responses-API tool/streaming rows route through the shared `crates/ai-sdk-open-responses` model with Azure-specific `assistant-` file-id and `/responses?api-version=` wiring.
