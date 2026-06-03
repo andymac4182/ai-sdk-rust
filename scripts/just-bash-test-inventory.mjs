@@ -3699,8 +3699,32 @@ function sourceOverrideFor(relativePath) {
   return group ? rowOverrideFromGroup(group) : undefined;
 }
 
+const jbAliasCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/alias/alias.test.ts',
+    lines: [6, 13, 20, 27, 34, 40, 47],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::alias',
+    rustTest:
+      'just_bash_alias_lists_no_aliases_initially; just_bash_alias_sets_and_lists_within_same_exec; just_bash_alias_shows_specific_alias_within_same_exec; just_bash_alias_errors_when_alias_not_found; just_bash_alias_sets_multiple_within_same_exec_in_definition_order; just_bash_alias_shows_help_with_help_flag; just_bash_alias_does_not_persist_across_exec_calls',
+    notes:
+      'JB alias builtin: portable definition-ordered alias listing, single-alias display, not-found errors, multi-definition order, --help, and fresh-shell non-persistence across exec calls over the virtual session.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/alias/alias.test.ts',
+    lines: [62, 69, 76, 85],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::unalias',
+    rustTest:
+      'just_bash_unalias_removes_an_alias_within_same_exec; just_bash_unalias_errors_when_unaliasing_nonexistent_alias; just_bash_unalias_removes_all_aliases_with_a_flag; just_bash_unalias_shows_help_with_help_flag',
+    notes:
+      'JB unalias builtin: portable single-alias removal, not-found error, -a remove-all, and --help over the virtual session.',
+  },
+];
+
 function caseOverrideFor(testCase) {
   const group = [
+    ...jbAliasCaseGroups,
     ...jbc39CaseGroups,
     ...jbc28CaseGroups,
     ...jb06CaseGroups,
