@@ -7087,6 +7087,7 @@ fn relative_display_path(cwd: &str, path: &str) -> String {
 
 fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
     let mut quiet = false;
+    let mut ere = false;
     let mut scripts = Vec::new();
     let mut paths = Vec::new();
     let mut index = 0;
@@ -7094,6 +7095,10 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
         match arg.as_str() {
             "-n" => {
                 quiet = true;
+                index += 1;
+            }
+            "-E" | "-r" | "--regexp-extended" => {
+                ere = true;
                 index += 1;
             }
             "-e" => {
@@ -7135,8 +7140,10 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
                 replacement,
                 global,
                 ignore_case,
+                occurrence,
             } => {
-                let regex = match RegexBuilder::new(&pattern)
+                let translated = sed_pattern_to_regex(&pattern, ere);
+                let regex = match RegexBuilder::new(&translated)
                     .case_insensitive(ignore_case)
                     .build()
                 {
@@ -7144,16 +7151,13 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
                     Err(error) => return stderr_result(1, format!("sed: {error}\n")),
                 };
                 let line_count = lines.len();
+                let replacement = sed_replacement_to_regex(&replacement);
                 for (line_index, line) in lines.iter_mut().enumerate() {
                     if !sed_address_matches(address.as_ref(), line_index, line, line_count) {
                         continue;
                     }
-                    let replacement = sed_replacement_to_regex(&replacement);
-                    *line = if global {
-                        regex.replace_all(line, replacement.as_str()).into_owned()
-                    } else {
-                        regex.replace(line, replacement.as_str()).into_owned()
-                    };
+                    *line =
+                        sed_substitute_line(&regex, line, replacement.as_str(), global, occurrence);
                 }
             }
             SedCommand::Print(address) => {
@@ -7174,11 +7178,63 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
                     })
                     .collect();
             }
+            SedCommand::Quit { line, print_line } => {
+                // `Nq` auto-prints lines up to and including line N then quits.
+                // `NQ` quits before printing line N.
+                let keep = if print_line {
+                    line.min(lines.len())
+                } else {
+                    line.saturating_sub(1).min(lines.len())
+                };
+                lines.truncate(keep);
+            }
         }
     }
     let output_lines = if quiet { explicit_print } else { lines };
     let output = join_lines_with_newline(&output_lines);
     stdout_result(output)
+}
+
+/// Substitute occurrences in a single line, honouring the optional Nth-occurrence
+/// flag and the `g` (global) flag. When `occurrence` is `Some(n)`, only the n-th
+/// match (and following ones if `global` is also set) are replaced.
+fn sed_substitute_line(
+    regex: &Regex,
+    line: &str,
+    replacement: &str,
+    global: bool,
+    occurrence: Option<usize>,
+) -> String {
+    match occurrence {
+        None => {
+            if global {
+                regex.replace_all(line, replacement).into_owned()
+            } else {
+                regex.replace(line, replacement).into_owned()
+            }
+        }
+        Some(target) => {
+            let mut count = 0usize;
+            regex
+                .replace_all(line, |caps: &regex::Captures<'_>| {
+                    count += 1;
+                    let replace = if global {
+                        count >= target
+                    } else {
+                        count == target
+                    };
+                    if replace {
+                        let mut out = String::new();
+                        caps.expand(replacement, &mut out);
+                        out
+                    } else {
+                        caps.get(0)
+                            .map_or(String::new(), |m| m.as_str().to_string())
+                    }
+                })
+                .into_owned()
+        }
+    }
 }
 
 fn command_awk(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
@@ -7501,13 +7557,31 @@ enum SedCommand {
         replacement: String,
         global: bool,
         ignore_case: bool,
+        occurrence: Option<usize>,
     },
     Print(SedAddress),
     Delete(SedAddress),
+    Quit {
+        line: usize,
+        print_line: bool,
+    },
 }
 
 fn parse_sed_command(script: &str) -> Result<SedCommand, String> {
     let script = script.trim();
+    // `Nq` / `NQ` quit commands: N is a required leading line number.
+    if let Some(line) = script.strip_suffix('q').and_then(|n| n.trim().parse().ok()) {
+        return Ok(SedCommand::Quit {
+            line,
+            print_line: true,
+        });
+    }
+    if let Some(line) = script.strip_suffix('Q').and_then(|n| n.trim().parse().ok()) {
+        return Ok(SedCommand::Quit {
+            line,
+            print_line: false,
+        });
+    }
     if let Some(address) = script.strip_suffix('p').and_then(parse_sed_address) {
         return Ok(SedCommand::Print(address));
     }
@@ -7518,12 +7592,22 @@ fn parse_sed_command(script: &str) -> Result<SedCommand, String> {
     let Some((pattern, replacement, flags)) = parse_sed_substitution_parts(&substitution) else {
         return Err("unsupported script".to_string());
     };
+    let occurrence = flags
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect::<String>();
+    let occurrence = if occurrence.is_empty() {
+        None
+    } else {
+        occurrence.parse::<usize>().ok()
+    };
     Ok(SedCommand::Substitute {
         address,
         pattern,
         replacement,
         global: flags.contains('g'),
-        ignore_case: flags.contains('i'),
+        ignore_case: flags.contains('i') || flags.contains('I'),
+        occurrence,
     })
 }
 
@@ -7532,13 +7616,23 @@ fn sed_replacement_to_regex(replacement: &str) -> String {
     let mut chars = replacement.chars();
     while let Some(ch) = chars.next() {
         match ch {
-            '&' => output.push_str("$0"),
+            // `&` expands to the entire match.
+            '&' => output.push_str("${0}"),
             '\\' => match chars.next() {
+                // `\&` is a literal ampersand.
                 Some('&') => push_regex_replacement_literal(&mut output, '&'),
-                Some(next) => {
-                    push_regex_replacement_literal(&mut output, '\\');
-                    push_regex_replacement_literal(&mut output, next);
+                // `\1`..`\9` are backreferences to capture groups.
+                Some(digit @ '1'..='9') => {
+                    output.push_str("${");
+                    output.push(digit);
+                    output.push('}');
                 }
+                // `\n` and `\t` expand to newline / tab.
+                Some('n') => push_regex_replacement_literal(&mut output, '\n'),
+                Some('t') => push_regex_replacement_literal(&mut output, '\t'),
+                // `\\` is a literal backslash.
+                Some('\\') => push_regex_replacement_literal(&mut output, '\\'),
+                Some(next) => push_regex_replacement_literal(&mut output, next),
                 None => push_regex_replacement_literal(&mut output, '\\'),
             },
             other => push_regex_replacement_literal(&mut output, other),
@@ -7553,6 +7647,56 @@ fn push_regex_replacement_literal(output: &mut String, ch: char) {
     } else {
         output.push(ch);
     }
+}
+
+/// Translate a sed pattern into a Rust `regex` (RE2) pattern.
+///
+/// The Rust `regex` crate is ERE-flavoured, so ERE input passes through almost
+/// unchanged. BRE input differs: `+ ? | ( ) { }` are literal unless escaped with
+/// a backslash, which is the inverse of ERE. Bracket expressions `[...]` are
+/// copied verbatim because their contents are not BRE/ERE metacharacters.
+fn sed_pattern_to_regex(pattern: &str, ere: bool) -> String {
+    let mut output = String::new();
+    let mut chars = pattern.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '[' => {
+                // Copy the whole bracket expression verbatim.
+                output.push('[');
+                if matches!(chars.peek(), Some('^')) {
+                    output.push(chars.next().unwrap());
+                }
+                if matches!(chars.peek(), Some(']')) {
+                    output.push(chars.next().unwrap());
+                }
+                for inner in chars.by_ref() {
+                    output.push(inner);
+                    if inner == ']' {
+                        break;
+                    }
+                }
+            }
+            '\\' => match chars.next() {
+                Some(next) => {
+                    if !ere && matches!(next, '+' | '?' | '|' | '(' | ')' | '{' | '}') {
+                        // In BRE, `\+` etc. ARE the metacharacters.
+                        output.push(next);
+                    } else {
+                        output.push('\\');
+                        output.push(next);
+                    }
+                }
+                None => output.push('\\'),
+            },
+            '+' | '?' | '|' | '(' | ')' | '{' | '}' if !ere => {
+                // In BRE these are literal characters.
+                output.push('\\');
+                output.push(ch);
+            }
+            other => output.push(other),
+        }
+    }
+    output
 }
 
 fn split_sed_address_and_command(script: &str) -> (Option<SedAddress>, String) {
