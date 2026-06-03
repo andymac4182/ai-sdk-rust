@@ -429,4 +429,437 @@ mod tests {
             |_| panic!("empty warnings should not call the custom logger"),
         ));
     }
+
+    // ---------------------------------------------------------------------
+    // Upstream parity: packages/ai/src/logger/log-warnings.test.ts
+    // ---------------------------------------------------------------------
+
+    /// packages-ai-1505: when disabled, a single warning produces no records.
+    #[test]
+    fn disabled_logger_does_not_log_single_warning() {
+        let mut logger = WarningLogger::disabled();
+        let options = LogWarningsOptions::new(vec![Warning::Other {
+            message: "Test warning".to_string(),
+        }])
+        .with_scope("providerX", "modelY");
+
+        assert_eq!(logger.log_warnings(&options), Vec::new());
+    }
+
+    /// packages-ai-1506: when disabled, multiple warnings produce no records.
+    #[test]
+    fn disabled_logger_does_not_log_multiple_warnings() {
+        let mut logger = WarningLogger::disabled();
+        let options = LogWarningsOptions::new(vec![
+            Warning::Other {
+                message: "Test warning 1".to_string(),
+            },
+            Warning::Other {
+                message: "Test warning 2".to_string(),
+            },
+        ])
+        .with_scope("provider", "model");
+
+        assert_eq!(logger.log_warnings(&options), Vec::new());
+    }
+
+    /// packages-ai-1507: when disabled, an empty batch does not consume the
+    /// first-call state, and a following non-empty batch still logs nothing.
+    #[test]
+    fn disabled_logger_does_not_count_empty_arrays_as_first_call() {
+        let mut logger = WarningLogger::disabled();
+
+        assert_eq!(
+            logger.log_warnings(&LogWarningsOptions::new(Vec::new()).with_scope("prov", "mod")),
+            Vec::new()
+        );
+
+        assert_eq!(
+            logger.log_warnings(
+                &LogWarningsOptions::new(vec![Warning::Other {
+                    message: "foo".to_string(),
+                }])
+                .with_scope("p1", "m1")
+            ),
+            Vec::new()
+        );
+    }
+
+    /// packages-ai-1508: the custom logger receives the original options once.
+    #[test]
+    fn custom_logger_called_with_warning_options() {
+        let options = LogWarningsOptions::new(vec![Warning::Other {
+            message: "Test warning".to_string(),
+        }])
+        .with_scope("pp", "mm");
+        let mut call_count = 0usize;
+        let mut captured = None;
+
+        let invoked = log_warnings_with_custom_logger(&options, |received| {
+            call_count += 1;
+            captured = Some(received.clone());
+        });
+
+        assert!(invoked);
+        assert_eq!(call_count, 1);
+        assert_eq!(captured, Some(options));
+    }
+
+    /// packages-ai-1509: the custom logger receives multiple warnings verbatim.
+    #[test]
+    fn custom_logger_called_with_multiple_warnings() {
+        let options = LogWarningsOptions::new(vec![
+            Warning::Unsupported {
+                feature: "temperature".to_string(),
+                details: Some("Temperature not supported".to_string()),
+            },
+            Warning::Other {
+                message: "Another warning".to_string(),
+            },
+        ])
+        .with_scope("provider", "model");
+        let mut call_count = 0usize;
+        let mut captured = None;
+
+        let invoked = log_warnings_with_custom_logger(&options, |received| {
+            call_count += 1;
+            captured = Some(received.clone());
+        });
+
+        assert!(invoked);
+        assert_eq!(call_count, 1);
+        assert_eq!(captured, Some(options));
+    }
+
+    /// packages-ai-1510: the custom logger is not called for an empty batch.
+    #[test]
+    fn custom_logger_not_called_with_empty_warnings_array() {
+        let mut call_count = 0usize;
+
+        let invoked = log_warnings_with_custom_logger(
+            &LogWarningsOptions::new(Vec::new()).with_scope("x", "y"),
+            |_| {
+                call_count += 1;
+            },
+        );
+
+        assert!(!invoked);
+        assert_eq!(call_count, 0);
+    }
+
+    /// packages-ai-1511: the first batch emits the info note once, then a
+    /// formatted warning record per warning.
+    #[test]
+    fn default_logger_shows_info_once_then_warning_per_warning() {
+        let mut logger = WarningLogger::new();
+
+        let records = logger.log_warnings(
+            &LogWarningsOptions::new(vec![Warning::Other {
+                message: "Test warning message".to_string(),
+            }])
+            .with_scope("myProvider", "myModel"),
+        );
+
+        assert_eq!(
+            records,
+            vec![
+                WarningLogRecord::Info(FIRST_WARNING_INFO_MESSAGE.to_string()),
+                WarningLogRecord::Warning {
+                    message: "AI SDK Warning (myProvider / myModel): Test warning message"
+                        .to_string(),
+                    kind: WarningLogKind::Warning,
+                },
+            ]
+        );
+    }
+
+    /// packages-ai-1512: only the first non-empty call emits the info note.
+    #[test]
+    fn default_logger_shows_info_only_on_first_non_empty_call() {
+        let mut logger = WarningLogger::new();
+
+        let first = logger.log_warnings(
+            &LogWarningsOptions::new(vec![Warning::Other {
+                message: "1".to_string(),
+            }])
+            .with_scope("a", "b"),
+        );
+        let second = logger.log_warnings(
+            &LogWarningsOptions::new(vec![Warning::Other {
+                message: "2".to_string(),
+            }])
+            .with_scope("a", "b"),
+        );
+
+        assert_eq!(
+            first,
+            vec![
+                WarningLogRecord::Info(FIRST_WARNING_INFO_MESSAGE.to_string()),
+                WarningLogRecord::Warning {
+                    message: "AI SDK Warning (a / b): 1".to_string(),
+                    kind: WarningLogKind::Warning,
+                },
+            ]
+        );
+        assert_eq!(
+            second,
+            vec![WarningLogRecord::Warning {
+                message: "AI SDK Warning (a / b): 2".to_string(),
+                kind: WarningLogKind::Warning,
+            }]
+        );
+    }
+
+    /// packages-ai-1513: empty batches interleaved with non-empty ones never
+    /// log, and the info note stays a one-time event across non-empty calls.
+    #[test]
+    fn default_logger_only_logs_for_non_empty_warnings() {
+        let mut logger = WarningLogger::new();
+
+        assert_eq!(
+            logger.log_warnings(&LogWarningsOptions::new(Vec::new()).with_scope("err", "m")),
+            Vec::new()
+        );
+
+        let first = logger.log_warnings(
+            &LogWarningsOptions::new(vec![Warning::Other {
+                message: "t1".to_string(),
+            }])
+            .with_scope("prov", "mod"),
+        );
+        assert_eq!(
+            first,
+            vec![
+                WarningLogRecord::Info(FIRST_WARNING_INFO_MESSAGE.to_string()),
+                WarningLogRecord::Warning {
+                    message: "AI SDK Warning (prov / mod): t1".to_string(),
+                    kind: WarningLogKind::Warning,
+                },
+            ]
+        );
+
+        assert_eq!(
+            logger.log_warnings(&LogWarningsOptions::new(Vec::new()).with_scope("prov", "mod")),
+            Vec::new()
+        );
+
+        let second = logger.log_warnings(
+            &LogWarningsOptions::new(vec![Warning::Other {
+                message: "t2".to_string(),
+            }])
+            .with_scope("prov", "mod"),
+        );
+        assert_eq!(
+            second,
+            vec![WarningLogRecord::Warning {
+                message: "AI SDK Warning (prov / mod): t2".to_string(),
+                kind: WarningLogKind::Warning,
+            }]
+        );
+    }
+
+    /// packages-ai-1514: every warning variant is formatted per upstream
+    /// `formatWarning`, with the deprecated variant using a deprecation sink.
+    #[test]
+    fn default_logger_handles_various_warning_types_per_format_warning() {
+        let mut logger = WarningLogger::new();
+
+        let records = logger.log_warnings(
+            &LogWarningsOptions::new(vec![
+                Warning::Unsupported {
+                    feature: "mediaType".to_string(),
+                    details: Some("detail".to_string()),
+                },
+                Warning::Unsupported {
+                    feature: "voice".to_string(),
+                    details: Some("detail2".to_string()),
+                },
+                Warning::Deprecated {
+                    setting: "providerOptions key 'old-key'".to_string(),
+                    message: "Use 'oldKey' instead.".to_string(),
+                },
+                Warning::Other {
+                    message: "other msg".to_string(),
+                },
+            ])
+            .with_scope("zzz", "MMM"),
+        );
+
+        assert_eq!(
+            records,
+            vec![
+                WarningLogRecord::Info(FIRST_WARNING_INFO_MESSAGE.to_string()),
+                WarningLogRecord::Warning {
+                    message:
+                        "AI SDK Warning (zzz / MMM): The feature \"mediaType\" is not supported. detail"
+                            .to_string(),
+                    kind: WarningLogKind::Warning,
+                },
+                WarningLogRecord::Warning {
+                    message:
+                        "AI SDK Warning (zzz / MMM): The feature \"voice\" is not supported. detail2"
+                            .to_string(),
+                    kind: WarningLogKind::Warning,
+                },
+                WarningLogRecord::Warning {
+                    message:
+                        "AI SDK Warning (zzz / MMM): Deprecated: \"providerOptions key 'old-key'\". Use 'oldKey' instead."
+                            .to_string(),
+                    kind: WarningLogKind::DeprecationWarning,
+                },
+                WarningLogRecord::Warning {
+                    message: "AI SDK Warning (zzz / MMM): other msg".to_string(),
+                    kind: WarningLogKind::Warning,
+                },
+            ]
+        );
+    }
+
+    /// packages-ai-1515: the warning is still emitted with literal "unknown
+    /// provider" / "unknown model" scope strings.
+    #[test]
+    fn default_logger_includes_warning_with_unknown_provider_and_model() {
+        let mut logger = WarningLogger::new();
+
+        let records = logger.log_warnings(
+            &LogWarningsOptions::new(vec![Warning::Other {
+                message: "messx".to_string(),
+            }])
+            .with_scope("unknown provider", "unknown model"),
+        );
+
+        assert_eq!(
+            records,
+            vec![
+                WarningLogRecord::Info(FIRST_WARNING_INFO_MESSAGE.to_string()),
+                WarningLogRecord::Warning {
+                    message: "AI SDK Warning (unknown provider / unknown model): messx".to_string(),
+                    kind: WarningLogKind::Warning,
+                },
+            ]
+        );
+    }
+
+    /// packages-ai-1516: an explicitly unset logger uses the default behavior
+    /// and emits a `Warning`-kind record (the upstream `process.emitWarning`).
+    #[test]
+    fn default_logger_undefined_uses_default_behavior_and_emits_warning() {
+        let mut logger = WarningLogger::new();
+
+        let records = logger.log_warnings(
+            &LogWarningsOptions::new(vec![Warning::Other {
+                message: "Test warning with undefined logger".to_string(),
+            }])
+            .with_scope("p1", "m1"),
+        );
+
+        assert_eq!(
+            records,
+            vec![
+                WarningLogRecord::Info(FIRST_WARNING_INFO_MESSAGE.to_string()),
+                WarningLogRecord::Warning {
+                    message: "AI SDK Warning (p1 / m1): Test warning with undefined logger"
+                        .to_string(),
+                    kind: WarningLogKind::Warning,
+                },
+            ]
+        );
+    }
+
+    /// packages-ai-1517: an empty batch never emits the info note.
+    #[test]
+    fn default_logger_does_not_display_info_message_for_empty_warnings() {
+        let mut logger = WarningLogger::new();
+
+        assert_eq!(
+            logger.log_warnings(&LogWarningsOptions::new(Vec::new()).with_scope("a", "b")),
+            Vec::new()
+        );
+    }
+
+    /// packages-ai-1518: leading empty batches never emit the info note; it
+    /// fires once on the first real (non-empty) call, then never again.
+    #[test]
+    fn default_logger_displays_info_note_only_on_first_real_call() {
+        let mut logger = WarningLogger::new();
+
+        assert_eq!(
+            logger.log_warnings(&LogWarningsOptions::new(Vec::new()).with_scope("a", "b")),
+            Vec::new()
+        );
+        assert_eq!(
+            logger.log_warnings(&LogWarningsOptions::new(Vec::new()).with_scope("a", "b")),
+            Vec::new()
+        );
+
+        let first_real = logger.log_warnings(
+            &LogWarningsOptions::new(vec![Warning::Other {
+                message: "foo".to_string(),
+            }])
+            .with_scope("abc", "bbb"),
+        );
+        assert_eq!(
+            first_real,
+            vec![
+                WarningLogRecord::Info(FIRST_WARNING_INFO_MESSAGE.to_string()),
+                WarningLogRecord::Warning {
+                    message: "AI SDK Warning (abc / bbb): foo".to_string(),
+                    kind: WarningLogKind::Warning,
+                },
+            ]
+        );
+
+        let second_real = logger.log_warnings(
+            &LogWarningsOptions::new(vec![Warning::Other {
+                message: "bar".to_string(),
+            }])
+            .with_scope("abc", "bbb"),
+        );
+        assert_eq!(
+            second_real,
+            vec![WarningLogRecord::Warning {
+                message: "AI SDK Warning (abc / bbb): bar".to_string(),
+                kind: WarningLogKind::Warning,
+            }]
+        );
+    }
+
+    /// packages-ai-1519: the custom-logger path never produces the info note.
+    #[test]
+    fn custom_logger_does_not_display_information_note() {
+        let options = LogWarningsOptions::new(vec![Warning::Other {
+            message: "Message".to_string(),
+        }])
+        .with_scope("provV", "modZ");
+        let mut call_count = 0usize;
+
+        let invoked = log_warnings_with_custom_logger(&options, |_| {
+            call_count += 1;
+        });
+
+        // The custom-logger entry point returns no deterministic records: only
+        // the user callback runs, so there is no info note to emit.
+        assert!(invoked);
+        assert_eq!(call_count, 1);
+    }
+
+    /// packages-ai-1520: a disabled logger never produces the info note.
+    #[test]
+    fn disabled_logger_does_not_display_information_note() {
+        let mut logger = WarningLogger::disabled();
+
+        let records = logger.log_warnings(
+            &LogWarningsOptions::new(vec![Warning::Other {
+                message: "Suppressed".to_string(),
+            }])
+            .with_scope("notProv", "notModel"),
+        );
+
+        assert_eq!(records, Vec::new());
+        assert!(
+            !records
+                .iter()
+                .any(|record| matches!(record, WarningLogRecord::Info(_)))
+        );
+    }
 }
