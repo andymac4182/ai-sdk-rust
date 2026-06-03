@@ -3722,6 +3722,38 @@ const jbAliasCaseGroups = [
   },
 ];
 
+const jbInterpreterBuiltinsCaseGroups = [
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/cd.test.ts',
+    lines: [6, 16, 25, 35, 48, 60, 71, 82, 91, 98],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::builtins::cd',
+    rustTest:
+      'builtins_cd_changes_to_specified_directory; builtins_cd_changes_to_home_without_argument; builtins_cd_updates_pwd_environment_variable; builtins_cd_updates_oldpwd_environment_variable; builtins_cd_handles_cd_dash; builtins_cd_handles_dotdot; builtins_cd_handles_absolute_path; builtins_cd_does_not_change_real_process_cwd; builtins_cd_errors_on_nonexistent_directory; builtins_cd_errors_when_cd_to_a_file',
+    notes:
+      'JB cd builtin: portable virtual directory change, $HOME default, PWD/OLDPWD updates, cd -, .., absolute path, virtual isolation of the real cwd, and No-such-file / Not-a-directory errors over the virtual session.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/exit.test.ts',
+    lines: [6, 12, 18, 24, 37, 43, 49, 57, 121],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::builtins::exit',
+    rustTest:
+      'builtins_exit_with_code_0_by_default; builtins_exit_with_specified_code; builtins_exit_with_code_1; builtins_exit_stops_execution_after_exit; builtins_exit_wraps_code_256_to_0; builtins_exit_wraps_code_257_to_1; builtins_exit_handles_negative_codes; builtins_exit_from_function; builtins_exit_errors_on_non_numeric_argument',
+    notes:
+      'JB exit builtin: portable default 0, explicit code, stop-after-exit, modulo-256 wrapping (256->0, 257->1, -1->255), exit from a function, and numeric-argument-required error with code 2.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/export.test.ts',
+    lines: [108],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::builtins::export',
+    rustTest: 'builtins_export_works_with_conditional',
+    notes:
+      'JB export builtin: portable export of a value then a [ ... ] && conditional use over the virtual session.',
+  },
+];
+
 const jbExecOptionsLoggingCaseGroups = [
   {
     file: 'packages/just-bash/src/Bash.exec-options.test.ts',
@@ -3827,6 +3859,7 @@ const jbExecOptionsLoggingCaseGroups = [
 function caseOverrideFor(testCase) {
   const group = [
     ...jbAliasCaseGroups,
+    ...jbInterpreterBuiltinsCaseGroups,
     ...jbExecOptionsLoggingCaseGroups,
     ...jbc39CaseGroups,
     ...jbc28CaseGroups,

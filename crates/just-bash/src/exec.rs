@@ -1347,13 +1347,25 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
             exit_code: 1,
             ..CommandResult::default()
         },
-        "exit" => CommandResult {
-            exit_code: tokens
-                .get(1)
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(0),
-            exit_requested: true,
-            ..CommandResult::default()
+        "exit" => match tokens.get(1) {
+            Some(value) => match value.parse::<i64>() {
+                Ok(code) => CommandResult {
+                    exit_code: code.rem_euclid(256) as i32,
+                    exit_requested: true,
+                    ..CommandResult::default()
+                },
+                Err(_) => CommandResult {
+                    stderr: format!("bash: exit: {value}: numeric argument required\n"),
+                    exit_code: 2,
+                    exit_requested: true,
+                    ..CommandResult::default()
+                },
+            },
+            None => CommandResult {
+                exit_code: 0,
+                exit_requested: true,
+                ..CommandResult::default()
+            },
         },
         "pwd" => stdout_result(format!("{}\n", state.cwd)),
         "echo" => command_echo(&tokens[1..]),
@@ -1367,8 +1379,19 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
             CommandResult::default()
         }
         "unset" => {
+            let mut mode_functions = false;
             for arg in &tokens[1..] {
-                state.env.remove(arg);
+                match arg.as_str() {
+                    "-f" => mode_functions = true,
+                    "-v" => mode_functions = false,
+                    name => {
+                        if mode_functions {
+                            state.functions.remove(name);
+                        } else {
+                            state.env.remove(name);
+                        }
+                    }
+                }
             }
             CommandResult::default()
         }
@@ -21698,5 +21721,307 @@ mod tests {
             .stdout,
             "file-x\nfile-y\n"
         );
+    }
+
+    // --- Upstream parity: interpreter/builtins cd/exit/export/unset ---
+    // Each test below mirrors exactly one upstream Vitest `it(...)` case in
+    // packages/just-bash/src/interpreter/builtins/{cd,exit,export,unset}.test.ts.
+
+    // cd.test.ts
+    #[test]
+    fn builtins_cd_changes_to_specified_directory() {
+        let bash = JustBashSession::new();
+        bash.exec("mkdir -p /tmp/testdir", JustBashExecOptions::new());
+        let r = bash.exec("cd /tmp/testdir; pwd", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "/tmp/testdir\n");
+    }
+
+    #[test]
+    fn builtins_cd_changes_to_home_without_argument() {
+        let bash =
+            JustBashSession::with_options(JustBashSessionOptions::new().with_env("HOME", "/tmp"));
+        let r = bash.exec("cd; pwd", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "/tmp\n");
+    }
+
+    #[test]
+    fn builtins_cd_updates_pwd_environment_variable() {
+        let bash = JustBashSession::new();
+        bash.exec("mkdir -p /tmp/pwdtest", JustBashExecOptions::new());
+        let r = bash.exec("cd /tmp/pwdtest; echo $PWD", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "/tmp/pwdtest\n");
+    }
+
+    #[test]
+    fn builtins_cd_updates_oldpwd_environment_variable() {
+        let bash = JustBashSession::new();
+        bash.exec("mkdir -p /tmp/dir1 /tmp/dir2", JustBashExecOptions::new());
+        let r = bash.exec(
+            "cd /tmp/dir1; cd /tmp/dir2; echo $OLDPWD",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "/tmp/dir1\n");
+    }
+
+    #[test]
+    fn builtins_cd_handles_cd_dash() {
+        let bash = JustBashSession::new();
+        bash.exec("mkdir -p /tmp/orig /tmp/new", JustBashExecOptions::new());
+        let r = bash.exec(
+            "cd /tmp/orig; cd /tmp/new; cd -; pwd",
+            JustBashExecOptions::new(),
+        );
+        assert!(r.stdout.contains("/tmp/orig"), "got {:?}", r.stdout);
+    }
+
+    #[test]
+    fn builtins_cd_handles_dotdot() {
+        let bash = JustBashSession::new();
+        bash.exec("mkdir -p /tmp/parent/child", JustBashExecOptions::new());
+        let r = bash.exec(
+            "cd /tmp/parent/child; cd ..; pwd",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "/tmp/parent\n");
+    }
+
+    #[test]
+    fn builtins_cd_handles_absolute_path() {
+        let bash = JustBashSession::new();
+        let r = bash.exec("cd /tmp; pwd", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "/tmp\n");
+    }
+
+    #[test]
+    fn builtins_cd_does_not_change_real_process_cwd() {
+        let before = std::env::current_dir().unwrap();
+        let bash = JustBashSession::new();
+        bash.exec("cd /tmp", JustBashExecOptions::new());
+        assert_eq!(std::env::current_dir().unwrap(), before);
+    }
+
+    #[test]
+    fn builtins_cd_errors_on_nonexistent_directory() {
+        let bash = JustBashSession::new();
+        let r = bash.exec("cd /nonexistent/directory", JustBashExecOptions::new());
+        assert!(r.stderr.contains("No such file or directory"));
+        assert_eq!(r.exit_code, 1);
+    }
+
+    #[test]
+    fn builtins_cd_errors_when_cd_to_a_file() {
+        let bash = JustBashSession::new();
+        bash.exec("touch /tmp/testfile", JustBashExecOptions::new());
+        let r = bash.exec("cd /tmp/testfile", JustBashExecOptions::new());
+        assert!(r.stderr.contains("Not a directory"));
+        assert_eq!(r.exit_code, 1);
+    }
+
+    // exit.test.ts
+    #[test]
+    fn builtins_exit_with_code_0_by_default() {
+        let bash = JustBashSession::new();
+        assert_eq!(bash.exec("exit", JustBashExecOptions::new()).exit_code, 0);
+    }
+
+    #[test]
+    fn builtins_exit_with_specified_code() {
+        let bash = JustBashSession::new();
+        assert_eq!(
+            bash.exec("exit 42", JustBashExecOptions::new()).exit_code,
+            42
+        );
+    }
+
+    #[test]
+    fn builtins_exit_with_code_1() {
+        let bash = JustBashSession::new();
+        assert_eq!(bash.exec("exit 1", JustBashExecOptions::new()).exit_code, 1);
+    }
+
+    #[test]
+    fn builtins_exit_stops_execution_after_exit() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "echo before; exit 0; echo after",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "before\n");
+        assert!(!r.stdout.contains("after"));
+    }
+
+    #[test]
+    fn builtins_exit_wraps_code_256_to_0() {
+        let bash = JustBashSession::new();
+        assert_eq!(
+            bash.exec("exit 256", JustBashExecOptions::new()).exit_code,
+            0
+        );
+    }
+
+    #[test]
+    fn builtins_exit_wraps_code_257_to_1() {
+        let bash = JustBashSession::new();
+        assert_eq!(
+            bash.exec("exit 257", JustBashExecOptions::new()).exit_code,
+            1
+        );
+    }
+
+    #[test]
+    fn builtins_exit_handles_negative_codes() {
+        let bash = JustBashSession::new();
+        assert_eq!(
+            bash.exec("exit -1", JustBashExecOptions::new()).exit_code,
+            255
+        );
+    }
+
+    #[test]
+    fn builtins_exit_errors_on_non_numeric_argument() {
+        let bash = JustBashSession::new();
+        let r = bash.exec("exit abc", JustBashExecOptions::new());
+        assert!(r.stderr.contains("numeric argument required"));
+        assert_eq!(r.exit_code, 2);
+    }
+
+    #[test]
+    fn builtins_exit_from_function() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "myfunc() { echo \"in func\"; exit 5; echo \"never\"; }; myfunc; echo \"also never\"",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "in func\n");
+        assert_eq!(r.exit_code, 5);
+    }
+
+    // export.test.ts
+    #[test]
+    fn builtins_export_sets_variable_with_name_value() {
+        let bash = JustBashSession::new();
+        let r = bash.exec("export FOO=bar; echo $FOO", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "bar\n");
+    }
+
+    #[test]
+    fn builtins_export_sets_multiple_variables() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "export FOO=bar BAZ=qux; echo $FOO $BAZ",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "bar qux\n");
+    }
+
+    #[test]
+    fn builtins_export_handles_value_with_equals_sign() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "export URL=http://example.com?foo=bar; echo $URL",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "http://example.com?foo=bar\n");
+    }
+
+    #[test]
+    fn builtins_export_creates_empty_variable_when_name_has_no_value() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "export EMPTY; test -z \"$EMPTY\" && echo empty",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "empty\n");
+    }
+
+    #[test]
+    fn builtins_export_variable_available_in_same_exec() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "export GREETING=hello; echo $GREETING world",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "hello world\n");
+    }
+
+    #[test]
+    fn builtins_export_works_with_conditional() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "export DEBUG=1; [ \"$DEBUG\" = \"1\" ] && echo debug_on",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "debug_on\n");
+    }
+
+    // unset.test.ts
+    #[test]
+    fn builtins_unset_a_variable() {
+        let bash =
+            JustBashSession::with_options(JustBashSessionOptions::new().with_env("VAR", "value"));
+        let r = bash.exec(
+            "echo \"before: $VAR\"\nunset VAR\necho \"after: $VAR\"",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "before: value\nafter: \n");
+    }
+
+    #[test]
+    fn builtins_unset_multiple_variables() {
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_env("A", "1")
+                .with_env("B", "2")
+                .with_env("C", "3"),
+        );
+        let r = bash.exec(
+            "unset A B\necho \"A=$A B=$B C=$C\"",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "A= B= C=3\n");
+    }
+
+    #[test]
+    fn builtins_unset_succeeds_silently_for_nonexistent_variable() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "unset NONEXISTENT\necho \"done\"",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "done\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn builtins_unset_variable_with_v_flag() {
+        let bash =
+            JustBashSession::with_options(JustBashSessionOptions::new().with_env("VAR", "value"));
+        let r = bash.exec(
+            "unset -v VAR\necho \"VAR=$VAR\"",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "VAR=\n");
+    }
+
+    #[test]
+    fn builtins_unset_a_function_with_f_flag() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "myfunc() { echo \"hello\"; }\nmyfunc\nunset -f myfunc\nmyfunc",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "hello\n");
+        assert!(r.stderr.contains("command not found"));
+    }
+
+    #[test]
+    fn builtins_unset_succeeds_silently_for_nonexistent_function() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "unset -f nonexistent_func\necho \"done\"",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "done\n");
+        assert_eq!(r.exit_code, 0);
     }
 }
