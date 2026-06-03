@@ -294,7 +294,7 @@ impl BlackForestLabsImageModel {
         let timestamp = (self.current_date)();
         let abort_signal = options.abort_signal.clone();
         let (request_body, warnings, poll_overrides) =
-            match black_forest_labs_image_request_body(&options) {
+            match black_forest_labs_image_request_body(&self.model_id, &options) {
                 Ok(args) => args,
                 Err(error) => {
                     return black_forest_labs_image_result_from_error(
@@ -773,6 +773,7 @@ impl BlackForestLabsPollResponse {
 }
 
 fn black_forest_labs_image_request_body(
+    model_id: &str,
     options: &ImageModelCallOptions,
 ) -> Result<
     (
@@ -854,11 +855,16 @@ fn black_forest_labs_image_request_body(
             return Err("Black Forest Labs supports up to 10 input images.".to_string());
         }
 
+        let input_image_field = if model_id == "flux-pro-1.0-fill" {
+            "image"
+        } else {
+            "input_image"
+        };
         for (index, file) in files.iter().enumerate() {
             let name = if index == 0 {
-                "input_image".to_string()
+                input_image_field.to_string()
             } else {
-                format!("input_image_{}", index + 1)
+                format!("{}_{}", input_image_field, index + 1)
             };
             body.insert(
                 name,
@@ -1880,6 +1886,105 @@ mod tests {
                 "aspect_ratio": "16:9",
                 "prompt": "A cute baby sea otter",
                 "prompt_upsampling": true
+            })
+        );
+    }
+
+    fn bfl_fill_success_transport() -> (
+        Arc<Mutex<Vec<ProviderApiRequest>>>,
+        BlackForestLabsTransport,
+    ) {
+        recorded_transport(|request| match (request.method, request.url.as_str()) {
+            (ProviderApiRequestMethod::Post, "https://api.example.com/v1/flux-pro-1.0-fill") => {
+                json_response(json!({
+                    "id": "req-123",
+                    "polling_url": "https://api.example.com/poll"
+                }))
+            }
+            (ProviderApiRequestMethod::Get, "https://api.example.com/poll?id=req-123") => {
+                json_response(json!({
+                    "status": "Ready",
+                    "result": { "sample": "https://api.example.com/image.png" }
+                }))
+            }
+            (ProviderApiRequestMethod::Get, "https://api.example.com/image.png") => {
+                ProviderApiResponse::bytes(200, "OK", vec![1, 2, 3])
+            }
+            _ => ProviderApiResponse::text(
+                404,
+                "Not Found",
+                json!({"message": "unexpected request"}).to_string(),
+            ),
+        })
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_uses_image_field_for_flux_pro_1_0_fill_input_images() {
+        let (requests, transport) = bfl_fill_success_transport();
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1"),
+        )
+        .with_transport(transport);
+
+        poll_ready(
+            provider.image("flux-pro-1.0-fill").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A cute baby sea otter")
+                    .with_aspect_ratio("1:1")
+                    .with_files(vec![ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Bytes(b"test-image".to_vec()),
+                    )])
+                    .with_mask(ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Bytes(b"test-mask".to_vec()),
+                    )),
+            ),
+        );
+
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        assert_eq!(
+            request_body_json(&requests[0]),
+            json!({
+                "prompt": "A cute baby sea otter",
+                "aspect_ratio": "1:1",
+                "image": "dGVzdC1pbWFnZQ==",
+                "mask": "dGVzdC1tYXNr"
+            })
+        );
+    }
+
+    #[test]
+    fn black_forest_labs_image_model_uses_input_image_field_for_non_fill_input_images() {
+        let (requests, transport) = bfl_success_transport();
+        let provider = create_black_forest_labs(
+            BlackForestLabsProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_base_url("https://api.example.com/v1"),
+        )
+        .with_transport(transport);
+
+        poll_ready(
+            provider.image("flux-pro-1.1").do_generate(
+                ImageModelCallOptions::new(1)
+                    .with_prompt("A cute baby sea otter")
+                    .with_aspect_ratio("1:1")
+                    .with_files(vec![ImageModelFile::file(
+                        "image/png",
+                        FileDataContent::Bytes(b"test-image".to_vec()),
+                    )]),
+            ),
+        );
+
+        let requests = requests.lock().expect("request list mutex is not poisoned");
+        assert_eq!(
+            request_body_json(&requests[0]),
+            json!({
+                "prompt": "A cute baby sea otter",
+                "aspect_ratio": "1:1",
+                "input_image": "dGVzdC1pbWFnZQ=="
             })
         );
     }

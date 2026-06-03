@@ -50,6 +50,35 @@ the strict inventory generator.
 | `packages/togetherai` | `src/togetherai.rs`, `src/openai_compatible.rs` | 10 |
 | `packages/voyage` | `src/voyage.rs` | 0 |
 
+## Black Forest Labs Exact Case Map
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | passes the correct parameters including aspect ratio and providerOptions | `black_forest_labs_image_model_passes_correct_parameters_including_aspect_ratio_and_provider_options` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | uses image field for flux-pro-1.0-fill input images | `black_forest_labs_image_model_uses_image_field_for_flux_pro_1_0_fill_input_images` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | uses input_image field for non-fill input images | `black_forest_labs_image_model_uses_input_image_field_for_non_fill_input_images` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | includes seed in providerMetadata images when provided by API | `black_forest_labs_image_model_includes_seed_in_provider_metadata_images_when_provided_by_api` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | includes all cost and megapixel fields when provided by submit API | `black_forest_labs_image_model_includes_all_cost_and_megapixel_fields_when_provided_by_submit_api` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | omits cost and megapixel fields from providerMetadata when not provided by submit API | `black_forest_labs_image_model_omits_cost_and_megapixel_fields_from_provider_metadata_when_not_provided_by_submit_api` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | handles null cost and megapixel fields from submit API | `black_forest_labs_image_model_handles_null_cost_and_megapixel_fields_from_submit_api` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | calls the expected URLs in sequence | `black_forest_labs_image_model_calls_the_expected_urls_in_sequence` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | merges provider and request headers for submit call | `black_forest_labs_image_model_merges_provider_and_request_headers_for_submit_call` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | passes merged headers to polling requests | `black_forest_labs_image_model_passes_merged_headers_to_polling_requests` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | warns and derives aspect_ratio when size is provided | `black_forest_labs_image_model_warns_and_derives_aspect_ratio_when_size_is_provided` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | warns and ignores size when both size and aspectRatio are provided | `black_forest_labs_image_model_warns_and_ignores_size_when_both_size_and_aspect_ratio_are_provided` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | handles API errors with message and detail | `black_forest_labs_image_model_handles_api_errors_with_message_and_detail` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | handles poll responses with state instead of status | `black_forest_labs_image_model_handles_poll_responses_with_state_instead_of_status` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | polls multiple times using configured interval until Ready | `black_forest_labs_image_model_polls_multiple_times_using_configured_interval_until_ready` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | uses configured pollTimeoutMillis and pollIntervalMillis to time out | `black_forest_labs_image_model_uses_configured_poll_timeout_millis_and_poll_interval_millis_to_time_out` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | throws when poll is Ready but sample is missing | `black_forest_labs_image_model_throws_when_poll_is_ready_but_sample_is_missing` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | throws when poll returns Error or Failed | `black_forest_labs_image_model_throws_when_poll_returns_error_or_failed` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | includes timestamp, headers, and modelId in response metadata | `black_forest_labs_image_model_includes_timestamp_headers_and_model_id_in_response_metadata` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | exposes correct provider and model information | `black_forest_labs_image_model_exposes_correct_provider_and_model_information` | none |
+| `packages/black-forest-labs/src/black-forest-labs-provider.test.ts` | creates image models via .image and .imageModel | `black_forest_labs_provider_creates_image_models_via_image_and_image_model` | none |
+| `packages/black-forest-labs/src/black-forest-labs-provider.test.ts` | configures baseURL and headers correctly | `black_forest_labs_provider_configures_base_url_and_headers_correctly` | none |
+| `packages/black-forest-labs/src/black-forest-labs-provider.test.ts` | uses provider polling options for timeout behavior | `black_forest_labs_provider_uses_provider_polling_options_for_timeout_behavior` | none |
+| `packages/black-forest-labs/src/black-forest-labs-provider.test.ts` | throws NoSuchModelError for unsupported model types | `black_forest_labs_provider_throws_nosuchmodelerror_for_unsupported_model_types` | none |
+
 ## Alibaba Exact Case Map
 
 | Upstream file | Current upstream case | Rust mapping | Remaining exception |
