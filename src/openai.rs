@@ -1845,6 +1845,10 @@ fn openai_transcription_form_data(
         FormDataValue::bytes(openai_file_upload_data_bytes(&options.audio)),
     );
 
+    if model_id == "whisper-1" {
+        form_data.append("response_format", FormDataValue::text("verbose_json"));
+    }
+
     if let Some(openai_options) = options
         .provider_options
         .as_ref()
@@ -1862,10 +1866,12 @@ fn openai_transcription_form_data(
             form_data.append("prompt", FormDataValue::text(prompt));
         }
 
-        form_data.append(
-            "response_format",
-            FormDataValue::text(openai_transcription_response_format(model_id)),
-        );
+        if model_id != "whisper-1" {
+            form_data.append(
+                "response_format",
+                FormDataValue::text(openai_transcription_response_format(model_id)),
+            );
+        }
 
         let temperature = openai_options
             .get("temperature")
@@ -8276,6 +8282,37 @@ mod tests {
             form_data.get("file"),
             Some(&FormDataValue::bytes(vec![1_u8, 2, 3, 4]))
         );
+    }
+
+    #[test]
+    fn openai_transcription_should_default_whisper_1_to_verbose_json_response_format() {
+        let captured_requests = Arc::new(Mutex::new(Vec::<ProviderApiRequest>::new()));
+        let provider = openai_transcription_test_provider(
+            Arc::clone(&captured_requests),
+            openai_transcription_fixture(),
+        );
+
+        let result = poll_ready(
+            provider
+                .transcription("whisper-1")
+                .do_generate(openai_transcription_call_options()),
+        );
+
+        let form_data = captured_openai_request(&captured_requests)
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_form_data)
+            .expect("form data body is captured")
+            .clone();
+        assert_eq!(
+            form_data.get("model"),
+            Some(&FormDataValue::text("whisper-1"))
+        );
+        assert_eq!(
+            form_data.get("response_format"),
+            Some(&FormDataValue::text("verbose_json"))
+        );
+        assert_eq!(result.duration_in_seconds, Some(36.709999084472656_f64));
     }
 
     #[test]

@@ -530,6 +530,8 @@ fn open_responses_request_body(
     let store = open_responses_store_enabled(provider_options_name, provider_options);
     let has_conversation =
         open_responses_conversation_enabled(provider_options_name, provider_options);
+    let has_previous_response_id =
+        open_responses_previous_response_id_enabled(provider_options_name, provider_options);
     let pass_through_unsupported_files = open_responses_pass_through_unsupported_files_enabled(
         provider_options_name,
         provider_options,
@@ -549,6 +551,7 @@ fn open_responses_request_body(
     let prompt_input_options = OpenResponsesPromptInputOptions {
         store,
         has_conversation,
+        has_previous_response_id,
         pass_through_unsupported_files,
         file_id_prefixes,
         provider_options_name,
@@ -1319,6 +1322,7 @@ fn open_responses_camel_case_provider_options_key(value: &str) -> String {
 struct OpenResponsesPromptInputOptions<'a> {
     store: bool,
     has_conversation: bool,
+    has_previous_response_id: bool,
     pass_through_unsupported_files: bool,
     file_id_prefixes: &'a [String],
     provider_options_name: &'a str,
@@ -1337,6 +1341,7 @@ fn open_responses_input(
 ) -> Result<(Vec<JsonValue>, Option<String>), String> {
     let store = options.store;
     let has_conversation = options.has_conversation;
+    let has_previous_response_id = options.has_previous_response_id;
     let pass_through_unsupported_files = options.pass_through_unsupported_files;
     let file_id_prefixes = options.file_id_prefixes;
     let provider_options_name = options.provider_options_name;
@@ -1466,7 +1471,7 @@ fn open_responses_input(
                                 reasoning.provider_options.as_ref(),
                                 provider_options_name,
                             );
-                            if has_conversation && item_id.is_some() {
+                            if (has_conversation || has_previous_response_id) && item_id.is_some() {
                                 open_responses_flush_assistant_content(
                                     &mut assistant_items,
                                     &mut content,
@@ -1603,6 +1608,9 @@ fn open_responses_input(
                             }
 
                             if store && let Some(item_id) = item_id {
+                                if has_previous_response_id {
+                                    continue;
+                                }
                                 assistant_items.push(json!({
                                     "type": "item_reference",
                                     "id": item_id
@@ -4366,6 +4374,7 @@ fn open_responses_web_search_output(action: Option<&JsonValue>) -> JsonValue {
         Some("search") => {
             let mut mapped_action = open_responses_tool_with_type("search");
             open_responses_insert_arg(&mut mapped_action, "query", action, "query");
+            open_responses_insert_arg(&mut mapped_action, "queries", action, "queries");
 
             let mut output = JsonObject::new();
             output.insert("action".to_string(), JsonValue::Object(mapped_action));
@@ -7642,6 +7651,13 @@ mod tests {
     fn openai_conversation_options() -> ProviderOptions {
         openai_provider_options(json!({
             "conversation": "conv_123",
+            "store": true
+        }))
+    }
+
+    fn openai_previous_response_id_store_options() -> ProviderOptions {
+        openai_provider_options(json!({
+            "previousResponseId": "resp_123",
             "store": true
         }))
     }
@@ -12961,6 +12977,186 @@ mod tests {
             ])
         );
         assert!(request_body.get("conversation").is_none());
+    }
+
+    #[test]
+    fn open_responses_provider_keeps_text_and_skips_function_call_item_references_when_previous_response_id_is_set()
+     {
+        let (_, request_body) = openai_request_body_for(
+            "gpt-4o",
+            LanguageModelCallOptions::new(vec![
+                open_responses_user_text_message("Hello"),
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Text(
+                        LanguageModelTextPart::new("Hi there!")
+                            .with_provider_options(openai_item_options("msg_existing_123")),
+                    ),
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "call_123",
+                            "getWeather",
+                            json!({ "location": "San Francisco" }),
+                        )
+                        .with_provider_options(openai_item_options("fc_existing_456")),
+                    ),
+                ])),
+                LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "call_123",
+                        "getWeather",
+                        LanguageModelToolResultOutput::json(json!({ "temp": 72 })),
+                    )),
+                ])),
+            ])
+            .with_provider_options(openai_previous_response_id_store_options()),
+        );
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        }
+                    ]
+                },
+                {
+                    "type": "item_reference",
+                    "id": "msg_existing_123"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": "{\"temp\":72}"
+                }
+            ])
+        );
+        assert_eq!(request_body["previous_response_id"], "resp_123");
+    }
+
+    #[test]
+    fn open_responses_provider_skips_reasoning_parts_with_item_ids_when_previous_response_id_is_set()
+     {
+        let (_, request_body) = openai_request_body_for(
+            "gpt-4o",
+            LanguageModelCallOptions::new(vec![
+                open_responses_user_text_message("Hello"),
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Reasoning(
+                        LanguageModelReasoningPart::new("Let me think...")
+                            .with_provider_options(openai_item_options("rs_existing_789")),
+                    ),
+                ])),
+            ])
+            .with_provider_options(openai_previous_response_id_store_options()),
+        );
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(request_body["previous_response_id"], "resp_123");
+    }
+
+    #[test]
+    fn open_responses_provider_does_not_send_item_references_for_reasoning_when_previous_response_id_is_set()
+     {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4o",
+            LanguageModelCallOptions::new(vec![
+                open_responses_user_text_message("Hello"),
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::Reasoning(
+                        LanguageModelReasoningPart::new("Let me think...")
+                            .with_provider_options(openai_item_options("rs_existing_123")),
+                    ),
+                ])),
+            ])
+            .with_provider_options(openai_previous_response_id_store_options()),
+        );
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Hello"
+                        }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(request_body["previous_response_id"], "resp_123");
+        assert_eq!(request_body["store"], true);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn open_responses_provider_does_not_send_item_references_for_function_calls_when_previous_response_id_is_set()
+     {
+        let (warnings, request_body) = openai_request_body_for(
+            "gpt-4o",
+            LanguageModelCallOptions::new(vec![
+                open_responses_user_text_message("What is the weather?"),
+                LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                    LanguageModelAssistantContentPart::ToolCall(
+                        LanguageModelToolCallPart::new(
+                            "call_123",
+                            "weather",
+                            json!({ "location": "San Francisco" }),
+                        )
+                        .with_provider_options(openai_item_options("fc_existing_123")),
+                    ),
+                ])),
+                LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                    LanguageModelToolContentPart::ToolResult(LanguageModelToolResultPart::new(
+                        "call_123",
+                        "weather",
+                        LanguageModelToolResultOutput::json(json!({ "temp": 72 })),
+                    )),
+                ])),
+            ])
+            .with_provider_options(openai_previous_response_id_store_options()),
+        );
+
+        assert_eq!(
+            request_body["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "What is the weather?"
+                        }
+                    ]
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": "{\"temp\":72}"
+                }
+            ])
+        );
+        assert_eq!(request_body["previous_response_id"], "resp_123");
+        assert_eq!(request_body["store"], true);
+        assert!(warnings.is_empty());
     }
 
     #[test]
@@ -30105,6 +30301,75 @@ mod tests {
                     "web_search_call.action.sources"
                 ]
             })
+        );
+    }
+
+    #[test]
+    fn open_responses_provider_forwards_web_search_call_action_queries_to_tool_result() {
+        let body = json!({
+            "id": "resp_queries",
+            "object": "response",
+            "created_at": 1741631111,
+            "status": "completed",
+            "model": "gpt-4o",
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "id": "ws_queries",
+                    "status": "completed",
+                    "action": {
+                        "type": "search",
+                        "query": "sf news",
+                        "queries": ["sf news", "bay area tech"]
+                    }
+                },
+                {
+                    "type": "message",
+                    "id": "msg_done",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Here is what I found.",
+                            "annotations": []
+                        }
+                    ]
+                }
+            ],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15
+            }
+        })
+        .to_string();
+
+        let (result, _) = open_responses_generate_result_from_text_with_request_body(
+            "gpt-4o",
+            &body,
+            open_responses_web_search_call_options(),
+        );
+
+        let tool_result = result
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelContent::ToolResult(tool_result)
+                    if tool_result.tool_name == "webSearch" =>
+                {
+                    Some(tool_result)
+                }
+                _ => None,
+            })
+            .expect("web search tool-result is present");
+
+        let result_value = tool_result.result.as_value();
+        assert_eq!(result_value["action"]["type"], "search");
+        assert_eq!(result_value["action"]["query"], "sf news");
+        assert_eq!(
+            result_value["action"]["queries"],
+            json!(["sf news", "bay area tech"])
         );
     }
 

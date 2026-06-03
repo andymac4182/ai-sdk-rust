@@ -226,6 +226,12 @@ pub struct GoogleAuthOptions {
 
     /// Optional quota project marker retained for parity tests.
     pub quota_project_id: Option<String>,
+
+    /// Google Cloud project id forwarded to `createAuthTokenGenerator`.
+    pub project_id: Option<String>,
+
+    /// Path to a service-account key file forwarded to the auth library.
+    pub key_file: Option<String>,
 }
 
 impl GoogleAuthOptions {
@@ -235,6 +241,8 @@ impl GoogleAuthOptions {
             access_token: None,
             scopes: vec![GOOGLE_CLOUD_SCOPE.to_string()],
             quota_project_id: None,
+            project_id: None,
+            key_file: None,
         }
     }
 
@@ -248,6 +256,45 @@ impl GoogleAuthOptions {
     pub fn with_quota_project_id(mut self, quota_project_id: impl Into<String>) -> Self {
         self.quota_project_id = Some(quota_project_id.into());
         self
+    }
+
+    /// Sets an explicit `projectId` forwarded to the auth token generator.
+    pub fn with_project_id(mut self, project_id: impl Into<String>) -> Self {
+        self.project_id = Some(project_id.into());
+        self
+    }
+
+    /// Sets a service-account key file path forwarded to the auth library.
+    pub fn with_key_file(mut self, key_file: impl Into<String>) -> Self {
+        self.key_file = Some(key_file.into());
+        self
+    }
+}
+
+/// Mirrors the upstream node wrapper merge of the provider `project` setting into
+/// `googleAuthOptions.projectId`:
+///
+/// ```text
+/// project == null
+///   ? googleAuthOptions
+///   : { projectId: project, ...googleAuthOptions }
+/// ```
+///
+/// The `project` value only supplies a default `projectId`; an explicit
+/// `googleAuthOptions.projectId` is preserved (the spread wins).
+pub fn resolve_node_auth_options(
+    project: Option<&str>,
+    google_auth_options: GoogleAuthOptions,
+) -> GoogleAuthOptions {
+    match project {
+        None => google_auth_options,
+        Some(project) => {
+            let mut merged = google_auth_options;
+            if merged.project_id.is_none() {
+                merged.project_id = Some(project.to_string());
+            }
+            merged
+        }
     }
 }
 
@@ -605,6 +652,8 @@ impl GoogleVertexProvider {
             return Self::base(settings);
         }
 
+        let google_auth_options =
+            resolve_node_auth_options(settings.project.as_deref(), google_auth_options);
         let token_generator = create_auth_token_generator(google_auth_options);
         Self::with_auth_token(settings, token_generator, true)
     }
@@ -3509,6 +3558,78 @@ mod tests {
             .image_model("imagen-3.0-generate-002")
             .expect("model");
         assert_eq!(model.base_url(), EXPRESS_MODE_BASE_URL);
+    }
+
+    /// google-vertex-0124: the node wrapper merges the provider `project` setting
+    /// into `googleAuthOptions.projectId` as a default only; an explicit
+    /// `projectId` (and sibling fields like `keyFile`) is preserved.
+    #[test]
+    fn google_vertex_node_does_not_override_explicit_google_auth_project_id() {
+        // project supplies the default projectId when none is set.
+        let defaulted = resolve_node_auth_options(
+            Some("test-project"),
+            GoogleAuthOptions::new().with_key_file("path/to/key.json"),
+        );
+        assert_eq!(defaulted.project_id.as_deref(), Some("test-project"));
+        assert_eq!(defaulted.key_file.as_deref(), Some("path/to/key.json"));
+
+        // explicit googleAuthOptions.projectId is NOT overridden by `project`.
+        let explicit = resolve_node_auth_options(
+            Some("provider-project"),
+            GoogleAuthOptions::new()
+                .with_project_id("auth-project")
+                .with_key_file("path/to/key.json"),
+        );
+        assert_eq!(explicit.project_id.as_deref(), Some("auth-project"));
+        assert_eq!(explicit.key_file.as_deref(), Some("path/to/key.json"));
+
+        // when no project is provided the auth options pass through unchanged.
+        let passthrough =
+            resolve_node_auth_options(None, GoogleAuthOptions::new().with_project_id("only-auth"));
+        assert_eq!(passthrough.project_id.as_deref(), Some("only-auth"));
+
+        let no_project_no_auth = resolve_node_auth_options(None, GoogleAuthOptions::new());
+        assert_eq!(no_project_no_auth.project_id, None);
+    }
+
+    /// google-vertex-0125: when an apiKey is provided the node wrapper passes
+    /// options through to the base provider without installing an auth-token
+    /// header function (Express mode), so requests carry `x-goog-api-key` and
+    /// never an `authorization` bearer token.
+    #[test]
+    fn google_vertex_node_passes_options_through_when_api_key_provided() {
+        let provider = GoogleVertexProvider::node(
+            GoogleVertexProviderSettings::new()
+                .with_api_key("test-api-key")
+                .with_project("project")
+                .with_location("us-central1"),
+            // would otherwise generate a bearer token; must be ignored.
+            GoogleAuthOptions::new().with_access_token("unused-token"),
+        );
+
+        let captured = CapturedRequests::default();
+        let model = provider
+            .embedding_model("text-embedding-004")
+            .expect("model");
+        let model = GoogleVertexEmbeddingModel::new(
+            model.model_id().to_string(),
+            model
+                .config
+                .with_transport(captured.transport(vec![text_response(json!({
+                    "predictions": []
+                }))])),
+        );
+        // Express mode base URL is selected when an api key is present.
+        assert_eq!(model.base_url(), EXPRESS_MODE_BASE_URL);
+
+        let _ = poll_ready(model.do_embed(EmbeddingModelCallOptions::new(vec!["a".to_string()])));
+        let request = &captured.requests()[0];
+        assert_eq!(
+            request.headers.get("x-goog-api-key"),
+            Some(&"test-api-key".to_string())
+        );
+        // No auth-token generator runs, so there is no bearer authorization header.
+        assert_eq!(request.headers.get("authorization"), None);
     }
 
     #[test]

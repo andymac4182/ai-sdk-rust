@@ -1245,6 +1245,12 @@ fn xai_responses_prepare_provider_tool(tool: &LanguageModelProviderTool) -> Opti
             xai_insert_mapped(
                 &mut prepared,
                 &tool.args,
+                "enable_image_search",
+                "enableImageSearch",
+            );
+            xai_insert_mapped(
+                &mut prepared,
+                &tool.args,
                 "enable_image_understanding",
                 "enableImageUnderstanding",
             );
@@ -3731,6 +3737,43 @@ mod tests {
                     "type": "function_call_output",
                     "call_id": "call-1",
                     "output": "ok"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn xai_responses_web_search_tool_maps_enable_image_search() {
+        let context = super::XaiResponsesRequestContext {
+            tools: Some(vec![LanguageModelTool::Provider(
+                LanguageModelProviderTool::new(
+                    "xai.web_search",
+                    "web_search",
+                    JsonObject::from_iter([("enableImageSearch".to_string(), json!(true))]),
+                ),
+            )]),
+            tool_choice: None,
+        };
+        let request = ProviderApiRequest::post(
+            "https://api.x.ai/v1/responses",
+            crate::headers::Headers::new(),
+            ProviderApiRequestBody::text(json!({ "model": "grok-4" }).to_string()),
+            json!({ "model": "grok-4" }),
+        );
+        let request = xai_responses_request_with_tools(request, Some(context));
+        let body: JsonValue = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str(body).ok())
+            .expect("request body parses");
+
+        assert_eq!(
+            body["tools"],
+            json!([
+                {
+                    "type": "web_search",
+                    "enable_image_search": true
                 }
             ])
         );
