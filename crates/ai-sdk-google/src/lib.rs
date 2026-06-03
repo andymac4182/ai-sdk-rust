@@ -5906,6 +5906,75 @@ mod tests {
         );
     }
 
+    // Upstream: packages/google/src/google-language-model.test.ts:4196 (google-0291)
+    // "it should finalize streamed function call arguments when the final partialArgs chunk omits
+    // willContinue". Reproduces the
+    // `google-stream-tool-call-array-arguments-missing-terminal-function-call` fixture: the writeItems
+    // call streams two array operations whose string values are split across chunks carrying
+    // `willContinue: true`, but the final `price` chunk omits `willContinue` entirely AND no terminal
+    // (partialArgs-less) functionCall arrives to signal completion. The accumulator must still close the
+    // open string and finalize containers so the joined streamed deltas plus the finalize closing form
+    // the exact complete JSON arguments.
+    #[test]
+    fn google_json_accumulator_finalizes_when_final_chunk_omits_will_continue() {
+        let str_arg = |path: &str, value: &str, will_continue: Option<bool>| PartialArg {
+            json_path: path.to_string(),
+            string_value: Some(value.to_string()),
+            will_continue,
+            ..PartialArg::default()
+        };
+        let num_arg = |path: &str, value: f64| PartialArg {
+            json_path: path.to_string(),
+            number_value: Some(value),
+            ..PartialArg::default()
+        };
+
+        // Each entry mirrors one fixture chunk's partialArgs (chunks 1..=14 from the recording).
+        let chunks: Vec<Vec<PartialArg>> = vec![
+            vec![str_arg("$.operations[0].action", "add", Some(true))],
+            vec![str_arg("$.operations[0].action", "", None)],
+            vec![str_arg(
+                "$.operations[0].description",
+                "Fresh red apple",
+                Some(true),
+            )],
+            vec![str_arg("$.operations[0].description", "", None)],
+            vec![str_arg("$.operations[0].itemid", "apple_001", Some(true))],
+            vec![str_arg("$.operations[0].itemid", "", None)],
+            vec![num_arg("$.operations[0].price", 0.5)],
+            vec![str_arg("$.operations[1].action", "add", Some(true))],
+            vec![str_arg("$.operations[1].action", "", None)],
+            vec![str_arg(
+                "$.operations[1].description",
+                "Ripe yellow banana",
+                Some(true),
+            )],
+            vec![str_arg("$.operations[1].description", "", None)],
+            vec![str_arg("$.operations[1].itemid", "banana_001", Some(true))],
+            vec![str_arg("$.operations[1].itemid", "", None)],
+            // Terminal chunk omits willContinue; no partialArgs-less functionCall follows.
+            vec![num_arg("$.operations[1].price", 0.3)],
+        ];
+
+        let mut acc = GoogleJsonAccumulator::new();
+        let mut streamed = String::new();
+        for chunk in &chunks {
+            let (_, delta) = acc.process_partial_args(chunk);
+            streamed.push_str(&delta);
+        }
+        let (final_json, closing) = acc.finalize();
+        streamed.push_str(&closing);
+
+        let expected = "{\"operations\":[\
+            {\"action\":\"add\",\"description\":\"Fresh red apple\",\"itemid\":\"apple_001\",\"price\":0.5},\
+            {\"action\":\"add\",\"description\":\"Ripe yellow banana\",\"itemid\":\"banana_001\",\"price\":0.3}\
+            ]}";
+        // The joined streamed deltas (mirroring tool-input-delta events) reconstruct the full arguments
+        // exactly, and the finalized JSON matches the same complete object the tool-call carries.
+        assert_eq!(streamed, expected);
+        assert_eq!(final_json, expected);
+    }
+
     #[test]
     fn google_language_model_generate_upstream_cases() {
         let captured = Arc::new(Mutex::new(Vec::new()));

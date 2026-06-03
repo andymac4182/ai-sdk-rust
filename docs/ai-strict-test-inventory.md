@@ -10,11 +10,11 @@ Generated from upstream `vercel/ai` after `npx opensrc fetch https://github.com/
 | Local upstream source | `/Users/andrewmcclenaghan/.opensrc/repos/github.com/vercel/ai/main` |
 | Test files scanned | 561 |
 | Upstream cases scanned | 9013 |
-| Portable cases mapped to named Rust tests | 6599 |
-| Portable cases still missing named Rust tests | 1070 |
+| Portable cases mapped to named Rust tests | 6600 |
+| Portable cases still missing named Rust tests | 1069 |
 | JavaScript-only exceptions | 924 |
 | Type-system-impossible exceptions | 420 |
-| Portable mapped denominator | 6599 / 7669 |
+| Portable mapped denominator | 6600 / 7669 |
 
 This inventory is intentionally stricter than package-level progress. A package can only claim case-level parity after every portable upstream row below is either `portable-mapped` to a named Rust test or explicitly classified as `js-only-documented` or `type-system-impossible`.
 
@@ -45,7 +45,7 @@ This inventory is intentionally stricter than package-level progress. A package 
 | `packages/fireworks` | `@ai-sdk/fireworks` | provider package | `verified` | `src/fireworks.rs`, `src/openai_compatible.rs` | 2 | 43 | 43 | 0 | 0 | 0 | none |
 | `packages/gateway` | `@ai-sdk/gateway` | provider package | `verified` | `crates/ai-sdk-gateway`; root facade shims in `src/gateway.rs`, `src/gateway_error.rs`, `src/gateway_tools.rs`, and `src/vercel_ai_gateway.rs` | 18 | 407 | 396 | 0 | 10 | 1 | none |
 | `packages/gladia` | `@ai-sdk/gladia` | provider package | `verified` | `crates/ai-sdk-gladia` | 2 | 7 | 7 | 0 | 0 | 0 | none |
-| `packages/google` | `@ai-sdk/google` | provider package | `verified` | `crates/ai-sdk-google`; `docs/ai-foundational-provider-inventory.md` | 21 | 592 | 587 | 1 | 0 | 4 | `packages-google-0291` |
+| `packages/google` | `@ai-sdk/google` | provider package | `verified` | `crates/ai-sdk-google`; `docs/ai-foundational-provider-inventory.md` | 21 | 592 | 588 | 0 | 0 | 4 | none |
 | `packages/google-vertex` | `@ai-sdk/google-vertex` | provider package | `verified` | `crates/ai-sdk-google-vertex`; `docs/ai-foundational-provider-inventory.md` | 17 | 206 | 203 | 0 | 3 | 0 | none |
 | `packages/groq` | `@ai-sdk/groq` | provider package | `verified` | `src/groq.rs`, `crates/ai-sdk-openai-compatible/src/openai_compatible.rs` | 6 | 95 | 95 | 0 | 0 | 0 | none |
 | `packages/huggingface` | `@ai-sdk/huggingface` | provider package | `verified` | `src/huggingface.rs` | 2 | 37 | 37 | 0 | 0 | 0 | none |
@@ -5123,7 +5123,7 @@ This inventory is intentionally stricter than package-level progress. A package 
 | `packages-google-0288` | `packages/google` | `packages/google/src/google-language-model.test.ts:4129` it should stream reasoning with thoughtSignature | `portable-mapped` | `crates/ai-sdk-google`; `docs/ai-foundational-provider-inventory.md` | `google_language_model_stream_upstream_cases` | docs/ai-foundational-provider-inventory.md | Portable Google behavior is mapped to a named Rust upstream-case test in the owning provider crate. |
 | `packages-google-0289` | `packages/google` | `packages/google/src/google-language-model.test.ts:4144` it should stream tool call with thoughtSignature | `portable-mapped` | `crates/ai-sdk-google`; `docs/ai-foundational-provider-inventory.md` | `google_language_model_stream_upstream_cases` | docs/ai-foundational-provider-inventory.md | Portable Google behavior is mapped to a named Rust upstream-case test in the owning provider crate. |
 | `packages-google-0290` | `packages/google` | `packages/google/src/google-language-model.test.ts:4159` it should stream partial function call arguments with parallel tool calls | `portable-mapped` | `crates/ai-sdk-google`; `docs/ai-foundational-provider-inventory.md` | `google_language_model_stream_upstream_cases` | docs/ai-foundational-provider-inventory.md | Portable Google behavior is mapped to a named Rust upstream-case test in the owning provider crate. |
-| `packages-google-0291` | `packages/google` | `packages/google/src/google-language-model.test.ts:4196` it should finalize streamed function call arguments when the final partialArgs chunk omits willContinue | `portable-unmapped` | `crates/ai-sdk-google`; `docs/ai-foundational-provider-inventory.md` | missing | strict inventory default | Portable upstream case still needs a named Rust test or an explicit non-portable exception. |
+| `packages-google-0291` | `packages/google` | `packages/google/src/google-language-model.test.ts:4196` it should finalize streamed function call arguments when the final partialArgs chunk omits willContinue | `portable-mapped` | `crates/ai-sdk-google`; `docs/ai-foundational-provider-inventory.md` | `google_json_accumulator_finalizes_when_final_chunk_omits_will_continue` | docs/ai-foundational-provider-inventory.md | Portable Google behavior is mapped to a named Rust upstream-case test in the owning provider crate. |
 | `packages-google-0292` | `packages/google` | `packages/google/src/google-language-model.test.ts:4268` it should emit no-args function calls and preserve thoughtSignature alongside streamed-args calls | `portable-mapped` | `crates/ai-sdk-google`; `docs/ai-foundational-provider-inventory.md` | `google_language_model_generate_upstream_cases` | docs/ai-foundational-provider-inventory.md | Portable Google behavior is mapped to a named Rust upstream-case test in the owning provider crate. |
 | `packages-google-0293` | `packages/google` | `packages/google/src/google-language-model.test.ts:4368` it should stream nested partial function call arguments into proper nested JSON | `portable-mapped` | `crates/ai-sdk-google`; `docs/ai-foundational-provider-inventory.md` | `google_language_model_stream_upstream_cases` | docs/ai-foundational-provider-inventory.md | Portable Google behavior is mapped to a named Rust upstream-case test in the owning provider crate. |
 | `packages-google-0294` | `packages/google` | `packages/google/src/google-language-model.test.ts:4413` it should expose grounding metadata in provider metadata on finish | `portable-mapped` | `crates/ai-sdk-google`; `docs/ai-foundational-provider-inventory.md` | `google_language_model_stream_finish_metadata_upstream_cases` | docs/ai-foundational-provider-inventory.md | Portable Google behavior is mapped to a named Rust upstream-case test in the owning provider crate. |
