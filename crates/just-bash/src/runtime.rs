@@ -6791,6 +6791,165 @@ be, to a very large extent, the result of luck. Sherlock Holmes\n",
     }
 
     #[test]
+    fn structured_data_jq_keyword_field_access_space_rows() {
+        let env = bash();
+        // space-separated keyword/identifier after dot is NOT field access -> error
+        assert_ne!(
+            env.exec("echo '{\"if\":\"value\"}' | jq '. if'").exit_code,
+            0
+        );
+        assert_ne!(env.exec("echo '{\"and\":true}' | jq '. and'").exit_code, 0);
+        assert_ne!(env.exec("echo '{\"try\":1}' | jq '. try'").exit_code, 0);
+        assert_ne!(
+            env.exec("echo '{\"foo\":\"bar\"}' | jq '. foo'").exit_code,
+            0
+        );
+        assert_ne!(
+            env.exec("echo '{\"data\":{\"foo\":\"bar\"}}' | jq '.data. foo'")
+                .exit_code,
+            0
+        );
+        // space-separated string after dot SHOULD be field access
+        let r = env.exec("echo '{\"foo\":\"bar\"}' | jq '. \"foo\"'");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "\"bar\"\n");
+        let r = env.exec("echo '{\"data\":{\"foo\":\"bar\"}}' | jq '.data. \"foo\"'");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "\"bar\"\n");
+    }
+
+    #[test]
+    fn structured_data_jq_prototype_pollution_safe_key_rows() {
+        let env = bash();
+        // from_entries / with_entries drop dangerous keys
+        assert_eq!(
+            env.exec("echo '{\"a\":1}' | jq 'with_entries(.key = \"__proto__\")'")
+                .stdout
+                .trim(),
+            "{}"
+        );
+        assert_eq!(
+            env.exec("echo '{\"a\":1}' | jq 'with_entries(.key = \"constructor\")'")
+                .stdout
+                .trim(),
+            "{}"
+        );
+        // setpath ignores dangerous keys
+        assert_eq!(
+            env.exec("echo '{}' | jq 'setpath([\"__proto__\"]; \"polluted\")'")
+                .stdout
+                .trim(),
+            "{}"
+        );
+        assert_eq!(
+            env.exec("echo '{}' | jq 'setpath([\"constructor\"]; \"polluted\")'")
+                .stdout
+                .trim(),
+            "{}"
+        );
+        assert_eq!(
+            env.exec("echo '{\"a\":{}}' | jq -c 'setpath([\"a\",\"__proto__\"]; \"polluted\")'")
+                .stdout
+                .trim(),
+            "{\"a\":{}}"
+        );
+        assert_eq!(
+            env.exec(
+                "echo '{}' | jq -c 'setpath([\"safe\"]; \"ok\") | setpath([\"__proto__\"]; \"bad\")'"
+            )
+            .stdout
+            .trim(),
+            "{\"safe\":\"ok\"}"
+        );
+        // object construction with dangerous computed keys
+        assert_eq!(
+            env.exec(
+                "echo '{}' | jq -c '{(\"__proto__\"): 1, (\"constructor\"): 2, (\"prototype\"): 3, safe: 4}'"
+            )
+            .stdout
+            .trim(),
+            "{\"safe\":4}"
+        );
+        assert_eq!(
+            env.exec("echo '{\"a\":1}' | jq -c '. + {(\"__proto__\"): 2} | . + {b: 3}'")
+                .stdout
+                .trim(),
+            "{\"a\":1,\"b\":3}"
+        );
+        // no host prototype pollution: fresh empty object has no keys
+        assert_eq!(env.exec("echo '{}' | jq -c 'keys'").stdout.trim(), "[]");
+    }
+
+    #[test]
+    fn structured_data_jq_multi_file_range_limit_and_tab_rows() {
+        // many files in parallel
+        let mut files = BTreeMap::new();
+        for i in 0..10 {
+            files.insert(
+                format!("/data/file{i}.json"),
+                format!("{{\"id\":{i},\"value\":{}}}", i * 10),
+            );
+        }
+        let env = Bash::with_options(BashOptions {
+            files,
+            ..BashOptions::default()
+        });
+        let paths: Vec<String> = (0..10).map(|i| format!("/data/file{i}.json")).collect();
+        assert_eq!(
+            env.exec(&format!("jq '.id' {}", paths.join(" "))).stdout,
+            "0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n"
+        );
+
+        // find | xargs jq -r
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/repo/issues/1.json".to_string(),
+                    "{\"author\":\"alice\"}".to_string(),
+                ),
+                (
+                    "/repo/issues/2.json".to_string(),
+                    "{\"author\":\"bob\"}".to_string(),
+                ),
+                (
+                    "/repo/pulls/1.json".to_string(),
+                    "{\"author\":\"charlie\"}".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            env.exec("find /repo -name '*.json' | sort | xargs jq -r '.author'")
+                .stdout,
+            "alice\nbob\ncharlie\n"
+        );
+
+        // slurp concatenated JSON into array length
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/stream.json".to_string(),
+                "{\"x\":1}\n{\"x\":2}\n{\"x\":3}".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        assert_eq!(env.exec("cat /stream.json | jq -s 'length'").stdout, "3\n");
+
+        let env = bash();
+        // --tab indentation
+        let r = env.exec("echo '{\"a\":1}' | jq --tab '.'");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "{\n\t\"a\": 1\n}\n");
+
+        // range limits: limit caps and moderate ranges complete
+        let r = env.exec("jq -n '[limit(5; range(1000000))]'");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "[\n  0,\n  1,\n  2,\n  3,\n  4\n]\n");
+        let r = env.exec("jq -n '[range(50000)] | length'");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout.trim(), "50000");
+    }
+
+    #[test]
     fn structured_data_yq_yaml_json_env_and_error_rows() {
         let env = Bash::with_options(BashOptions {
             files: BTreeMap::from([

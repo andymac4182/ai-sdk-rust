@@ -1399,6 +1399,42 @@ const jbc16CaseGroups = [
       'JBC-16 verifies portable jq join, startswith, ascii_downcase, and index string helpers.',
   },
   {
+    file: 'packages/just-bash/src/commands/jq/jq.keyword-field-access.test.ts',
+    lines: [115, 121, 127, 135, 141, 151, 158],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_keyword_field_access_space_rows',
+    notes:
+      'JBC-16 verifies that a space-separated keyword/identifier after a dot is rejected as not-a-field-access (nonzero exit) while a space-separated string after a dot stays field access, including chained forms.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.prototype-pollution.test.ts',
+    lines: [141, 150, 161, 170, 179, 189, 323, 344, 386],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_prototype_pollution_safe_key_rows',
+    notes:
+      'JBC-16 verifies that with_entries renaming, setpath (including nested and mixed-safe paths), and object construction with computed dangerous keys drop __proto__/constructor/prototype while preserving safe keys and leaving keys empty.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.test.ts',
+    lines: [93, 209, 287, 375],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_multi_file_range_limit_and_tab_rows',
+    notes:
+      'JBC-16 verifies parallel multi-file input, find|xargs piping, slurp length over concatenated NDJSON, and --tab indentation.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.limits.test.ts',
+    lines: [90, 124],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_multi_file_range_limit_and_tab_rows',
+    notes:
+      'JBC-16 verifies that limit(n; range(...)) caps output and that moderate ranges complete deterministically.',
+  },
+  {
     file: 'packages/just-bash/src/commands/yq/yq.test.ts',
     lines: [
       6, 17, 33, 50, 66, 100, 111, 124, 135, 287, 305, 314, 324, 331,
