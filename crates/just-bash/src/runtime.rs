@@ -3144,6 +3144,123 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn awk_jbc_edge_special_chars_numeric_string_and_regex_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                // Binary content here is plain ASCII bytes "1 2\n3 4\n".
+                "/data.bin".to_string(),
+                "1 2\n3 4\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+
+        // Special characters in field data (awk.edge-cases.test.ts:44-87).
+        assert_eq!(
+            env.exec(r#"echo 'he said "hello"' | awk '{ print $3 }'"#)
+                .stdout,
+            "\"hello\"\n"
+        );
+        let backslash = env.exec(r#"echo 'path\\to\\file' | awk '{ print }'"#);
+        assert_eq!(backslash.stdout, "path\\\\to\\\\file\n");
+        assert_eq!(backslash.exit_code, 0);
+        assert_eq!(
+            env.exec(r#"echo "[test]" | awk '{ print $1 }'"#).stdout,
+            "[test]\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo 'price: \$100' | awk '{ print $2 }'"#)
+                .stdout,
+            "\\$100\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "a & b" | awk '{ print $2 }'"#).stdout,
+            "&\n"
+        );
+
+        // Numeric edge cases (awk.edge-cases.test.ts:91-128).
+        let large = env.exec(r#"echo "" | awk 'BEGIN { print 1e308 }'"#);
+        assert_eq!(large.exit_code, 0);
+        assert!(
+            large.stdout.to_lowercase().contains("1e+308")
+                || large.stdout.to_lowercase().contains("1e308"),
+            "expected 1e308 scientific output, got {:?}",
+            large.stdout
+        );
+        let small = env.exec(r#"echo "" | awk 'BEGIN { print 1e-308 }'"#);
+        assert_eq!(small.exit_code, 0);
+        assert!(
+            small.stdout.to_lowercase().contains("1e-308"),
+            "expected 1e-308 scientific output, got {:?}",
+            small.stdout
+        );
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print -0 }'"#).stdout,
+            "0\n"
+        );
+        let precision = env.exec(r#"echo "" | awk 'BEGIN { print 0.1 + 0.2 }'"#);
+        assert_eq!(precision.exit_code, 0);
+        assert!(
+            (precision.stdout.trim().parse::<f64>().unwrap() - 0.3).abs() < 1e-10,
+            "expected 0.1+0.2 close to 0.3, got {:?}",
+            precision.stdout
+        );
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 9999999999999999999999 }'"#)
+                .exit_code,
+            0
+        );
+
+        // String edge cases (awk.edge-cases.test.ts:132-164).
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print ("" == "") }'"#)
+                .stdout,
+            "1\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x = ""; print length(x) }'"#)
+                .stdout,
+            "0\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "     " | awk '{ print NF }'"#).stdout,
+            "0\n"
+        );
+
+        // Regex edge cases (awk.edge-cases.test.ts:168-200).
+        assert_eq!(
+            env.exec(r#"echo "test" | awk '//' | head -1"#).stdout,
+            "test\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "a.b" | awk '/a\.b/ { print "matched" }'"#)
+                .stdout,
+            "matched\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "test" | awk '/^test/ { print "yes" }'"#)
+                .stdout,
+            "yes\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "test" | awk '/test$/ { print "yes" }'"#)
+                .stdout,
+            "yes\n"
+        );
+
+        // Post-increment array element (awk.arrays.test.ts:297).
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { a["x"] = 5; print a["x"]++, a["x"] }'"#)
+                .stdout,
+            "5 6\n"
+        );
+
+        // Binary (ASCII byte) file processed by awk (awk.binary.test.ts:5).
+        let binary = env.exec("awk '{print $1 + $2}' /data.bin");
+        assert_eq!(binary.stdout, "3\n7\n");
+        assert_eq!(binary.exit_code, 0);
+    }
+
+    #[test]
     fn rg_upstream_basic_rows_are_portable() {
         assert_home_exec(
             &[("file.txt", "hello world\nfoo bar\n")],

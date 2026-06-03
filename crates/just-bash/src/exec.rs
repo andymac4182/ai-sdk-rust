@@ -9907,16 +9907,79 @@ fn awk_numeric_value(value: &str) -> Option<f64> {
 
 fn format_awk_number(value: f64) -> String {
     if value == 0.0 {
+        // Normalize negative zero to "0" to match upstream AWK output.
         return "0".to_string();
     }
-    if value.is_finite() && (value.fract()).abs() < f64::EPSILON {
+    // Integer-valued numbers within the i64 range print as plain integers,
+    // matching JavaScript's `String(n)` for integers. Values outside that
+    // range (e.g. 1e308) must NOT saturate via `as i64`; they fall through to
+    // the scientific-notation path below, mirroring JS `String(1e308)`.
+    if value.is_finite()
+        && value == value.trunc()
+        && value >= i64::MIN as f64
+        && value <= i64::MAX as f64
+    {
         return (value as i64).to_string();
     }
-    let formatted = value.to_string();
-    formatted
-        .strip_suffix(".0")
-        .unwrap_or(&formatted)
-        .to_string()
+    // For values outside the plain-integer range (very large/small magnitudes),
+    // replicate JavaScript's `String(n)`, which AWK's upstream port relies on:
+    // it switches to exponential notation for big/small numbers (e.g. 1e+308).
+    js_number_to_string(value)
+}
+
+/// Format an `f64` the way JavaScript's `String(number)` does, matching the
+/// upstream AWK port's `toAwkString`. Rust's `f64::to_string` (Ryū) never emits
+/// exponential notation for large integers, but ECMAScript switches to
+/// exponential form when the decimal exponent is `>= 21` or `< -6`.
+fn js_number_to_string(value: f64) -> String {
+    if value == 0.0 {
+        return "0".to_string();
+    }
+    if value.is_nan() {
+        return "nan".to_string();
+    }
+    if value.is_infinite() {
+        return if value < 0.0 { "-inf" } else { "inf" }.to_string();
+    }
+
+    let negative = value < 0.0;
+    let magnitude = value.abs();
+
+    // `{:e}` yields shortest round-trip significand and a base-10 exponent.
+    let exp_repr = format!("{magnitude:e}");
+    let (mantissa, exponent_str) = exp_repr
+        .split_once('e')
+        .expect("scientific format always contains 'e'");
+    let exponent: i32 = exponent_str.parse().expect("valid base-10 exponent");
+    // Significant digits with the decimal point removed.
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let digits = digits.trim_end_matches('0');
+    let digits = if digits.is_empty() { "0" } else { digits };
+    let k = digits.len() as i32; // number of significant digits
+    let n = exponent + 1; // position of the decimal point: value = digits * 10^(n-k)
+
+    let body = if (1..=21).contains(&n) && n >= k {
+        // Integer with trailing zeros, e.g. 12300.
+        format!("{digits}{}", "0".repeat((n - k) as usize))
+    } else if n > 0 && n <= 21 {
+        // Decimal point falls inside the digits, e.g. 12.34.
+        format!("{}.{}", &digits[..n as usize], &digits[n as usize..])
+    } else if n <= 0 && n > -6 {
+        // 0.00ddd form, e.g. 0.0001234.
+        format!("0.{}{digits}", "0".repeat((-n) as usize))
+    } else {
+        // Exponential form: d.ddde±X, e.g. 1e+308 or 1.5e-7.
+        let exp = n - 1;
+        let sign = if exp >= 0 { "+" } else { "-" };
+        let mantissa_out = if k == 1 {
+            digits.to_string()
+        } else {
+            format!("{}.{}", &digits[..1], &digits[1..])
+        };
+        format!("{mantissa_out}e{sign}{}", exp.abs())
+    };
+
+    if negative { format!("-{body}") } else { body }
 }
 
 fn format_awk_printf(format: &str, args: &[String]) -> Result<String, String> {
