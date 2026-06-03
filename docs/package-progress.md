@@ -3,17 +3,17 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv` with strict test inventory `docs/ai-strict-test-inventory.md`._
 
 - Displayed package rows: 54
-- Average estimated completion: 63.6%
-- Portable package average: 55.4%
-- Closed package rows: 27 / 54
-- Strict portable verified rows: 17 / 44
-- In-progress rows: 27
+- Average estimated completion: 65.5%
+- Portable package average: 57.6%
+- Closed package rows: 28 / 54
+- Strict portable verified rows: 18 / 44
+- In-progress rows: 26
 - Not-started rows: 0
 - Strict inventory full upstream cases scanned: 9013
-- Strict inventory full portable cases mapped: 6154 / 7670
-- Strict inventory full portable cases unmapped: 1516
-- Displayed-row strict portable test cases mapped: 5836 / 7267
-- Displayed-row strict portable test cases unmapped: 1431
+- Strict inventory full portable cases mapped: 6186 / 7670
+- Strict inventory full portable cases unmapped: 1484
+- Displayed-row strict portable test cases mapped: 5868 / 7267
+- Displayed-row strict portable test cases unmapped: 1399
 
 ## 100% Closed
 
@@ -30,6 +30,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/groq` | 100% | Verified | provider package |
 | `@ai-sdk/klingai` | 100% | Verified | provider package |
 | `@ai-sdk/mistral` | 100% | Verified | provider package |
+| `@ai-sdk/perplexity` | 100% | Verified | provider package |
 | `@ai-sdk/prodia` | 100% | Verified | provider package |
 | `@ai-sdk/replicate` | 100% | Verified | provider package |
 | `@ai-sdk/togetherai` | 100% | Verified | provider package |
@@ -75,7 +76,6 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/lmnt` | 0% | In progress | provider package | strict test inventory: 9 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/luma` | 0% | In progress | provider package | strict test inventory: 29 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/moonshotai` | 0% | In progress | provider package | strict test inventory: 17 portable upstream cases still need named Rust tests; sample failing IDs:... |
-| `@ai-sdk/perplexity` | 0% | In progress | provider package | strict test inventory: 32 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/revai` | 0% | In progress | provider package | strict test inventory: 6 portable upstream cases still need named Rust tests; sample failing IDs:... |
 | `@ai-sdk/test-server` | 0% | In progress | testing support package | strict test inventory: 5 portable upstream cases still need named Rust tests; sample failing IDs:... |
 
