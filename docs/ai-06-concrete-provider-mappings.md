@@ -889,3 +889,23 @@ real Luma image model request mapping, response parsing, and provider wiring.
 | `packages/luma/src/luma-image-model.test.ts` | should parse response with multiple reference types | `luma_image_model_parses_response_with_modify_image_and_multiple_reference_types` | none |
 | `packages/luma/src/luma-provider.test.ts` | should construct an image model with default configuration | `luma_provider_settings_serde_accepts_upstream_shape` | none |
 | `packages/luma/src/luma-provider.test.ts` | should respect custom configuration options | `luma_provider_creates_image_model_with_headers_body_and_metadata` | none |
+
+## Hume Exact Case Map
+
+Row-level strict mapping for portable `packages/hume` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named Rust test in
+`crates/ai-sdk-hume/src/lib.rs` that exercises the same behavior against the
+real Hume speech model request mapping, response parsing, error schema, and
+provider wiring.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/hume/src/hume-error.test.ts` | should parse Hume resource exhausted error | `hume_error_data_schema_parses_hume_resource_exhausted_error` | none |
+| `packages/hume/src/hume-speech-model.test.ts` | should pass the model and text | `hume_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/hume/src/hume-speech-model.test.ts` | should pass headers | `hume_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/hume/src/hume-speech-model.test.ts` | should pass options | `hume_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/hume/src/hume-speech-model.test.ts` | should return audio data with correct content type | `hume_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/hume/src/hume-speech-model.test.ts` | should include response data with timestamp, modelId and headers | `hume_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/hume/src/hume-speech-model.test.ts` | should use real date when no custom date provider is specified | `hume_speech_model_uses_real_date_when_no_custom_date_provider_is_specified` | none |
+| `packages/hume/src/hume-speech-model.test.ts` | should handle different audio formats | `hume_speech_model_handles_different_audio_formats` | none |
+| `packages/hume/src/hume-speech-model.test.ts` | should include warnings if any are generated | `hume_speech_model_includes_warnings_if_any_are_generated` | none |
