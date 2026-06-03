@@ -10,8 +10,8 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 - In-progress rows: 1
 - Not-started rows: 0
 - Strict inventory full upstream cases scanned: 9013
-- Strict inventory full portable cases mapped: 7606 / 7618
-- Strict inventory full portable cases unmapped: 12
+- Strict inventory full portable cases mapped: 7609 / 7618
+- Strict inventory full portable cases unmapped: 9
 - Displayed-row strict portable test cases mapped: 7211 / 7216
 - Displayed-row strict portable test cases unmapped: 5
 
