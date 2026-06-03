@@ -2590,6 +2590,64 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn awk_jbc25_in_delete_and_for_in_array_rows() {
+        let env = Bash::new();
+
+        // `in` operator: existing key, missing key, numeric keys, and the
+        // non-creating behavior of membership tests.
+        let existing =
+            env.exec(r#"echo "" | awk 'BEGIN { a["x"] = 1; if ("x" in a) print "found" }'"#);
+        assert_eq!(existing.stdout, "found\n");
+        assert_eq!(existing.exit_code, 0);
+
+        let missing = env.exec(
+            r#"echo "" | awk 'BEGIN { a["x"] = 1; if ("y" in a) print "found"; else print "not found" }'"#,
+        );
+        assert_eq!(missing.stdout, "not found\n");
+        assert_eq!(missing.exit_code, 0);
+
+        let numeric =
+            env.exec(r#"echo "" | awk 'BEGIN { a[42] = "answer"; print (42 in a), (99 in a) }'"#);
+        assert_eq!(numeric.stdout, "1 0\n");
+        assert_eq!(numeric.exit_code, 0);
+
+        let no_create = env
+            .exec(r#"echo "" | awk 'BEGIN { if ("x" in a) print "yes"; for (k in a) print k }'"#);
+        assert_eq!(no_create.stdout, "");
+        assert_eq!(no_create.exit_code, 0);
+
+        // delete statement: single element, missing element, and whole array.
+        let delete_one =
+            env.exec(r#"echo "" | awk 'BEGIN { a["x"] = 1; delete a["x"]; print ("x" in a) }'"#);
+        assert_eq!(delete_one.stdout, "0\n");
+        assert_eq!(delete_one.exit_code, 0);
+
+        let delete_missing =
+            env.exec(r#"echo "" | awk 'BEGIN { delete a["missing"]; print "ok" }'"#);
+        assert_eq!(delete_missing.stdout, "ok\n");
+        assert_eq!(delete_missing.exit_code, 0);
+
+        let delete_all = env.exec(
+            r#"echo "" | awk 'BEGIN { a[1]=1; a[2]=2; a[3]=3; delete a; for(k in a) count++; print count+0 }'"#,
+        );
+        assert_eq!(delete_all.stdout, "0\n");
+        assert_eq!(delete_all.exit_code, 0);
+
+        // for-in loops: count keys and sum values via key indirection.
+        let iterate = env.exec(
+            r#"echo "" | awk 'BEGIN { a["a"]=1; a["b"]=2; a["c"]=3; for (k in a) count++; print count }'"#,
+        );
+        assert_eq!(iterate.stdout, "3\n");
+        assert_eq!(iterate.exit_code, 0);
+
+        let sum = env.exec(
+            r#"echo "" | awk 'BEGIN { a[1]=10; a[2]=20; a[3]=30; sum=0; for (k in a) sum += a[k]; print sum }'"#,
+        );
+        assert_eq!(sum.stdout, "60\n");
+        assert_eq!(sum.exit_code, 0);
+    }
+
+    #[test]
     fn awk_jbc35_field_rebuild_printf_and_edge_rows() {
         let env = Bash::with_options(BashOptions {
             files: BTreeMap::from([

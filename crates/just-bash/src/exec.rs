@@ -7660,6 +7660,15 @@ enum AwkAction {
     Next,
     Exit(Option<AwkExpr>),
     Return(Option<AwkExpr>),
+    Delete {
+        name: String,
+        key: Option<AwkExpr>,
+    },
+    ForIn {
+        variable: String,
+        array: String,
+        body: Vec<AwkAction>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -7698,6 +7707,10 @@ enum AwkExpr {
         prefix: bool,
     },
     Concat(Vec<AwkExpr>),
+    InArray {
+        key: Box<AwkExpr>,
+        array: String,
+    },
 }
 
 impl AwkSeparator {
@@ -7910,6 +7923,21 @@ fn parse_awk_actions(body: &str) -> Result<Vec<AwkAction>, String> {
             index += 1;
             continue;
         }
+        if let Some((variable, array, body_source)) = parse_awk_for_in_statement(statement)? {
+            let body = parse_awk_nested_actions(&body_source)?;
+            actions.push(AwkAction::ForIn {
+                variable,
+                array,
+                body,
+            });
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = strip_awk_keyword(statement, "delete") {
+            actions.push(parse_awk_delete_action(rest.trim())?);
+            index += 1;
+            continue;
+        }
         if let Some(rest) = strip_awk_keyword(statement, "exit") {
             let rest = rest.trim();
             actions.push(AwkAction::Exit(
@@ -8001,6 +8029,90 @@ fn parse_awk_if_statement(statement: &str) -> Result<Option<(AwkExpr, String)>, 
         return Err("unsupported program".to_string());
     }
     Ok(Some((condition, then_source.to_string())))
+}
+
+fn parse_awk_for_in_statement(statement: &str) -> Result<Option<(String, String, String)>, String> {
+    let Some(rest) = strip_awk_keyword(statement, "for") else {
+        return Ok(None);
+    };
+    let rest = rest.trim_start();
+    if !rest.starts_with('(') {
+        return Err("unsupported program".to_string());
+    }
+    let header_end =
+        find_matching_awk_paren(rest, 0).ok_or_else(|| "unsupported program".to_string())?;
+    let header = &rest[1..header_end];
+    // Only the `for (k in array)` form is supported here; the C-style
+    // `for (init; cond; step)` form has no semicolons inside its header that we
+    // accept, so bail out to keep behavior explicit.
+    if header.contains(';') {
+        return Err("unsupported program".to_string());
+    }
+    let Some(variable_part) = strip_awk_keyword_value(header, "in") else {
+        return Err("unsupported program".to_string());
+    };
+    let variable = variable_part.0.trim();
+    let array = variable_part.1.trim();
+    if !is_awk_identifier(variable) || !is_awk_identifier(array) {
+        return Err("unsupported program".to_string());
+    }
+    let body_source = rest[header_end + 1..].trim();
+    if body_source.is_empty() {
+        return Err("unsupported program".to_string());
+    }
+    Ok(Some((
+        variable.to_string(),
+        array.to_string(),
+        body_source.to_string(),
+    )))
+}
+
+/// Splits `lhs <keyword> rhs` on a top-level whole-word keyword, returning the
+/// left and right sides. Used to parse `k in array` headers.
+fn strip_awk_keyword_value<'a>(source: &'a str, keyword: &str) -> Option<(&'a str, &'a str)> {
+    let bytes = source.as_bytes();
+    let mut index = 0usize;
+    while index + keyword.len() <= source.len() {
+        if source[index..].starts_with(keyword) {
+            let before_ok = index == 0 || !is_awk_word_byte(bytes[index - 1]);
+            let after = index + keyword.len();
+            let after_ok = after >= source.len() || !is_awk_word_byte(bytes[after]);
+            if before_ok && after_ok {
+                return Some((&source[..index], &source[after..]));
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_awk_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn parse_awk_delete_action(rest: &str) -> Result<AwkAction, String> {
+    if let Some(bracket_start) = rest.find('[') {
+        let name = rest[..bracket_start].trim();
+        if !is_awk_identifier(name) {
+            return Err("unsupported program".to_string());
+        }
+        let bracket_end = find_matching_awk_bracket(rest, bracket_start)
+            .ok_or_else(|| "unsupported program".to_string())?;
+        if !rest[bracket_end + 1..].trim().is_empty() {
+            return Err("unsupported program".to_string());
+        }
+        return Ok(AwkAction::Delete {
+            name: name.to_string(),
+            key: Some(parse_awk_array_key(&rest[bracket_start + 1..bracket_end])?),
+        });
+    }
+    if is_awk_identifier(rest) {
+        return Ok(AwkAction::Delete {
+            name: rest.to_string(),
+            key: None,
+        });
+    }
+    Err("unsupported program".to_string())
 }
 
 fn parse_awk_nested_actions(source: &str) -> Result<Vec<AwkAction>, String> {
@@ -8179,6 +8291,16 @@ impl<'a> AwkExprParser<'a> {
     fn parse_comparison(&mut self) -> Result<AwkExpr, String> {
         let mut expression = self.parse_concat()?;
         loop {
+            if self.consume_keyword("in") {
+                let array = self
+                    .take_identifier()
+                    .ok_or_else(|| "unsupported program".to_string())?;
+                expression = AwkExpr::InArray {
+                    key: Box::new(expression),
+                    array: array.to_string(),
+                };
+                continue;
+            }
             let op = if self.consume_token("!~") {
                 Some(AwkBinaryOp::RegexNoMatch)
             } else if self.consume_token("~") {
@@ -8455,6 +8577,13 @@ impl<'a> AwkExprParser<'a> {
         if rest.starts_with("++") || rest.starts_with("--") {
             return true;
         }
+        // The `in` membership keyword must not be swallowed as a concatenation
+        // operand; let the comparison layer consume it instead.
+        if let Some(after) = rest.strip_prefix("in")
+            && after.chars().next().is_none_or(|ch| !is_awk_word_char(ch))
+        {
+            return false;
+        }
         let Some(ch) = rest.chars().next() else {
             return false;
         };
@@ -8472,6 +8601,22 @@ impl<'a> AwkExprParser<'a> {
         } else {
             false
         }
+    }
+
+    /// Consumes a whole-word keyword (e.g. `in`) only when it is not part of a
+    /// larger identifier such as `index` or `intval`.
+    fn consume_keyword(&mut self, keyword: &str) -> bool {
+        self.skip_whitespace();
+        let rest = &self.source[self.cursor..];
+        if !rest.starts_with(keyword) {
+            return false;
+        }
+        let after = &rest[keyword.len()..];
+        if after.chars().next().is_some_and(is_awk_word_char) {
+            return false;
+        }
+        self.cursor += keyword.len();
+        true
     }
 
     fn consume_char(&mut self, ch: char) -> bool {
@@ -8576,6 +8721,37 @@ fn execute_awk_actions(
                     .unwrap_or_default();
                 return Ok(AwkFlow::Return(value));
             }
+            AwkAction::Delete { name, key } => match key {
+                Some(key) => {
+                    let key = eval_awk_array_key(key, context, runtime)?;
+                    if let Some(entries) = runtime.arrays.get_mut(name) {
+                        entries.remove(&key);
+                    }
+                }
+                None => {
+                    if let Some(entries) = runtime.arrays.get_mut(name) {
+                        entries.clear();
+                    }
+                }
+            },
+            AwkAction::ForIn {
+                variable,
+                array,
+                body,
+            } => {
+                let keys: Vec<String> = runtime
+                    .arrays
+                    .get(array)
+                    .map(|entries| entries.keys().cloned().collect())
+                    .unwrap_or_default();
+                for key in keys {
+                    runtime.variables.insert(variable.clone(), key);
+                    match execute_awk_actions(body, context, runtime, stdout)? {
+                        AwkFlow::Continue => {}
+                        flow => return Ok(flow),
+                    }
+                }
+            }
         }
     }
     Ok(AwkFlow::Continue)
@@ -8639,6 +8815,14 @@ fn eval_awk_expr(
             .map(|expr| eval_awk_expr(expr, context, runtime))
             .collect::<Result<Vec<_>, _>>()?
             .join("")),
+        AwkExpr::InArray { key, array } => {
+            let key = eval_awk_array_key(key, context, runtime)?;
+            let present = runtime
+                .arrays
+                .get(array)
+                .is_some_and(|entries| entries.contains_key(&key));
+            Ok(awk_bool(present))
+        }
     }
 }
 
@@ -9891,6 +10075,10 @@ fn is_awk_identifier(value: &str) -> bool {
     };
     (first == '_' || first.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn is_awk_word_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
 }
 
 fn take_awk_identifier(value: &str) -> Option<&str> {
