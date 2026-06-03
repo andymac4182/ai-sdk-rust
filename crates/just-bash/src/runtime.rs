@@ -2,10 +2,12 @@
 
 use std::collections::BTreeMap;
 
+use std::sync::Arc;
+
 use crate::{
-    JustBashCustomCommand, JustBashExecOptions, JustBashExecResult, JustBashLanguageRuntime,
-    JustBashResult, JustBashSession, JustBashSessionOptions, NetworkPolicy, NetworkResponse,
-    path::resolve_path,
+    BashLogger, JustBashCustomCommand, JustBashExecOptions, JustBashExecResult,
+    JustBashLanguageRuntime, JustBashResult, JustBashSession, JustBashSessionOptions,
+    NetworkPolicy, NetworkResponse, path::resolve_path,
 };
 
 /// Construction options for the upstream-style [`Bash`] facade.
@@ -29,6 +31,8 @@ pub struct BashOptions {
     pub network_policy: Option<NetworkPolicy>,
     /// Fake HTTP responses for deterministic network command execution.
     pub network_responses: BTreeMap<String, NetworkResponse>,
+    /// Optional logger for execution tracing (see [`BashLogger`]).
+    pub logger: Option<Arc<dyn BashLogger>>,
 }
 
 /// Portable `Bash` facade for Just Bash command-registry parity tests.
@@ -62,6 +66,7 @@ impl Bash {
         session_options.create_default_layout = create_default_layout;
         session_options.network_policy = options.network_policy;
         session_options.network_responses = options.network_responses;
+        session_options.logger = options.logger;
         Self {
             session: JustBashSession::with_options(session_options),
         }
@@ -7881,5 +7886,170 @@ and exhibited clearly, with a label attached.\n";
             env.exec("wc /workspace/src/lib.ts").stdout,
             "1 5 25 /workspace/src/lib.ts\n"
         );
+    }
+
+    // --- Bash.exec-options.test.ts: "Logging" suite -----------------------
+
+    use crate::{BashLogData, BashLogEntry, BashLogLevel, BashLogger};
+
+    /// Mirror of the upstream `createMockLogger` helper: records every entry in
+    /// arrival order so tests can inspect message, level, and data.
+    #[derive(Debug, Default)]
+    struct MockLogger {
+        logs: Mutex<Vec<BashLogEntry>>,
+    }
+
+    impl BashLogger for MockLogger {
+        fn log(&self, entry: BashLogEntry) {
+            self.logs.lock().expect("logger mutex").push(entry);
+        }
+    }
+
+    impl MockLogger {
+        fn entries(&self) -> Vec<BashLogEntry> {
+            self.logs.lock().expect("logger mutex").clone()
+        }
+
+        fn find(&self, message: &str) -> Option<BashLogEntry> {
+            self.entries()
+                .into_iter()
+                .find(|entry| entry.message == message)
+        }
+    }
+
+    fn logging_bash() -> (Bash, Arc<MockLogger>) {
+        let logger = Arc::new(MockLogger::default());
+        let env = Bash::with_options(BashOptions {
+            logger: Some(logger.clone()),
+            ..BashOptions::default()
+        });
+        (env, logger)
+    }
+
+    fn output_of(entry: &BashLogEntry) -> &str {
+        match &entry.data {
+            BashLogData::Output(output) => output,
+            other => panic!("expected output data, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_options_logging_does_not_log_without_logger() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:721
+        let env = Bash::new();
+        let result = env.exec("echo hello");
+        assert_eq!(result.stdout, "hello\n");
+    }
+
+    #[test]
+    fn exec_options_logging_logs_exec_command_at_info_level() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:728
+        let (env, logger) = logging_bash();
+        env.exec("echo hello");
+
+        let exec_log = logger.find("exec").expect("exec log defined");
+        assert_eq!(exec_log.level, BashLogLevel::Info);
+        assert_eq!(
+            exec_log.data,
+            BashLogData::Command("echo hello".to_string())
+        );
+    }
+
+    #[test]
+    fn exec_options_logging_logs_stdout_at_debug_level() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:740
+        let (env, logger) = logging_bash();
+        env.exec("echo hello");
+
+        let stdout_log = logger.find("stdout").expect("stdout log defined");
+        assert_eq!(stdout_log.level, BashLogLevel::Debug);
+        assert_eq!(output_of(&stdout_log), "hello\n");
+    }
+
+    #[test]
+    fn exec_options_logging_logs_stderr_at_info_level() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:752
+        let (env, logger) = logging_bash();
+        env.exec("echo error >&2");
+
+        let stderr_log = logger.find("stderr").expect("stderr log defined");
+        assert_eq!(stderr_log.level, BashLogLevel::Info);
+        assert_eq!(output_of(&stderr_log), "error\n");
+    }
+
+    #[test]
+    fn exec_options_logging_logs_exit_code_at_info_level() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:764
+        let (env, logger) = logging_bash();
+        env.exec("echo hello");
+
+        let exit_log = logger.find("exit").expect("exit log defined");
+        assert_eq!(exit_log.level, BashLogLevel::Info);
+        assert_eq!(exit_log.data, BashLogData::ExitCode(0));
+    }
+
+    #[test]
+    fn exec_options_logging_logs_non_zero_exit_code() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:776
+        let (env, logger) = logging_bash();
+        env.exec("exit 42");
+
+        let exit_log = logger.find("exit").expect("exit log defined");
+        assert_eq!(exit_log.data, BashLogData::ExitCode(42));
+    }
+
+    #[test]
+    fn exec_options_logging_logs_in_correct_order_exec_then_exit() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:787
+        let (env, logger) = logging_bash();
+        env.exec("echo out; echo err >&2");
+
+        let logs = logger.entries();
+        assert_eq!(logs.first().expect("at least one log").message, "exec");
+        assert_eq!(logs.last().expect("at least one log").message, "exit");
+    }
+
+    #[test]
+    fn exec_options_logging_does_not_log_stdout_when_empty() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:797
+        let (env, logger) = logging_bash();
+        env.exec("true");
+
+        assert!(logger.find("stdout").is_none());
+    }
+
+    #[test]
+    fn exec_options_logging_does_not_log_stderr_when_empty() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:807
+        let (env, logger) = logging_bash();
+        env.exec("echo hello");
+
+        assert!(logger.find("stderr").is_none());
+    }
+
+    #[test]
+    fn exec_options_logging_does_not_log_empty_commands() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:817
+        let (env, logger) = logging_bash();
+        env.exec("");
+        env.exec("   ");
+
+        assert_eq!(logger.entries().len(), 0);
+    }
+
+    #[test]
+    fn exec_options_logging_logs_parse_errors() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:827
+        let (env, logger) = logging_bash();
+        env.exec("echo ${");
+
+        let exec_log = logger.find("exec").expect("exec log defined");
+        assert_eq!(exec_log.data, BashLogData::Command("echo ${".to_string()));
+
+        let stderr_log = logger.find("stderr").expect("stderr log defined");
+        assert!(output_of(&stderr_log).contains("syntax error"));
+
+        let exit_log = logger.find("exit").expect("exit log defined");
+        assert_eq!(exit_log.data, BashLogData::ExitCode(2));
     }
 }

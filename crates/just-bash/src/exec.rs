@@ -76,6 +76,55 @@ impl fmt::Debug for JustBashCancelToken {
     }
 }
 
+/// Severity level for a [`BashLogger`] log record.
+///
+/// Mirrors the upstream `BashLogger` interface, which distinguishes
+/// informational messages (`info`) from debug output (`debug`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BashLogLevel {
+    /// Informational records: exec commands, stderr, and exit codes.
+    Info,
+    /// Debug records: stdout output.
+    Debug,
+}
+
+/// Structured payload carried by a [`BashLogEntry`].
+///
+/// Each variant matches the `data` object the upstream logger receives:
+/// `{ command }` for `exec`, `{ output }` for `stdout`/`stderr`, and
+/// `{ exitCode }` for `exit`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BashLogData {
+    /// The command line passed to `exec`.
+    Command(String),
+    /// Captured stdout or stderr output.
+    Output(String),
+    /// The final exit code of the execution.
+    ExitCode(i32),
+}
+
+/// A single execution-tracing record emitted to a [`BashLogger`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BashLogEntry {
+    /// Severity level for this record.
+    pub level: BashLogLevel,
+    /// Stable message label: `exec`, `stdout`, `stderr`, or `exit`.
+    pub message: String,
+    /// Structured data attached to this record.
+    pub data: BashLogData,
+}
+
+/// Logger interface for Bash execution tracing.
+///
+/// Mirrors the upstream `BashLogger` interface. When a logger is provided to a
+/// session, it receives an `exec` record (info) for every non-empty command,
+/// `stdout` (debug) and `stderr` (info) records when their output is non-empty,
+/// and an `exit` record (info) with the final exit code, in that order.
+pub trait BashLogger: Send + Sync + fmt::Debug {
+    /// Receives a single execution-tracing record.
+    fn log(&self, entry: BashLogEntry);
+}
+
 /// Per-execution options. Every exec starts from the session defaults, then
 /// applies this structure without mutating the session shell state.
 #[derive(Clone, Debug, Default)]
@@ -644,6 +693,9 @@ pub struct JustBashSessionOptions {
     pub network_policy: Option<NetworkPolicy>,
     /// Fake HTTP responses keyed by URL for deterministic `curl` execution.
     pub network_responses: BTreeMap<String, NetworkResponse>,
+    /// Optional logger for execution tracing. When provided, every exec emits
+    /// `exec`/`stdout`/`stderr`/`exit` records (see [`BashLogger`]).
+    pub logger: Option<Arc<dyn BashLogger>>,
 }
 
 impl Default for JustBashSessionOptions {
@@ -662,6 +714,7 @@ impl Default for JustBashSessionOptions {
             create_default_layout: true,
             network_policy: None,
             network_responses: BTreeMap::new(),
+            logger: None,
         }
     }
 }
@@ -785,6 +838,12 @@ impl JustBashSessionOptions {
             .insert(response.url.clone(), response);
         self
     }
+
+    /// Attaches an execution-tracing logger (see [`BashLogger`]).
+    pub fn with_logger(mut self, logger: Arc<dyn BashLogger>) -> Self {
+        self.logger = Some(logger);
+        self
+    }
 }
 
 /// In-process shell session with a persistent virtual filesystem and fresh
@@ -808,6 +867,7 @@ struct JustBashSessionInner {
     language_runtimes: BTreeMap<String, JustBashLanguageRuntime>,
     network_policy: Option<NetworkPolicy>,
     network_responses: BTreeMap<String, NetworkResponse>,
+    logger: Option<Arc<dyn BashLogger>>,
 }
 
 impl JustBashSession {
@@ -899,6 +959,7 @@ impl JustBashSession {
                 language_runtimes,
                 network_policy: options.network_policy,
                 network_responses: options.network_responses,
+                logger: options.logger,
             }),
         }
     }
@@ -944,9 +1005,50 @@ impl JustBashSession {
             errexit: false,
         };
         let mut script = script.as_ref().to_string();
+
+        // Mirror upstream: empty commands are a no-op and emit no log records.
+        // A logger receives an `exec` record only for non-empty command lines.
+        let command_line = script.clone();
+        let is_empty_command = command_line.trim().is_empty();
+        if let Some(logger) = &self.inner.logger {
+            if !is_empty_command {
+                logger.log(BashLogEntry {
+                    level: BashLogLevel::Info,
+                    message: "exec".to_string(),
+                    data: BashLogData::Command(command_line),
+                });
+            }
+        }
+
         extract_function_definitions(&mut script, &mut state.functions);
         let mut result = execute_control_script(&mut state, &script);
         let truncated = cap_output(&mut result, self.inner.max_output_length);
+
+        // Mirror upstream `logResult`: stdout at debug, stderr at info, exit at
+        // info, in that order. Empty stdout/stderr are not logged.
+        if let Some(logger) = &self.inner.logger {
+            if !is_empty_command {
+                if !result.stdout.is_empty() {
+                    logger.log(BashLogEntry {
+                        level: BashLogLevel::Debug,
+                        message: "stdout".to_string(),
+                        data: BashLogData::Output(result.stdout.clone()),
+                    });
+                }
+                if !result.stderr.is_empty() {
+                    logger.log(BashLogEntry {
+                        level: BashLogLevel::Info,
+                        message: "stderr".to_string(),
+                        data: BashLogData::Output(result.stderr.clone()),
+                    });
+                }
+                logger.log(BashLogEntry {
+                    level: BashLogLevel::Info,
+                    message: "exit".to_string(),
+                    data: BashLogData::ExitCode(result.exit_code),
+                });
+            }
+        }
 
         JustBashExecResult {
             stdout: result.stdout,
@@ -18793,7 +18895,7 @@ fn tokenize(input: &str, env: &BTreeMap<String, String>) -> Result<Vec<String>, 
             }
             None | Some('"') if ch == '$' => {
                 started = true;
-                current.push_str(&read_variable(&chars, &mut index, env));
+                current.push_str(&read_variable(&chars, &mut index, env)?);
             }
             Some('"') if ch == '\\' => {
                 started = true;
@@ -18825,10 +18927,14 @@ fn tokenize(input: &str, env: &BTreeMap<String, String>) -> Result<Vec<String>, 
     Ok(tokens)
 }
 
-fn read_variable(chars: &[char], index: &mut usize, env: &BTreeMap<String, String>) -> String {
+fn read_variable(
+    chars: &[char],
+    index: &mut usize,
+    env: &BTreeMap<String, String>,
+) -> Result<String, String> {
     let start = *index;
     let Some(next) = chars.get(start + 1) else {
-        return "$".to_string();
+        return Ok("$".to_string());
     };
     if *next == '{' {
         let mut end = start + 2;
@@ -18836,17 +18942,21 @@ fn read_variable(chars: &[char], index: &mut usize, env: &BTreeMap<String, Strin
             end += 1;
         }
         if end >= chars.len() {
-            return "$".to_string();
+            // An unterminated `${...}` expansion is a parse failure in bash,
+            // surfaced as a syntax error with exit status 2 (matching upstream
+            // `Bash.exec`, which reports `syntax error` for `echo ${`).
+            return Err("syntax error: unexpected end of input in `${`".to_string());
         }
         let expression = chars[start + 2..end].iter().collect::<String>();
         *index = end;
         if let Some((name, default)) = expression.split_once(":-") {
-            env.get(name)
+            Ok(env
+                .get(name)
                 .filter(|value| !value.is_empty())
                 .cloned()
-                .unwrap_or_else(|| default.to_string())
+                .unwrap_or_else(|| default.to_string()))
         } else {
-            env.get(&expression).cloned().unwrap_or_default()
+            Ok(env.get(&expression).cloned().unwrap_or_default())
         }
     } else if next.is_ascii_alphabetic() || *next == '_' {
         let mut end = start + 1;
@@ -18855,12 +18965,12 @@ fn read_variable(chars: &[char], index: &mut usize, env: &BTreeMap<String, Strin
         }
         let name = chars[start + 1..end].iter().collect::<String>();
         *index = end - 1;
-        env.get(&name).cloned().unwrap_or_default()
+        Ok(env.get(&name).cloned().unwrap_or_default())
     } else if next.is_ascii_digit() || matches!(*next, '#' | '@' | '*') {
         *index = start + 1;
-        env.get(&next.to_string()).cloned().unwrap_or_default()
+        Ok(env.get(&next.to_string()).cloned().unwrap_or_default())
     } else {
-        "$".to_string()
+        Ok("$".to_string())
     }
 }
 
