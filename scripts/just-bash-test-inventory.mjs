@@ -3722,9 +3722,112 @@ const jbAliasCaseGroups = [
   },
 ];
 
+const jbExecOptionsLoggingCaseGroups = [
+  {
+    file: 'packages/just-bash/src/Bash.exec-options.test.ts',
+    lines: [721],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::logging',
+    rustTest: 'exec_options_logging_does_not_log_without_logger',
+    notes:
+      'JB exec logging: a session without a logger executes normally and emits no log records.',
+  },
+  {
+    file: 'packages/just-bash/src/Bash.exec-options.test.ts',
+    lines: [728],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::logging',
+    rustTest: 'exec_options_logging_logs_exec_command_at_info_level',
+    notes:
+      'JB exec logging: the exec command line is logged at info level with the command in the data payload.',
+  },
+  {
+    file: 'packages/just-bash/src/Bash.exec-options.test.ts',
+    lines: [740],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::logging',
+    rustTest: 'exec_options_logging_logs_stdout_at_debug_level',
+    notes:
+      'JB exec logging: captured stdout is logged at debug level with the output in the data payload.',
+  },
+  {
+    file: 'packages/just-bash/src/Bash.exec-options.test.ts',
+    lines: [752],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::logging',
+    rustTest: 'exec_options_logging_logs_stderr_at_info_level',
+    notes:
+      'JB exec logging: captured stderr is logged at info level with the output in the data payload.',
+  },
+  {
+    file: 'packages/just-bash/src/Bash.exec-options.test.ts',
+    lines: [764],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::logging',
+    rustTest: 'exec_options_logging_logs_exit_code_at_info_level',
+    notes:
+      'JB exec logging: the exit code is logged at info level with the exit code in the data payload.',
+  },
+  {
+    file: 'packages/just-bash/src/Bash.exec-options.test.ts',
+    lines: [776],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::logging',
+    rustTest: 'exec_options_logging_logs_non_zero_exit_code',
+    notes:
+      'JB exec logging: a non-zero exit code is propagated into the exit log data payload.',
+  },
+  {
+    file: 'packages/just-bash/src/Bash.exec-options.test.ts',
+    lines: [787],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::logging',
+    rustTest: 'exec_options_logging_logs_in_correct_order_exec_then_exit',
+    notes:
+      'JB exec logging: records are emitted in order with exec first and exit last.',
+  },
+  {
+    file: 'packages/just-bash/src/Bash.exec-options.test.ts',
+    lines: [797],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::logging',
+    rustTest: 'exec_options_logging_does_not_log_stdout_when_empty',
+    notes:
+      'JB exec logging: empty stdout produces no stdout record.',
+  },
+  {
+    file: 'packages/just-bash/src/Bash.exec-options.test.ts',
+    lines: [807],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::logging',
+    rustTest: 'exec_options_logging_does_not_log_stderr_when_empty',
+    notes:
+      'JB exec logging: empty stderr produces no stderr record.',
+  },
+  {
+    file: 'packages/just-bash/src/Bash.exec-options.test.ts',
+    lines: [817],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::logging',
+    rustTest: 'exec_options_logging_does_not_log_empty_commands',
+    notes:
+      'JB exec logging: empty or whitespace-only commands are a no-op and emit no records.',
+  },
+  {
+    file: 'packages/just-bash/src/Bash.exec-options.test.ts',
+    lines: [827],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::logging',
+    rustTest: 'exec_options_logging_logs_parse_errors',
+    notes:
+      'JB exec logging: a parse error (unterminated ${) still logs exec, a syntax-error stderr, and exit code 2.',
+  },
+];
+
 function caseOverrideFor(testCase) {
   const group = [
     ...jbAliasCaseGroups,
+    ...jbExecOptionsLoggingCaseGroups,
     ...jbc39CaseGroups,
     ...jbc28CaseGroups,
     ...jb06CaseGroups,

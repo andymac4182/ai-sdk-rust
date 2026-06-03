@@ -6899,9 +6899,12 @@ mod tests {
         // Each incoming delta fully drains the buffer through the segmenter, so a
         // hiragana fragment that is not yet a complete word ("こんに") is emitted
         // character-by-character ("こん", then "に"). This documents the Rust ICU
-        // segmentation; the exact boundary for the isolated "ちは" fragment differs
-        // from V8's Intl.Segmenter, so upstream case packages-ai-0905 is left as a
-        // documented model-version divergence rather than mapped here.
+        // segmentation. The algorithm matches upstream exactly; the only divergence
+        // is the word-boundary *data*: ICU4X keeps the isolated fragment "ちは" as
+        // one segment, whereas V8's Intl.Segmenter splits it into "ち" / "は".
+        // Upstream case packages-ai-0905 pins that exact boundary to V8's bundled
+        // ICU build, so it is classified `js-only-documented` (JavaScript runtime
+        // ICU dictionary) rather than mapped here; see docs/ai-core-package-inventory.md.
         let parts = smooth_stream(
             vec![
                 TextStreamPart::TextStart(LanguageModelTextStart::new("1")),
@@ -23004,6 +23007,68 @@ mod tests {
         assert_eq!(result.steps[0].provider_metadata.as_ref(), Some(&expected));
         assert_eq!(result.steps[1].provider_metadata.as_ref(), Some(&expected));
         assert_eq!(result.steps[2].provider_metadata, None);
+    }
+
+    /// Maps packages/ai stream-text.test.ts:23899
+    /// `should forward container ID via providerOptions in step 2` — when a
+    /// `prepare_step` callback forwards the `anthropic.container.id` provider
+    /// metadata from the previous step's finish into the next step's
+    /// `provider_options` (mirroring upstream
+    /// `forwardAnthropicContainerIdFromLastStep`), the second `doStream` request
+    /// is invoked with that container id as its provider options.
+    #[test]
+    fn stream_text_dice_game_forwards_container_id_via_provider_options_in_step_2() {
+        let model = dice_game_model();
+        let executions = Arc::new(Mutex::new(Vec::new()));
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Simulate a dice game")])
+                .with_tool(dice_roll_tool(executions))
+                .with_max_steps(5)
+                .with_prepare_step(|options| {
+                    // Forward the container id from the previous step's response
+                    // provider metadata into this step's request provider options.
+                    let forwarded = options.steps.last().and_then(|step| {
+                        step.provider_metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.get("anthropic"))
+                            .and_then(|anthropic| anthropic.get("container"))
+                            .and_then(|container| container.get("id"))
+                            .and_then(JsonValue::as_str)
+                            .map(|id| {
+                                ProviderOptions::from([(
+                                    "anthropic".to_string(),
+                                    Map::from_iter([(
+                                        "container".to_string(),
+                                        json!({ "id": id }),
+                                    )]),
+                                )])
+                            })
+                    });
+                    async move {
+                        match forwarded {
+                            Some(provider_options) => {
+                                PrepareStepResult::new().with_provider_options(provider_options)
+                            }
+                            None => PrepareStepResult::new(),
+                        }
+                    }
+                }),
+        ));
+        result.consume_stream();
+
+        let calls = model.stream_calls();
+        assert!(calls.len() >= 2);
+        // Step 1 (index 0) has no previous step, so no forwarded provider options.
+        assert_eq!(calls[0].provider_options, None);
+        // Step 2 (index 1) carries the container id forwarded from step 1's finish.
+        assert_eq!(
+            calls[1].provider_options,
+            Some(ProviderOptions::from([(
+                "anthropic".to_string(),
+                Map::from_iter([("container".to_string(), json!({ "id": DICE_CONTAINER_ID }),)]),
+            )]))
+        );
     }
 
     /// Maps packages/ai stream-text.test.ts:24368

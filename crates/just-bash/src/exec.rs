@@ -76,6 +76,55 @@ impl fmt::Debug for JustBashCancelToken {
     }
 }
 
+/// Severity level for a [`BashLogger`] log record.
+///
+/// Mirrors the upstream `BashLogger` interface, which distinguishes
+/// informational messages (`info`) from debug output (`debug`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BashLogLevel {
+    /// Informational records: exec commands, stderr, and exit codes.
+    Info,
+    /// Debug records: stdout output.
+    Debug,
+}
+
+/// Structured payload carried by a [`BashLogEntry`].
+///
+/// Each variant matches the `data` object the upstream logger receives:
+/// `{ command }` for `exec`, `{ output }` for `stdout`/`stderr`, and
+/// `{ exitCode }` for `exit`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BashLogData {
+    /// The command line passed to `exec`.
+    Command(String),
+    /// Captured stdout or stderr output.
+    Output(String),
+    /// The final exit code of the execution.
+    ExitCode(i32),
+}
+
+/// A single execution-tracing record emitted to a [`BashLogger`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BashLogEntry {
+    /// Severity level for this record.
+    pub level: BashLogLevel,
+    /// Stable message label: `exec`, `stdout`, `stderr`, or `exit`.
+    pub message: String,
+    /// Structured data attached to this record.
+    pub data: BashLogData,
+}
+
+/// Logger interface for Bash execution tracing.
+///
+/// Mirrors the upstream `BashLogger` interface. When a logger is provided to a
+/// session, it receives an `exec` record (info) for every non-empty command,
+/// `stdout` (debug) and `stderr` (info) records when their output is non-empty,
+/// and an `exit` record (info) with the final exit code, in that order.
+pub trait BashLogger: Send + Sync + fmt::Debug {
+    /// Receives a single execution-tracing record.
+    fn log(&self, entry: BashLogEntry);
+}
+
 /// Per-execution options. Every exec starts from the session defaults, then
 /// applies this structure without mutating the session shell state.
 #[derive(Clone, Debug, Default)]
@@ -644,6 +693,9 @@ pub struct JustBashSessionOptions {
     pub network_policy: Option<NetworkPolicy>,
     /// Fake HTTP responses keyed by URL for deterministic `curl` execution.
     pub network_responses: BTreeMap<String, NetworkResponse>,
+    /// Optional logger for execution tracing. When provided, every exec emits
+    /// `exec`/`stdout`/`stderr`/`exit` records (see [`BashLogger`]).
+    pub logger: Option<Arc<dyn BashLogger>>,
 }
 
 impl Default for JustBashSessionOptions {
@@ -662,6 +714,7 @@ impl Default for JustBashSessionOptions {
             create_default_layout: true,
             network_policy: None,
             network_responses: BTreeMap::new(),
+            logger: None,
         }
     }
 }
@@ -785,6 +838,12 @@ impl JustBashSessionOptions {
             .insert(response.url.clone(), response);
         self
     }
+
+    /// Attaches an execution-tracing logger (see [`BashLogger`]).
+    pub fn with_logger(mut self, logger: Arc<dyn BashLogger>) -> Self {
+        self.logger = Some(logger);
+        self
+    }
 }
 
 /// In-process shell session with a persistent virtual filesystem and fresh
@@ -808,6 +867,7 @@ struct JustBashSessionInner {
     language_runtimes: BTreeMap<String, JustBashLanguageRuntime>,
     network_policy: Option<NetworkPolicy>,
     network_responses: BTreeMap<String, NetworkResponse>,
+    logger: Option<Arc<dyn BashLogger>>,
 }
 
 impl JustBashSession {
@@ -899,6 +959,7 @@ impl JustBashSession {
                 language_runtimes,
                 network_policy: options.network_policy,
                 network_responses: options.network_responses,
+                logger: options.logger,
             }),
         }
     }
@@ -944,9 +1005,50 @@ impl JustBashSession {
             errexit: false,
         };
         let mut script = script.as_ref().to_string();
+
+        // Mirror upstream: empty commands are a no-op and emit no log records.
+        // A logger receives an `exec` record only for non-empty command lines.
+        let command_line = script.clone();
+        let is_empty_command = command_line.trim().is_empty();
+        if let Some(logger) = &self.inner.logger {
+            if !is_empty_command {
+                logger.log(BashLogEntry {
+                    level: BashLogLevel::Info,
+                    message: "exec".to_string(),
+                    data: BashLogData::Command(command_line),
+                });
+            }
+        }
+
         extract_function_definitions(&mut script, &mut state.functions);
         let mut result = execute_control_script(&mut state, &script);
         let truncated = cap_output(&mut result, self.inner.max_output_length);
+
+        // Mirror upstream `logResult`: stdout at debug, stderr at info, exit at
+        // info, in that order. Empty stdout/stderr are not logged.
+        if let Some(logger) = &self.inner.logger {
+            if !is_empty_command {
+                if !result.stdout.is_empty() {
+                    logger.log(BashLogEntry {
+                        level: BashLogLevel::Debug,
+                        message: "stdout".to_string(),
+                        data: BashLogData::Output(result.stdout.clone()),
+                    });
+                }
+                if !result.stderr.is_empty() {
+                    logger.log(BashLogEntry {
+                        level: BashLogLevel::Info,
+                        message: "stderr".to_string(),
+                        data: BashLogData::Output(result.stderr.clone()),
+                    });
+                }
+                logger.log(BashLogEntry {
+                    level: BashLogLevel::Info,
+                    message: "exit".to_string(),
+                    data: BashLogData::ExitCode(result.exit_code),
+                });
+            }
+        }
 
         JustBashExecResult {
             stdout: result.stdout,
@@ -6985,6 +7087,7 @@ fn relative_display_path(cwd: &str, path: &str) -> String {
 
 fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
     let mut quiet = false;
+    let mut ere = false;
     let mut scripts = Vec::new();
     let mut paths = Vec::new();
     let mut index = 0;
@@ -6992,6 +7095,10 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
         match arg.as_str() {
             "-n" => {
                 quiet = true;
+                index += 1;
+            }
+            "-E" | "-r" | "--regexp-extended" => {
+                ere = true;
                 index += 1;
             }
             "-e" => {
@@ -7033,8 +7140,10 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
                 replacement,
                 global,
                 ignore_case,
+                occurrence,
             } => {
-                let regex = match RegexBuilder::new(&pattern)
+                let translated = sed_pattern_to_regex(&pattern, ere);
+                let regex = match RegexBuilder::new(&translated)
                     .case_insensitive(ignore_case)
                     .build()
                 {
@@ -7042,16 +7151,13 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
                     Err(error) => return stderr_result(1, format!("sed: {error}\n")),
                 };
                 let line_count = lines.len();
+                let replacement = sed_replacement_to_regex(&replacement);
                 for (line_index, line) in lines.iter_mut().enumerate() {
                     if !sed_address_matches(address.as_ref(), line_index, line, line_count) {
                         continue;
                     }
-                    let replacement = sed_replacement_to_regex(&replacement);
-                    *line = if global {
-                        regex.replace_all(line, replacement.as_str()).into_owned()
-                    } else {
-                        regex.replace(line, replacement.as_str()).into_owned()
-                    };
+                    *line =
+                        sed_substitute_line(&regex, line, replacement.as_str(), global, occurrence);
                 }
             }
             SedCommand::Print(address) => {
@@ -7072,11 +7178,63 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
                     })
                     .collect();
             }
+            SedCommand::Quit { line, print_line } => {
+                // `Nq` auto-prints lines up to and including line N then quits.
+                // `NQ` quits before printing line N.
+                let keep = if print_line {
+                    line.min(lines.len())
+                } else {
+                    line.saturating_sub(1).min(lines.len())
+                };
+                lines.truncate(keep);
+            }
         }
     }
     let output_lines = if quiet { explicit_print } else { lines };
     let output = join_lines_with_newline(&output_lines);
     stdout_result(output)
+}
+
+/// Substitute occurrences in a single line, honouring the optional Nth-occurrence
+/// flag and the `g` (global) flag. When `occurrence` is `Some(n)`, only the n-th
+/// match (and following ones if `global` is also set) are replaced.
+fn sed_substitute_line(
+    regex: &Regex,
+    line: &str,
+    replacement: &str,
+    global: bool,
+    occurrence: Option<usize>,
+) -> String {
+    match occurrence {
+        None => {
+            if global {
+                regex.replace_all(line, replacement).into_owned()
+            } else {
+                regex.replace(line, replacement).into_owned()
+            }
+        }
+        Some(target) => {
+            let mut count = 0usize;
+            regex
+                .replace_all(line, |caps: &regex::Captures<'_>| {
+                    count += 1;
+                    let replace = if global {
+                        count >= target
+                    } else {
+                        count == target
+                    };
+                    if replace {
+                        let mut out = String::new();
+                        caps.expand(replacement, &mut out);
+                        out
+                    } else {
+                        caps.get(0)
+                            .map_or(String::new(), |m| m.as_str().to_string())
+                    }
+                })
+                .into_owned()
+        }
+    }
 }
 
 fn command_awk(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
@@ -7399,13 +7557,31 @@ enum SedCommand {
         replacement: String,
         global: bool,
         ignore_case: bool,
+        occurrence: Option<usize>,
     },
     Print(SedAddress),
     Delete(SedAddress),
+    Quit {
+        line: usize,
+        print_line: bool,
+    },
 }
 
 fn parse_sed_command(script: &str) -> Result<SedCommand, String> {
     let script = script.trim();
+    // `Nq` / `NQ` quit commands: N is a required leading line number.
+    if let Some(line) = script.strip_suffix('q').and_then(|n| n.trim().parse().ok()) {
+        return Ok(SedCommand::Quit {
+            line,
+            print_line: true,
+        });
+    }
+    if let Some(line) = script.strip_suffix('Q').and_then(|n| n.trim().parse().ok()) {
+        return Ok(SedCommand::Quit {
+            line,
+            print_line: false,
+        });
+    }
     if let Some(address) = script.strip_suffix('p').and_then(parse_sed_address) {
         return Ok(SedCommand::Print(address));
     }
@@ -7416,12 +7592,22 @@ fn parse_sed_command(script: &str) -> Result<SedCommand, String> {
     let Some((pattern, replacement, flags)) = parse_sed_substitution_parts(&substitution) else {
         return Err("unsupported script".to_string());
     };
+    let occurrence = flags
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect::<String>();
+    let occurrence = if occurrence.is_empty() {
+        None
+    } else {
+        occurrence.parse::<usize>().ok()
+    };
     Ok(SedCommand::Substitute {
         address,
         pattern,
         replacement,
         global: flags.contains('g'),
-        ignore_case: flags.contains('i'),
+        ignore_case: flags.contains('i') || flags.contains('I'),
+        occurrence,
     })
 }
 
@@ -7430,13 +7616,23 @@ fn sed_replacement_to_regex(replacement: &str) -> String {
     let mut chars = replacement.chars();
     while let Some(ch) = chars.next() {
         match ch {
-            '&' => output.push_str("$0"),
+            // `&` expands to the entire match.
+            '&' => output.push_str("${0}"),
             '\\' => match chars.next() {
+                // `\&` is a literal ampersand.
                 Some('&') => push_regex_replacement_literal(&mut output, '&'),
-                Some(next) => {
-                    push_regex_replacement_literal(&mut output, '\\');
-                    push_regex_replacement_literal(&mut output, next);
+                // `\1`..`\9` are backreferences to capture groups.
+                Some(digit @ '1'..='9') => {
+                    output.push_str("${");
+                    output.push(digit);
+                    output.push('}');
                 }
+                // `\n` and `\t` expand to newline / tab.
+                Some('n') => push_regex_replacement_literal(&mut output, '\n'),
+                Some('t') => push_regex_replacement_literal(&mut output, '\t'),
+                // `\\` is a literal backslash.
+                Some('\\') => push_regex_replacement_literal(&mut output, '\\'),
+                Some(next) => push_regex_replacement_literal(&mut output, next),
                 None => push_regex_replacement_literal(&mut output, '\\'),
             },
             other => push_regex_replacement_literal(&mut output, other),
@@ -7451,6 +7647,56 @@ fn push_regex_replacement_literal(output: &mut String, ch: char) {
     } else {
         output.push(ch);
     }
+}
+
+/// Translate a sed pattern into a Rust `regex` (RE2) pattern.
+///
+/// The Rust `regex` crate is ERE-flavoured, so ERE input passes through almost
+/// unchanged. BRE input differs: `+ ? | ( ) { }` are literal unless escaped with
+/// a backslash, which is the inverse of ERE. Bracket expressions `[...]` are
+/// copied verbatim because their contents are not BRE/ERE metacharacters.
+fn sed_pattern_to_regex(pattern: &str, ere: bool) -> String {
+    let mut output = String::new();
+    let mut chars = pattern.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '[' => {
+                // Copy the whole bracket expression verbatim.
+                output.push('[');
+                if matches!(chars.peek(), Some('^')) {
+                    output.push(chars.next().unwrap());
+                }
+                if matches!(chars.peek(), Some(']')) {
+                    output.push(chars.next().unwrap());
+                }
+                for inner in chars.by_ref() {
+                    output.push(inner);
+                    if inner == ']' {
+                        break;
+                    }
+                }
+            }
+            '\\' => match chars.next() {
+                Some(next) => {
+                    if !ere && matches!(next, '+' | '?' | '|' | '(' | ')' | '{' | '}') {
+                        // In BRE, `\+` etc. ARE the metacharacters.
+                        output.push(next);
+                    } else {
+                        output.push('\\');
+                        output.push(next);
+                    }
+                }
+                None => output.push('\\'),
+            },
+            '+' | '?' | '|' | '(' | ')' | '{' | '}' if !ere => {
+                // In BRE these are literal characters.
+                output.push('\\');
+                output.push(ch);
+            }
+            other => output.push(other),
+        }
+    }
+    output
 }
 
 fn split_sed_address_and_command(script: &str) -> (Option<SedAddress>, String) {
@@ -7660,6 +7906,15 @@ enum AwkAction {
     Next,
     Exit(Option<AwkExpr>),
     Return(Option<AwkExpr>),
+    Delete {
+        name: String,
+        key: Option<AwkExpr>,
+    },
+    ForIn {
+        variable: String,
+        array: String,
+        body: Vec<AwkAction>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -7698,6 +7953,10 @@ enum AwkExpr {
         prefix: bool,
     },
     Concat(Vec<AwkExpr>),
+    InArray {
+        key: Box<AwkExpr>,
+        array: String,
+    },
 }
 
 impl AwkSeparator {
@@ -7910,6 +8169,21 @@ fn parse_awk_actions(body: &str) -> Result<Vec<AwkAction>, String> {
             index += 1;
             continue;
         }
+        if let Some((variable, array, body_source)) = parse_awk_for_in_statement(statement)? {
+            let body = parse_awk_nested_actions(&body_source)?;
+            actions.push(AwkAction::ForIn {
+                variable,
+                array,
+                body,
+            });
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = strip_awk_keyword(statement, "delete") {
+            actions.push(parse_awk_delete_action(rest.trim())?);
+            index += 1;
+            continue;
+        }
         if let Some(rest) = strip_awk_keyword(statement, "exit") {
             let rest = rest.trim();
             actions.push(AwkAction::Exit(
@@ -8001,6 +8275,90 @@ fn parse_awk_if_statement(statement: &str) -> Result<Option<(AwkExpr, String)>, 
         return Err("unsupported program".to_string());
     }
     Ok(Some((condition, then_source.to_string())))
+}
+
+fn parse_awk_for_in_statement(statement: &str) -> Result<Option<(String, String, String)>, String> {
+    let Some(rest) = strip_awk_keyword(statement, "for") else {
+        return Ok(None);
+    };
+    let rest = rest.trim_start();
+    if !rest.starts_with('(') {
+        return Err("unsupported program".to_string());
+    }
+    let header_end =
+        find_matching_awk_paren(rest, 0).ok_or_else(|| "unsupported program".to_string())?;
+    let header = &rest[1..header_end];
+    // Only the `for (k in array)` form is supported here; the C-style
+    // `for (init; cond; step)` form has no semicolons inside its header that we
+    // accept, so bail out to keep behavior explicit.
+    if header.contains(';') {
+        return Err("unsupported program".to_string());
+    }
+    let Some(variable_part) = strip_awk_keyword_value(header, "in") else {
+        return Err("unsupported program".to_string());
+    };
+    let variable = variable_part.0.trim();
+    let array = variable_part.1.trim();
+    if !is_awk_identifier(variable) || !is_awk_identifier(array) {
+        return Err("unsupported program".to_string());
+    }
+    let body_source = rest[header_end + 1..].trim();
+    if body_source.is_empty() {
+        return Err("unsupported program".to_string());
+    }
+    Ok(Some((
+        variable.to_string(),
+        array.to_string(),
+        body_source.to_string(),
+    )))
+}
+
+/// Splits `lhs <keyword> rhs` on a top-level whole-word keyword, returning the
+/// left and right sides. Used to parse `k in array` headers.
+fn strip_awk_keyword_value<'a>(source: &'a str, keyword: &str) -> Option<(&'a str, &'a str)> {
+    let bytes = source.as_bytes();
+    let mut index = 0usize;
+    while index + keyword.len() <= source.len() {
+        if source[index..].starts_with(keyword) {
+            let before_ok = index == 0 || !is_awk_word_byte(bytes[index - 1]);
+            let after = index + keyword.len();
+            let after_ok = after >= source.len() || !is_awk_word_byte(bytes[after]);
+            if before_ok && after_ok {
+                return Some((&source[..index], &source[after..]));
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_awk_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn parse_awk_delete_action(rest: &str) -> Result<AwkAction, String> {
+    if let Some(bracket_start) = rest.find('[') {
+        let name = rest[..bracket_start].trim();
+        if !is_awk_identifier(name) {
+            return Err("unsupported program".to_string());
+        }
+        let bracket_end = find_matching_awk_bracket(rest, bracket_start)
+            .ok_or_else(|| "unsupported program".to_string())?;
+        if !rest[bracket_end + 1..].trim().is_empty() {
+            return Err("unsupported program".to_string());
+        }
+        return Ok(AwkAction::Delete {
+            name: name.to_string(),
+            key: Some(parse_awk_array_key(&rest[bracket_start + 1..bracket_end])?),
+        });
+    }
+    if is_awk_identifier(rest) {
+        return Ok(AwkAction::Delete {
+            name: rest.to_string(),
+            key: None,
+        });
+    }
+    Err("unsupported program".to_string())
 }
 
 fn parse_awk_nested_actions(source: &str) -> Result<Vec<AwkAction>, String> {
@@ -8179,6 +8537,16 @@ impl<'a> AwkExprParser<'a> {
     fn parse_comparison(&mut self) -> Result<AwkExpr, String> {
         let mut expression = self.parse_concat()?;
         loop {
+            if self.consume_keyword("in") {
+                let array = self
+                    .take_identifier()
+                    .ok_or_else(|| "unsupported program".to_string())?;
+                expression = AwkExpr::InArray {
+                    key: Box::new(expression),
+                    array: array.to_string(),
+                };
+                continue;
+            }
             let op = if self.consume_token("!~") {
                 Some(AwkBinaryOp::RegexNoMatch)
             } else if self.consume_token("~") {
@@ -8455,6 +8823,13 @@ impl<'a> AwkExprParser<'a> {
         if rest.starts_with("++") || rest.starts_with("--") {
             return true;
         }
+        // The `in` membership keyword must not be swallowed as a concatenation
+        // operand; let the comparison layer consume it instead.
+        if let Some(after) = rest.strip_prefix("in")
+            && after.chars().next().is_none_or(|ch| !is_awk_word_char(ch))
+        {
+            return false;
+        }
         let Some(ch) = rest.chars().next() else {
             return false;
         };
@@ -8472,6 +8847,22 @@ impl<'a> AwkExprParser<'a> {
         } else {
             false
         }
+    }
+
+    /// Consumes a whole-word keyword (e.g. `in`) only when it is not part of a
+    /// larger identifier such as `index` or `intval`.
+    fn consume_keyword(&mut self, keyword: &str) -> bool {
+        self.skip_whitespace();
+        let rest = &self.source[self.cursor..];
+        if !rest.starts_with(keyword) {
+            return false;
+        }
+        let after = &rest[keyword.len()..];
+        if after.chars().next().is_some_and(is_awk_word_char) {
+            return false;
+        }
+        self.cursor += keyword.len();
+        true
     }
 
     fn consume_char(&mut self, ch: char) -> bool {
@@ -8576,6 +8967,37 @@ fn execute_awk_actions(
                     .unwrap_or_default();
                 return Ok(AwkFlow::Return(value));
             }
+            AwkAction::Delete { name, key } => match key {
+                Some(key) => {
+                    let key = eval_awk_array_key(key, context, runtime)?;
+                    if let Some(entries) = runtime.arrays.get_mut(name) {
+                        entries.remove(&key);
+                    }
+                }
+                None => {
+                    if let Some(entries) = runtime.arrays.get_mut(name) {
+                        entries.clear();
+                    }
+                }
+            },
+            AwkAction::ForIn {
+                variable,
+                array,
+                body,
+            } => {
+                let keys: Vec<String> = runtime
+                    .arrays
+                    .get(array)
+                    .map(|entries| entries.keys().cloned().collect())
+                    .unwrap_or_default();
+                for key in keys {
+                    runtime.variables.insert(variable.clone(), key);
+                    match execute_awk_actions(body, context, runtime, stdout)? {
+                        AwkFlow::Continue => {}
+                        flow => return Ok(flow),
+                    }
+                }
+            }
         }
     }
     Ok(AwkFlow::Continue)
@@ -8639,6 +9061,14 @@ fn eval_awk_expr(
             .map(|expr| eval_awk_expr(expr, context, runtime))
             .collect::<Result<Vec<_>, _>>()?
             .join("")),
+        AwkExpr::InArray { key, array } => {
+            let key = eval_awk_array_key(key, context, runtime)?;
+            let present = runtime
+                .arrays
+                .get(array)
+                .is_some_and(|entries| entries.contains_key(&key));
+            Ok(awk_bool(present))
+        }
     }
 }
 
@@ -9891,6 +10321,10 @@ fn is_awk_identifier(value: &str) -> bool {
     };
     (first == '_' || first.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn is_awk_word_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
 }
 
 fn take_awk_identifier(value: &str) -> Option<&str> {
@@ -18605,7 +19039,7 @@ fn tokenize(input: &str, env: &BTreeMap<String, String>) -> Result<Vec<String>, 
             }
             None | Some('"') if ch == '$' => {
                 started = true;
-                current.push_str(&read_variable(&chars, &mut index, env));
+                current.push_str(&read_variable(&chars, &mut index, env)?);
             }
             Some('"') if ch == '\\' => {
                 started = true;
@@ -18637,10 +19071,14 @@ fn tokenize(input: &str, env: &BTreeMap<String, String>) -> Result<Vec<String>, 
     Ok(tokens)
 }
 
-fn read_variable(chars: &[char], index: &mut usize, env: &BTreeMap<String, String>) -> String {
+fn read_variable(
+    chars: &[char],
+    index: &mut usize,
+    env: &BTreeMap<String, String>,
+) -> Result<String, String> {
     let start = *index;
     let Some(next) = chars.get(start + 1) else {
-        return "$".to_string();
+        return Ok("$".to_string());
     };
     if *next == '{' {
         let mut end = start + 2;
@@ -18648,17 +19086,21 @@ fn read_variable(chars: &[char], index: &mut usize, env: &BTreeMap<String, Strin
             end += 1;
         }
         if end >= chars.len() {
-            return "$".to_string();
+            // An unterminated `${...}` expansion is a parse failure in bash,
+            // surfaced as a syntax error with exit status 2 (matching upstream
+            // `Bash.exec`, which reports `syntax error` for `echo ${`).
+            return Err("syntax error: unexpected end of input in `${`".to_string());
         }
         let expression = chars[start + 2..end].iter().collect::<String>();
         *index = end;
         if let Some((name, default)) = expression.split_once(":-") {
-            env.get(name)
+            Ok(env
+                .get(name)
                 .filter(|value| !value.is_empty())
                 .cloned()
-                .unwrap_or_else(|| default.to_string())
+                .unwrap_or_else(|| default.to_string()))
         } else {
-            env.get(&expression).cloned().unwrap_or_default()
+            Ok(env.get(&expression).cloned().unwrap_or_default())
         }
     } else if next.is_ascii_alphabetic() || *next == '_' {
         let mut end = start + 1;
@@ -18667,12 +19109,12 @@ fn read_variable(chars: &[char], index: &mut usize, env: &BTreeMap<String, Strin
         }
         let name = chars[start + 1..end].iter().collect::<String>();
         *index = end - 1;
-        env.get(&name).cloned().unwrap_or_default()
+        Ok(env.get(&name).cloned().unwrap_or_default())
     } else if next.is_ascii_digit() || matches!(*next, '#' | '@' | '*') {
         *index = start + 1;
-        env.get(&next.to_string()).cloned().unwrap_or_default()
+        Ok(env.get(&next.to_string()).cloned().unwrap_or_default())
     } else {
-        "$".to_string()
+        Ok("$".to_string())
     }
 }
 

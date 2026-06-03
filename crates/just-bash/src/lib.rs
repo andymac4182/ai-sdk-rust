@@ -33,12 +33,13 @@ pub use encoding::{
 };
 pub use error::{JustBashError, JustBashErrorKind, JustBashResult};
 pub use exec::{
-    JUST_BASH_BACKEND, JUST_BASH_DEFAULT_MAX_OUTPUT_LENGTH, JUST_BASH_DEFAULT_TIMEOUT_MS,
-    JUST_BASH_TIMEOUT_EXIT_CODE, JustBashCancelToken, JustBashCustomCommand,
-    JustBashCustomCommandContext, JustBashCustomCommandResult, JustBashExecMetadata,
-    JustBashExecOptions, JustBashExecResult, JustBashExecutor, JustBashExecutorTool,
-    JustBashLanguageRuntime, JustBashLanguageRuntimeContext, JustBashLanguageRuntimeKind,
-    JustBashSession, JustBashSessionOptions,
+    BashLogData, BashLogEntry, BashLogLevel, BashLogger, JUST_BASH_BACKEND,
+    JUST_BASH_DEFAULT_MAX_OUTPUT_LENGTH, JUST_BASH_DEFAULT_TIMEOUT_MS, JUST_BASH_TIMEOUT_EXIT_CODE,
+    JustBashCancelToken, JustBashCustomCommand, JustBashCustomCommandContext,
+    JustBashCustomCommandResult, JustBashExecMetadata, JustBashExecOptions, JustBashExecResult,
+    JustBashExecutor, JustBashExecutorTool, JustBashLanguageRuntime,
+    JustBashLanguageRuntimeContext, JustBashLanguageRuntimeKind, JustBashSession,
+    JustBashSessionOptions,
 };
 pub use file_reader::{
     ReadFileContent, ReadFilesOptions, ReadFilesResult, read_and_concat, read_files,

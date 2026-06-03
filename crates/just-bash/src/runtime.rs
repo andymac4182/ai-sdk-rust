@@ -2,10 +2,12 @@
 
 use std::collections::BTreeMap;
 
+use std::sync::Arc;
+
 use crate::{
-    JustBashCustomCommand, JustBashExecOptions, JustBashExecResult, JustBashLanguageRuntime,
-    JustBashResult, JustBashSession, JustBashSessionOptions, NetworkPolicy, NetworkResponse,
-    path::resolve_path,
+    BashLogger, JustBashCustomCommand, JustBashExecOptions, JustBashExecResult,
+    JustBashLanguageRuntime, JustBashResult, JustBashSession, JustBashSessionOptions,
+    NetworkPolicy, NetworkResponse, path::resolve_path,
 };
 
 /// Construction options for the upstream-style [`Bash`] facade.
@@ -29,6 +31,8 @@ pub struct BashOptions {
     pub network_policy: Option<NetworkPolicy>,
     /// Fake HTTP responses for deterministic network command execution.
     pub network_responses: BTreeMap<String, NetworkResponse>,
+    /// Optional logger for execution tracing (see [`BashLogger`]).
+    pub logger: Option<Arc<dyn BashLogger>>,
 }
 
 /// Portable `Bash` facade for Just Bash command-registry parity tests.
@@ -62,6 +66,7 @@ impl Bash {
         session_options.create_default_layout = create_default_layout;
         session_options.network_policy = options.network_policy;
         session_options.network_responses = options.network_responses;
+        session_options.logger = options.logger;
         Self {
             session: JustBashSession::with_options(session_options),
         }
@@ -2587,6 +2592,64 @@ and exhibited clearly, with a label attached.\n";
                 .stdout,
             "20 40\n"
         );
+    }
+
+    #[test]
+    fn awk_jbc25_in_delete_and_for_in_array_rows() {
+        let env = Bash::new();
+
+        // `in` operator: existing key, missing key, numeric keys, and the
+        // non-creating behavior of membership tests.
+        let existing =
+            env.exec(r#"echo "" | awk 'BEGIN { a["x"] = 1; if ("x" in a) print "found" }'"#);
+        assert_eq!(existing.stdout, "found\n");
+        assert_eq!(existing.exit_code, 0);
+
+        let missing = env.exec(
+            r#"echo "" | awk 'BEGIN { a["x"] = 1; if ("y" in a) print "found"; else print "not found" }'"#,
+        );
+        assert_eq!(missing.stdout, "not found\n");
+        assert_eq!(missing.exit_code, 0);
+
+        let numeric =
+            env.exec(r#"echo "" | awk 'BEGIN { a[42] = "answer"; print (42 in a), (99 in a) }'"#);
+        assert_eq!(numeric.stdout, "1 0\n");
+        assert_eq!(numeric.exit_code, 0);
+
+        let no_create = env
+            .exec(r#"echo "" | awk 'BEGIN { if ("x" in a) print "yes"; for (k in a) print k }'"#);
+        assert_eq!(no_create.stdout, "");
+        assert_eq!(no_create.exit_code, 0);
+
+        // delete statement: single element, missing element, and whole array.
+        let delete_one =
+            env.exec(r#"echo "" | awk 'BEGIN { a["x"] = 1; delete a["x"]; print ("x" in a) }'"#);
+        assert_eq!(delete_one.stdout, "0\n");
+        assert_eq!(delete_one.exit_code, 0);
+
+        let delete_missing =
+            env.exec(r#"echo "" | awk 'BEGIN { delete a["missing"]; print "ok" }'"#);
+        assert_eq!(delete_missing.stdout, "ok\n");
+        assert_eq!(delete_missing.exit_code, 0);
+
+        let delete_all = env.exec(
+            r#"echo "" | awk 'BEGIN { a[1]=1; a[2]=2; a[3]=3; delete a; for(k in a) count++; print count+0 }'"#,
+        );
+        assert_eq!(delete_all.stdout, "0\n");
+        assert_eq!(delete_all.exit_code, 0);
+
+        // for-in loops: count keys and sum values via key indirection.
+        let iterate = env.exec(
+            r#"echo "" | awk 'BEGIN { a["a"]=1; a["b"]=2; a["c"]=3; for (k in a) count++; print count }'"#,
+        );
+        assert_eq!(iterate.stdout, "3\n");
+        assert_eq!(iterate.exit_code, 0);
+
+        let sum = env.exec(
+            r#"echo "" | awk 'BEGIN { a[1]=10; a[2]=20; a[3]=30; sum=0; for (k in a) sum += a[k]; print sum }'"#,
+        );
+        assert_eq!(sum.stdout, "60\n");
+        assert_eq!(sum.exit_code, 0);
     }
 
     #[test]
@@ -5629,6 +5692,137 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn text_search_sed_ere_bre_quit_and_occurrence_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/ere.txt".to_string(), "aab\nab\nb\n".to_string()),
+                ("/colour.txt".to_string(), "color colour\n".to_string()),
+                ("/animals.txt".to_string(), "cat dog bird\n".to_string()),
+                ("/hello.txt".to_string(), "hello world\n".to_string()),
+                (
+                    "/log.txt".to_string(),
+                    "error: file not found\nwarning: deprecated\ninfo: success\n".to_string(),
+                ),
+                ("/aquant.txt".to_string(), "a aa aaa aaaa\n".to_string()),
+                ("/plus.txt".to_string(), "aaa bbb\na+ ccc\n".to_string()),
+                ("/optb.txt".to_string(), "ab\nb\n".to_string()),
+                ("/alt.txt".to_string(), "cat\ndog\nbird\n".to_string()),
+                ("/nth.txt".to_string(), "foo bar foo baz foo\n".to_string()),
+                ("/nth3.txt".to_string(), "a a a a a\n".to_string()),
+                ("/lines.txt".to_string(), "1\n2\n3\n4\n5\n".to_string()),
+                ("/abc.txt".to_string(), "a\nb\nc\n".to_string()),
+                (
+                    "/qlines.txt".to_string(),
+                    "line1\nline2\nline3\n".to_string(),
+                ),
+                ("/abc3.txt".to_string(), "abc\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // ERE (-E / -r) quantifiers, alternation, grouping, and backreferences.
+        assert_eq!(env.exec("sed -E 's/a+b/X/' /ere.txt").stdout, "X\nX\nb\n");
+        assert_eq!(env.exec("sed -r 's/a+b/X/' /ere.txt").stdout, "X\nX\nb\n");
+        assert_eq!(env.exec("sed -E 's/a?b/X/' /optb.txt").stdout, "X\nX\n");
+        assert_eq!(
+            env.exec("sed -E 's/colou?r/COLOR/g' /colour.txt").stdout,
+            "COLOR COLOR\n"
+        );
+        assert_eq!(
+            env.exec("sed -E 's/cat|dog/ANIMAL/g' /animals.txt").stdout,
+            "ANIMAL ANIMAL bird\n"
+        );
+        assert_eq!(
+            env.exec("sed -E 's/(hello) (world)/\\2 \\1/' /hello.txt")
+                .stdout,
+            "world hello\n"
+        );
+        assert_eq!(
+            env.exec("sed -E 's/^(error|warning): (.+)/[\\1] \\2/' /log.txt")
+                .stdout,
+            "[error] file not found\n[warning] deprecated\ninfo: success\n"
+        );
+        assert_eq!(
+            env.exec("sed -E 's/a{2,3}/X/g' /aquant.txt").stdout,
+            "a X X Xa\n"
+        );
+        assert_eq!(
+            env.exec("sed -E 's/(a)(b)(c)/\\3\\2\\1/' /abc3.txt").stdout,
+            "cba\n"
+        );
+
+        // BRE mode: + ? | ( ) are literal; \+ \? are quantifiers.
+        assert_eq!(
+            env.exec("sed 's/a+/X/' /plus.txt").stdout,
+            "aaa bbb\nX ccc\n"
+        );
+        assert_eq!(env.exec("sed 's/a\\+b/X/' /ere.txt").stdout, "X\nX\nb\n");
+        assert_eq!(env.exec("sed 's/a\\?b/X/' /optb.txt").stdout, "X\nX\n");
+        assert_eq!(
+            env.exec("sed 's/cat\\|dog/X/' /alt.txt").stdout,
+            "X\nX\nbird\n"
+        );
+        // BRE: bare ( ) are literal characters.
+        let env_paren = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/paren.txt".to_string(), "(foo)\nfoo\n".to_string())]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            env_paren.exec("sed 's/(foo)/X/' /paren.txt").stdout,
+            "X\nfoo\n"
+        );
+        // BRE: \( \) capture groups with \1 \2 backreferences in the replacement.
+        assert_eq!(
+            env.exec("sed 's/\\(hello\\) \\(world\\)/\\2 \\1/' /hello.txt")
+                .stdout,
+            "world hello\n"
+        );
+
+        // Nth occurrence substitution.
+        assert_eq!(
+            env.exec("sed 's/foo/XXX/2' /nth.txt").stdout,
+            "foo bar XXX baz foo\n"
+        );
+        assert_eq!(env.exec("sed 's/a/X/3' /nth3.txt").stdout, "a a X a a\n");
+
+        // q quits after printing the current line; Q quits without printing it.
+        assert_eq!(env.exec("sed '3q' /lines.txt").stdout, "1\n2\n3\n");
+        assert_eq!(env.exec("sed '1q' /abc.txt").stdout, "a\n");
+        assert_eq!(env.exec("sed '2q' /qlines.txt").stdout, "line1\nline2\n");
+        assert_eq!(env.exec("sed '2Q' /qlines.txt").stdout, "line1\n");
+
+        // Pattern addresses: delete and address-scoped substitution.
+        let env2 = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/foo.txt".to_string(), "foo\nbar\nbaz\n".to_string()),
+                (
+                    "/fruit.txt".to_string(),
+                    "apple\nbanana\napricot\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+        assert_eq!(env2.exec("sed '/bar/d' /foo.txt").stdout, "foo\nbaz\n");
+        assert_eq!(
+            env2.exec("sed '/^a/s/a/A/g' /fruit.txt").stdout,
+            "Apple\nbanana\nApricot\n"
+        );
+
+        // ERE with escaped parens treats \( \) as literal parentheses.
+        let env3 = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/require.txt".to_string(),
+                "const x = require('foo');\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        let require_result = env3
+            .exec("sed -E \"s/const x = require\\('foo'\\);/import x from 'foo';/g\" /require.txt");
+        assert_eq!(require_result.stdout, "import x from 'foo';\n");
+        assert_eq!(require_result.exit_code, 0);
+    }
+
+    #[test]
     fn text_stream_jbc34_utf8_pipeline_rows_use_implemented_commands() {
         let env = Bash::with_options(BashOptions {
             files: BTreeMap::from([
@@ -7823,5 +8017,170 @@ and exhibited clearly, with a label attached.\n";
             env.exec("wc /workspace/src/lib.ts").stdout,
             "1 5 25 /workspace/src/lib.ts\n"
         );
+    }
+
+    // --- Bash.exec-options.test.ts: "Logging" suite -----------------------
+
+    use crate::{BashLogData, BashLogEntry, BashLogLevel, BashLogger};
+
+    /// Mirror of the upstream `createMockLogger` helper: records every entry in
+    /// arrival order so tests can inspect message, level, and data.
+    #[derive(Debug, Default)]
+    struct MockLogger {
+        logs: Mutex<Vec<BashLogEntry>>,
+    }
+
+    impl BashLogger for MockLogger {
+        fn log(&self, entry: BashLogEntry) {
+            self.logs.lock().expect("logger mutex").push(entry);
+        }
+    }
+
+    impl MockLogger {
+        fn entries(&self) -> Vec<BashLogEntry> {
+            self.logs.lock().expect("logger mutex").clone()
+        }
+
+        fn find(&self, message: &str) -> Option<BashLogEntry> {
+            self.entries()
+                .into_iter()
+                .find(|entry| entry.message == message)
+        }
+    }
+
+    fn logging_bash() -> (Bash, Arc<MockLogger>) {
+        let logger = Arc::new(MockLogger::default());
+        let env = Bash::with_options(BashOptions {
+            logger: Some(logger.clone()),
+            ..BashOptions::default()
+        });
+        (env, logger)
+    }
+
+    fn output_of(entry: &BashLogEntry) -> &str {
+        match &entry.data {
+            BashLogData::Output(output) => output,
+            other => panic!("expected output data, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_options_logging_does_not_log_without_logger() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:721
+        let env = Bash::new();
+        let result = env.exec("echo hello");
+        assert_eq!(result.stdout, "hello\n");
+    }
+
+    #[test]
+    fn exec_options_logging_logs_exec_command_at_info_level() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:728
+        let (env, logger) = logging_bash();
+        env.exec("echo hello");
+
+        let exec_log = logger.find("exec").expect("exec log defined");
+        assert_eq!(exec_log.level, BashLogLevel::Info);
+        assert_eq!(
+            exec_log.data,
+            BashLogData::Command("echo hello".to_string())
+        );
+    }
+
+    #[test]
+    fn exec_options_logging_logs_stdout_at_debug_level() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:740
+        let (env, logger) = logging_bash();
+        env.exec("echo hello");
+
+        let stdout_log = logger.find("stdout").expect("stdout log defined");
+        assert_eq!(stdout_log.level, BashLogLevel::Debug);
+        assert_eq!(output_of(&stdout_log), "hello\n");
+    }
+
+    #[test]
+    fn exec_options_logging_logs_stderr_at_info_level() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:752
+        let (env, logger) = logging_bash();
+        env.exec("echo error >&2");
+
+        let stderr_log = logger.find("stderr").expect("stderr log defined");
+        assert_eq!(stderr_log.level, BashLogLevel::Info);
+        assert_eq!(output_of(&stderr_log), "error\n");
+    }
+
+    #[test]
+    fn exec_options_logging_logs_exit_code_at_info_level() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:764
+        let (env, logger) = logging_bash();
+        env.exec("echo hello");
+
+        let exit_log = logger.find("exit").expect("exit log defined");
+        assert_eq!(exit_log.level, BashLogLevel::Info);
+        assert_eq!(exit_log.data, BashLogData::ExitCode(0));
+    }
+
+    #[test]
+    fn exec_options_logging_logs_non_zero_exit_code() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:776
+        let (env, logger) = logging_bash();
+        env.exec("exit 42");
+
+        let exit_log = logger.find("exit").expect("exit log defined");
+        assert_eq!(exit_log.data, BashLogData::ExitCode(42));
+    }
+
+    #[test]
+    fn exec_options_logging_logs_in_correct_order_exec_then_exit() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:787
+        let (env, logger) = logging_bash();
+        env.exec("echo out; echo err >&2");
+
+        let logs = logger.entries();
+        assert_eq!(logs.first().expect("at least one log").message, "exec");
+        assert_eq!(logs.last().expect("at least one log").message, "exit");
+    }
+
+    #[test]
+    fn exec_options_logging_does_not_log_stdout_when_empty() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:797
+        let (env, logger) = logging_bash();
+        env.exec("true");
+
+        assert!(logger.find("stdout").is_none());
+    }
+
+    #[test]
+    fn exec_options_logging_does_not_log_stderr_when_empty() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:807
+        let (env, logger) = logging_bash();
+        env.exec("echo hello");
+
+        assert!(logger.find("stderr").is_none());
+    }
+
+    #[test]
+    fn exec_options_logging_does_not_log_empty_commands() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:817
+        let (env, logger) = logging_bash();
+        env.exec("");
+        env.exec("   ");
+
+        assert_eq!(logger.entries().len(), 0);
+    }
+
+    #[test]
+    fn exec_options_logging_logs_parse_errors() {
+        // packages/just-bash/src/Bash.exec-options.test.ts:827
+        let (env, logger) = logging_bash();
+        env.exec("echo ${");
+
+        let exec_log = logger.find("exec").expect("exec log defined");
+        assert_eq!(exec_log.data, BashLogData::Command("echo ${".to_string()));
+
+        let stderr_log = logger.find("stderr").expect("stderr log defined");
+        assert!(output_of(&stderr_log).contains("syntax error"));
+
+        let exit_log = logger.find("exit").expect("exit log defined");
+        assert_eq!(exit_log.data, BashLogData::ExitCode(2));
     }
 }
