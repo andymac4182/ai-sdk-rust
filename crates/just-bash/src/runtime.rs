@@ -5629,6 +5629,137 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn text_search_sed_ere_bre_quit_and_occurrence_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/ere.txt".to_string(), "aab\nab\nb\n".to_string()),
+                ("/colour.txt".to_string(), "color colour\n".to_string()),
+                ("/animals.txt".to_string(), "cat dog bird\n".to_string()),
+                ("/hello.txt".to_string(), "hello world\n".to_string()),
+                (
+                    "/log.txt".to_string(),
+                    "error: file not found\nwarning: deprecated\ninfo: success\n".to_string(),
+                ),
+                ("/aquant.txt".to_string(), "a aa aaa aaaa\n".to_string()),
+                ("/plus.txt".to_string(), "aaa bbb\na+ ccc\n".to_string()),
+                ("/optb.txt".to_string(), "ab\nb\n".to_string()),
+                ("/alt.txt".to_string(), "cat\ndog\nbird\n".to_string()),
+                ("/nth.txt".to_string(), "foo bar foo baz foo\n".to_string()),
+                ("/nth3.txt".to_string(), "a a a a a\n".to_string()),
+                ("/lines.txt".to_string(), "1\n2\n3\n4\n5\n".to_string()),
+                ("/abc.txt".to_string(), "a\nb\nc\n".to_string()),
+                (
+                    "/qlines.txt".to_string(),
+                    "line1\nline2\nline3\n".to_string(),
+                ),
+                ("/abc3.txt".to_string(), "abc\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // ERE (-E / -r) quantifiers, alternation, grouping, and backreferences.
+        assert_eq!(env.exec("sed -E 's/a+b/X/' /ere.txt").stdout, "X\nX\nb\n");
+        assert_eq!(env.exec("sed -r 's/a+b/X/' /ere.txt").stdout, "X\nX\nb\n");
+        assert_eq!(env.exec("sed -E 's/a?b/X/' /optb.txt").stdout, "X\nX\n");
+        assert_eq!(
+            env.exec("sed -E 's/colou?r/COLOR/g' /colour.txt").stdout,
+            "COLOR COLOR\n"
+        );
+        assert_eq!(
+            env.exec("sed -E 's/cat|dog/ANIMAL/g' /animals.txt").stdout,
+            "ANIMAL ANIMAL bird\n"
+        );
+        assert_eq!(
+            env.exec("sed -E 's/(hello) (world)/\\2 \\1/' /hello.txt")
+                .stdout,
+            "world hello\n"
+        );
+        assert_eq!(
+            env.exec("sed -E 's/^(error|warning): (.+)/[\\1] \\2/' /log.txt")
+                .stdout,
+            "[error] file not found\n[warning] deprecated\ninfo: success\n"
+        );
+        assert_eq!(
+            env.exec("sed -E 's/a{2,3}/X/g' /aquant.txt").stdout,
+            "a X X Xa\n"
+        );
+        assert_eq!(
+            env.exec("sed -E 's/(a)(b)(c)/\\3\\2\\1/' /abc3.txt").stdout,
+            "cba\n"
+        );
+
+        // BRE mode: + ? | ( ) are literal; \+ \? are quantifiers.
+        assert_eq!(
+            env.exec("sed 's/a+/X/' /plus.txt").stdout,
+            "aaa bbb\nX ccc\n"
+        );
+        assert_eq!(env.exec("sed 's/a\\+b/X/' /ere.txt").stdout, "X\nX\nb\n");
+        assert_eq!(env.exec("sed 's/a\\?b/X/' /optb.txt").stdout, "X\nX\n");
+        assert_eq!(
+            env.exec("sed 's/cat\\|dog/X/' /alt.txt").stdout,
+            "X\nX\nbird\n"
+        );
+        // BRE: bare ( ) are literal characters.
+        let env_paren = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/paren.txt".to_string(), "(foo)\nfoo\n".to_string())]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            env_paren.exec("sed 's/(foo)/X/' /paren.txt").stdout,
+            "X\nfoo\n"
+        );
+        // BRE: \( \) capture groups with \1 \2 backreferences in the replacement.
+        assert_eq!(
+            env.exec("sed 's/\\(hello\\) \\(world\\)/\\2 \\1/' /hello.txt")
+                .stdout,
+            "world hello\n"
+        );
+
+        // Nth occurrence substitution.
+        assert_eq!(
+            env.exec("sed 's/foo/XXX/2' /nth.txt").stdout,
+            "foo bar XXX baz foo\n"
+        );
+        assert_eq!(env.exec("sed 's/a/X/3' /nth3.txt").stdout, "a a X a a\n");
+
+        // q quits after printing the current line; Q quits without printing it.
+        assert_eq!(env.exec("sed '3q' /lines.txt").stdout, "1\n2\n3\n");
+        assert_eq!(env.exec("sed '1q' /abc.txt").stdout, "a\n");
+        assert_eq!(env.exec("sed '2q' /qlines.txt").stdout, "line1\nline2\n");
+        assert_eq!(env.exec("sed '2Q' /qlines.txt").stdout, "line1\n");
+
+        // Pattern addresses: delete and address-scoped substitution.
+        let env2 = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/foo.txt".to_string(), "foo\nbar\nbaz\n".to_string()),
+                (
+                    "/fruit.txt".to_string(),
+                    "apple\nbanana\napricot\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+        assert_eq!(env2.exec("sed '/bar/d' /foo.txt").stdout, "foo\nbaz\n");
+        assert_eq!(
+            env2.exec("sed '/^a/s/a/A/g' /fruit.txt").stdout,
+            "Apple\nbanana\nApricot\n"
+        );
+
+        // ERE with escaped parens treats \( \) as literal parentheses.
+        let env3 = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/require.txt".to_string(),
+                "const x = require('foo');\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        let require_result = env3
+            .exec("sed -E \"s/const x = require\\('foo'\\);/import x from 'foo';/g\" /require.txt");
+        assert_eq!(require_result.stdout, "import x from 'foo';\n");
+        assert_eq!(require_result.exit_code, 0);
+    }
+
+    #[test]
     fn text_stream_jbc34_utf8_pipeline_rows_use_implemented_commands() {
         let env = Bash::with_options(BashOptions {
             files: BTreeMap::from([
