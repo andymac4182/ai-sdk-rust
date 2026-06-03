@@ -17274,4 +17274,569 @@ mod tests {
                 .clone()
         );
     }
+
+    fn execute_tools_value_schema() -> JsonObject {
+        json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone()
+    }
+
+    fn execute_tools_single_call_model(tool_name: &str) -> MockLanguageModel {
+        MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+            LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                "call-1",
+                tool_name,
+                r#"{"value":"test"}"#,
+            )),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                tool_calls_finish_reason(),
+            )),
+        ]))
+    }
+
+    #[test]
+    fn stream_text_execute_tools_from_stream_handles_async_tool_execution() {
+        let model = execute_tools_single_call_model("syncTool");
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_tool(
+                Tool::new("syncTool", execute_tools_value_schema()).with_execute(
+                    |input, _options| async move {
+                        Ok(json!(format!(
+                            "{}-sync-result",
+                            input["value"].as_str().expect("value is a string")
+                        )))
+                    },
+                ),
+            ),
+        ));
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_call_id, "call-1");
+        assert_eq!(result.tool_calls[0].tool_name, "syncTool");
+        assert_eq!(result.tool_calls[0].input, json!({ "value": "test" }));
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "call-1");
+        assert_eq!(result.tool_results[0].output, json!("test-sync-result"));
+        assert_eq!(result.tool_results[0].is_error, None);
+    }
+
+    #[test]
+    fn stream_text_execute_tools_from_stream_handles_sync_tool_execution() {
+        // Rust tool executors are always futures; the upstream sync execute path
+        // is a future that resolves immediately. Assert the same observable output.
+        let model = execute_tools_single_call_model("syncTool");
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_tool(
+                Tool::new("syncTool", execute_tools_value_schema()).with_execute(
+                    |input, _options| {
+                        let output = json!(format!(
+                            "{}-sync-result",
+                            input["value"].as_str().expect("value is a string")
+                        ));
+                        std::future::ready(Ok(output))
+                    },
+                ),
+            ),
+        ));
+
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].output, json!("test-sync-result"));
+        assert_eq!(result.tool_results[0].tool_name, "syncTool");
+        assert_eq!(result.tool_results[0].is_error, None);
+    }
+
+    #[test]
+    fn stream_text_execute_tools_from_stream_passes_sandbox_to_tool_execution() {
+        let model = execute_tools_single_call_model("sandboxTool");
+        let sandbox: Arc<dyn ExperimentalSandbox> = Arc::new(TestSandbox::new("test sandbox"));
+        let received = Arc::new(Mutex::new(None::<String>));
+        let received_for_tool = Arc::clone(&received);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_experimental_sandbox(Arc::clone(&sandbox))
+                .with_tool(
+                    Tool::new("sandboxTool", execute_tools_value_schema()).with_execute(
+                        move |input, options| {
+                            let received = Arc::clone(&received_for_tool);
+                            async move {
+                                let sandbox = options
+                                    .experimental_sandbox
+                                    .expect("sandbox is passed to tool execution");
+                                *received.lock().expect("received lock") =
+                                    Some(sandbox.description().to_string());
+                                Ok(json!(format!(
+                                    "{}-sandbox-result",
+                                    input["value"].as_str().expect("value is a string")
+                                )))
+                            }
+                        },
+                    ),
+                ),
+        ));
+
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].output, json!("test-sandbox-result"));
+        assert_eq!(
+            received.lock().expect("received lock").as_deref(),
+            Some("test sandbox")
+        );
+    }
+
+    #[test]
+    fn stream_text_execute_tools_from_stream_does_not_execute_provider_executed_tool_calls() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new("call-1", "providerTool", r#"{"value":"test"}"#)
+                        .with_provider_executed(true),
+                ),
+                LanguageModelStreamPart::ToolResult(LanguageModelToolResult::new(
+                    "call-1",
+                    "providerTool",
+                    NonNullJsonValue::new(json!("example-result"))
+                        .expect("provider result is non-null"),
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let input_schema = execute_tools_value_schema();
+        let output_schema = input_schema.clone();
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_for_tool = Arc::clone(&executed);
+
+        let _result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_tool(
+                Tool::provider_executed(
+                    "providerTool",
+                    "test.providerTool",
+                    JsonObject::new(),
+                    input_schema,
+                    output_schema,
+                )
+                .with_execute(move |_input, _options| {
+                    let executed = Arc::clone(&executed_for_tool);
+                    async move {
+                        executed.store(true, Ordering::SeqCst);
+                        Ok(json!("should-not-execute"))
+                    }
+                }),
+            ),
+        ));
+
+        assert!(!executed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn stream_text_execute_tools_from_stream_calls_execution_callbacks_in_order() {
+        let model = execute_tools_single_call_model("testTool");
+        let call_order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let start_order = Arc::clone(&call_order);
+        let execute_order = Arc::clone(&call_order);
+        let end_order = Arc::clone(&call_order);
+
+        let _result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("testTool", execute_tools_value_schema()).with_execute(
+                        move |input, _options| {
+                            let execute_order = Arc::clone(&execute_order);
+                            async move {
+                                execute_order.lock().expect("order lock").push("execute");
+                                Ok(json!(format!(
+                                    "{}-result",
+                                    input["value"].as_str().expect("value is a string")
+                                )))
+                            }
+                        },
+                    ),
+                )
+                .with_on_tool_execution_start(move |_event| {
+                    let start_order = Arc::clone(&start_order);
+                    async move {
+                        start_order
+                            .lock()
+                            .expect("order lock")
+                            .push("onToolExecutionStart");
+                    }
+                })
+                .with_on_tool_execution_end(move |_event| {
+                    let end_order = Arc::clone(&end_order);
+                    async move {
+                        end_order
+                            .lock()
+                            .expect("order lock")
+                            .push("onToolExecutionEnd");
+                    }
+                }),
+        ));
+
+        assert_eq!(
+            call_order.lock().expect("order lock").as_slice(),
+            ["onToolExecutionStart", "execute", "onToolExecutionEnd"]
+        );
+    }
+
+    #[test]
+    fn stream_text_execute_tools_from_stream_passes_call_metadata_to_callbacks() {
+        let model = execute_tools_single_call_model("testTool");
+        let tools_context =
+            JsonObject::from_iter([("testTool".to_string(), json!({ "value": "test" }))]);
+        let start_events = Arc::new(Mutex::new(Vec::<GenerateTextToolExecutionStartEvent>::new()));
+        let end_events = Arc::new(Mutex::new(Vec::<GenerateTextToolExecutionEndEvent>::new()));
+        let start_events_for_callback = Arc::clone(&start_events);
+        let end_events_for_callback = Arc::clone(&end_events);
+
+        let _result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tools_context(tools_context)
+                .with_tool(
+                    Tool::new("testTool", execute_tools_value_schema()).with_execute(
+                        |input, _options| async move {
+                            Ok(json!(format!(
+                                "{}-result",
+                                input["value"].as_str().expect("value is a string")
+                            )))
+                        },
+                    ),
+                )
+                .with_on_tool_execution_start(move |event| {
+                    let events = Arc::clone(&start_events_for_callback);
+                    async move {
+                        events.lock().expect("events lock").push(event);
+                    }
+                })
+                .with_on_tool_execution_end(move |event| {
+                    let events = Arc::clone(&end_events_for_callback);
+                    async move {
+                        events.lock().expect("events lock").push(event);
+                    }
+                }),
+        ));
+
+        let start_events = start_events.lock().expect("events lock");
+        assert_eq!(start_events.len(), 1);
+        let start = &start_events[0];
+        assert_eq!(start.tool_call.tool_call_id, "call-1");
+        assert_eq!(start.tool_call.tool_name, "testTool");
+        assert_eq!(start.tool_call.input, json!({ "value": "test" }));
+        assert_eq!(start.tool_context, Some(json!({ "value": "test" })));
+        assert_eq!(start.messages, vec![user_message("test-input")]);
+
+        let end_events = end_events.lock().expect("events lock");
+        assert_eq!(end_events.len(), 1);
+        let end = &end_events[0];
+        assert_eq!(end.tool_call.tool_call_id, "call-1");
+        assert_eq!(end.tool_context, Some(json!({ "value": "test" })));
+        assert_eq!(end.tool_output.output, json!("test-result"));
+    }
+
+    #[test]
+    fn stream_text_execute_tools_from_stream_reports_success_to_execution_end() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "testTool",
+                    r#"{"value":"abc"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let end_events = Arc::new(Mutex::new(Vec::<GenerateTextToolExecutionEndEvent>::new()));
+        let end_events_for_callback = Arc::clone(&end_events);
+
+        let _result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("testTool", execute_tools_value_schema()).with_execute(
+                        |input, _options| async move {
+                            Ok(json!(format!(
+                                "{}-result",
+                                input["value"].as_str().expect("value is a string")
+                            )))
+                        },
+                    ),
+                )
+                .with_on_tool_execution_end(move |event| {
+                    let events = Arc::clone(&end_events_for_callback);
+                    async move {
+                        events.lock().expect("events lock").push(event);
+                    }
+                }),
+        ));
+
+        let end_events = end_events.lock().expect("events lock");
+        assert_eq!(end_events.len(), 1);
+        let end = &end_events[0];
+        assert_eq!(end.tool_call.input, json!({ "value": "abc" }));
+        assert_eq!(end.tool_context, None);
+        assert_eq!(end.tool_output.output, json!("abc-result"));
+        assert_eq!(end.tool_output.is_error, None);
+    }
+
+    #[test]
+    fn stream_text_execute_tools_from_stream_reports_error_to_execution_end() {
+        let model = execute_tools_single_call_model("failingTool");
+        let end_events = Arc::new(Mutex::new(Vec::<GenerateTextToolExecutionEndEvent>::new()));
+        let end_events_for_callback = Arc::clone(&end_events);
+
+        let _result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("failingTool", execute_tools_value_schema()).with_execute(
+                        |input, _options| async move {
+                            if input["value"] == json!("test") {
+                                Err::<JsonValue, ToolExecutionError>(ToolExecutionError::new(
+                                    "tool failed",
+                                ))
+                            } else {
+                                Ok(json!("test-result"))
+                            }
+                        },
+                    ),
+                )
+                .with_on_tool_execution_end(move |event| {
+                    let events = Arc::clone(&end_events_for_callback);
+                    async move {
+                        events.lock().expect("events lock").push(event);
+                    }
+                }),
+        ));
+
+        let end_events = end_events.lock().expect("events lock");
+        assert_eq!(end_events.len(), 1);
+        let end = &end_events[0];
+        assert_eq!(end.tool_call.tool_name, "failingTool");
+        assert_eq!(end.tool_output.is_error, Some(true));
+        assert!(
+            end.tool_output
+                .output
+                .as_str()
+                .expect("error output is a string")
+                .contains("tool failed")
+        );
+    }
+
+    #[test]
+    fn stream_text_execute_tools_from_stream_skips_callbacks_for_tools_without_execute() {
+        let model = execute_tools_single_call_model("noExecuteTool");
+        let starts = Arc::new(AtomicUsize::new(0));
+        let ends = Arc::new(AtomicUsize::new(0));
+        let starts_for_callback = Arc::clone(&starts);
+        let ends_for_callback = Arc::clone(&ends);
+
+        let _result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(Tool::new("noExecuteTool", execute_tools_value_schema()))
+                .with_on_tool_execution_start(move |_event| {
+                    let starts = Arc::clone(&starts_for_callback);
+                    async move {
+                        starts.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+                .with_on_tool_execution_end(move |_event| {
+                    let ends = Arc::clone(&ends_for_callback);
+                    async move {
+                        ends.fetch_add(1, Ordering::SeqCst);
+                    }
+                }),
+        ));
+
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+        assert_eq!(ends.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn stream_text_execute_tools_from_stream_calls_callbacks_for_each_tool_in_multi_tool_stream() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "testTool",
+                    r#"{"value":"a"}"#,
+                )),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-2",
+                    "testTool",
+                    r#"{"value":"b"}"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let start_events = Arc::new(Mutex::new(Vec::<GenerateTextToolExecutionStartEvent>::new()));
+        let end_events = Arc::new(Mutex::new(Vec::<GenerateTextToolExecutionEndEvent>::new()));
+        let start_events_for_callback = Arc::clone(&start_events);
+        let end_events_for_callback = Arc::clone(&end_events);
+
+        let _result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("testTool", execute_tools_value_schema()).with_execute(
+                        |input, _options| async move {
+                            Ok(json!(format!(
+                                "{}-result",
+                                input["value"].as_str().expect("value is a string")
+                            )))
+                        },
+                    ),
+                )
+                .with_on_tool_execution_start(move |event| {
+                    let events = Arc::clone(&start_events_for_callback);
+                    async move {
+                        events.lock().expect("events lock").push(event);
+                    }
+                })
+                .with_on_tool_execution_end(move |event| {
+                    let events = Arc::clone(&end_events_for_callback);
+                    async move {
+                        events.lock().expect("events lock").push(event);
+                    }
+                }),
+        ));
+
+        let start_events = start_events.lock().expect("events lock");
+        assert_eq!(start_events.len(), 2);
+        assert_eq!(start_events[0].tool_call.tool_call_id, "call-1");
+        assert_eq!(start_events[0].tool_call.input, json!({ "value": "a" }));
+        assert_eq!(start_events[1].tool_call.tool_call_id, "call-2");
+        assert_eq!(start_events[1].tool_call.input, json!({ "value": "b" }));
+
+        let end_events = end_events.lock().expect("events lock");
+        assert_eq!(end_events.len(), 2);
+        assert_eq!(end_events[0].tool_output.output, json!("a-result"));
+        assert_eq!(end_events[1].tool_output.output, json!("b-result"));
+    }
+
+    #[test]
+    fn stream_text_execute_tools_from_stream_skips_callbacks_for_provider_executed_tools() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(
+                    LanguageModelToolCall::new("call-1", "providerTool", r#"{"value":"test"}"#)
+                        .with_provider_executed(true),
+                ),
+                LanguageModelStreamPart::ToolResult(LanguageModelToolResult::new(
+                    "call-1",
+                    "providerTool",
+                    NonNullJsonValue::new(json!({ "result": "example" }))
+                        .expect("provider result is non-null"),
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]));
+        let input_schema = execute_tools_value_schema();
+        let output_schema = input_schema.clone();
+        let starts = Arc::new(AtomicUsize::new(0));
+        let ends = Arc::new(AtomicUsize::new(0));
+        let starts_for_callback = Arc::clone(&starts);
+        let ends_for_callback = Arc::clone(&ends);
+
+        let _result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(Tool::provider_executed(
+                    "providerTool",
+                    "test.providerTool",
+                    JsonObject::new(),
+                    input_schema,
+                    output_schema,
+                ))
+                .with_on_tool_execution_start(move |_event| {
+                    let starts = Arc::clone(&starts_for_callback);
+                    async move {
+                        starts.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+                .with_on_tool_execution_end(move |_event| {
+                    let ends = Arc::clone(&ends_for_callback);
+                    async move {
+                        ends.fetch_add(1, Ordering::SeqCst);
+                    }
+                }),
+        ));
+
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+        assert_eq!(ends.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn stream_text_execute_tools_from_stream_surfaces_async_tool_error() {
+        let model = execute_tools_single_call_model("failingTool");
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_tool(
+                Tool::new("failingTool", execute_tools_value_schema()).with_execute(
+                    |input, _options| async move {
+                        if input["value"] == json!("test") {
+                            Err::<JsonValue, ToolExecutionError>(ToolExecutionError::new(
+                                "Tool execution failed!",
+                            ))
+                        } else {
+                            Ok(json!("test-result"))
+                        }
+                    },
+                ),
+            ),
+        ));
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_call_id, "call-1");
+        assert_eq!(result.tool_results[0].tool_name, "failingTool");
+        assert_eq!(result.tool_results[0].input, json!({ "value": "test" }));
+        assert_eq!(result.tool_results[0].is_error, Some(true));
+        assert!(
+            result.tool_results[0]
+                .output
+                .as_str()
+                .expect("error output is a string")
+                .contains("Tool execution failed!")
+        );
+    }
+
+    #[test]
+    fn stream_text_execute_tools_from_stream_surfaces_sync_tool_error() {
+        let model = execute_tools_single_call_model("failingTool");
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_tool(
+                Tool::new("failingTool", execute_tools_value_schema()).with_execute(
+                    |input, _options| {
+                        let outcome = if input["value"] == json!("test") {
+                            Err::<JsonValue, ToolExecutionError>(ToolExecutionError::new(
+                                "Sync tool failed!",
+                            ))
+                        } else {
+                            Ok(json!("test-result"))
+                        };
+                        std::future::ready(outcome)
+                    },
+                ),
+            ),
+        ));
+
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].is_error, Some(true));
+        assert!(
+            result.tool_results[0]
+                .output
+                .as_str()
+                .expect("error output is a string")
+                .contains("Sync tool failed!")
+        );
+    }
 }
