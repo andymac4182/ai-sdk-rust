@@ -15399,6 +15399,61 @@ mod tests {
     }
 
     #[test]
+    fn generate_text_output_is_unset_when_finish_reason_is_tool_calls() {
+        // Upstream: generate-text.test.ts `should not parse output when finish
+        // reason is tool-calls`. The output is only resolved when the final step
+        // finishes with `stop`; a `tool-calls` finish leaves it unset while the
+        // tool calls/results remain available.
+        let tool_call_step = GenerateTextStep::from_language_model_result(
+            "call-test",
+            0,
+            GenerateTextModelInfo::new("test-provider", "test-model"),
+            LanguageModelGenerateResult::new(
+                vec![LanguageModelContent::ToolCall(
+                    crate::language_model::LanguageModelToolCall::new(
+                        "call-1",
+                        "testTool",
+                        r#"{"value":"test"}"#,
+                    ),
+                )],
+                LanguageModelFinishReason {
+                    unified: FinishReason::ToolCalls,
+                    raw: None,
+                },
+                LanguageModelUsage::default(),
+            ),
+        );
+        let result = GenerateTextResult::from_steps(vec![tool_call_step]);
+
+        assert_eq!(result.finish_reason, FinishReason::ToolCalls);
+        assert!(result.output.is_none());
+        let error = result.output().expect_err("output is unset on tool-calls");
+        assert_eq!(error.to_string(), "No output generated.");
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_name, "testTool");
+
+        // Contrast: a `stop` finish resolves the text output.
+        let stop_step = GenerateTextStep::from_language_model_result(
+            "call-test",
+            0,
+            GenerateTextModelInfo::new("test-provider", "test-model"),
+            LanguageModelGenerateResult::new(
+                vec![LanguageModelContent::Text(LanguageModelText::new("done"))],
+                LanguageModelFinishReason {
+                    unified: FinishReason::Stop,
+                    raw: None,
+                },
+                LanguageModelUsage::default(),
+            ),
+        );
+        let stop_result = GenerateTextResult::from_steps(vec![stop_step]);
+        assert_eq!(
+            stop_result.output,
+            Some(JsonValue::String("done".to_string()))
+        );
+    }
+
+    #[test]
     fn generate_text_messages_with_url_file_calls_model_supported_urls() {
         let supported_urls_called = Arc::new(AtomicBool::new(false));
         let model = FakeLanguageModel::new()
