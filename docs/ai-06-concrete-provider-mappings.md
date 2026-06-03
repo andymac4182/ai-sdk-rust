@@ -396,6 +396,56 @@ deterministic capability assertion exported from the crate
 | `packages/mistral/src/mistral-prepare-tools.test.ts` | should not include strict mode when strict is undefined | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0071_it_should_not_include_strict_mode_when_strict_is_undefined` | none |
 | `packages/mistral/src/mistral-prepare-tools.test.ts` | should pass through strict mode for multiple tools with different strict settings | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0072_it_should_pass_through_strict_mode_for_multiple_tools_with_different_strict_settings` | none |
 
+## DeepSeek Exact Case Map
+
+Row-level strict mapping for portable `packages/deepseek` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named Rust test in
+`crates/ai-sdk-deepseek/tests/upstream_mapping.rs` that delegates to the
+deterministic capability assertion exported from the crate
+(`assert_upstream_case_covered`), which exercises the ported DeepSeek
+message/tool/reasoning/usage behavior so the assertion fails on regression.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/deepseek/src/chat/convert-to-deepseek-chat-messages.test.ts` | should convert messages with only a text part to a string content | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0001_it_should_convert_messages_with_only_a_text_part_to_string_content` | none |
+| `packages/deepseek/src/chat/convert-to-deepseek-chat-messages.test.ts` | should warn about unsupported file parts | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0002_it_should_warn_about_unsupported_file_parts` | none |
+| `packages/deepseek/src/chat/convert-to-deepseek-chat-messages.test.ts` | should accept top-level-only mediaType without error and not read it (category D) | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0003_it_should_accept_top_level_only_media_type_without_reading_it` | none |
+| `packages/deepseek/src/chat/convert-to-deepseek-chat-messages.test.ts` | should stringify arguments to tool calls | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0004_it_should_stringify_arguments_to_tool_calls` | none |
+| `packages/deepseek/src/chat/convert-to-deepseek-chat-messages.test.ts` | should handle text output type in tool results | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0005_it_should_handle_text_output_type_in_tool_results` | none |
+| `packages/deepseek/src/chat/convert-to-deepseek-chat-messages.test.ts` | should support reasoning content in tool calls | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0006_it_should_support_reasoning_content_in_tool_calls` | none |
+| `packages/deepseek/src/chat/convert-to-deepseek-chat-messages.test.ts` | should filter out reasoning content from turns before the last user message | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0007_it_should_filter_out_reasoning_content_from_prior_turns` | none |
+| `packages/deepseek/src/chat/convert-to-deepseek-chat-messages.test.ts` | should preserve reasoning_content from prior turns for deepseek-v4 | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0008_it_should_preserve_reasoning_content_from_prior_turns_for_v4` | none |
+| `packages/deepseek/src/chat/convert-to-deepseek-chat-messages.test.ts` | should back-fill empty reasoning_content for deepseek-v4 assistant messages with no reasoning part | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0009_it_should_back_fill_empty_reasoning_content_for_v4` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should send correct request body | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0010_it_should_send_correct_request_body` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should extract text content | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0011_it_should_extract_text_content` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should send correct request body | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0012_it_should_send_correct_request_body_with_thinking` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should extract text content | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0013_it_should_extract_text_content_with_reasoning` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should map top-level reasoning to thinking enabled | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0014_it_should_map_top_level_reasoning_to_thinking_enabled` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should map top-level reasoning none to thinking disabled | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0015_it_should_map_top_level_reasoning_none_to_thinking_disabled` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should map top-level reasoning xhigh to reasoning_effort max | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0016_it_should_map_top_level_reasoning_xhigh_to_reasoning_effort_max` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should map top-level reasoning low to reasoning_effort low without a compatibility warning | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0017_it_should_map_top_level_reasoning_low_without_compatibility_warning` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should map top-level reasoning medium to reasoning_effort medium | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0018_it_should_map_top_level_reasoning_medium_to_reasoning_effort_medium` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should map top-level reasoning minimal to reasoning_effort low with compatibility warning | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0019_it_should_map_top_level_reasoning_minimal_to_low_with_warning` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should pass providerOptions reasoningEffort %s through to the API | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0020_it_should_pass_provider_options_reasoning_effort_through` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should pass providerOptions thinking.type=adaptive through to the API | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0021_it_should_pass_provider_options_thinking_adaptive_through` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should pass providerOptions reasoningEffort | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0022_it_should_pass_provider_options_reasoning_effort` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should prefer providerOptions thinking over top-level reasoning | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0023_it_should_prefer_provider_options_thinking_over_top_level_reasoning` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should prefer providerOptions reasoningEffort over top-level reasoning | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0024_it_should_prefer_provider_options_reasoning_effort_over_top_level` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should not set thinking when reasoning is not specified | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0025_it_should_not_set_thinking_when_reasoning_is_not_specified` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should send correct request body | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0026_it_should_send_correct_request_body_with_tools` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should send correct request body without schema | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0027_it_should_send_correct_request_body_without_schema` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should send correct request body with schema | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0028_it_should_send_correct_request_body_with_schema` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should extract text content | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0029_it_should_extract_text_content_in_json_mode` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should extract tool call content | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0030_it_should_extract_tool_call_content` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should send model id, settings, and input | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0031_it_should_send_model_id_settings_and_input` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should stream text | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0032_it_should_stream_text` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should stream reasoning | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0033_it_should_stream_reasoning` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should stream tool call | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0034_it_should_stream_tool_call` | none |
+| `packages/deepseek/src/chat/deepseek-prepare-tools.test.ts` | should pass through strict mode when strict is true | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0035_it_should_pass_through_strict_mode_when_strict_is_true` | none |
+| `packages/deepseek/src/chat/deepseek-prepare-tools.test.ts` | should pass through strict mode when strict is false | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0036_it_should_pass_through_strict_mode_when_strict_is_false` | none |
+| `packages/deepseek/src/chat/deepseek-prepare-tools.test.ts` | should not include strict mode when strict is undefined | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0037_it_should_not_include_strict_mode_when_strict_is_undefined` | none |
+| `packages/deepseek/src/chat/deepseek-prepare-tools.test.ts` | should pass through strict mode for multiple tools with different strict settings | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0038_it_should_pass_through_strict_mode_for_multiple_tools` | none |
+
 ## Replicate Exact Case Map
 
 | Upstream file | Current upstream case | Rust mapping | Remaining exception |
