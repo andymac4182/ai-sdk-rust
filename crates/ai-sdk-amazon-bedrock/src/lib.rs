@@ -2066,7 +2066,10 @@ fn convert_to_amazon_bedrock_chat_messages(
                                 let LanguageModelToolContentPart::ToolResult(part) = part else {
                                     continue;
                                 };
-                                let tool_content = tool_result_output_to_bedrock(&part.output)?;
+                                let tool_content = tool_result_output_to_bedrock(
+                                    &part.output,
+                                    &mut document_counter,
+                                )?;
                                 content.push(json!({
                                     "toolResult": {
                                         "toolUseId": normalize_tool_call_id(&part.tool_call_id, is_mistral),
@@ -2282,6 +2285,7 @@ fn document_block(
 
 fn tool_result_output_to_bedrock(
     output: &LanguageModelToolResultOutput,
+    document_counter: &mut u64,
 ) -> Result<Vec<JsonValue>, UnsupportedFunctionalityError> {
     match output {
         LanguageModelToolResultOutput::Text { value, .. }
@@ -2300,12 +2304,6 @@ fn tool_result_output_to_bedrock(
             .map(|part| match part {
                 LanguageModelToolResultContentPart::Text(text) => Ok(json!({ "text": text.text })),
                 LanguageModelToolResultContentPart::File(file) => {
-                    if get_top_level_media_type(&file.media_type) != "image" {
-                        return Err(UnsupportedFunctionalityError::new(format!(
-                            "media type: {}",
-                            file.media_type
-                        )));
-                    }
                     let FileData::Data { data } = &file.data else {
                         return Err(UnsupportedFunctionalityError::new(format!(
                             "tool result file data of type \"{}\"",
@@ -2318,6 +2316,15 @@ fn tool_result_output_to_bedrock(
                             error.to_string(),
                         )
                     })?;
+                    if get_top_level_media_type(&full_media_type) != "image" {
+                        return document_block(
+                            &full_media_type,
+                            file.filename.as_deref(),
+                            data.clone(),
+                            file.provider_options.as_ref(),
+                            document_counter,
+                        );
+                    }
                     Ok(json!({
                         "image": {
                             "format": amazon_bedrock_image_format(&full_media_type)?,
@@ -4403,6 +4410,74 @@ mod tests {
         assert_eq!(
             converted.messages[2]["content"][0]["toolResult"]["toolUseId"],
             json!("toolcalli")
+        );
+    }
+
+    fn tool_result_file_prompt(media_type: &str) -> Vec<LanguageModelMessage> {
+        vec![LanguageModelMessage::Tool(LanguageModelToolMessage::new(
+            vec![LanguageModelToolContentPart::ToolResult(
+                LanguageModelToolResultPart::new(
+                    "call-123",
+                    "image-generator",
+                    LanguageModelToolResultOutput::content(vec![
+                        LanguageModelToolResultContentPart::File(LanguageModelFilePart::new(
+                            FileData::Data {
+                                data: FileDataContent::Base64("base64data".to_string()),
+                            },
+                            media_type,
+                        )),
+                    ]),
+                ),
+            )],
+        ))]
+    }
+
+    #[test]
+    fn amazon_bedrock_tool_result_unsupported_image_format_errors() {
+        // Upstream packages-amazon-bedrock-0324: image/avif is a top-level image
+        // type that Bedrock does not support, so conversion must reject it with the
+        // image-specific error message.
+        let prompt = tool_result_file_prompt("image/avif");
+        let error = convert_to_amazon_bedrock_chat_messages(&prompt, false)
+            .expect_err("unsupported image format must fail");
+        assert_eq!(
+            error.message(),
+            "Unsupported image mime type: image/avif, expected one of: image/jpeg, image/png, image/gif, image/webp"
+        );
+    }
+
+    #[test]
+    fn amazon_bedrock_tool_result_unsupported_file_mime_errors() {
+        // Upstream packages-amazon-bedrock-0325: a non-image top-level media type is
+        // routed to the document branch, which rejects unknown document mime types
+        // with the file-specific error message.
+        let prompt = tool_result_file_prompt("unsupported/mime-type");
+        let error = convert_to_amazon_bedrock_chat_messages(&prompt, false)
+            .expect_err("unsupported file mime must fail");
+        assert_eq!(
+            error.message(),
+            "Unsupported file mime type: unsupported/mime-type, expected one of: application/pdf, text/csv, application/msword, application/vnd.openxmlformats-officedocument.wordprocessingml.document, application/vnd.ms-excel, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, text/html, text/plain, text/markdown"
+        );
+    }
+
+    #[test]
+    fn amazon_bedrock_tool_result_json_output_falls_back_to_stringified_text() {
+        // Upstream packages-amazon-bedrock-0326: a JSON tool-result output is
+        // serialized to a single stringified text block in the Bedrock toolResult.
+        let prompt = vec![LanguageModelMessage::Tool(LanguageModelToolMessage::new(
+            vec![LanguageModelToolContentPart::ToolResult(
+                LanguageModelToolResultPart::new(
+                    "call-123",
+                    "calculator",
+                    LanguageModelToolResultOutput::json(json!({ "value": 42 })),
+                ),
+            )],
+        ))];
+        let converted =
+            convert_to_amazon_bedrock_chat_messages(&prompt, false).expect("converted prompt");
+        assert_eq!(
+            converted.messages[0]["content"][0]["toolResult"]["content"],
+            json!([{ "text": "{\"value\":42}" }])
         );
     }
 
