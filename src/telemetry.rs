@@ -112,6 +112,8 @@ type TelemetryCallback = Arc<dyn Fn(TelemetryEvent) + Send + Sync>;
 type TelemetryDiagnosticCallback = Arc<dyn Fn(TelemetryDiagnosticMessage) + Send + Sync>;
 type TelemetryExecuteToolCallback =
     Arc<dyn Fn(TelemetryExecuteToolOptions) -> JsonValue + Send + Sync>;
+type TelemetryExecuteLanguageModelCallCallback =
+    Arc<dyn Fn(TelemetryExecuteLanguageModelCallOptions) -> JsonValue + Send + Sync>;
 
 /// Options passed to telemetry execute-tool wrappers.
 pub struct TelemetryExecuteToolOptions {
@@ -130,11 +132,27 @@ impl fmt::Debug for TelemetryExecuteToolOptions {
     }
 }
 
+/// Options passed to telemetry execute-language-model-call wrappers.
+pub struct TelemetryExecuteLanguageModelCallOptions {
+    pub call_id: String,
+    pub execute: Box<dyn FnOnce() -> JsonValue + Send>,
+}
+
+impl fmt::Debug for TelemetryExecuteLanguageModelCallOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TelemetryExecuteLanguageModelCallOptions")
+            .field("call_id", &self.call_id)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Custom telemetry integration callbacks.
 #[derive(Clone, Default)]
 pub struct TelemetryIntegration {
     callbacks: BTreeMap<TelemetryEventKind, TelemetryCallback>,
     execute_tool: Option<TelemetryExecuteToolCallback>,
+    execute_language_model_call: Option<TelemetryExecuteLanguageModelCallCallback>,
 }
 
 impl fmt::Debug for TelemetryIntegration {
@@ -143,6 +161,10 @@ impl fmt::Debug for TelemetryIntegration {
             .debug_struct("TelemetryIntegration")
             .field("callbacks", &self.callbacks.keys().collect::<Vec<_>>())
             .field("execute_tool", &self.execute_tool.is_some())
+            .field(
+                "execute_language_model_call",
+                &self.execute_language_model_call.is_some(),
+            )
             .finish()
     }
 }
@@ -172,12 +194,28 @@ impl TelemetryIntegration {
         self
     }
 
+    /// Registers a language-model-call execution wrapper.
+    pub fn with_execute_language_model_call(
+        mut self,
+        execute_language_model_call: impl Fn(TelemetryExecuteLanguageModelCallOptions) -> JsonValue
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.execute_language_model_call = Some(Arc::new(execute_language_model_call));
+        self
+    }
+
     fn callback(&self, kind: TelemetryEventKind) -> Option<TelemetryCallback> {
         self.callbacks.get(&kind).cloned()
     }
 
     fn execute_tool(&self) -> Option<TelemetryExecuteToolCallback> {
         self.execute_tool.clone()
+    }
+
+    fn execute_language_model_call(&self) -> Option<TelemetryExecuteLanguageModelCallCallback> {
+        self.execute_language_model_call.clone()
     }
 }
 
@@ -1013,6 +1051,15 @@ impl TelemetryDispatcher {
                 .any(|integration| integration.execute_tool.is_some())
     }
 
+    /// Returns true when at least one execute-language-model-call wrapper is available.
+    pub fn has_execute_language_model_call(&self) -> bool {
+        self.is_enabled
+            && self
+                .integrations
+                .iter()
+                .any(|integration| integration.execute_language_model_call.is_some())
+    }
+
     /// Dispatches a lifecycle event.
     pub fn dispatch(&self, kind: TelemetryEventKind, event: impl Serialize) {
         if !self.is_enabled {
@@ -1124,6 +1171,37 @@ impl TelemetryDispatcher {
                 wrapper(TelemetryExecuteToolOptions {
                     call_id,
                     tool_call_id,
+                    execute: inner_execute,
+                })
+            });
+        }
+
+        execute()
+    }
+
+    /// Runs a language-model-call execute function through the configured telemetry wrappers.
+    pub fn execute_language_model_call(
+        &self,
+        call_id: impl Into<String>,
+        execute: impl FnOnce() -> JsonValue + Send + 'static,
+    ) -> JsonValue {
+        if !self.is_enabled {
+            return execute();
+        }
+
+        let call_id = call_id.into();
+        let mut execute: Box<dyn FnOnce() -> JsonValue + Send> = Box::new(execute);
+
+        for wrapper in self
+            .integrations
+            .iter()
+            .filter_map(|integration| integration.execute_language_model_call())
+        {
+            let inner_execute = execute;
+            let call_id = call_id.clone();
+            execute = Box::new(move || {
+                wrapper(TelemetryExecuteLanguageModelCallOptions {
+                    call_id,
                     execute: inner_execute,
                 })
             });
@@ -2174,6 +2252,123 @@ mod tests {
             ]
         );
         reset_telemetry_state_for_tests();
+    }
+
+    #[test]
+    fn telemetry_dispatcher_returns_noop_listeners_without_integrations() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+        let dispatcher = create_telemetry_dispatcher(Some(TelemetryOptions::new()));
+
+        // No execute wrappers are available without integrations.
+        assert!(!dispatcher.has_execute_tool());
+        assert!(!dispatcher.has_execute_language_model_call());
+
+        // Lifecycle dispatch and the execute wrappers are no-ops that simply
+        // run the underlying work without observing any integration callbacks.
+        dispatcher.on_start(json!({}));
+        dispatcher.on_error(json!({}));
+        assert_eq!(
+            dispatcher.execute_tool("call-1", "tool-1", || json!("tool-result")),
+            json!("tool-result")
+        );
+        assert_eq!(
+            dispatcher.execute_language_model_call("call-1", || json!("lm-result")),
+            json!("lm-result")
+        );
+    }
+
+    #[test]
+    fn telemetry_dispatcher_uses_only_local_integration_array_ignoring_global() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+        let global_events = recorded_events();
+        let captured_global = Arc::clone(&global_events);
+        register_telemetry_integration(TelemetryIntegration::new().with_callback(
+            TelemetryEventKind::OnStart,
+            move |event| {
+                captured_global.lock().expect("event lock").push(event);
+            },
+        ));
+
+        let local_events = recorded_events();
+        let captured_local_one = Arc::clone(&local_events);
+        let captured_local_two = Arc::clone(&local_events);
+        let dispatcher =
+            create_telemetry_dispatcher(Some(TelemetryOptions::new().with_integrations([
+                TelemetryIntegration::new().with_callback(
+                    TelemetryEventKind::OnStart,
+                    move |event| {
+                        captured_local_one.lock().expect("event lock").push(event);
+                    },
+                ),
+                TelemetryIntegration::new().with_callback(
+                    TelemetryEventKind::OnStart,
+                    move |event| {
+                        captured_local_two.lock().expect("event lock").push(event);
+                    },
+                ),
+            ])));
+
+        dispatcher.on_start(json!({ "callId": "local" }));
+
+        // Global integration is ignored entirely.
+        assert!(global_events.lock().expect("event lock").is_empty());
+        // Both local integrations receive the event.
+        let local = local_events.lock().expect("event lock");
+        assert_eq!(local.len(), 2);
+        assert!(
+            local
+                .iter()
+                .all(|event| event.event == json!({ "callId": "local" }))
+        );
+    }
+
+    #[test]
+    fn telemetry_dispatcher_returns_no_execute_language_model_call_wrapper_when_unimplemented() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+        let dispatcher =
+            create_telemetry_dispatcher(Some(TelemetryOptions::new().with_integration(
+                TelemetryIntegration::new().with_callback(TelemetryEventKind::OnStart, |_| {}),
+            )));
+
+        assert!(!dispatcher.has_execute_language_model_call());
+        assert_eq!(
+            dispatcher.execute_language_model_call("call-1", || json!("direct")),
+            json!("direct")
+        );
+    }
+
+    #[test]
+    fn telemetry_dispatcher_wraps_execute_language_model_call_with_a_single_integration() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+        let wrapper_calls = Arc::new(AtomicUsize::new(0));
+        let captured_calls = Arc::clone(&wrapper_calls);
+        let dispatcher =
+            create_telemetry_dispatcher(Some(TelemetryOptions::new().with_integration(
+                TelemetryIntegration::new().with_execute_language_model_call(move |options| {
+                    captured_calls.fetch_add(1, Ordering::Relaxed);
+                    let inner = (options.execute)();
+                    json!(format!(
+                        "wrapped:{}",
+                        inner.as_str().expect("inner result is a string")
+                    ))
+                }),
+            )));
+
+        assert!(dispatcher.has_execute_language_model_call());
+        let executed = Arc::new(AtomicUsize::new(0));
+        let captured_executed = Arc::clone(&executed);
+        let result = dispatcher.execute_language_model_call("call-1", move || {
+            captured_executed.fetch_add(1, Ordering::Relaxed);
+            json!("result")
+        });
+
+        assert_eq!(result, json!("wrapped:result"));
+        assert_eq!(wrapper_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(executed.load(Ordering::Relaxed), 1);
     }
 
     #[test]

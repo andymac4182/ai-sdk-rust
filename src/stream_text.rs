@@ -56,7 +56,9 @@ use crate::prompt::{
     download_prompt_assets, get_total_timeout_ms, prompt_has_url_files,
     standardize_and_convert_to_language_model_prompt,
 };
-use crate::provider::{ApiCallError, InvalidPromptError, ProviderMetadata, ProviderOptions};
+use crate::provider::{
+    ApiCallError, InvalidPromptError, ProviderMetadata, ProviderOptions, get_error_message,
+};
 use crate::provider_utils::{
     ExperimentalSandbox, Tool, convert_to_base64, prepare_tools_with_context,
     with_user_agent_suffix,
@@ -4563,6 +4565,317 @@ fn is_stream_text_chunk_callback_part(part: &TextStreamPart) -> bool {
             | TextStreamPart::Raw(_)
             | TextStreamPart::Abort(_)
     )
+}
+
+/// Dynamic-tool resolution input mirroring the upstream `tools` set used by
+/// `toUIMessageChunk`.
+///
+/// Upstream `isDynamic` consults the `tools` object: a `dynamic` tool resolves
+/// to `Some(true)`, a static tool resolves to `None`, and a tool that is not in
+/// the set falls back to the part's own `dynamic` flag.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToUiMessageChunkToolKind {
+    /// A statically-typed tool: upstream `isDynamic` returns `undefined`.
+    Static,
+
+    /// A dynamic tool: upstream `isDynamic` returns `true`.
+    Dynamic,
+}
+
+/// Options controlling [`to_ui_message_chunk`], mirroring upstream
+/// `ToUIMessageChunkOptions`.
+#[derive(Default)]
+pub struct ToUiMessageChunkOptions<'a> {
+    /// Tool kinds keyed by tool name, used to resolve dynamic tool calls the
+    /// same way upstream consults its `tools` set.
+    pub tools: Option<&'a BTreeMap<String, ToUiMessageChunkToolKind>>,
+
+    /// Whether reasoning parts should be emitted. Defaults to `true`.
+    pub send_reasoning: bool,
+
+    /// Whether source parts should be emitted. Defaults to `false`.
+    pub send_sources: bool,
+
+    /// Whether the stream-start part should be emitted. Defaults to `true`.
+    pub send_start: bool,
+
+    /// Whether the stream-finish part should be emitted. Defaults to `true`.
+    pub send_finish: bool,
+
+    /// Maps a stream error into UI-safe text, mirroring upstream `onError`.
+    pub on_error: Option<&'a dyn Fn(&JsonValue) -> String>,
+
+    /// Static metadata merged into start/finish chunks.
+    pub message_metadata: Option<JsonValue>,
+
+    /// Response message id injected into the start chunk.
+    pub response_message_id: Option<String>,
+}
+
+impl<'a> ToUiMessageChunkOptions<'a> {
+    /// Creates options with the upstream defaults (`sendReasoning`/`sendStart`/
+    /// `sendFinish` enabled, `sendSources` disabled).
+    pub fn new() -> Self {
+        Self {
+            tools: None,
+            send_reasoning: true,
+            send_sources: false,
+            send_start: true,
+            send_finish: true,
+            on_error: None,
+            message_metadata: None,
+            response_message_id: None,
+        }
+    }
+}
+
+fn to_ui_message_chunk_error_text(
+    error: &JsonValue,
+    options: &ToUiMessageChunkOptions<'_>,
+) -> String {
+    if let Some(on_error) = options.on_error {
+        return on_error(error);
+    }
+
+    match error {
+        JsonValue::String(text) => text.clone(),
+        other => get_error_message(Some(other as &dyn fmt::Display)),
+    }
+}
+
+fn to_ui_message_chunk_is_dynamic(
+    options: &ToUiMessageChunkOptions<'_>,
+    tool_name: &str,
+    part_dynamic: Option<bool>,
+) -> Option<bool> {
+    match options.tools.and_then(|tools| tools.get(tool_name)) {
+        None => part_dynamic,
+        Some(ToUiMessageChunkToolKind::Dynamic) => Some(true),
+        Some(ToUiMessageChunkToolKind::Static) => None,
+    }
+}
+
+/// Converts a single high-level [`TextStreamPart`] into a [`UiMessageChunk`],
+/// mirroring upstream `toUIMessageChunk`.
+///
+/// Returns `None` for stream parts that do not produce UI message chunks
+/// (`tool-input-end`, `raw`, and suppressed reasoning/source/start/finish
+/// parts). Unlike the upstream `default` branch that throws for an unknown
+/// chunk type, the Rust [`TextStreamPart`] enum is exhaustive so an unknown
+/// part type is unrepresentable.
+pub fn to_ui_message_chunk(
+    part: &TextStreamPart,
+    options: &ToUiMessageChunkOptions<'_>,
+) -> Option<UiMessageChunk> {
+    match part {
+        TextStreamPart::TextStart(part) => Some(UiMessageChunk::TextStart {
+            id: part.id.clone(),
+            provider_metadata: part.provider_metadata.clone(),
+        }),
+        TextStreamPart::TextDelta(part) => Some(UiMessageChunk::TextDelta {
+            id: part.id.clone(),
+            delta: part.text.clone(),
+            provider_metadata: part.provider_metadata.clone(),
+        }),
+        TextStreamPart::TextEnd(part) => Some(UiMessageChunk::TextEnd {
+            id: part.id.clone(),
+            provider_metadata: part.provider_metadata.clone(),
+        }),
+        TextStreamPart::ReasoningStart(part) => {
+            if !options.send_reasoning {
+                return None;
+            }
+            Some(UiMessageChunk::ReasoningStart {
+                id: part.id.clone(),
+                provider_metadata: part.provider_metadata.clone(),
+            })
+        }
+        TextStreamPart::ReasoningDelta(part) => {
+            if !options.send_reasoning {
+                return None;
+            }
+            Some(UiMessageChunk::ReasoningDelta {
+                id: part.id.clone(),
+                delta: part.text.clone(),
+                provider_metadata: part.provider_metadata.clone(),
+            })
+        }
+        TextStreamPart::ReasoningEnd(part) => {
+            if !options.send_reasoning {
+                return None;
+            }
+            Some(UiMessageChunk::ReasoningEnd {
+                id: part.id.clone(),
+                provider_metadata: part.provider_metadata.clone(),
+            })
+        }
+        TextStreamPart::File(part) => Some(UiMessageChunk::File {
+            media_type: part.file.media_type.clone(),
+            url: ui_message_file_url(&part.file.media_type, &part.file.data),
+            provider_metadata: part.provider_metadata.clone(),
+        }),
+        TextStreamPart::ReasoningFile(part) => {
+            if !options.send_reasoning {
+                return None;
+            }
+            Some(UiMessageChunk::ReasoningFile {
+                media_type: part.file.media_type.clone(),
+                url: ui_message_file_url(&part.file.media_type, &part.file.data),
+                provider_metadata: part.provider_metadata.clone(),
+            })
+        }
+        TextStreamPart::Source(part) => {
+            if !options.send_sources {
+                return None;
+            }
+            match part {
+                LanguageModelSource::Url(source) => Some(UiMessageChunk::SourceUrl {
+                    source_id: source.id.clone(),
+                    url: source.url.clone(),
+                    title: source.title.clone(),
+                    provider_metadata: source.provider_metadata.clone(),
+                }),
+                LanguageModelSource::Document(source) => Some(UiMessageChunk::SourceDocument {
+                    source_id: source.id.clone(),
+                    media_type: source.media_type.clone(),
+                    title: source.title.clone(),
+                    filename: source.filename.clone(),
+                    provider_metadata: source.provider_metadata.clone(),
+                }),
+            }
+        }
+        TextStreamPart::Custom(part) => Some(UiMessageChunk::Custom {
+            kind: part.kind.clone(),
+            provider_metadata: part.provider_metadata.clone(),
+        }),
+        TextStreamPart::ToolInputStart(part) => {
+            let dynamic = to_ui_message_chunk_is_dynamic(options, &part.tool_name, part.dynamic);
+            Some(UiMessageChunk::ToolInputStart {
+                tool_call_id: part.id.clone(),
+                tool_name: part.tool_name.clone(),
+                provider_executed: part.provider_executed,
+                provider_metadata: part.provider_metadata.clone(),
+                dynamic,
+                title: part.title.clone(),
+            })
+        }
+        TextStreamPart::ToolInputDelta(part) => Some(UiMessageChunk::ToolInputDelta {
+            tool_call_id: part.id.clone(),
+            input_text_delta: part.delta.clone(),
+        }),
+        TextStreamPart::ToolCall(part) => {
+            let dynamic = to_ui_message_chunk_is_dynamic(options, &part.tool_name, part.dynamic);
+            if part.invalid == Some(true) {
+                let error = part
+                    .error
+                    .as_ref()
+                    .map(|message| JsonValue::String(message.clone()))
+                    .unwrap_or(JsonValue::Null);
+                Some(UiMessageChunk::ToolInputError {
+                    tool_call_id: part.tool_call_id.clone(),
+                    tool_name: part.tool_name.clone(),
+                    input: part.input.clone(),
+                    error_text: to_ui_message_chunk_error_text(&error, options),
+                    provider_executed: part.provider_executed,
+                    provider_metadata: part.provider_metadata.clone(),
+                    tool_metadata: part.tool_metadata.clone(),
+                    dynamic,
+                    title: part.title.clone(),
+                })
+            } else {
+                Some(UiMessageChunk::ToolInputAvailable {
+                    tool_call_id: part.tool_call_id.clone(),
+                    tool_name: part.tool_name.clone(),
+                    input: part.input.clone(),
+                    provider_executed: part.provider_executed,
+                    provider_metadata: part.provider_metadata.clone(),
+                    tool_metadata: part.tool_metadata.clone(),
+                    dynamic,
+                    title: part.title.clone(),
+                })
+            }
+        }
+        TextStreamPart::ToolApprovalRequest(part) => Some(UiMessageChunk::ToolApprovalRequest {
+            approval_id: part.approval_id.clone(),
+            tool_call_id: part.tool_call_id.clone(),
+            is_automatic: part.is_automatic,
+            provider_metadata: None,
+        }),
+        TextStreamPart::ToolApprovalResponse(part) => Some(UiMessageChunk::ToolApprovalResponse {
+            approval_id: part.approval_id.clone(),
+            approved: part.approved,
+            reason: part.reason.clone(),
+            provider_executed: part.provider_executed,
+        }),
+        TextStreamPart::ToolResult(part) => {
+            let dynamic = to_ui_message_chunk_is_dynamic(options, &part.tool_name, part.dynamic);
+            if part.is_error == Some(true) {
+                // Upstream models provider errors as a dedicated `tool-error`
+                // part: when the tool is provider-executed the error value is
+                // used verbatim (string) or JSON-stringified, otherwise it is
+                // routed through `onError`.
+                let error_text = if part.provider_executed == Some(true) {
+                    match &part.output {
+                        JsonValue::String(text) => text.clone(),
+                        other => other.to_string(),
+                    }
+                } else {
+                    to_ui_message_chunk_error_text(&part.output, options)
+                };
+                Some(UiMessageChunk::ToolOutputError {
+                    tool_call_id: part.tool_call_id.clone(),
+                    error_text,
+                    provider_executed: part.provider_executed,
+                    provider_metadata: part.provider_metadata.clone(),
+                    tool_metadata: part.tool_metadata.clone(),
+                    dynamic,
+                })
+            } else {
+                Some(UiMessageChunk::ToolOutputAvailable {
+                    tool_call_id: part.tool_call_id.clone(),
+                    output: part.output.clone(),
+                    provider_executed: part.provider_executed,
+                    provider_metadata: part.provider_metadata.clone(),
+                    tool_metadata: part.tool_metadata.clone(),
+                    preliminary: part.preliminary,
+                    dynamic,
+                })
+            }
+        }
+        TextStreamPart::ToolOutputDenied(part) => Some(UiMessageChunk::ToolOutputDenied {
+            tool_call_id: part.tool_call_id.clone(),
+            tool_name: None,
+            provider_executed: None,
+            dynamic: None,
+        }),
+        TextStreamPart::Error(part) => Some(UiMessageChunk::Error {
+            error_text: to_ui_message_chunk_error_text(&part.error, options),
+        }),
+        TextStreamPart::StartStep(_) => Some(UiMessageChunk::StartStep),
+        TextStreamPart::FinishStep(_) => Some(UiMessageChunk::FinishStep),
+        TextStreamPart::Start(_) => {
+            if !options.send_start {
+                return None;
+            }
+            Some(UiMessageChunk::Start {
+                message_id: options.response_message_id.clone(),
+                message_metadata: options.message_metadata.clone(),
+            })
+        }
+        TextStreamPart::Finish(part) => {
+            if !options.send_finish {
+                return None;
+            }
+            Some(UiMessageChunk::Finish {
+                finish_reason: Some(part.finish_reason.clone()),
+                message_metadata: options.message_metadata.clone(),
+            })
+        }
+        TextStreamPart::Abort(part) => Some(UiMessageChunk::Abort {
+            reason: part.reason.clone(),
+        }),
+        TextStreamPart::ToolInputEnd(_) | TextStreamPart::Raw(_) => None,
+    }
 }
 
 fn ui_message_error_text(error: &JsonValue, options: &StreamTextUiMessageStreamOptions) -> String {
@@ -15548,6 +15861,103 @@ mod tests {
         assert_eq!(result.tool_results[0].output["forecast"], "sunny");
     }
 
+    /// Maps packages/ai stream-text.test.ts row
+    /// `should complete tool loop with isLoopFinished()` — with an
+    /// `is_loop_finished()` stop condition the loop runs the tool-call step and
+    /// then the follow-up text step, finishing with the final-step text.
+    #[test]
+    fn stream_text_completes_tool_loop_with_is_loop_finished_stop_condition() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-0")
+                        .with_model_id("mock-model-id")
+                        .with_timestamp(time::OffsetDateTime::UNIX_EPOCH),
+                ),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": "value" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Done!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+        let input_schema = json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("tool1", input_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("result1")) }),
+                )
+                .with_max_steps(10)
+                .with_stop_condition(crate::generate_text::is_loop_finished()),
+        ));
+
+        assert_eq!(result.text, "Done!");
+        assert_eq!(result.steps.len(), 2);
+        assert_eq!(model.stream_calls().len(), 2);
+    }
+
+    /// Maps packages/ai stream-text.test.ts `options.headers` row
+    /// `should set headers` — request headers configured on the call options are
+    /// forwarded to the provider `doStream` call.
+    #[test]
+    fn stream_text_sets_request_headers_on_provider_call() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", ", ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let mut options = StreamTextOptions::new(&model, vec![user_message("test-input")]);
+        options.call_options.headers = Some(Headers::from_iter([(
+            "custom-request-header".to_string(),
+            "request-header-value".to_string(),
+        )]));
+
+        let result = poll_ready(stream_text(options));
+
+        assert_eq!(result.text_stream, vec!["Hello", ", ", "world!"]);
+        let stream_calls = model.stream_calls();
+        assert_eq!(stream_calls.len(), 1);
+        let headers = stream_calls[0]
+            .headers
+            .as_ref()
+            .expect("headers forwarded to provider call");
+        assert_eq!(
+            headers.get("custom-request-header").map(String::as_str),
+            Some("request-header-value")
+        );
+    }
+
     #[test]
     fn stream_text_honors_stop_condition_after_streamed_tool_call() {
         let model = MockLanguageModel::new().with_stream_results([
@@ -17923,6 +18333,119 @@ mod tests {
         assert_eq!(end.tool_output.output, json!("test-result"));
     }
 
+    /// Maps packages/ai stream-text.test.ts `tool execution errors` row
+    /// `should include tool error part in the full stream` — a local tool whose
+    /// execution fails surfaces an error tool-result part in the high-level
+    /// stream parts (carrying `is_error` and the failure message).
+    #[test]
+    fn stream_text_includes_tool_error_part_in_full_stream() {
+        let model = execute_tools_single_call_model("tool1");
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_tool(
+                Tool::new("tool1", execute_tools_value_schema()).with_execute(
+                    |_input, _options| async move {
+                        Err::<JsonValue, ToolExecutionError>(ToolExecutionError::new("test error"))
+                    },
+                ),
+            ),
+        ));
+
+        let error_result = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::ToolResult(tool_result) if tool_result.is_error == Some(true) => {
+                    Some(tool_result)
+                }
+                _ => None,
+            })
+            .expect("error tool-result part present in full stream");
+
+        assert_eq!(error_result.tool_call_id, "call-1");
+        assert_eq!(error_result.tool_name, "tool1");
+        assert!(
+            error_result
+                .output
+                .as_str()
+                .expect("error output is a string")
+                .contains("test error")
+        );
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].is_error, Some(true));
+    }
+
+    /// Maps packages/ai stream-text.test.ts `tool execution errors` row
+    /// `should include error result in response messages` — the failed tool
+    /// result is recorded in the accumulated response messages as a tool message
+    /// with an errored tool-result content part.
+    #[test]
+    fn stream_text_includes_tool_error_result_in_response_messages() {
+        let model = execute_tools_single_call_model("tool1");
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_tool(
+                Tool::new("tool1", execute_tools_value_schema()).with_execute(
+                    |_input, _options| async move {
+                        Err::<JsonValue, ToolExecutionError>(ToolExecutionError::new("test error"))
+                    },
+                ),
+            ),
+        ));
+
+        let tool_message = result
+            .response_messages
+            .iter()
+            .find_map(|message| match message {
+                LanguageModelMessage::Tool(tool_message) => Some(tool_message),
+                _ => None,
+            })
+            .expect("tool response message present");
+
+        let tool_result = tool_message
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelToolContentPart::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .expect("tool-result content part present");
+
+        assert_eq!(tool_result.tool_call_id, "call-1");
+        assert_eq!(tool_result.tool_name, "tool1");
+    }
+
+    /// Maps packages/ai stream-text.test.ts `tool execution errors` row
+    /// `should add tool-error parts to ui message stream` — a failed local tool
+    /// emits a `tool-output-error` chunk in the UI message stream.
+    #[test]
+    fn stream_text_adds_tool_error_parts_to_ui_message_stream() {
+        let model = execute_tools_single_call_model("tool1");
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_tool(
+                Tool::new("tool1", execute_tools_value_schema()).with_execute(
+                    |_input, _options| async move {
+                        Err::<JsonValue, ToolExecutionError>(ToolExecutionError::new("test error"))
+                    },
+                ),
+            ),
+        ));
+
+        let chunks = result.to_ui_message_stream();
+        let error_chunk = chunks
+            .iter()
+            .find_map(|chunk| match chunk {
+                UiMessageChunk::ToolOutputError {
+                    tool_call_id,
+                    error_text,
+                    ..
+                } => Some((tool_call_id, error_text)),
+                _ => None,
+            })
+            .expect("tool-output-error chunk present in ui message stream");
+
+        assert_eq!(error_chunk.0, "call-1");
+        assert!(error_chunk.1.contains("test error"));
+    }
+
     #[test]
     fn stream_text_execute_tools_from_stream_reports_success_to_execution_end() {
         let model =
@@ -19398,5 +19921,753 @@ mod tests {
             .expect("tool-input-available chunk present");
         assert_eq!(available["toolName"], json!("tool1"));
         assert_eq!(available["input"], json!({ "value": "value" }));
+    }
+
+    // Upstream parity: packages/ai/src/ui-message-stream/to-ui-message-chunk.test.ts
+    fn to_ui_message_chunk_provider_metadata() -> ProviderMetadata {
+        ProviderMetadata::from([(
+            "testProvider".to_string(),
+            Map::from_iter([("signature".to_string(), json!("sig-1"))]),
+        )])
+    }
+
+    fn to_ui_message_chunk_value(
+        part: &TextStreamPart,
+        options: &ToUiMessageChunkOptions<'_>,
+    ) -> Option<JsonValue> {
+        to_ui_message_chunk(part, options)
+            .map(|chunk| serde_json::to_value(chunk).expect("chunk serializes"))
+    }
+
+    fn to_ui_message_chunk_test_file() -> LanguageModelFile {
+        LanguageModelFile::new(
+            "text/plain",
+            LanguageModelFileData::Data {
+                data: FileDataContent::Base64("SGVsbG8=".to_string()),
+            },
+        )
+    }
+
+    #[test]
+    fn to_ui_message_chunk_maps_text_parts_and_preserves_provider_metadata() {
+        let provider_metadata = to_ui_message_chunk_provider_metadata();
+        let options = ToUiMessageChunkOptions::new();
+
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::TextStart(
+                    LanguageModelTextStart::new("text-1")
+                        .with_provider_metadata(provider_metadata.clone()),
+                ),
+                &options,
+            ),
+            Some(json!({
+                "type": "text-start",
+                "id": "text-1",
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } },
+            })),
+        );
+
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::TextDelta(
+                    TextStreamTextDeltaPart::new("text-1", "hello")
+                        .with_provider_metadata(provider_metadata.clone()),
+                ),
+                &options,
+            ),
+            Some(json!({
+                "type": "text-delta",
+                "id": "text-1",
+                "delta": "hello",
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } },
+            })),
+        );
+
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::TextEnd(
+                    LanguageModelTextEnd::new("text-1").with_provider_metadata(provider_metadata),
+                ),
+                &options,
+            ),
+            Some(json!({
+                "type": "text-end",
+                "id": "text-1",
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } },
+            })),
+        );
+    }
+
+    #[test]
+    fn to_ui_message_chunk_maps_reasoning_parts_by_default_and_suppresses_when_disabled() {
+        let provider_metadata = to_ui_message_chunk_provider_metadata();
+        let parts = vec![
+            TextStreamPart::ReasoningStart(
+                LanguageModelReasoningStart::new("reasoning-1")
+                    .with_provider_metadata(provider_metadata.clone()),
+            ),
+            TextStreamPart::ReasoningDelta(
+                TextStreamReasoningDeltaPart::new("reasoning-1", "thinking")
+                    .with_provider_metadata(provider_metadata.clone()),
+            ),
+            TextStreamPart::ReasoningEnd(
+                LanguageModelReasoningEnd::new("reasoning-1")
+                    .with_provider_metadata(provider_metadata),
+            ),
+        ];
+
+        let default_options = ToUiMessageChunkOptions::new();
+        let mapped: Vec<Option<JsonValue>> = parts
+            .iter()
+            .map(|part| to_ui_message_chunk_value(part, &default_options))
+            .collect();
+        assert_eq!(
+            mapped,
+            vec![
+                Some(json!({
+                    "type": "reasoning-start",
+                    "id": "reasoning-1",
+                    "providerMetadata": { "testProvider": { "signature": "sig-1" } },
+                })),
+                Some(json!({
+                    "type": "reasoning-delta",
+                    "id": "reasoning-1",
+                    "delta": "thinking",
+                    "providerMetadata": { "testProvider": { "signature": "sig-1" } },
+                })),
+                Some(json!({
+                    "type": "reasoning-end",
+                    "id": "reasoning-1",
+                    "providerMetadata": { "testProvider": { "signature": "sig-1" } },
+                })),
+            ],
+        );
+
+        let disabled = ToUiMessageChunkOptions {
+            send_reasoning: false,
+            ..ToUiMessageChunkOptions::new()
+        };
+        let suppressed: Vec<Option<UiMessageChunk>> = parts
+            .iter()
+            .map(|part| to_ui_message_chunk(part, &disabled))
+            .collect();
+        assert_eq!(suppressed, vec![None, None, None]);
+    }
+
+    #[test]
+    fn to_ui_message_chunk_maps_files_and_suppresses_reasoning_files_when_disabled() {
+        let provider_metadata = to_ui_message_chunk_provider_metadata();
+        let options = ToUiMessageChunkOptions::new();
+
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::File(TextStreamFilePart::new(
+                    to_ui_message_chunk_test_file()
+                        .with_provider_metadata(provider_metadata.clone()),
+                ),),
+                &options,
+            ),
+            Some(json!({
+                "type": "file",
+                "mediaType": "text/plain",
+                "url": "data:text/plain;base64,SGVsbG8=",
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } },
+            })),
+        );
+
+        let reasoning_file_part = TextStreamPart::ReasoningFile(TextStreamReasoningFilePart::new(
+            LanguageModelReasoningFile::new(
+                "text/plain",
+                LanguageModelFileData::Data {
+                    data: FileDataContent::Base64("SGVsbG8=".to_string()),
+                },
+            )
+            .with_provider_metadata(provider_metadata),
+        ));
+
+        assert_eq!(
+            to_ui_message_chunk_value(&reasoning_file_part, &options),
+            Some(json!({
+                "type": "reasoning-file",
+                "mediaType": "text/plain",
+                "url": "data:text/plain;base64,SGVsbG8=",
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } },
+            })),
+        );
+
+        let disabled = ToUiMessageChunkOptions {
+            send_reasoning: false,
+            ..ToUiMessageChunkOptions::new()
+        };
+        assert_eq!(to_ui_message_chunk(&reasoning_file_part, &disabled), None);
+    }
+
+    #[test]
+    fn to_ui_message_chunk_skips_sources_by_default_and_sends_them_when_enabled() {
+        let provider_metadata = to_ui_message_chunk_provider_metadata();
+        let url_source_part = TextStreamPart::Source(LanguageModelSource::Url(
+            LanguageModelUrlSource::new("source-1", "https://example.com")
+                .with_title("Example")
+                .with_provider_metadata(provider_metadata.clone()),
+        ));
+        let document_source_part = TextStreamPart::Source(LanguageModelSource::Document(
+            LanguageModelDocumentSource::new("source-2", "application/pdf", "Document")
+                .with_filename("document.pdf")
+                .with_provider_metadata(provider_metadata),
+        ));
+
+        let default_options = ToUiMessageChunkOptions::new();
+        assert_eq!(
+            to_ui_message_chunk(&url_source_part, &default_options),
+            None
+        );
+        assert_eq!(
+            to_ui_message_chunk(&document_source_part, &default_options),
+            None
+        );
+
+        let with_sources = ToUiMessageChunkOptions {
+            send_sources: true,
+            ..ToUiMessageChunkOptions::new()
+        };
+        assert_eq!(
+            to_ui_message_chunk_value(&url_source_part, &with_sources),
+            Some(json!({
+                "type": "source-url",
+                "sourceId": "source-1",
+                "url": "https://example.com",
+                "title": "Example",
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } },
+            })),
+        );
+        assert_eq!(
+            to_ui_message_chunk_value(&document_source_part, &with_sources),
+            Some(json!({
+                "type": "source-document",
+                "sourceId": "source-2",
+                "mediaType": "application/pdf",
+                "title": "Document",
+                "filename": "document.pdf",
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } },
+            })),
+        );
+    }
+
+    #[test]
+    fn to_ui_message_chunk_maps_custom_and_lifecycle_parts() {
+        let provider_metadata = to_ui_message_chunk_provider_metadata();
+        let default_options = ToUiMessageChunkOptions::new();
+
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::Custom(
+                    LanguageModelCustomContent::new("openai.compaction")
+                        .with_provider_metadata(provider_metadata.clone()),
+                ),
+                &default_options,
+            ),
+            Some(json!({
+                "type": "custom",
+                "kind": "openai.compaction",
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } },
+            })),
+        );
+
+        let start_options = ToUiMessageChunkOptions {
+            message_metadata: Some(json!({ "model": "test-model" })),
+            response_message_id: Some("msg-1".to_string()),
+            ..ToUiMessageChunkOptions::new()
+        };
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::Start(TextStreamStartPart::new()),
+                &start_options,
+            ),
+            Some(json!({
+                "type": "start",
+                "messageId": "msg-1",
+                "messageMetadata": { "model": "test-model" },
+            })),
+        );
+
+        let no_start = ToUiMessageChunkOptions {
+            send_start: false,
+            ..ToUiMessageChunkOptions::new()
+        };
+        assert_eq!(
+            to_ui_message_chunk(
+                &TextStreamPart::Start(TextStreamStartPart::new()),
+                &no_start
+            ),
+            None,
+        );
+
+        let finish_part = TextStreamPart::Finish(TextStreamFinishPart::new(
+            FinishReason::Stop,
+            Some("stop".to_string()),
+            usage(),
+        ));
+        let finish_options = ToUiMessageChunkOptions {
+            message_metadata: Some(json!({ "model": "test-model" })),
+            ..ToUiMessageChunkOptions::new()
+        };
+        assert_eq!(
+            to_ui_message_chunk_value(&finish_part, &finish_options),
+            Some(json!({
+                "type": "finish",
+                "finishReason": "stop",
+                "messageMetadata": { "model": "test-model" },
+            })),
+        );
+
+        let no_finish = ToUiMessageChunkOptions {
+            send_finish: false,
+            ..ToUiMessageChunkOptions::new()
+        };
+        assert_eq!(to_ui_message_chunk(&finish_part, &no_finish), None);
+
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::StartStep(TextStreamStartStepPart::new(
+                    LanguageModelRequest::default(),
+                    Vec::new(),
+                )),
+                &default_options,
+            ),
+            Some(json!({ "type": "start-step" })),
+        );
+
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::FinishStep(TextStreamFinishStepPart::new(
+                    StreamTextResponseMetadata::default(),
+                    usage(),
+                    StreamTextStepPerformance::default(),
+                    FinishReason::Stop,
+                    Some("stop".to_string()),
+                    Some(provider_metadata),
+                )),
+                &default_options,
+            ),
+            Some(json!({ "type": "finish-step" })),
+        );
+
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::Abort(TextStreamAbortPart::with_reason(json!("user"))),
+                &default_options,
+            ),
+            Some(json!({ "type": "abort", "reason": "user" })),
+        );
+    }
+
+    #[test]
+    fn to_ui_message_chunk_maps_tool_input_streaming_parts() {
+        let provider_metadata = to_ui_message_chunk_provider_metadata();
+        let mut tools = BTreeMap::new();
+        tools.insert("dynamicTool".to_string(), ToUiMessageChunkToolKind::Dynamic);
+        let options = ToUiMessageChunkOptions {
+            tools: Some(&tools),
+            ..ToUiMessageChunkOptions::new()
+        };
+
+        // Upstream also threads `toolMetadata` onto tool-input-start; the Rust
+        // `LanguageModelToolInputStart`/`UiMessageChunk::ToolInputStart` model
+        // does not carry tool metadata on this part, so it is not asserted here.
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::ToolInputStart(
+                    LanguageModelToolInputStart::new("call-1", "dynamicTool")
+                        .with_provider_executed(true)
+                        .with_provider_metadata(provider_metadata)
+                        .with_title("Dynamic Tool"),
+                ),
+                &options,
+            ),
+            Some(json!({
+                "type": "tool-input-start",
+                "toolCallId": "call-1",
+                "toolName": "dynamicTool",
+                "providerExecuted": true,
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } },
+                "dynamic": true,
+                "title": "Dynamic Tool",
+            })),
+        );
+
+        // Tool not present in the set: falls back to the part's own dynamic flag.
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::ToolInputStart(
+                    LanguageModelToolInputStart::new("call-2", "providerTool").with_dynamic(true),
+                ),
+                &options,
+            ),
+            Some(json!({
+                "type": "tool-input-start",
+                "toolCallId": "call-2",
+                "toolName": "providerTool",
+                "dynamic": true,
+            })),
+        );
+
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::ToolInputDelta(LanguageModelToolInputDelta::new(
+                    "call-1",
+                    "{\"value\"",
+                )),
+                &ToUiMessageChunkOptions::new(),
+            ),
+            Some(json!({
+                "type": "tool-input-delta",
+                "toolCallId": "call-1",
+                "inputTextDelta": "{\"value\"",
+            })),
+        );
+    }
+
+    #[test]
+    fn to_ui_message_chunk_maps_valid_and_invalid_tool_call_parts() {
+        let provider_metadata = to_ui_message_chunk_provider_metadata();
+        let tool_metadata = Map::from_iter([("clientName".to_string(), json!("test-client"))]);
+        let mut tools = BTreeMap::new();
+        tools.insert("staticTool".to_string(), ToUiMessageChunkToolKind::Static);
+        let options = ToUiMessageChunkOptions {
+            tools: Some(&tools),
+            ..ToUiMessageChunkOptions::new()
+        };
+
+        // staticTool resolves to a non-dynamic tool -> no `dynamic` field.
+        let static_call = GenerateTextToolCall {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "staticTool".to_string(),
+            input: json!({ "value": "input" }),
+            title: Some("Static Tool".to_string()),
+            provider_executed: Some(true),
+            dynamic: None,
+            invalid: None,
+            error: None,
+            provider_metadata: Some(provider_metadata.clone()),
+            tool_metadata: Some(tool_metadata.clone()),
+        };
+        assert_eq!(
+            to_ui_message_chunk_value(&TextStreamPart::ToolCall(static_call), &options),
+            Some(json!({
+                "type": "tool-input-available",
+                "toolCallId": "call-1",
+                "toolName": "staticTool",
+                "input": { "value": "input" },
+                "providerExecuted": true,
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } },
+                "toolMetadata": { "clientName": "test-client" },
+                "title": "Static Tool",
+            })),
+        );
+
+        let runtime_call = GenerateTextToolCall {
+            tool_call_id: "call-2".to_string(),
+            tool_name: "runtimeTool".to_string(),
+            input: json!({ "value": "input" }),
+            title: None,
+            provider_executed: None,
+            dynamic: Some(true),
+            invalid: None,
+            error: None,
+            provider_metadata: None,
+            tool_metadata: None,
+        };
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::ToolCall(runtime_call),
+                &ToUiMessageChunkOptions::new(),
+            ),
+            Some(json!({
+                "type": "tool-input-available",
+                "toolCallId": "call-2",
+                "toolName": "runtimeTool",
+                "input": { "value": "input" },
+                "dynamic": true,
+            })),
+        );
+
+        let handle_error: &dyn Fn(&JsonValue) -> String = &|error| {
+            format!(
+                "handled: {}",
+                error.as_str().expect("error text is a string")
+            )
+        };
+        let invalid_call = GenerateTextToolCall {
+            tool_call_id: "call-3".to_string(),
+            tool_name: "runtimeTool".to_string(),
+            input: json!("{broken"),
+            title: Some("Invalid Tool".to_string()),
+            provider_executed: Some(true),
+            dynamic: Some(true),
+            invalid: Some(true),
+            error: Some("invalid input".to_string()),
+            provider_metadata: Some(provider_metadata),
+            tool_metadata: Some(tool_metadata),
+        };
+        let invalid_options = ToUiMessageChunkOptions {
+            on_error: Some(handle_error),
+            ..ToUiMessageChunkOptions::new()
+        };
+        assert_eq!(
+            to_ui_message_chunk_value(&TextStreamPart::ToolCall(invalid_call), &invalid_options),
+            Some(json!({
+                "type": "tool-input-error",
+                "toolCallId": "call-3",
+                "toolName": "runtimeTool",
+                "input": "{broken",
+                "providerExecuted": true,
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } },
+                "toolMetadata": { "clientName": "test-client" },
+                "dynamic": true,
+                "errorText": "handled: invalid input",
+                "title": "Invalid Tool",
+            })),
+        );
+    }
+
+    #[test]
+    fn to_ui_message_chunk_maps_tool_result_error_denial_and_approval_parts() {
+        let provider_metadata = to_ui_message_chunk_provider_metadata();
+        let tool_metadata = Map::from_iter([("clientName".to_string(), json!("test-client"))]);
+
+        let result_part = GenerateTextToolResult {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "dynamicTool".to_string(),
+            input: json!({ "value": "input" }),
+            output: json!({ "value": "output" }),
+            title: None,
+            is_error: None,
+            provider_executed: Some(true),
+            dynamic: Some(true),
+            preliminary: Some(true),
+            provider_metadata: Some(provider_metadata.clone()),
+            tool_metadata: Some(tool_metadata.clone()),
+        };
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::ToolResult(result_part),
+                &ToUiMessageChunkOptions::new(),
+            ),
+            Some(json!({
+                "type": "tool-output-available",
+                "toolCallId": "call-1",
+                "output": { "value": "output" },
+                "providerExecuted": true,
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } },
+                "toolMetadata": { "clientName": "test-client" },
+                "preliminary": true,
+                "dynamic": true,
+            })),
+        );
+
+        // Provider-executed error: JSON-stringified, onError must NOT be used.
+        let unused_on_error: &dyn Fn(&JsonValue) -> String =
+            &|_| "should not be used for provider-executed errors".to_string();
+        let provider_error = GenerateTextToolResult {
+            tool_call_id: "call-2".to_string(),
+            tool_name: "dynamicTool".to_string(),
+            input: json!({ "value": "input" }),
+            output: json!({ "code": "provider-error" }),
+            title: None,
+            is_error: Some(true),
+            provider_executed: Some(true),
+            dynamic: Some(true),
+            preliminary: None,
+            provider_metadata: Some(provider_metadata),
+            tool_metadata: Some(tool_metadata),
+        };
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::ToolResult(provider_error),
+                &ToUiMessageChunkOptions {
+                    on_error: Some(unused_on_error),
+                    ..ToUiMessageChunkOptions::new()
+                },
+            ),
+            Some(json!({
+                "type": "tool-output-error",
+                "toolCallId": "call-2",
+                "errorText": "{\"code\":\"provider-error\"}",
+                "providerExecuted": true,
+                "providerMetadata": { "testProvider": { "signature": "sig-1" } },
+                "toolMetadata": { "clientName": "test-client" },
+                "dynamic": true,
+            })),
+        );
+
+        // Provider-executed string error: used verbatim.
+        let string_error = GenerateTextToolResult {
+            tool_call_id: "call-string-error".to_string(),
+            tool_name: "dynamicTool".to_string(),
+            input: json!({ "value": "input" }),
+            output: json!("provider string error"),
+            title: None,
+            is_error: Some(true),
+            provider_executed: Some(true),
+            dynamic: Some(true),
+            preliminary: None,
+            provider_metadata: None,
+            tool_metadata: None,
+        };
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::ToolResult(string_error),
+                &ToUiMessageChunkOptions::new(),
+            ),
+            Some(json!({
+                "type": "tool-output-error",
+                "toolCallId": "call-string-error",
+                "errorText": "provider string error",
+                "providerExecuted": true,
+                "dynamic": true,
+            })),
+        );
+
+        // Non-provider-executed error: routed through onError.
+        let handle_error: &dyn Fn(&JsonValue) -> String = &|error| {
+            format!(
+                "handled: {}",
+                error.as_str().expect("error text is a string")
+            )
+        };
+        let local_error = GenerateTextToolResult {
+            tool_call_id: "call-3".to_string(),
+            tool_name: "staticTool".to_string(),
+            input: json!({ "value": "input" }),
+            output: json!("tool failed"),
+            title: None,
+            is_error: Some(true),
+            provider_executed: None,
+            dynamic: None,
+            preliminary: None,
+            provider_metadata: None,
+            tool_metadata: None,
+        };
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::ToolResult(local_error),
+                &ToUiMessageChunkOptions {
+                    on_error: Some(handle_error),
+                    ..ToUiMessageChunkOptions::new()
+                },
+            ),
+            Some(json!({
+                "type": "tool-output-error",
+                "toolCallId": "call-3",
+                "errorText": "handled: tool failed",
+            })),
+        );
+
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::ToolOutputDenied(GenerateTextToolOutputDenied::new(
+                    "call-4",
+                    "staticTool",
+                )),
+                &ToUiMessageChunkOptions::new(),
+            ),
+            Some(json!({
+                "type": "tool-output-denied",
+                "toolCallId": "call-4",
+            })),
+        );
+
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::ToolApprovalRequest(
+                    TextStreamToolApprovalRequestPart::new("approval-1", "call-5")
+                        .with_automatic(true),
+                ),
+                &ToUiMessageChunkOptions::new(),
+            ),
+            Some(json!({
+                "type": "tool-approval-request",
+                "approvalId": "approval-1",
+                "toolCallId": "call-5",
+                "isAutomatic": true,
+            })),
+        );
+
+        let approval_tool_call = GenerateTextToolCall {
+            tool_call_id: "call-5".to_string(),
+            tool_name: "staticTool".to_string(),
+            input: json!({ "value": "input" }),
+            title: None,
+            provider_executed: None,
+            dynamic: None,
+            invalid: None,
+            error: None,
+            provider_metadata: None,
+            tool_metadata: None,
+        };
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::ToolApprovalResponse(
+                    ToolApprovalResponseOutput::new("approval-1", approval_tool_call, false)
+                        .with_reason("not allowed")
+                        .with_provider_executed(true),
+                ),
+                &ToUiMessageChunkOptions::new(),
+            ),
+            Some(json!({
+                "type": "tool-approval-response",
+                "approvalId": "approval-1",
+                "approved": false,
+                "reason": "not allowed",
+                "providerExecuted": true,
+            })),
+        );
+    }
+
+    #[test]
+    fn to_ui_message_chunk_maps_error_parts_through_on_error() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&calls);
+        let on_error: &dyn Fn(&JsonValue) -> String = &|error| {
+            captured.lock().expect("lock").push(error.clone());
+            "handled error".to_string()
+        };
+
+        assert_eq!(
+            to_ui_message_chunk_value(
+                &TextStreamPart::Error(LanguageModelErrorStreamPart::new(json!("boom"))),
+                &ToUiMessageChunkOptions {
+                    on_error: Some(on_error),
+                    ..ToUiMessageChunkOptions::new()
+                },
+            ),
+            Some(json!({ "type": "error", "errorText": "handled error" })),
+        );
+
+        assert_eq!(*calls.lock().expect("lock"), vec![json!("boom")]);
+    }
+
+    #[test]
+    fn to_ui_message_chunk_returns_none_for_parts_without_ui_message_chunks() {
+        let options = ToUiMessageChunkOptions::new();
+
+        assert_eq!(
+            to_ui_message_chunk(
+                &TextStreamPart::ToolInputEnd(LanguageModelToolInputEnd::new("call-1")),
+                &options,
+            ),
+            None,
+        );
+
+        assert_eq!(
+            to_ui_message_chunk(
+                &TextStreamPart::Raw(LanguageModelRawStreamPart::new(
+                    json!({ "provider": "raw" })
+                )),
+                &options,
+            ),
+            None,
+        );
     }
 }
