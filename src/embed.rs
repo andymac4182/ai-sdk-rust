@@ -608,6 +608,11 @@ pub async fn embed<M: EmbeddingModel + ?Sized>(options: EmbedOptions<'_, M>) -> 
         response,
     };
 
+    log_warnings(
+        &LogWarningsOptions::new(result.warnings.clone())
+            .with_scope(model.provider(), model.model_id()),
+    );
+
     if on_end.is_some() || telemetry_dispatcher.is_enabled() {
         let end_event = EmbedEndEvent {
             call_id,
@@ -2307,6 +2312,131 @@ mod tests {
 
         let _ = poll_ready(super::embed_many(
             EmbedManyOptions::new(&model, ["alpha", "beta", "gamma"])
+                .with_experimental_on_start(move |_| {
+                    order_for_start.borrow_mut().push("onStart".to_string());
+                    ready(())
+                })
+                .with_experimental_on_end(move |_| {
+                    order_for_end.borrow_mut().push("onEnd".to_string());
+                    ready(())
+                }),
+        ));
+
+        assert_eq!(*order.borrow(), vec!["onStart", "doEmbed", "onEnd"]);
+    }
+
+    #[test]
+    fn embed_defaults_missing_v2_provider_warnings_to_empty_array() {
+        // Mirrors packages/ai embed "should default missing v2 provider warnings
+        // to an empty array": a model returning no warnings yields an empty list.
+        let model = RecordingEmbeddingModel::new(
+            None,
+            true,
+            vec![
+                EmbeddingModelResult::new(vec![vec![0.1, 0.2, 0.3]])
+                    .with_usage(EmbeddingModelUsage::new(1)),
+            ],
+        );
+
+        let result = poll_ready(super::embed(EmbedOptions::new(&model, "sunrise")));
+
+        assert_eq!(result.warnings, Vec::<Warning>::new());
+    }
+
+    #[test]
+    fn embed_calls_log_warnings_with_correct_warnings() {
+        // Mirrors packages/ai embed "should call logWarnings with the correct
+        // warnings": embed forwards the model warnings to logWarnings scoped to
+        // the provider/model.
+        let expected_warnings = vec![
+            Warning::Other {
+                message: "Setting is not supported".to_string(),
+            },
+            Warning::Unsupported {
+                feature: "dimensions".to_string(),
+                details: Some("Dimensions parameter not supported".to_string()),
+            },
+        ];
+        let mut result = EmbeddingModelResult::new(vec![vec![0.1, 0.2, 0.3]]);
+        for warning in expected_warnings.clone() {
+            result = result.with_warning(warning);
+        }
+        let model = RecordingEmbeddingModel::new(None, true, vec![result]);
+        take_log_warning_calls_for_tests();
+
+        let _ = poll_ready(super::embed(EmbedOptions::new(&model, "sunrise")));
+
+        assert_eq!(
+            take_log_warning_calls_for_tests(),
+            vec![
+                LogWarningsOptions::new(expected_warnings)
+                    .with_scope("test-provider", "embedding-test")
+            ]
+        );
+    }
+
+    #[test]
+    fn embed_on_start_is_called_before_do_embed() {
+        // Mirrors packages/ai embed experimental_onStart "should be called before
+        // doEmbed".
+        let order = Rc::new(RefCell::new(Vec::<String>::new()));
+        let order_for_callback = Rc::clone(&order);
+        let model = RecordingEmbeddingModel::new(
+            None,
+            true,
+            vec![EmbeddingModelResult::new(vec![vec![0.1, 0.2, 0.3]])],
+        )
+        .with_order_log(Rc::clone(&order));
+
+        let _ = poll_ready(super::embed(
+            EmbedOptions::new(&model, "sunrise").with_experimental_on_start(move |_| {
+                order_for_callback.borrow_mut().push("onStart".to_string());
+                ready(())
+            }),
+        ));
+
+        assert_eq!(*order.borrow(), vec!["onStart", "doEmbed"]);
+    }
+
+    #[test]
+    fn embed_on_end_is_called_after_do_embed() {
+        // Mirrors packages/ai embed experimental_onEnd "should be called after
+        // doEmbed".
+        let order = Rc::new(RefCell::new(Vec::<String>::new()));
+        let order_for_callback = Rc::clone(&order);
+        let model = RecordingEmbeddingModel::new(
+            None,
+            true,
+            vec![EmbeddingModelResult::new(vec![vec![0.1, 0.2, 0.3]])],
+        )
+        .with_order_log(Rc::clone(&order));
+
+        let _ = poll_ready(super::embed(
+            EmbedOptions::new(&model, "sunrise").with_experimental_on_end(move |_| {
+                order_for_callback.borrow_mut().push("onEnd".to_string());
+                ready(())
+            }),
+        ));
+
+        assert_eq!(*order.borrow(), vec!["doEmbed", "onEnd"]);
+    }
+
+    #[test]
+    fn embed_calls_on_start_before_do_embed_and_on_end_after() {
+        // Mirrors packages/ai embed "should call onStart before doEmbed and onEnd
+        // after" (experimental_onStart and experimental_onEnd together).
+        let order = Rc::new(RefCell::new(Vec::<String>::new()));
+        let order_for_start = Rc::clone(&order);
+        let order_for_end = Rc::clone(&order);
+        let model = RecordingEmbeddingModel::new(
+            None,
+            true,
+            vec![EmbeddingModelResult::new(vec![vec![0.1, 0.2, 0.3]])],
+        )
+        .with_order_log(Rc::clone(&order));
+
+        let _ = poll_ready(super::embed(
+            EmbedOptions::new(&model, "sunrise")
                 .with_experimental_on_start(move |_| {
                     order_for_start.borrow_mut().push("onStart".to_string());
                     ready(())
