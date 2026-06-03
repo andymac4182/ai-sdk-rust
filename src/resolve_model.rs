@@ -486,4 +486,199 @@ mod tests {
         assert_eq!(direct.model_id(), "direct-model-id");
         assert_eq!(owned.model_id(), "actual-test-model-id");
     }
+
+    #[test]
+    fn resolve_language_model_should_convert_v3_to_v4() {
+        let provider = MockProvider::new();
+        let model = MockLanguageModel::new()
+            .with_provider("test-provider")
+            .with_model_id("test-model-id");
+
+        let resolved = resolve_language_model(&provider, ModelSource::model(&model))
+            .expect("v3 language model resolves to canonical v4 surface");
+
+        assert_eq!(resolved.as_ref().provider(), "test-provider");
+        assert_eq!(resolved.as_ref().model_id(), "test-model-id");
+    }
+
+    #[test]
+    fn resolve_language_model_should_adapt_v2_and_preserve_methods() {
+        let provider = MockProvider::new();
+        let model = MockLanguageModel::new()
+            .with_provider("test-provider")
+            .with_model_id("test-model-id");
+
+        let resolved = resolve_language_model(&provider, ModelSource::model(&model))
+            .expect("v2 language model adapts to canonical v4 surface");
+
+        assert_eq!(resolved.as_ref().provider(), "test-provider");
+        assert_eq!(resolved.as_ref().model_id(), "test-model-id");
+        // The adapted model still exposes the generation surface.
+        assert!(std::ptr::eq(resolved.as_ref(), &model));
+    }
+
+    #[test]
+    fn resolve_embedding_model_should_adapt_v2_and_preserve_methods() {
+        let provider = MockProvider::new();
+        let model = MockEmbeddingModel::new()
+            .with_provider("test-provider")
+            .with_model_id("test-model-id");
+
+        let resolved = resolve_embedding_model(&provider, ModelSource::model(&model))
+            .expect("v2 embedding model adapts to canonical v4 surface");
+
+        assert_eq!(resolved.as_ref().provider(), "test-provider");
+        assert_eq!(resolved.as_ref().model_id(), "test-model-id");
+        assert!(std::ptr::eq(resolved.as_ref(), &model));
+    }
+
+    #[test]
+    fn resolve_embedding_model_should_convert_v3_to_v4() {
+        let provider = MockProvider::new();
+        let model = MockEmbeddingModel::new()
+            .with_provider("test-provider")
+            .with_model_id("test-model-id");
+
+        let resolved = resolve_embedding_model(&provider, ModelSource::model(&model))
+            .expect("v3 embedding model resolves to canonical v4 surface");
+
+        assert_eq!(resolved.as_ref().provider(), "test-provider");
+        assert_eq!(resolved.as_ref().model_id(), "test-model-id");
+    }
+
+    #[test]
+    fn resolve_speech_model_should_return_it_as_is() {
+        let provider = MockProvider::new();
+        let model = MockSpeechModel::new()
+            .with_provider("test-provider")
+            .with_model_id("test-model-id");
+
+        let resolved = resolve_speech_model(&provider, ModelSource::model(&model))
+            .expect("direct speech model resolves");
+
+        assert!(resolved.is_borrowed());
+        assert!(std::ptr::eq(resolved.as_ref(), &model));
+        assert_eq!(resolved.as_ref().provider(), "test-provider");
+        assert_eq!(resolved.as_ref().model_id(), "test-model-id");
+    }
+
+    #[test]
+    fn resolve_speech_model_should_convert_v3_to_v4() {
+        let provider = MockProvider::new();
+        let model = MockSpeechModel::new()
+            .with_provider("test-provider")
+            .with_model_id("test-model-id");
+
+        let resolved = resolve_speech_model(&provider, ModelSource::model(&model))
+            .expect("v3 speech model resolves to canonical v4 surface");
+
+        assert_eq!(resolved.as_ref().provider(), "test-provider");
+        assert_eq!(resolved.as_ref().model_id(), "test-model-id");
+    }
+
+    #[test]
+    fn resolve_speech_model_should_return_a_gateway_speech_model() {
+        let provider = MockProvider::new().with_speech_model(
+            "test-model-id",
+            MockSpeechModel::new()
+                .with_provider("gateway")
+                .with_model_id("test-model-id"),
+        );
+
+        let resolved = resolve_speech_model(&provider, ModelSource::id("test-model-id"))
+            .expect("gateway speech model resolves by id");
+
+        assert!(resolved.is_owned());
+        assert_eq!(resolved.as_ref().provider(), "gateway");
+        assert_eq!(resolved.as_ref().model_id(), "test-model-id");
+    }
+
+    #[test]
+    fn resolve_transcription_model_should_return_it_as_is() {
+        let provider = MockProvider::new();
+        let model = MockTranscriptionModel::new()
+            .with_provider("test-provider")
+            .with_model_id("test-model-id");
+
+        let resolved = resolve_transcription_model(&provider, ModelSource::model(&model))
+            .expect("direct transcription model resolves");
+
+        assert!(resolved.is_borrowed());
+        assert!(std::ptr::eq(resolved.as_ref(), &model));
+        assert_eq!(resolved.as_ref().provider(), "test-provider");
+        assert_eq!(resolved.as_ref().model_id(), "test-model-id");
+    }
+
+    #[test]
+    fn resolve_transcription_model_should_convert_v3_to_v4() {
+        let provider = MockProvider::new();
+        let model = MockTranscriptionModel::new()
+            .with_provider("test-provider")
+            .with_model_id("test-model-id");
+
+        let resolved = resolve_transcription_model(&provider, ModelSource::model(&model))
+            .expect("v3 transcription model resolves to canonical v4 surface");
+
+        assert_eq!(resolved.as_ref().provider(), "test-provider");
+        assert_eq!(resolved.as_ref().model_id(), "test-model-id");
+    }
+
+    #[test]
+    fn resolve_transcription_model_should_return_a_gateway_transcription_model() {
+        let provider = MockProvider::new().with_transcription_model(
+            "test-model-id",
+            MockTranscriptionModel::new()
+                .with_provider("gateway")
+                .with_model_id("test-model-id"),
+        );
+
+        let resolved = resolve_transcription_model(&provider, ModelSource::id("test-model-id"))
+            .expect("gateway transcription model resolves by id");
+
+        assert!(resolved.is_owned());
+        assert_eq!(resolved.as_ref().provider(), "gateway");
+        assert_eq!(resolved.as_ref().model_id(), "test-model-id");
+    }
+
+    #[test]
+    fn resolve_image_model_should_return_the_image_model_v2() {
+        let provider = MockProvider::new();
+        let model = MockImageModel::new()
+            .with_provider("test-provider")
+            .with_model_id("test-model-id");
+
+        let resolved = resolve_image_model(&provider, ModelSource::model(&model))
+            .expect("v2 image model resolves and is returned");
+
+        assert_eq!(resolved.as_ref().provider(), "test-provider");
+        assert_eq!(resolved.as_ref().model_id(), "test-model-id");
+    }
+
+    #[test]
+    fn resolve_video_model_should_convert_v3_to_v4() {
+        let provider = MockProvider::new();
+        let model = MockVideoModel::new()
+            .with_provider("test-provider")
+            .with_model_id("test-model-id");
+
+        let resolved = resolve_video_model(&provider, ModelSource::model(&model))
+            .expect("v3 video model resolves to canonical v4 surface");
+
+        assert_eq!(resolved.as_ref().provider(), "test-provider");
+        assert_eq!(resolved.as_ref().model_id(), "test-model-id");
+    }
+
+    #[test]
+    fn resolve_reranking_model_should_convert_v3_to_v4() {
+        let provider = MockProvider::new();
+        let model = MockRerankingModel::new()
+            .with_provider("test-provider")
+            .with_model_id("test-model-id");
+
+        let resolved = resolve_reranking_model(&provider, ModelSource::model(&model))
+            .expect("v3 reranking model resolves to canonical v4 surface");
+
+        assert_eq!(resolved.as_ref().provider(), "test-provider");
+        assert_eq!(resolved.as_ref().model_id(), "test-model-id");
+    }
 }
