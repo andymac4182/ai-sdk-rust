@@ -12667,11 +12667,19 @@ mod tests {
                 .with_include_raw_chunks(true),
         ));
 
-        assert!(
-            result
-                .parts
-                .iter()
-                .any(|part| matches!(part, TextStreamPart::Raw(_)))
+        let raw_parts: Vec<&LanguageModelRawStreamPart> = result
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TextStreamPart::Raw(part) => Some(part),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(raw_parts.len(), 1);
+        // The provider-specific raw chunk payload is forwarded verbatim.
+        assert_eq!(
+            raw_parts[0].raw_value,
+            json!({"type": "raw-data", "content": "kept"})
         );
         assert_eq!(model.stream_calls()[0].include_raw_chunks, Some(true));
     }
