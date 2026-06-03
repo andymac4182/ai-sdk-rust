@@ -24,7 +24,7 @@ the strict inventory generator.
 | Package | Owner | Portable unmapped |
 | --- | --- | ---: |
 | `packages/alibaba` | `crates/ai-sdk-alibaba` | 0 |
-| `packages/assemblyai` | `crates/ai-sdk-assemblyai` | 6 |
+| `packages/assemblyai` | `crates/ai-sdk-assemblyai` | 0 |
 | `packages/azure` | `crates/ai-sdk-azure`, `crates/ai-sdk-open-responses`, `src/openai_compatible.rs` | 55 |
 | `packages/baseten` | `src/baseten.rs`, `src/openai_compatible.rs` | 25 |
 | `packages/black-forest-labs` | `crates/ai-sdk-black-forest-labs` | 24 |
@@ -49,6 +49,17 @@ the strict inventory generator.
 | `packages/revai` | `crates/ai-sdk-revai` | 6 |
 | `packages/togetherai` | `src/togetherai.rs`, `src/openai_compatible.rs` | 10 |
 | `packages/voyage` | `src/voyage.rs` | 0 |
+
+## AssemblyAI Exact Case Map
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/assemblyai/src/assemblyai-error.test.ts` | should parse AssemblyAI resource exhausted error | `assemblyai_error_schema_parses_resource_exhausted_error` | none |
+| `packages/assemblyai/src/assemblyai-transcription-model.test.ts` | should pass the model | `assemblyai_provider_transcribes_audio_with_headers_options_and_response` | none |
+| `packages/assemblyai/src/assemblyai-transcription-model.test.ts` | should pass headers | `assemblyai_provider_transcribes_audio_with_headers_options_and_response` | none |
+| `packages/assemblyai/src/assemblyai-transcription-model.test.ts` | should extract the transcription text | `assemblyai_provider_transcribes_audio_with_headers_options_and_response` | none |
+| `packages/assemblyai/src/assemblyai-transcription-model.test.ts` | should include response data with timestamp, modelId and headers | `assemblyai_provider_transcribes_audio_with_headers_options_and_response` | none |
+| `packages/assemblyai/src/assemblyai-transcription-model.test.ts` | should use real date when no custom date provider is specified | `assemblyai_uses_real_date_when_no_custom_date_provider_is_specified` | none |
 
 ## Black Forest Labs Exact Case Map
 
