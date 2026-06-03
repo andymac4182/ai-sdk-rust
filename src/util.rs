@@ -4614,6 +4614,18 @@ mod tests {
     }
 
     #[test]
+    fn is_deep_equal_data_should_handle_date_object_comparisons_correctly() {
+        // Upstream compares parsed JSON data. `Date` values cross the JSON
+        // boundary as their serialized (ISO string) form, so two equal dates
+        // compare equal and two different dates compare unequal.
+        let date1 = json!("2000-01-01T00:00:00.000Z");
+        let date2 = json!("2000-01-01T00:00:00.000Z");
+        let date3 = json!("2000-01-02T00:00:00.000Z");
+        assert!(is_deep_equal_data(&date1, &date2));
+        assert!(!is_deep_equal_data(&date1, &date3));
+    }
+
+    #[test]
     fn prepare_headers_should_set_content_type_header_if_not_present() {
         let headers = prepare_headers(Some(Headers::new()), content_type_default_headers());
 
