@@ -14,7 +14,8 @@ use url::form_urlencoded::Serializer as FormUrlEncodedSerializer;
 
 use crate::gateway_error::{
     GATEWAY_AUTH_METHOD_HEADER, GatewayAuthMethod, GatewayAuthenticationError, GatewayError,
-    GatewayInvalidRequestError, as_gateway_error, parse_gateway_auth_method,
+    GatewayInvalidRequestError, VERCEL_AI_GATEWAY_TEAM_HEADER, as_gateway_error,
+    parse_gateway_auth_method,
 };
 use crate::gateway_tools::GatewayTools;
 use ai_sdk_provider::FileDataContent;
@@ -43,6 +44,13 @@ use ai_sdk_provider::{JsonArray, JsonObject, JsonValue};
 use ai_sdk_provider::{
     RerankingModel, RerankingModelCallOptions, RerankingModelRanking, RerankingModelResponse,
     RerankingModelResult,
+};
+use ai_sdk_provider::{
+    SpeechModel, SpeechModelCallOptions, SpeechModelResponse, SpeechModelResult,
+};
+use ai_sdk_provider::{
+    TranscriptionModel, TranscriptionModelCallOptions, TranscriptionModelResponse,
+    TranscriptionModelResult, TranscriptionModelSegment,
 };
 use ai_sdk_provider::{
     VideoModel, VideoModelCallOptions, VideoModelFile, VideoModelResponse, VideoModelResult,
@@ -580,6 +588,12 @@ pub struct GatewayProviderSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
 
+    /// Vercel team id or slug. When set, requests include the
+    /// `x-vercel-ai-gateway-team` header so the Gateway routes the call to the
+    /// named team.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_id_or_slug: Option<String>,
+
     /// Custom provider-level headers included with each request.
     #[serde(default, skip_serializing_if = "Headers::is_empty")]
     pub headers: Headers,
@@ -613,6 +627,13 @@ impl GatewayProviderSettings {
     /// Sets the AI Gateway API key.
     pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
         self.api_key = Some(api_key.into());
+        self
+    }
+
+    /// Sets the Vercel team id or slug sent as the `x-vercel-ai-gateway-team`
+    /// header.
+    pub fn with_team_id_or_slug(mut self, team_id_or_slug: impl Into<String>) -> Self {
+        self.team_id_or_slug = Some(team_id_or_slug.into());
         self
     }
 
@@ -1104,6 +1125,36 @@ impl GatewayProvider {
         self.video_model(model_id)
     }
 
+    /// Creates a Gateway speech model.
+    pub fn speech_model(&self, model_id: impl Into<String>) -> GatewaySpeechModel {
+        GatewaySpeechModel {
+            model_id: model_id.into(),
+            provider_id: GATEWAY_PROVIDER_ID.to_string(),
+            settings: self.settings.clone(),
+            transport: Arc::clone(&self.transport),
+        }
+    }
+
+    /// Alias for [`GatewayProvider::speech_model`].
+    pub fn speech(&self, model_id: impl Into<String>) -> GatewaySpeechModel {
+        self.speech_model(model_id)
+    }
+
+    /// Creates a Gateway transcription model.
+    pub fn transcription_model(&self, model_id: impl Into<String>) -> GatewayTranscriptionModel {
+        GatewayTranscriptionModel {
+            model_id: model_id.into(),
+            provider_id: GATEWAY_PROVIDER_ID.to_string(),
+            settings: self.settings.clone(),
+            transport: Arc::clone(&self.transport),
+        }
+    }
+
+    /// Alias for [`GatewayProvider::transcription_model`].
+    pub fn transcription(&self, model_id: impl Into<String>) -> GatewayTranscriptionModel {
+        self.transcription_model(model_id)
+    }
+
     /// Returns Gateway-specific provider-executed tools.
     pub fn tools(&self) -> GatewayTools {
         GatewayTools::new()
@@ -1323,6 +1374,24 @@ pub struct GatewayRerankingModel {
 /// Native AI SDK Gateway video model.
 #[derive(Clone)]
 pub struct GatewayVideoModel {
+    model_id: String,
+    provider_id: String,
+    settings: GatewayProviderSettings,
+    transport: GatewayTransport,
+}
+
+/// Native AI SDK Gateway speech model.
+#[derive(Clone)]
+pub struct GatewaySpeechModel {
+    model_id: String,
+    provider_id: String,
+    settings: GatewayProviderSettings,
+    transport: GatewayTransport,
+}
+
+/// Native AI SDK Gateway transcription model.
+#[derive(Clone)]
+pub struct GatewayTranscriptionModel {
     model_id: String,
     provider_id: String,
     settings: GatewayProviderSettings,
@@ -1953,6 +2022,186 @@ impl GatewayVideoModel {
     }
 }
 
+impl GatewaySpeechModel {
+    /// Returns a copy of this model that uses the supplied HTTP transport.
+    pub fn with_transport(mut self, transport: GatewayTransport) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    /// Returns a copy of this model with an explicit provider identifier.
+    pub fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = provider_id.into();
+        self
+    }
+
+    /// Performs a speech generation request, surfacing Gateway errors directly.
+    async fn do_generate_inner(
+        &self,
+        options: SpeechModelCallOptions,
+    ) -> Result<SpeechModelResult, GatewayError> {
+        let request_body = gateway_speech_request_body(&options);
+        let request_headers = self.request_headers(options.headers.as_ref());
+        let auth_method = parse_gateway_auth_method(&request_headers);
+        let post_options = PostJsonToApiOptions::new(self.speech_model_url(), request_body)
+            .with_headers(request_headers)
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(options.abort_signal.clone());
+        let transport = Arc::clone(&self.transport);
+
+        match post_json_to_api(
+            post_options,
+            move |request| (transport)(request),
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    gateway_speech_response,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_json_error_response_handler(
+                    response.json_error_response_handler_options(request),
+                    clone_json_value,
+                    gateway_error_to_message,
+                    |_, _| None,
+                ))
+            },
+        )
+        .await
+        {
+            Ok(response) => Ok(speech_result_from_response(
+                &self.model_id,
+                response.value,
+                response.response_headers,
+            )),
+            Err(error) => Err(as_gateway_error(error, auth_method)),
+        }
+    }
+
+    fn speech_model_url(&self) -> String {
+        format!("{}/speech-model", self.base_url())
+    }
+
+    fn base_url(&self) -> String {
+        gateway_base_url(&self.settings)
+    }
+
+    fn request_headers(&self, call_headers: Option<&Headers>) -> BTreeMap<String, Option<String>> {
+        let provider_headers = Some(
+            gateway_provider_headers(&self.settings)
+                .into_iter()
+                .collect::<Vec<_>>(),
+        );
+        let call_headers = optional_headers(call_headers);
+        let observability_headers = gateway_observability_header_entries(&self.settings);
+        let model_headers = Some(vec![
+            (
+                "ai-speech-model-specification-version".to_string(),
+                Some("4".to_string()),
+            ),
+            ("ai-model-id".to_string(), Some(self.model_id.clone())),
+        ]);
+
+        combine_headers([
+            provider_headers,
+            call_headers,
+            model_headers,
+            observability_headers,
+        ])
+    }
+}
+
+impl GatewayTranscriptionModel {
+    /// Returns a copy of this model that uses the supplied HTTP transport.
+    pub fn with_transport(mut self, transport: GatewayTransport) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    /// Returns a copy of this model with an explicit provider identifier.
+    pub fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = provider_id.into();
+        self
+    }
+
+    /// Performs a transcription request, surfacing Gateway errors directly.
+    async fn do_generate_inner(
+        &self,
+        options: TranscriptionModelCallOptions,
+    ) -> Result<TranscriptionModelResult, GatewayError> {
+        let request_body = gateway_transcription_request_body(&options);
+        let request_headers = self.request_headers(options.headers.as_ref());
+        let auth_method = parse_gateway_auth_method(&request_headers);
+        let post_options = PostJsonToApiOptions::new(self.transcription_model_url(), request_body)
+            .with_headers(request_headers)
+            .with_environment(RuntimeEnvironment::unknown())
+            .with_optional_abort_signal(options.abort_signal.clone());
+        let transport = Arc::clone(&self.transport);
+
+        match post_json_to_api(
+            post_options,
+            move |request| (transport)(request),
+            |request, response| {
+                create_json_response_handler(
+                    response.json_response_handler_options(request),
+                    gateway_transcription_response,
+                )
+                .map_err(ProviderApiResponseHandlerError::from)
+            },
+            |request, response| {
+                Ok(create_json_error_response_handler(
+                    response.json_error_response_handler_options(request),
+                    clone_json_value,
+                    gateway_error_to_message,
+                    |_, _| None,
+                ))
+            },
+        )
+        .await
+        {
+            Ok(response) => Ok(transcription_result_from_response(
+                &self.model_id,
+                response.value,
+                response.response_headers,
+            )),
+            Err(error) => Err(as_gateway_error(error, auth_method)),
+        }
+    }
+
+    fn transcription_model_url(&self) -> String {
+        format!("{}/transcription-model", self.base_url())
+    }
+
+    fn base_url(&self) -> String {
+        gateway_base_url(&self.settings)
+    }
+
+    fn request_headers(&self, call_headers: Option<&Headers>) -> BTreeMap<String, Option<String>> {
+        let provider_headers = Some(
+            gateway_provider_headers(&self.settings)
+                .into_iter()
+                .collect::<Vec<_>>(),
+        );
+        let call_headers = optional_headers(call_headers);
+        let observability_headers = gateway_observability_header_entries(&self.settings);
+        let model_headers = Some(vec![
+            (
+                "ai-transcription-model-specification-version".to_string(),
+                Some("4".to_string()),
+            ),
+            ("ai-model-id".to_string(), Some(self.model_id.clone())),
+        ]);
+
+        combine_headers([
+            provider_headers,
+            call_headers,
+            model_headers,
+            observability_headers,
+        ])
+    }
+}
+
 impl LanguageModel for GatewayLanguageModel {
     type SupportedUrlsFuture<'a>
         = Ready<LanguageModelSupportedUrls>
@@ -2127,6 +2376,66 @@ impl VideoModel for GatewayVideoModel {
     }
 }
 
+impl SpeechModel for GatewaySpeechModel {
+    type GenerateFuture<'a>
+        = Pin<Box<dyn Future<Output = SpeechModelResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn specification_version(&self) -> SpecificationVersion {
+        SpecificationVersion::V4
+    }
+
+    fn provider(&self) -> &str {
+        &self.provider_id
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn do_generate(&self, options: SpeechModelCallOptions) -> Self::GenerateFuture<'_> {
+        let model_id = self.model_id.clone();
+        let future = self.do_generate_inner(options);
+        Box::pin(async move {
+            match future.await {
+                Ok(result) => result,
+                Err(error) => speech_result_from_error(&model_id, error),
+            }
+        })
+    }
+}
+
+impl TranscriptionModel for GatewayTranscriptionModel {
+    type GenerateFuture<'a>
+        = Pin<Box<dyn Future<Output = TranscriptionModelResult> + Send + 'a>>
+    where
+        Self: 'a;
+
+    fn specification_version(&self) -> SpecificationVersion {
+        SpecificationVersion::V4
+    }
+
+    fn provider(&self) -> &str {
+        &self.provider_id
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    fn do_generate(&self, options: TranscriptionModelCallOptions) -> Self::GenerateFuture<'_> {
+        let model_id = self.model_id.clone();
+        let future = self.do_generate_inner(options);
+        Box::pin(async move {
+            match future.await {
+                Ok(result) => result,
+                Err(error) => transcription_result_from_error(&model_id, error),
+            }
+        })
+    }
+}
+
 fn gateway_base_url(settings: &GatewayProviderSettings) -> String {
     without_trailing_slash(settings.base_url.as_deref())
         .unwrap_or(DEFAULT_GATEWAY_BASE_URL)
@@ -2205,6 +2514,13 @@ fn gateway_provider_headers_with_auth(
         headers.insert(
             GATEWAY_AUTH_METHOD_HEADER.to_string(),
             Some(auth.auth_method.as_str().to_string()),
+        );
+    }
+
+    if let Some(team_id_or_slug) = &settings.team_id_or_slug {
+        headers.insert(
+            VERCEL_AI_GATEWAY_TEAM_HEADER.to_string(),
+            Some(team_id_or_slug.clone()),
         );
     }
 
@@ -2809,6 +3125,183 @@ fn gateway_image_error_metadata(error: &GatewayError) -> ImageModelProviderMetad
         },
     );
     metadata
+}
+
+fn gateway_speech_request_body(options: &SpeechModelCallOptions) -> JsonValue {
+    let mut body = JsonObject::new();
+    body.insert("text".to_string(), JsonValue::String(options.text.clone()));
+
+    if let Some(voice) = &options.voice {
+        body.insert("voice".to_string(), JsonValue::String(voice.clone()));
+    }
+    if let Some(output_format) = &options.output_format {
+        body.insert(
+            "outputFormat".to_string(),
+            JsonValue::String(output_format.clone()),
+        );
+    }
+    if let Some(instructions) = &options.instructions {
+        body.insert(
+            "instructions".to_string(),
+            JsonValue::String(instructions.clone()),
+        );
+    }
+    if let Some(speed) = options.speed {
+        body.insert("speed".to_string(), json!(speed));
+    }
+    if let Some(language) = &options.language {
+        body.insert("language".to_string(), JsonValue::String(language.clone()));
+    }
+    if let Some(provider_options) = &options.provider_options {
+        body.insert(
+            "providerOptions".to_string(),
+            serde_json::to_value(provider_options).unwrap_or(JsonValue::Null),
+        );
+    }
+
+    JsonValue::Object(body)
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct GatewaySpeechResponse {
+    audio: String,
+    #[serde(default)]
+    warnings: Vec<Warning>,
+    #[serde(default)]
+    provider_metadata: Option<ProviderMetadata>,
+}
+
+fn gateway_speech_response(value: &JsonValue) -> Result<GatewaySpeechResponse, serde_json::Error> {
+    serde_json::from_value(value.clone())
+}
+
+fn speech_result_from_response(
+    model_id: &str,
+    response: GatewaySpeechResponse,
+    response_headers: Option<Headers>,
+) -> SpeechModelResult {
+    let mut speech_response = SpeechModelResponse::new(OffsetDateTime::now_utc(), model_id);
+    if let Some(headers) = response_headers {
+        for (name, value) in headers {
+            speech_response = speech_response.with_header(name, value);
+        }
+    }
+
+    let mut result =
+        SpeechModelResult::new(FileDataContent::Base64(response.audio), speech_response);
+
+    for warning in response.warnings {
+        result = result.with_warning(warning);
+    }
+
+    if let Some(provider_metadata) = response.provider_metadata {
+        result = result.with_provider_metadata(provider_metadata);
+    }
+
+    result
+}
+
+fn speech_result_from_error(model_id: &str, error: GatewayError) -> SpeechModelResult {
+    let response = SpeechModelResponse::new(OffsetDateTime::now_utc(), model_id);
+    let mut provider_metadata = ProviderMetadata::new();
+    provider_metadata.insert(
+        GATEWAY_PROVIDER_ID.to_string(),
+        gateway_error_metadata_entry(&error),
+    );
+
+    SpeechModelResult::new(FileDataContent::Base64(String::new()), response)
+        .with_provider_metadata(provider_metadata)
+}
+
+fn gateway_transcription_request_body(options: &TranscriptionModelCallOptions) -> JsonValue {
+    let mut body = JsonObject::new();
+    body.insert(
+        "audio".to_string(),
+        JsonValue::String(convert_to_base64(&options.audio)),
+    );
+    body.insert(
+        "mediaType".to_string(),
+        JsonValue::String(options.media_type.clone()),
+    );
+
+    if let Some(provider_options) = &options.provider_options {
+        body.insert(
+            "providerOptions".to_string(),
+            serde_json::to_value(provider_options).unwrap_or(JsonValue::Null),
+        );
+    }
+
+    JsonValue::Object(body)
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct GatewayTranscriptionResponse {
+    text: String,
+    #[serde(default)]
+    segments: Vec<TranscriptionModelSegment>,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    duration_in_seconds: Option<f64>,
+    #[serde(default)]
+    warnings: Vec<Warning>,
+    #[serde(default)]
+    provider_metadata: Option<ProviderMetadata>,
+}
+
+fn gateway_transcription_response(
+    value: &JsonValue,
+) -> Result<GatewayTranscriptionResponse, serde_json::Error> {
+    serde_json::from_value(value.clone())
+}
+
+fn transcription_result_from_response(
+    model_id: &str,
+    response: GatewayTranscriptionResponse,
+    response_headers: Option<Headers>,
+) -> TranscriptionModelResult {
+    let mut transcription_response =
+        TranscriptionModelResponse::new(OffsetDateTime::now_utc(), model_id);
+    if let Some(headers) = response_headers {
+        for (name, value) in headers {
+            transcription_response = transcription_response.with_header(name, value);
+        }
+    }
+
+    let mut result =
+        TranscriptionModelResult::new(response.text, response.segments, transcription_response);
+
+    if let Some(language) = response.language {
+        result = result.with_language(language);
+    }
+    if let Some(duration_in_seconds) = response.duration_in_seconds {
+        result = result.with_duration_in_seconds(duration_in_seconds);
+    }
+    for warning in response.warnings {
+        result = result.with_warning(warning);
+    }
+    if let Some(provider_metadata) = response.provider_metadata {
+        result = result.with_provider_metadata(provider_metadata);
+    }
+
+    result
+}
+
+fn transcription_result_from_error(
+    model_id: &str,
+    error: GatewayError,
+) -> TranscriptionModelResult {
+    let response = TranscriptionModelResponse::new(OffsetDateTime::now_utc(), model_id);
+    let mut provider_metadata = ProviderMetadata::new();
+    provider_metadata.insert(
+        GATEWAY_PROVIDER_ID.to_string(),
+        gateway_error_metadata_entry(&error),
+    );
+
+    TranscriptionModelResult::new(String::new(), Vec::new(), response)
+        .with_provider_metadata(provider_metadata)
 }
 
 fn gateway_reranking_request_body(options: &RerankingModelCallOptions) -> JsonValue {
@@ -3686,11 +4179,12 @@ fn provider_api_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_GATEWAY_BASE_URL, GatewayAuthMethod, GatewayCredentialType, GatewayEmbeddingModel,
-        GatewayGenerationInfoParams, GatewayImageModel, GatewayLanguageModel, GatewayModelType,
-        GatewayProvider, GatewayProviderOptions, GatewayProviderOptionsSort,
-        GatewayProviderSettings, GatewayProviderTimeouts, GatewayRerankingModel,
-        GatewaySpendReportDatePart, GatewaySpendReportGroupBy, GatewaySpendReportParams,
+        DEFAULT_GATEWAY_BASE_URL, GATEWAY_PROVIDER_ID, GatewayAuthMethod, GatewayCredentialType,
+        GatewayEmbeddingModel, GatewayGenerationInfoParams, GatewayImageModel,
+        GatewayLanguageModel, GatewayModelType, GatewayProvider, GatewayProviderOptions,
+        GatewayProviderOptionsSort, GatewayProviderSettings, GatewayProviderTimeouts,
+        GatewayRerankingModel, GatewaySpeechModel, GatewaySpendReportDatePart,
+        GatewaySpendReportGroupBy, GatewaySpendReportParams, GatewayTranscriptionModel,
         GatewayTransport, GatewayTransportFuture, GatewayVideoModel, create_gateway, gateway,
         gateway_base_url, gateway_observability_headers_with_env,
         gateway_provider_headers_with_env, gateway_provider_options,
@@ -3707,7 +4201,8 @@ mod tests {
         LanguageModelUserContentPart, LanguageModelUserMessage, Provider, ProviderMetadata,
         ProviderOptions, ProviderWithRerankingModel, ProviderWithVideoModel, RerankingModel,
         RerankingModelCallOptions, RerankingModelDocuments, RerankingModelRanking,
-        SpecificationVersion, VideoModel, VideoModelCallOptions, VideoModelFile,
+        SpecificationVersion, SpeechModel, SpeechModelCallOptions, TranscriptionModel,
+        TranscriptionModelCallOptions, VideoModel, VideoModelCallOptions, VideoModelFile,
         VideoModelVideoData, Warning,
     };
     use ai_sdk_provider_utils::{
@@ -16001,5 +16496,871 @@ mod tests {
             Poll::Ready(value) => value,
             Poll::Pending => unreachable!("test futures should be ready"),
         }
+    }
+
+    // ----- Team header (teamIdOrSlug) -----
+
+    fn gateway_provider_header_value(
+        settings: GatewayProviderSettings,
+        name: &str,
+    ) -> Option<String> {
+        gateway_provider_headers_with_env(&settings, env_lookup(&[]))
+            .get(name)
+            .cloned()
+            .flatten()
+    }
+
+    #[test]
+    fn create_gateway_uses_api_key_and_team_id_or_slug_for_language_model_requests() {
+        let settings = GatewayProviderSettings::new()
+            .with_api_key("vca_test-token")
+            .with_team_id_or_slug("vercel")
+            .with_header("Custom-Header", "value");
+        let headers = gateway_provider_headers_with_env(&settings, env_lookup(&[]));
+
+        assert_eq!(
+            headers.get("authorization").cloned().flatten(),
+            Some("Bearer vca_test-token".to_string())
+        );
+        assert_eq!(
+            headers.get("x-vercel-ai-gateway-team").cloned().flatten(),
+            Some("vercel".to_string())
+        );
+        assert_eq!(
+            headers.get("ai-gateway-auth-method").cloned().flatten(),
+            Some("api-key".to_string())
+        );
+        assert_eq!(
+            headers.get("custom-header").cloned().flatten(),
+            Some("value".to_string())
+        );
+    }
+
+    #[test]
+    fn create_gateway_uses_api_key_and_team_id_or_slug_for_non_language_model_requests() {
+        let settings = GatewayProviderSettings::new()
+            .with_api_key("vca_test-token")
+            .with_team_id_or_slug("vercel");
+        let model = create_gateway(settings).image_model("google/imagen-4.0-generate");
+        let headers = gateway_provider_headers_with_env(&model.settings, env_lookup(&[]));
+
+        assert_eq!(
+            headers.get("authorization").cloned().flatten(),
+            Some("Bearer vca_test-token".to_string())
+        );
+        assert_eq!(
+            headers.get("x-vercel-ai-gateway-team").cloned().flatten(),
+            Some("vercel".to_string())
+        );
+        assert_eq!(
+            headers.get("ai-gateway-auth-method").cloned().flatten(),
+            Some("api-key".to_string())
+        );
+    }
+
+    #[test]
+    fn create_gateway_passes_team_id_or_slug_with_url_special_characters_as_header_value() {
+        let value = gateway_provider_header_value(
+            GatewayProviderSettings::new()
+                .with_api_key("vca_test-token")
+                .with_team_id_or_slug("team-o'brien"),
+            "x-vercel-ai-gateway-team",
+        );
+
+        assert_eq!(value, Some("team-o'brien".to_string()));
+    }
+
+    #[test]
+    fn create_gateway_omits_team_header_for_api_key_requests_without_team_id_or_slug() {
+        let settings = GatewayProviderSettings::new().with_api_key("vca_test-token");
+        let headers = gateway_provider_headers_with_env(&settings, env_lookup(&[]));
+
+        assert_eq!(
+            headers.get("authorization").cloned().flatten(),
+            Some("Bearer vca_test-token".to_string())
+        );
+        assert!(!headers.contains_key("x-vercel-ai-gateway-team"));
+    }
+
+    #[test]
+    fn create_gateway_passes_team_id_or_slug_with_oidc_requests() {
+        let settings = GatewayProviderSettings::new().with_team_id_or_slug("vercel");
+        let headers = gateway_provider_headers_with_env(
+            &settings,
+            env_lookup(&[("VERCEL_OIDC_TOKEN", "mock-oidc-token")]),
+        );
+
+        assert_eq!(
+            headers.get("authorization").cloned().flatten(),
+            Some("Bearer mock-oidc-token".to_string())
+        );
+        assert_eq!(
+            headers.get("x-vercel-ai-gateway-team").cloned().flatten(),
+            Some("vercel".to_string())
+        );
+        assert_eq!(
+            headers.get("ai-gateway-auth-method").cloned().flatten(),
+            Some("oidc".to_string())
+        );
+    }
+
+    #[test]
+    fn create_gateway_uses_api_key_and_team_id_or_slug_for_get_available_models() {
+        let settings = GatewayProviderSettings::new()
+            .with_api_key("vca_test-token")
+            .with_team_id_or_slug("vercel");
+        let headers = try_gateway_provider_headers_with_env(&settings, env_lookup(&[]))
+            .expect("auth headers resolve");
+
+        assert_eq!(
+            headers.get("authorization").cloned().flatten(),
+            Some("Bearer vca_test-token".to_string())
+        );
+        assert_eq!(
+            headers.get("x-vercel-ai-gateway-team").cloned().flatten(),
+            Some("vercel".to_string())
+        );
+    }
+
+    #[test]
+    fn create_gateway_uses_oidc_and_team_id_or_slug_for_get_available_models_without_api_key() {
+        let settings = GatewayProviderSettings::new().with_team_id_or_slug("vercel");
+        let headers = try_gateway_provider_headers_with_env(
+            &settings,
+            env_lookup(&[("VERCEL_OIDC_TOKEN", "oidc-token")]),
+        )
+        .expect("auth headers resolve");
+
+        assert_eq!(
+            headers.get("authorization").cloned().flatten(),
+            Some("Bearer oidc-token".to_string())
+        );
+        assert_eq!(
+            headers.get("ai-gateway-auth-method").cloned().flatten(),
+            Some("oidc".to_string())
+        );
+        assert_eq!(
+            headers.get("x-vercel-ai-gateway-team").cloned().flatten(),
+            Some("vercel".to_string())
+        );
+    }
+
+    #[test]
+    fn create_gateway_surfaces_oidc_error_as_cause_when_authentication_fails() {
+        let result =
+            try_gateway_provider_headers_with_env(&GatewayProviderSettings::new(), env_lookup(&[]));
+        let error = result.expect_err("missing OIDC and API key surfaces an error");
+
+        assert_eq!(error.name(), "GatewayAuthenticationError");
+        assert_eq!(error.status_code(), 401);
+    }
+
+    #[test]
+    fn gateway_provider_uses_oidc_authentication_in_spend_reports() {
+        let settings = GatewayProviderSettings::new().with_base_url("https://api.test.com");
+        let headers = try_gateway_provider_headers_with_env(
+            &settings,
+            env_lookup(&[("VERCEL_OIDC_TOKEN", "oidc-token")]),
+        )
+        .expect("auth headers resolve");
+
+        assert_eq!(
+            headers.get("authorization").cloned().flatten(),
+            Some("Bearer oidc-token".to_string())
+        );
+        assert_eq!(
+            headers.get("ai-gateway-auth-method").cloned().flatten(),
+            Some("oidc".to_string())
+        );
+    }
+
+    #[test]
+    fn gateway_provider_uses_oidc_authentication_in_generation_info() {
+        let settings = GatewayProviderSettings::new().with_base_url("https://api.test.com");
+        let headers = try_gateway_provider_headers_with_env(
+            &settings,
+            env_lookup(&[("VERCEL_OIDC_TOKEN", "oidc-token")]),
+        )
+        .expect("auth headers resolve");
+
+        assert_eq!(
+            headers.get("authorization").cloned().flatten(),
+            Some("Bearer oidc-token".to_string())
+        );
+        assert_eq!(
+            headers.get("ai-gateway-auth-method").cloned().flatten(),
+            Some("oidc".to_string())
+        );
+    }
+
+    // ----- Speech model -----
+
+    const GATEWAY_SPEECH_TEST_MODEL_ID: &str = "openai/tts-1";
+
+    fn capturing_speech_transport(
+        status_code: u16,
+        status_text: impl Into<String>,
+        body: impl Into<String>,
+        headers: Option<Headers>,
+    ) -> (GatewayTransport, Arc<Mutex<Option<ProviderApiRequest>>>) {
+        capturing_image_transport(status_code, status_text, body, headers)
+    }
+
+    fn gateway_speech_test_model(
+        settings: GatewayProviderSettings,
+        transport: GatewayTransport,
+    ) -> GatewaySpeechModel {
+        GatewayProvider::from_settings(settings)
+            .with_transport(transport)
+            .speech_model(GATEWAY_SPEECH_TEST_MODEL_ID)
+    }
+
+    fn gateway_speech_test_settings() -> GatewayProviderSettings {
+        GatewayProviderSettings::new()
+            .with_base_url("https://api.test.com")
+            .with_api_key("test-token")
+    }
+
+    fn captured_request_json(request: &ProviderApiRequest) -> JsonValue {
+        request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body is JSON")
+    }
+
+    #[test]
+    fn gateway_speech_model_passes_headers_correctly() {
+        let (transport, captured_request) = capturing_speech_transport(
+            200,
+            "OK",
+            json!({ "audio": "base64-audio" }).to_string(),
+            None,
+        );
+        let model = gateway_speech_test_model(gateway_speech_test_settings(), transport);
+
+        let result = poll_ready(model.do_generate(
+            SpeechModelCallOptions::new("Hello world").with_header("Custom-Header", "test-value"),
+        ));
+        assert_eq!(
+            result.audio,
+            FileDataContent::Base64("base64-audio".to_string())
+        );
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-token")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("test-value")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-speech-model-specification-version")
+                .map(String::as_str),
+            Some("4")
+        );
+        assert_eq!(
+            request.headers.get("ai-model-id").map(String::as_str),
+            Some(GATEWAY_SPEECH_TEST_MODEL_ID)
+        );
+    }
+
+    #[test]
+    fn gateway_speech_model_includes_o11y_headers() {
+        let (transport, captured_request) = capturing_speech_transport(
+            200,
+            "OK",
+            json!({ "audio": "base64-audio" }).to_string(),
+            None,
+        );
+        let model = gateway_speech_test_model(
+            gateway_speech_test_settings().with_vercel_request_id("req-o11y"),
+            transport,
+        );
+
+        poll_ready(model.do_generate(SpeechModelCallOptions::new("Hello world")));
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            request
+                .headers
+                .get("ai-o11y-request-id")
+                .map(String::as_str),
+            Some("req-o11y")
+        );
+    }
+
+    #[test]
+    fn gateway_speech_model_sends_speech_options_in_request_body() {
+        let (transport, captured_request) = capturing_speech_transport(
+            200,
+            "OK",
+            json!({ "audio": "base64-audio" }).to_string(),
+            None,
+        );
+        let model = gateway_speech_test_model(gateway_speech_test_settings(), transport);
+
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": { "style": "friendly" }
+        }))
+        .expect("provider options deserialize");
+
+        poll_ready(
+            model.do_generate(
+                SpeechModelCallOptions::new("Hello world")
+                    .with_voice("alloy")
+                    .with_output_format("mp3")
+                    .with_instructions("Speak clearly")
+                    .with_speed(1.25)
+                    .with_language("en")
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            captured_request_json(&request),
+            json!({
+                "text": "Hello world",
+                "voice": "alloy",
+                "outputFormat": "mp3",
+                "instructions": "Speak clearly",
+                "speed": 1.25,
+                "language": "en",
+                "providerOptions": { "openai": { "style": "friendly" } }
+            })
+        );
+    }
+
+    #[test]
+    fn gateway_speech_model_omits_optional_speech_options_when_not_provided() {
+        let (transport, captured_request) = capturing_speech_transport(
+            200,
+            "OK",
+            json!({ "audio": "base64-audio" }).to_string(),
+            None,
+        );
+        let model = gateway_speech_test_model(gateway_speech_test_settings(), transport);
+
+        poll_ready(model.do_generate(SpeechModelCallOptions::new("Hello world")));
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            captured_request_json(&request),
+            json!({ "text": "Hello world" })
+        );
+    }
+
+    #[test]
+    fn gateway_speech_model_extracts_audio_and_metadata_from_response() {
+        let (transport, _captured_request) = capturing_speech_transport(
+            200,
+            "OK",
+            json!({
+                "audio": "base64-audio",
+                "warnings": [{ "type": "other", "message": "test warning" }],
+                "providerMetadata": { "gateway": { "cost": "0.002" } }
+            })
+            .to_string(),
+            Some(Headers::from([(
+                "x-request-id".to_string(),
+                "req-123".to_string(),
+            )])),
+        );
+        let model = gateway_speech_test_model(gateway_speech_test_settings(), transport);
+
+        let result = poll_ready(model.do_generate(SpeechModelCallOptions::new("Hello world")));
+
+        assert_eq!(
+            result.audio,
+            FileDataContent::Base64("base64-audio".to_string())
+        );
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Other {
+                message: "test warning".to_string()
+            }]
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|gateway| gateway.get("cost"))
+                .and_then(JsonValue::as_str),
+            Some("0.002")
+        );
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req-123")
+        );
+        assert_eq!(result.response.model_id, GATEWAY_SPEECH_TEST_MODEL_ID);
+    }
+
+    #[test]
+    fn gateway_speech_model_throws_invalid_request_error_on_400() {
+        let (transport, _captured_request) = capturing_speech_transport(
+            400,
+            "Bad Request",
+            json!({
+                "error": { "message": "Invalid text format", "type": "invalid_request_error" }
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_speech_test_model(gateway_speech_test_settings(), transport);
+
+        let error = poll_ready(model.do_generate_inner(SpeechModelCallOptions::new("Hello world")))
+            .expect_err("400 surfaces a Gateway error");
+
+        assert_eq!(error.name(), "GatewayInvalidRequestError");
+        assert_eq!(error.status_code(), 400);
+    }
+
+    #[test]
+    fn gateway_speech_model_throws_internal_server_error_on_500() {
+        let (transport, _captured_request) = capturing_speech_transport(
+            500,
+            "Internal Server Error",
+            json!({
+                "error": { "message": "Internal server error", "type": "internal_server_error" }
+            })
+            .to_string(),
+            None,
+        );
+        let model = gateway_speech_test_model(gateway_speech_test_settings(), transport);
+
+        let error = poll_ready(model.do_generate_inner(SpeechModelCallOptions::new("Hello world")))
+            .expect_err("500 surfaces a Gateway error");
+
+        assert_eq!(error.name(), "GatewayInternalServerError");
+        assert_eq!(error.status_code(), 500);
+    }
+
+    #[test]
+    fn gateway_speech_model_posts_to_speech_model_endpoint() {
+        let (transport, captured_request) = capturing_speech_transport(
+            200,
+            "OK",
+            json!({ "audio": "base64-audio" }).to_string(),
+            None,
+        );
+        let model = gateway_speech_test_model(gateway_speech_test_settings(), transport);
+
+        poll_ready(model.do_generate(SpeechModelCallOptions::new("Hello world")));
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://api.test.com/speech-model");
+    }
+
+    #[test]
+    fn create_gateway_creates_speech_model_for_speech_model_and_alias() {
+        let provider = create_gateway(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-api-key"),
+        );
+
+        let model = provider.speech_model(GATEWAY_SPEECH_TEST_MODEL_ID);
+        assert_eq!(model.provider(), GATEWAY_PROVIDER_ID);
+        assert_eq!(model.model_id(), GATEWAY_SPEECH_TEST_MODEL_ID);
+        assert_eq!(model.base_url(), "https://api.example.com");
+
+        let aliased = provider.speech(GATEWAY_SPEECH_TEST_MODEL_ID);
+        assert_eq!(aliased.model_id(), GATEWAY_SPEECH_TEST_MODEL_ID);
+    }
+
+    #[test]
+    fn create_gateway_reuses_gateway_headers_for_speech_model() {
+        let settings = GatewayProviderSettings::new()
+            .with_base_url("https://api.example.com")
+            .with_api_key("test-api-key")
+            .with_header("Custom-Header", "value");
+        let model = create_gateway(settings).speech_model(GATEWAY_SPEECH_TEST_MODEL_ID);
+        let headers = gateway_provider_headers_with_env(&model.settings, env_lookup(&[]));
+
+        assert_eq!(
+            headers.get("authorization").cloned().flatten(),
+            Some("Bearer test-api-key".to_string())
+        );
+        assert_eq!(
+            headers.get("custom-header").cloned().flatten(),
+            Some("value".to_string())
+        );
+        assert_eq!(
+            headers.get("ai-gateway-auth-method").cloned().flatten(),
+            Some("api-key".to_string())
+        );
+    }
+
+    #[test]
+    fn default_gateway_export_constructs_speech_model() {
+        let provider = create_gateway(GatewayProviderSettings::new().with_api_key("test-key"));
+        let model = provider.speech_model(GATEWAY_SPEECH_TEST_MODEL_ID);
+        assert_eq!(model.model_id(), GATEWAY_SPEECH_TEST_MODEL_ID);
+    }
+
+    // ----- Transcription model -----
+
+    const GATEWAY_TRANSCRIPTION_TEST_MODEL_ID: &str = "openai/gpt-4o-transcribe";
+
+    fn gateway_transcription_test_model(
+        settings: GatewayProviderSettings,
+        transport: GatewayTransport,
+    ) -> GatewayTranscriptionModel {
+        GatewayProvider::from_settings(settings)
+            .with_transport(transport)
+            .transcription_model(GATEWAY_TRANSCRIPTION_TEST_MODEL_ID)
+    }
+
+    fn gateway_transcription_test_settings() -> GatewayProviderSettings {
+        GatewayProviderSettings::new()
+            .with_base_url("https://api.test.com")
+            .with_api_key("test-token")
+    }
+
+    fn transcription_call_options(
+        audio: FileDataContent,
+        media_type: &str,
+    ) -> TranscriptionModelCallOptions {
+        TranscriptionModelCallOptions::new(audio, media_type)
+    }
+
+    #[test]
+    fn gateway_transcription_model_passes_headers_correctly() {
+        let (transport, captured_request) = capturing_speech_transport(
+            200,
+            "OK",
+            json!({ "text": "Hello world" }).to_string(),
+            None,
+        );
+        let model =
+            gateway_transcription_test_model(gateway_transcription_test_settings(), transport);
+
+        let mut options = transcription_call_options(
+            FileDataContent::Base64("base64-audio".to_string()),
+            "audio/wav",
+        );
+        options = options.with_header("Custom-Header", "test-value");
+        poll_ready(model.do_generate(options));
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer test-token")
+        );
+        assert_eq!(
+            request.headers.get("custom-header").map(String::as_str),
+            Some("test-value")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("ai-transcription-model-specification-version")
+                .map(String::as_str),
+            Some("4")
+        );
+        assert_eq!(
+            request.headers.get("ai-model-id").map(String::as_str),
+            Some(GATEWAY_TRANSCRIPTION_TEST_MODEL_ID)
+        );
+    }
+
+    #[test]
+    fn gateway_transcription_model_includes_o11y_headers() {
+        let (transport, captured_request) = capturing_speech_transport(
+            200,
+            "OK",
+            json!({ "text": "Hello world" }).to_string(),
+            None,
+        );
+        let model = gateway_transcription_test_model(
+            gateway_transcription_test_settings().with_vercel_request_id("req-o11y"),
+            transport,
+        );
+
+        poll_ready(model.do_generate(transcription_call_options(
+            FileDataContent::Base64("base64-audio".to_string()),
+            "audio/wav",
+        )));
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            request
+                .headers
+                .get("ai-o11y-request-id")
+                .map(String::as_str),
+            Some("req-o11y")
+        );
+    }
+
+    #[test]
+    fn gateway_transcription_model_base64_encodes_byte_audio_in_request_body() {
+        let (transport, captured_request) = capturing_speech_transport(
+            200,
+            "OK",
+            json!({ "text": "Hello world" }).to_string(),
+            None,
+        );
+        let model =
+            gateway_transcription_test_model(gateway_transcription_test_settings(), transport);
+
+        let provider_options: ProviderOptions = serde_json::from_value(json!({
+            "openai": { "language": "en" }
+        }))
+        .expect("provider options deserialize");
+
+        poll_ready(
+            model.do_generate(
+                transcription_call_options(FileDataContent::Bytes(vec![1, 2, 3]), "audio/wav")
+                    .with_provider_options(provider_options),
+            ),
+        );
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            captured_request_json(&request),
+            json!({
+                "audio": "AQID",
+                "mediaType": "audio/wav",
+                "providerOptions": { "openai": { "language": "en" } }
+            })
+        );
+    }
+
+    #[test]
+    fn gateway_transcription_model_passes_string_audio_through_in_request_body() {
+        let (transport, captured_request) = capturing_speech_transport(
+            200,
+            "OK",
+            json!({ "text": "Hello world" }).to_string(),
+            None,
+        );
+        let model =
+            gateway_transcription_test_model(gateway_transcription_test_settings(), transport);
+
+        poll_ready(model.do_generate(transcription_call_options(
+            FileDataContent::Base64("base64-audio".to_string()),
+            "audio/mpeg",
+        )));
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(
+            captured_request_json(&request),
+            json!({ "audio": "base64-audio", "mediaType": "audio/mpeg" })
+        );
+    }
+
+    #[test]
+    fn gateway_transcription_model_extracts_transcript_fields_and_metadata_from_response() {
+        let (transport, _captured_request) = capturing_speech_transport(
+            200,
+            "OK",
+            json!({
+                "text": "Hello world",
+                "segments": [
+                    { "text": "Hello", "startSecond": 0, "endSecond": 0.5 },
+                    { "text": "world", "startSecond": 0.5, "endSecond": 1 }
+                ],
+                "language": "en",
+                "durationInSeconds": 1,
+                "warnings": [{ "type": "other", "message": "test warning" }],
+                "providerMetadata": { "gateway": { "cost": "0.002" } }
+            })
+            .to_string(),
+            Some(Headers::from([(
+                "x-request-id".to_string(),
+                "req-123".to_string(),
+            )])),
+        );
+        let model =
+            gateway_transcription_test_model(gateway_transcription_test_settings(), transport);
+
+        let result = poll_ready(model.do_generate(transcription_call_options(
+            FileDataContent::Base64("base64-audio".to_string()),
+            "audio/wav",
+        )));
+
+        assert_eq!(result.text, "Hello world");
+        assert_eq!(result.segments.len(), 2);
+        assert_eq!(result.segments[0].text, "Hello");
+        assert_eq!(result.segments[0].start_second, 0.0);
+        assert_eq!(result.segments[0].end_second, 0.5);
+        assert_eq!(result.language.as_deref(), Some("en"));
+        assert_eq!(result.duration_in_seconds, Some(1.0));
+        assert_eq!(
+            result.warnings,
+            vec![Warning::Other {
+                message: "test warning".to_string()
+            }]
+        );
+        assert_eq!(
+            result
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("gateway"))
+                .and_then(|gateway| gateway.get("cost"))
+                .and_then(JsonValue::as_str),
+            Some("0.002")
+        );
+        assert_eq!(
+            result
+                .response
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-request-id"))
+                .map(String::as_str),
+            Some("req-123")
+        );
+        assert_eq!(
+            result.response.model_id,
+            GATEWAY_TRANSCRIPTION_TEST_MODEL_ID
+        );
+    }
+
+    #[test]
+    fn gateway_transcription_model_defaults_optional_transcript_fields() {
+        let (transport, _captured_request) = capturing_speech_transport(
+            200,
+            "OK",
+            json!({ "text": "Hello world" }).to_string(),
+            None,
+        );
+        let model =
+            gateway_transcription_test_model(gateway_transcription_test_settings(), transport);
+
+        let result = poll_ready(model.do_generate(transcription_call_options(
+            FileDataContent::Base64("base64-audio".to_string()),
+            "audio/wav",
+        )));
+
+        assert!(result.segments.is_empty());
+        assert_eq!(result.language, None);
+        assert_eq!(result.duration_in_seconds, None);
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn gateway_transcription_model_throws_invalid_request_error_on_400() {
+        let (transport, _captured_request) = capturing_speech_transport(
+            400,
+            "Bad Request",
+            json!({
+                "error": { "message": "Invalid audio format", "type": "invalid_request_error" }
+            })
+            .to_string(),
+            None,
+        );
+        let model =
+            gateway_transcription_test_model(gateway_transcription_test_settings(), transport);
+
+        let error = poll_ready(model.do_generate_inner(transcription_call_options(
+            FileDataContent::Base64("base64-audio".to_string()),
+            "audio/wav",
+        )))
+        .expect_err("400 surfaces a Gateway error");
+
+        assert_eq!(error.name(), "GatewayInvalidRequestError");
+        assert_eq!(error.status_code(), 400);
+    }
+
+    #[test]
+    fn gateway_transcription_model_throws_internal_server_error_on_500() {
+        let (transport, _captured_request) = capturing_speech_transport(
+            500,
+            "Internal Server Error",
+            json!({
+                "error": { "message": "Internal server error", "type": "internal_server_error" }
+            })
+            .to_string(),
+            None,
+        );
+        let model =
+            gateway_transcription_test_model(gateway_transcription_test_settings(), transport);
+
+        let error = poll_ready(model.do_generate_inner(transcription_call_options(
+            FileDataContent::Base64("base64-audio".to_string()),
+            "audio/wav",
+        )))
+        .expect_err("500 surfaces a Gateway error");
+
+        assert_eq!(error.name(), "GatewayInternalServerError");
+        assert_eq!(error.status_code(), 500);
+    }
+
+    #[test]
+    fn gateway_transcription_model_posts_to_transcription_model_endpoint() {
+        let (transport, captured_request) = capturing_speech_transport(
+            200,
+            "OK",
+            json!({ "text": "Hello world" }).to_string(),
+            None,
+        );
+        let model =
+            gateway_transcription_test_model(gateway_transcription_test_settings(), transport);
+
+        poll_ready(model.do_generate(transcription_call_options(
+            FileDataContent::Base64("base64-audio".to_string()),
+            "audio/wav",
+        )));
+
+        let request = captured_image_request(&captured_request);
+        assert_eq!(request.method, ProviderApiRequestMethod::Post);
+        assert_eq!(request.url, "https://api.test.com/transcription-model");
+    }
+
+    #[test]
+    fn create_gateway_creates_transcription_model_for_transcription_model_and_alias() {
+        let provider = create_gateway(
+            GatewayProviderSettings::new()
+                .with_base_url("https://api.example.com")
+                .with_api_key("test-api-key"),
+        );
+
+        let model = provider.transcription_model(GATEWAY_TRANSCRIPTION_TEST_MODEL_ID);
+        assert_eq!(model.provider(), GATEWAY_PROVIDER_ID);
+        assert_eq!(model.model_id(), GATEWAY_TRANSCRIPTION_TEST_MODEL_ID);
+        assert_eq!(model.base_url(), "https://api.example.com");
+
+        let aliased = provider.transcription(GATEWAY_TRANSCRIPTION_TEST_MODEL_ID);
+        assert_eq!(aliased.model_id(), GATEWAY_TRANSCRIPTION_TEST_MODEL_ID);
+    }
+
+    #[test]
+    fn create_gateway_reuses_gateway_headers_for_transcription_model() {
+        let settings = GatewayProviderSettings::new()
+            .with_base_url("https://api.example.com")
+            .with_api_key("test-api-key")
+            .with_header("Custom-Header", "value");
+        let model =
+            create_gateway(settings).transcription_model(GATEWAY_TRANSCRIPTION_TEST_MODEL_ID);
+        let headers = gateway_provider_headers_with_env(&model.settings, env_lookup(&[]));
+
+        assert_eq!(
+            headers.get("authorization").cloned().flatten(),
+            Some("Bearer test-api-key".to_string())
+        );
+        assert_eq!(
+            headers.get("custom-header").cloned().flatten(),
+            Some("value".to_string())
+        );
+    }
+
+    #[test]
+    fn default_gateway_export_constructs_transcription_model() {
+        let provider = create_gateway(GatewayProviderSettings::new().with_api_key("test-key"));
+        let model = provider.transcription_model(GATEWAY_TRANSCRIPTION_TEST_MODEL_ID);
+        assert_eq!(model.model_id(), GATEWAY_TRANSCRIPTION_TEST_MODEL_ID);
     }
 }

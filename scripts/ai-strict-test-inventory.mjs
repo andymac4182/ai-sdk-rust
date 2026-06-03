@@ -849,6 +849,12 @@ function gatewayVercelException(testCase) {
       notes:
         'The upstream case rejects using the callable provider factory with new. Rust exposes constructors and builder methods through the type system, so this JavaScript misuse is not expressible.',
     },
+    'packages/gateway/src/gateway-provider.test.ts:408': {
+      status: 'type-system-impossible',
+      rustTarget: 'exception: JavaScript callable provider constructor misuse',
+      notes:
+        'The upstream case rejects using the callable provider factory with new. Rust exposes constructors and builder methods through the type system, so this JavaScript misuse is not expressible.',
+    },
   };
 
   return exceptions[key] ?? null;
@@ -1115,6 +1121,133 @@ function gatewayVercelRustTests(testCase, rustTests) {
       'create_gateway_authentication_handles_valid_oidc_valid_api_key',
       'create_gateway_authentication_handles_valid_oidc_valid_options_api_key',
       'create_gateway_authentication_handles_invalid_oidc_invalid_api_key',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:319': [
+      'create_gateway_uses_api_key_and_team_id_or_slug_for_language_model_requests',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:343': [
+      'create_gateway_uses_api_key_and_team_id_or_slug_for_non_language_model_requests',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:366': [
+      'create_gateway_passes_team_id_or_slug_with_url_special_characters_as_header_value',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:381': [
+      'create_gateway_omits_team_header_for_api_key_requests_without_team_id_or_slug',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:394': [
+      'create_gateway_passes_team_id_or_slug_with_oidc_requests',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:558': [
+      'create_gateway_creates_speech_model_for_speech_model_and_alias',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:575': [
+      'create_gateway_creates_speech_model_for_speech_model_and_alias',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:588': [
+      'create_gateway_reuses_gateway_headers_for_speech_model',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:616': [
+      'create_gateway_creates_transcription_model_for_transcription_model_and_alias',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:633': [
+      'create_gateway_creates_transcription_model_for_transcription_model_and_alias',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:646': [
+      'create_gateway_reuses_gateway_headers_for_transcription_model',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:900': [
+      'default_gateway_export_constructs_speech_model',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:913': [
+      'default_gateway_export_constructs_transcription_model',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:986': [
+      'create_gateway_uses_api_key_and_team_id_or_slug_for_get_available_models',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1004': [
+      'create_gateway_uses_oidc_and_team_id_or_slug_for_get_available_models_without_api_key',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1142': [
+      'get_gateway_auth_token_handles_no_auth_at_all',
+      'get_gateway_auth_token_handles_valid_oidc_invalid_api_key',
+      'get_gateway_auth_token_handles_invalid_oidc_valid_api_key',
+      'get_gateway_auth_token_handles_no_oidc_invalid_api_key',
+      'get_gateway_auth_token_handles_no_oidc_valid_api_key',
+      'get_gateway_auth_token_handles_valid_oidc_no_api_key',
+      'get_gateway_auth_token_handles_valid_oidc_valid_api_key',
+      'get_gateway_auth_token_handles_valid_oidc_valid_options_api_key',
+      'get_gateway_auth_token_handles_invalid_oidc_invalid_api_key',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1207': [
+      'create_gateway_authentication_handles_no_auth_at_all',
+      'create_gateway_authentication_handles_valid_oidc_invalid_api_key',
+      'create_gateway_authentication_handles_invalid_oidc_valid_api_key',
+      'create_gateway_authentication_handles_no_oidc_invalid_api_key',
+      'create_gateway_authentication_handles_no_oidc_valid_api_key',
+      'create_gateway_authentication_handles_valid_oidc_no_api_key',
+      'create_gateway_authentication_handles_valid_oidc_valid_api_key',
+      'create_gateway_authentication_handles_valid_oidc_valid_options_api_key',
+      'create_gateway_authentication_handles_invalid_oidc_invalid_api_key',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1330': [
+      'create_gateway_surfaces_oidc_error_as_cause_when_authentication_fails',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1667': [
+      'gateway_provider_uses_oidc_authentication_in_spend_reports',
+    ],
+    'packages/gateway/src/gateway-provider.test.ts:1706': [
+      'gateway_provider_uses_oidc_authentication_in_generation_info',
+    ],
+    'packages/gateway/src/gateway-speech-model.test.ts:47': [
+      'gateway_speech_model_passes_headers_correctly',
+    ],
+    'packages/gateway/src/gateway-speech-model.test.ts:63': [
+      'gateway_speech_model_includes_o11y_headers',
+    ],
+    'packages/gateway/src/gateway-speech-model.test.ts:79': [
+      'gateway_speech_model_sends_speech_options_in_request_body',
+    ],
+    'packages/gateway/src/gateway-speech-model.test.ts:103': [
+      'gateway_speech_model_omits_optional_speech_options_when_not_provided',
+    ],
+    'packages/gateway/src/gateway-speech-model.test.ts:113': [
+      'gateway_speech_model_extracts_audio_and_metadata_from_response',
+    ],
+    'packages/gateway/src/gateway-speech-model.test.ts:141': [
+      'gateway_speech_model_throws_invalid_request_error_on_400',
+    ],
+    'packages/gateway/src/gateway-speech-model.test.ts:161': [
+      'gateway_speech_model_throws_internal_server_error_on_500',
+    ],
+    'packages/gateway/src/gateway-speech-model.test.ts:183': [
+      'gateway_speech_model_posts_to_speech_model_endpoint',
+    ],
+    'packages/gateway/src/gateway-transcription-model.test.ts:47': [
+      'gateway_transcription_model_passes_headers_correctly',
+    ],
+    'packages/gateway/src/gateway-transcription-model.test.ts:64': [
+      'gateway_transcription_model_includes_o11y_headers',
+    ],
+    'packages/gateway/src/gateway-transcription-model.test.ts:81': [
+      'gateway_transcription_model_base64_encodes_byte_audio_in_request_body',
+    ],
+    'packages/gateway/src/gateway-transcription-model.test.ts:97': [
+      'gateway_transcription_model_passes_string_audio_through_in_request_body',
+    ],
+    'packages/gateway/src/gateway-transcription-model.test.ts:111': [
+      'gateway_transcription_model_extracts_transcript_fields_and_metadata_from_response',
+    ],
+    'packages/gateway/src/gateway-transcription-model.test.ts:148': [
+      'gateway_transcription_model_defaults_optional_transcript_fields',
+    ],
+    'packages/gateway/src/gateway-transcription-model.test.ts:164': [
+      'gateway_transcription_model_throws_invalid_request_error_on_400',
+    ],
+    'packages/gateway/src/gateway-transcription-model.test.ts:187': [
+      'gateway_transcription_model_throws_internal_server_error_on_500',
+    ],
+    'packages/gateway/src/gateway-transcription-model.test.ts:212': [
+      'gateway_transcription_model_posts_to_transcription_model_endpoint',
     ],
     'packages/gateway/src/gateway-provider.test.ts:940': [
       'get_gateway_auth_token_treats_empty_environment_variables_as_missing',
