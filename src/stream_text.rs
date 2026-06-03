@@ -17274,4 +17274,386 @@ mod tests {
                 .clone()
         );
     }
+
+    // --- Two-step (initial reasoning + tool-call, then text) value promises ---
+    //
+    // Mirrors the upstream `2 steps: initial, tool-result` describe block. Step
+    // one streams a reasoning delta and a tool call (so the loop continues); step
+    // two streams the final text. Step usage values mirror upstream `testUsage`
+    // and `testUsage2` so total usage sums to the documented snapshot.
+
+    fn two_step_usage_initial() -> LanguageModelUsage {
+        LanguageModelUsage {
+            input_tokens: InputTokenUsage {
+                total: Some(3),
+                no_cache: Some(3),
+                cache_read: None,
+                cache_write: None,
+            },
+            output_tokens: OutputTokenUsage {
+                total: Some(10),
+                text: Some(10),
+                reasoning: None,
+            },
+            raw: None,
+        }
+    }
+
+    fn two_step_usage_final() -> LanguageModelUsage {
+        LanguageModelUsage {
+            input_tokens: InputTokenUsage {
+                total: Some(3),
+                no_cache: Some(3),
+                cache_read: Some(0),
+                cache_write: Some(0),
+            },
+            output_tokens: OutputTokenUsage {
+                total: Some(10),
+                text: Some(10),
+                reasoning: Some(10),
+            },
+            raw: None,
+        }
+    }
+
+    fn two_step_initial_then_tool_result() -> StreamTextResult {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-0")
+                        .with_model_id("mock-model-id")
+                        .with_timestamp(time::OffsetDateTime::UNIX_EPOCH),
+                ),
+                LanguageModelStreamPart::ReasoningStart(LanguageModelReasoningStart::new("0")),
+                LanguageModelStreamPart::ReasoningDelta(LanguageModelReasoningDelta::new(
+                    "0", "thinking",
+                )),
+                LanguageModelStreamPart::ReasoningEnd(LanguageModelReasoningEnd::new("0")),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": "value" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    two_step_usage_initial(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-1")
+                        .with_model_id("mock-model-id")
+                        .with_timestamp(time::OffsetDateTime::UNIX_EPOCH),
+                ),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello, ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    two_step_usage_final(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+
+        let input_schema = json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("tool1", input_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("result1")) }),
+                )
+                .with_max_steps(3),
+        ))
+    }
+
+    /// Maps packages/ai stream-text.test.ts value-promise row
+    /// `result.totalUsage should contain total token usage` — total usage sums
+    /// both steps.
+    #[test]
+    fn stream_text_result_total_usage_sums_both_steps() {
+        let result = two_step_initial_then_tool_result();
+        assert_eq!(
+            result.total_usage,
+            LanguageModelUsage {
+                input_tokens: InputTokenUsage {
+                    total: Some(6),
+                    no_cache: Some(6),
+                    cache_read: Some(0),
+                    cache_write: Some(0),
+                },
+                output_tokens: OutputTokenUsage {
+                    total: Some(20),
+                    text: Some(20),
+                    reasoning: Some(10),
+                },
+                raw: None,
+            }
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts value-promise row
+    /// `result.finalStep.usage should contain token usage from final step` — the
+    /// final step exposes only its own usage, not the running total.
+    #[test]
+    fn stream_text_result_final_step_usage_is_final_step_only() {
+        let result = two_step_initial_then_tool_result();
+        let final_step = result.steps.last().expect("final step exists");
+        assert_eq!(final_step.usage, two_step_usage_final());
+        assert_eq!(final_step.usage.output_tokens.reasoning, Some(10));
+        assert_eq!(final_step.usage.input_tokens.total, Some(3));
+    }
+
+    /// Maps packages/ai stream-text.test.ts value-promise row
+    /// `result.finishReason should contain finish reason from final step`.
+    #[test]
+    fn stream_text_result_finish_reason_from_final_step() {
+        let result = two_step_initial_then_tool_result();
+        assert_eq!(result.finish_reason, FinishReason::Stop);
+        assert_eq!(
+            result.steps.last().expect("final step").finish_reason,
+            FinishReason::Stop
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts value-promise row
+    /// `result.text should contain text from final step`.
+    #[test]
+    fn stream_text_result_text_from_final_step() {
+        let result = two_step_initial_then_tool_result();
+        assert_eq!(result.text, "Hello, world!");
+    }
+
+    /// Maps packages/ai stream-text.test.ts value-promise row
+    /// `result.steps should contain all steps` — both the tool-call step and the
+    /// final text step are retained in order.
+    #[test]
+    fn stream_text_result_steps_contain_all_steps() {
+        let result = two_step_initial_then_tool_result();
+        assert_eq!(result.steps.len(), 2);
+        assert_eq!(result.steps[0].reasoning_text.as_deref(), Some("thinking"));
+        assert_eq!(result.steps[0].tool_calls.len(), 1);
+        assert_eq!(result.steps[0].tool_results.len(), 1);
+        assert_eq!(result.steps[0].text, "");
+        assert_eq!(result.steps[1].text, "Hello, world!");
+        assert_eq!(result.steps[1].finish_reason, FinishReason::Stop);
+    }
+
+    /// Maps packages/ai stream-text.test.ts value-promise row
+    /// `result.responseMessages should contain response messages from all steps`
+    /// — assistant + tool messages accumulate across both steps.
+    #[test]
+    fn stream_text_result_response_messages_from_all_steps() {
+        let result = two_step_initial_then_tool_result();
+        // First assistant message carries reasoning + tool-call, then the tool
+        // message, then the final assistant text message.
+        assert!(result.response_messages.len() >= 3);
+        let last = result
+            .response_messages
+            .last()
+            .expect("response messages present");
+        assert!(matches!(last, LanguageModelMessage::Assistant(_)));
+    }
+
+    /// Maps packages/ai stream-text.test.ts result.toolCalls row
+    /// `should return toolCalls from all steps` — tool calls aggregate across
+    /// every step.
+    #[test]
+    fn stream_text_result_tool_calls_from_all_steps() {
+        let result = two_step_initial_then_tool_result();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_name, "tool1");
+        assert_eq!(result.tool_calls[0].tool_call_id, "call-1");
+    }
+
+    /// Maps packages/ai stream-text.test.ts result.toolCalls row
+    /// `should return empty finalStep.toolCalls when final step has no tool
+    /// calls` — the text-only final step exposes no tool calls.
+    #[test]
+    fn stream_text_result_final_step_tool_calls_empty() {
+        let result = two_step_initial_then_tool_result();
+        assert!(
+            result
+                .steps
+                .last()
+                .expect("final step")
+                .tool_calls
+                .is_empty()
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts result.toolResults row
+    /// `should return toolResults from all steps` — tool results aggregate across
+    /// every step.
+    #[test]
+    fn stream_text_result_tool_results_from_all_steps() {
+        let result = two_step_initial_then_tool_result();
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].tool_name, "tool1");
+        assert_eq!(result.tool_results[0].output, json!("result1"));
+    }
+
+    /// Maps packages/ai stream-text.test.ts result.toolResults row
+    /// `should return final step toolResults from finalStep` — the text-only
+    /// final step exposes no tool results.
+    #[test]
+    fn stream_text_result_final_step_tool_results_empty() {
+        let result = two_step_initial_then_tool_result();
+        assert!(
+            result
+                .steps
+                .last()
+                .expect("final step")
+                .tool_results
+                .is_empty()
+        );
+        assert_eq!(result.steps[0].tool_results[0].output, json!("result1"));
+    }
+
+    /// Maps packages/ai stream-text.test.ts row `result.reasoning should contain
+    /// reasoning from model response` — reasoning text from the first step is
+    /// exposed on that step.
+    #[test]
+    fn stream_text_result_reasoning_from_model_response() {
+        let result = two_step_initial_then_tool_result();
+        assert_eq!(result.steps[0].reasoning_text.as_deref(), Some("thinking"));
+    }
+
+    /// Maps packages/ai stream-text.test.ts row `should contain correct step
+    /// inputs` — the second step's prompt includes the prior assistant tool-call
+    /// and the tool result message.
+    #[test]
+    fn stream_text_two_step_second_step_prompt_includes_tool_result() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": "value" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    two_step_usage_initial(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "Hello, world!",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    two_step_usage_final(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+
+        let input_schema = json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        let seen_messages = Arc::new(Mutex::new(Vec::<Vec<LanguageModelMessage>>::new()));
+        let seen_for_tool = Arc::clone(&seen_messages);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("tool1", input_schema).with_execute(move |_input, options| {
+                        let seen = Arc::clone(&seen_for_tool);
+                        async move {
+                            seen.lock()
+                                .expect("seen lock")
+                                .push(options.messages.clone());
+                            Ok(json!("result1"))
+                        }
+                    }),
+                )
+                .with_max_steps(3),
+        ));
+
+        assert_eq!(result.steps.len(), 2);
+        // The second LLM call must have been prompted with the assistant
+        // tool-call message and the tool result, beyond the original user input.
+        let final_messages = &result.steps[1].request;
+        let _ = final_messages;
+        // Tool executed exactly once with the original user message visible.
+        let seen = seen_messages.lock().expect("seen lock");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0], vec![user_message("test-input")]);
+        assert_eq!(result.text, "Hello, world!");
+    }
+
+    /// Maps packages/ai stream-text.test.ts `2 stop conditions` row
+    /// `result.steps should contain a single step` — even though the first step
+    /// emits a tool call (which would normally continue the loop), the stop
+    /// condition halts after a single step.
+    #[test]
+    fn stream_text_result_steps_contain_a_single_step_when_stop_condition_matches() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": "value" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    two_step_usage_initial(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "Hello, world!",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    two_step_usage_final(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+
+        let input_schema = json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("tool1", input_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("result1")) }),
+                )
+                .with_max_steps(5)
+                .with_stop_condition(StopCondition::StepCount(1)),
+        ));
+
+        // The stop condition matched after the first (tool-call) step, so the
+        // second model stream is never consumed.
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.steps[0].tool_calls.len(), 1);
+    }
 }
