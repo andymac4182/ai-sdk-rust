@@ -1043,6 +1043,60 @@ mod tests {
         assert_eq!(stats.max, 500.0);
     }
 
+    // packages-ai-1096: it should include step performance
+    //
+    // Mirrors `stream-text.test.ts:6670`, which drives `createTestModel()` (the
+    // `Hello` / `, ` / `world!` text-delta stream with `testUsage` 3-in/10-out)
+    // through the deterministic `_internal.now` mock
+    // `mockValues(1000, 1000, 1200, 1300, 1400, 1500, 1500, 1500)` and asserts the
+    // exact step `performance` object. The Rust performance collector consumes one
+    // timestamp at call start, one per output chunk, and one at finish, so the
+    // load-bearing subset of the mock is `[1000, 1200, 1300, 1400, 1500]`: call
+    // start 1000, first delta 1200 (timeToFirstOutput 200), deltas at +100 each,
+    // finish 1500 (responseTime 500). Every derived rate the upstream snapshot
+    // pins is asserted exactly here.
+    #[test]
+    fn stream_language_model_call_includes_step_performance() {
+        let result = run_with_timestamps(
+            vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", ", ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                finish_stop(),
+            ],
+            vec![1000.0, 1200.0, 1300.0, 1400.0, 1500.0],
+        );
+
+        let perf = last_performance(&result);
+        // responseTimeMs: 500, stepTimeMs is the same wall-clock span upstream.
+        assert_eq!(perf.response_time_ms, 500.0);
+        assert_eq!(perf.time_to_first_output_ms, Some(200.0));
+        // effectiveOutputTokensPerSecond: 10 tokens / 0.5s = 20.
+        assert!((perf.effective_output_tokens_per_second - 20.0).abs() < 1e-9);
+        // outputTokensPerSecond: 10 tokens / (0.5s - 0.2s) = 33.333...
+        assert!(
+            (perf.output_tokens_per_second.expect("output rate") - 33.333_333_333_333_336).abs()
+                < 1e-9
+        );
+        // inputTokensPerSecond: 3 tokens / 0.2s = 15.
+        assert!((perf.input_tokens_per_second.expect("input rate") - 15.0).abs() < 1e-9);
+        // effectiveTotalTokensPerSecond: 13 tokens / 0.5s = 26.
+        assert!((perf.effective_total_tokens_per_second - 26.0).abs() < 1e-9);
+
+        let stats = perf
+            .time_between_output_chunks_ms
+            .as_ref()
+            .expect("timing stats");
+        assert_eq!(stats.min, 100.0);
+        assert_eq!(stats.p10, 100.0);
+        assert_eq!(stats.median, 100.0);
+        assert_eq!(stats.avg, 100.0);
+        assert_eq!(stats.p90, 100.0);
+        assert_eq!(stats.max, 100.0);
+    }
+
     // packages-ai-0927: it should measure time between all output chunk types
     #[test]
     fn stream_language_model_call_measures_time_between_all_output_chunk_types() {

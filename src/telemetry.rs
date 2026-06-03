@@ -2598,6 +2598,64 @@ mod tests {
         assert_eq!(executed.load(Ordering::Relaxed), 1);
     }
 
+    // packages-ai-0997: it should execute doStream inside executeLanguageModelCall context
+    //
+    // Mirrors `stream-text.test.ts:471`. Upstream installs an
+    // `executeLanguageModelCall` integration that sets a module-level
+    // `activeContext = callId` before invoking `execute()` (the wrapped model
+    // call / `doStream`) and clears it afterwards; the model's `doStream`
+    // captures `activeContext` at the moment it runs and the test asserts the
+    // captured value equals the call id `test-telemetry-call-id`. This proves the
+    // model call executes *inside* the integration's context wrapper. The Rust
+    // port models `executeLanguageModelCall` on the telemetry dispatcher, so the
+    // same context-propagation behavior is exercised here: the wrapper sets the
+    // shared active context, the inner `execute` (standing in for `doStream`)
+    // captures it, and we assert the captured context matches the call id and is
+    // cleared again once the wrapper returns.
+    #[test]
+    fn telemetry_dispatcher_executes_language_model_call_inside_integration_context() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+
+        // Shared "active context" the integration sets while the model call runs.
+        let active_context: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let wrapper_context = Arc::clone(&active_context);
+
+        let dispatcher =
+            create_telemetry_dispatcher(Some(TelemetryOptions::new().with_integration(
+                TelemetryIntegration::new().with_execute_language_model_call(move |options| {
+                    // Enter the model-call context (callId becomes active).
+                    *wrapper_context.lock().expect("context lock") = Some(options.call_id.clone());
+                    let result = (options.execute)();
+                    // Leave the context once the model call completed.
+                    *wrapper_context.lock().expect("context lock") = None;
+                    result
+                }),
+            )));
+
+        assert!(dispatcher.has_execute_language_model_call());
+
+        // The inner execute stands in for `doStream`: it captures whatever context
+        // is active at the moment it runs.
+        let captured_context: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let execute_context = Arc::clone(&active_context);
+        let execute_capture = Arc::clone(&captured_context);
+        let result = dispatcher.execute_language_model_call("test-telemetry-call-id", move || {
+            *execute_capture.lock().expect("capture lock") =
+                execute_context.lock().expect("context lock").clone();
+            json!("done")
+        });
+
+        assert_eq!(result, json!("done"));
+        // doStream ran inside the executeLanguageModelCall context: it saw the call id.
+        assert_eq!(
+            *captured_context.lock().expect("capture lock"),
+            Some("test-telemetry-call-id".to_string())
+        );
+        // The context is restored (cleared) after the wrapper returns.
+        assert_eq!(*active_context.lock().expect("context lock"), None);
+    }
+
     #[test]
     fn open_telemetry_integration_exports_dispatcher_spans_to_local_otlp_receiver() {
         let _guard = telemetry_test_guard();
