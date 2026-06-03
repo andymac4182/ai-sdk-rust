@@ -1533,6 +1533,112 @@ mod tests {
         assert_eq!(get_global_telemetry_integrations().len(), 3);
     }
 
+    // Upstream parity: packages/ai/src/telemetry/telemetry-registry.test.ts.
+    // The upstream `beforeEach` resets `globalThis.AI_SDK_TELEMETRY_INTEGRATIONS`;
+    // we mirror that with `reset_telemetry_state_for_tests()` under the shared
+    // test guard so the process-global registry starts empty for each case.
+
+    /// packages-ai-2177: it adds an integration to the global registry.
+    #[test]
+    fn register_telemetry_adds_an_integration_to_the_global_registry() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+
+        let integration =
+            TelemetryIntegration::new().with_callback(TelemetryEventKind::OnStart, |_event| {});
+
+        register_telemetry_integration(integration);
+
+        let registered = get_global_telemetry_integrations();
+        assert_eq!(registered.len(), 1);
+        assert!(
+            registered[0]
+                .callback(TelemetryEventKind::OnStart)
+                .is_some()
+        );
+    }
+
+    /// packages-ai-2178: it adds multiple integrations in registration order.
+    #[test]
+    fn register_telemetry_adds_multiple_integrations_in_registration_order() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+
+        let integration1 =
+            TelemetryIntegration::new().with_callback(TelemetryEventKind::OnStart, |_event| {});
+        let integration2 =
+            TelemetryIntegration::new().with_callback(TelemetryEventKind::OnEnd, |_event| {});
+
+        register_telemetry_integration(integration1);
+        register_telemetry_integration(integration2);
+
+        let registered = get_global_telemetry_integrations();
+        assert_eq!(registered.len(), 2);
+        // Registration order is preserved: first the onStart integration, then onEnd.
+        assert!(
+            registered[0]
+                .callback(TelemetryEventKind::OnStart)
+                .is_some()
+        );
+        assert!(registered[0].callback(TelemetryEventKind::OnEnd).is_none());
+        assert!(registered[1].callback(TelemetryEventKind::OnEnd).is_some());
+        assert!(
+            registered[1]
+                .callback(TelemetryEventKind::OnStart)
+                .is_none()
+        );
+    }
+
+    /// packages-ai-2179: it adds multiple integrations passed in a single call.
+    #[test]
+    fn register_telemetry_adds_multiple_integrations_passed_in_a_single_call() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+
+        let integration1 =
+            TelemetryIntegration::new().with_callback(TelemetryEventKind::OnStart, |_event| {});
+        let integration2 =
+            TelemetryIntegration::new().with_callback(TelemetryEventKind::OnEnd, |_event| {});
+        let integration3 =
+            TelemetryIntegration::new().with_callback(TelemetryEventKind::OnError, |_event| {});
+
+        register_telemetry([integration1, integration2, integration3]);
+
+        let registered = get_global_telemetry_integrations();
+        assert_eq!(registered.len(), 3);
+        assert!(
+            registered[0]
+                .callback(TelemetryEventKind::OnStart)
+                .is_some()
+        );
+        assert!(registered[1].callback(TelemetryEventKind::OnEnd).is_some());
+        assert!(
+            registered[2]
+                .callback(TelemetryEventKind::OnError)
+                .is_some()
+        );
+    }
+
+    /// packages-ai-2180: it is a no-op when called with no integrations.
+    #[test]
+    fn register_telemetry_is_a_no_op_when_called_with_no_integrations() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+
+        register_telemetry(std::iter::empty::<TelemetryIntegration>());
+
+        assert!(get_global_telemetry_integrations().is_empty());
+    }
+
+    /// packages-ai-2181: it returns an empty array when no integrations are registered.
+    #[test]
+    fn get_global_telemetry_integrations_returns_empty_when_none_registered() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+
+        assert!(get_global_telemetry_integrations().is_empty());
+    }
+
     #[test]
     fn telemetry_dispatcher_invokes_local_integration_with_augmented_event() {
         let _guard = telemetry_test_guard();
@@ -2073,6 +2179,92 @@ mod tests {
             diagnostic.event.function_id.as_deref(),
             Some("diagnostic-function")
         );
+    }
+
+    #[test]
+    fn telemetry_dispatcher_publishes_on_start_lifecycle_event_without_integrations() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+        let diagnostics = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&diagnostics);
+        let _subscription = subscribe_telemetry_diagnostics(move |message| {
+            captured.lock().expect("diagnostics lock").push(message);
+        });
+
+        create_telemetry_dispatcher(Some(TelemetryOptions::new()))
+            .on_start(json!({ "callId": "diagnostic-channel-without-integrations" }));
+
+        let diagnostics = diagnostics.lock().expect("diagnostics lock");
+        let published: Vec<_> = diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.event.event.get("callId")
+                    == Some(&json!("diagnostic-channel-without-integrations"))
+            })
+            .collect();
+
+        assert_eq!(published.len(), 1);
+        let diagnostic = published[0];
+        assert_eq!(diagnostic.kind, TelemetryEventKind::OnStart);
+        assert_eq!(diagnostic.event.kind, TelemetryEventKind::OnStart);
+        assert_eq!(
+            diagnostic.event.event,
+            json!({ "callId": "diagnostic-channel-without-integrations" })
+        );
+        assert_eq!(diagnostic.event.function_id, None);
+        assert_eq!(diagnostic.event.record_inputs, None);
+        assert_eq!(diagnostic.event.record_outputs, None);
+    }
+
+    #[test]
+    fn telemetry_dispatcher_applies_telemetry_settings_per_call() {
+        let _guard = telemetry_test_guard();
+        reset_telemetry_state_for_tests();
+        let diagnostics = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&diagnostics);
+        let _subscription = subscribe_telemetry_diagnostics(move |message| {
+            captured.lock().expect("diagnostics lock").push(message);
+        });
+
+        let enabled = create_telemetry_dispatcher(Some(
+            TelemetryOptions::new().with_function_id("enabled-function"),
+        ));
+        let disabled = create_telemetry_dispatcher(Some(
+            TelemetryOptions::new()
+                .with_enabled(false)
+                .with_function_id("disabled-function"),
+        ));
+
+        disabled.on_start(json!({ "callId": "diagnostic-channel-disabled-call" }));
+        enabled.on_start(json!({ "callId": "diagnostic-channel-enabled-call" }));
+
+        let diagnostics = diagnostics.lock().expect("diagnostics lock");
+        let published: Vec<_> = diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                let call_id = diagnostic
+                    .event
+                    .event
+                    .get("callId")
+                    .and_then(JsonValue::as_str);
+                call_id == Some("diagnostic-channel-enabled-call")
+                    || call_id == Some("diagnostic-channel-disabled-call")
+            })
+            .collect();
+
+        assert_eq!(published.len(), 1);
+        let diagnostic = published[0];
+        assert_eq!(diagnostic.kind, TelemetryEventKind::OnStart);
+        assert_eq!(
+            diagnostic.event.event,
+            json!({ "callId": "diagnostic-channel-enabled-call" })
+        );
+        assert_eq!(
+            diagnostic.event.function_id.as_deref(),
+            Some("enabled-function")
+        );
+        assert_eq!(diagnostic.event.record_inputs, None);
+        assert_eq!(diagnostic.event.record_outputs, None);
     }
 
     #[test]
