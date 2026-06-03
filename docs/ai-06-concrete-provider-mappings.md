@@ -640,6 +640,13 @@ All 55 portable `packages/azure` upstream cases map to named Rust tests in `crat
 | `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | normalizes image/* wildcard via detection | `huggingface_responses_resolves_top_level_image_media_types` | none |
 ## Perplexity Exact Case Map
 
+Row-level strict mapping for portable `packages/perplexity` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named colocated Rust
+test in `crates/ai-sdk-perplexity/src/lib.rs` (`#[cfg(test)] mod tests`) that
+exercises the corresponding upstream behavior deterministically.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
 | `packages/perplexity/src/convert-to-perplexity-messages.test.ts` | should convert a system message with text content | `convert_to_perplexity_messages_converts_system_user_assistant_messages` | none |
 | `packages/perplexity/src/convert-to-perplexity-messages.test.ts` | should convert a user message with text parts | `convert_to_perplexity_messages_converts_system_user_assistant_messages` | none |
 | `packages/perplexity/src/convert-to-perplexity-messages.test.ts` | should convert a user message with image parts | `convert_to_perplexity_messages_handles_top_level_media_type_resolution` | none |
