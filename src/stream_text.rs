@@ -2386,6 +2386,23 @@ impl StreamTextResult {
     }
 }
 
+/// Converts a sequence of [`TextStreamPart`] chunks into a stream of text deltas.
+///
+/// This mirrors upstream `toTextStream`: only `text-delta` parts contribute and
+/// each contributes its `text` value, all other part types are dropped.
+pub fn to_text_stream<I>(parts: I) -> Vec<String>
+where
+    I: IntoIterator<Item = TextStreamPart>,
+{
+    parts
+        .into_iter()
+        .filter_map(|part| match part {
+            TextStreamPart::TextDelta(part) => Some(part.text),
+            _ => None,
+        })
+        .collect()
+}
+
 fn stream_text_output_value(text: &str) -> JsonValue {
     serde_json::from_str(text).unwrap_or_else(|_| JsonValue::String(text.to_string()))
 }

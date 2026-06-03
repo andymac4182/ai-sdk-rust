@@ -277,6 +277,29 @@ mod tests {
     }
 
     #[test]
+    fn create_text_stream_response_can_respond_with_to_text_stream_output() {
+        use crate::language_model::LanguageModelTextEnd;
+        use crate::stream_text::{
+            TextStreamPart, TextStreamStartPart, TextStreamTextDeltaPart, to_text_stream,
+        };
+
+        let parts = vec![
+            TextStreamPart::Start(TextStreamStartPart::new()),
+            TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("t1", "Hello")),
+            TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("t1", ", world!")),
+            TextStreamPart::TextEnd(LanguageModelTextEnd::new("t1")),
+        ];
+
+        let response =
+            create_text_stream_response(TextStreamResponseOptions::new(to_text_stream(parts)));
+
+        assert_eq!(
+            response.decoded_body().expect("body chunks decode"),
+            vec!["Hello".to_string(), ", world!".to_string()]
+        );
+    }
+
+    #[test]
     fn pipe_text_stream_to_response_writes_headers_chunks_and_end() {
         let mut response = MockTextStreamResponse::default();
 
