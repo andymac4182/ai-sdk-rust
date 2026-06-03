@@ -5624,6 +5624,160 @@ mod tests {
         );
     }
 
+    /// Maps packages/ai stream-text.test.ts text-output row
+    /// `should not call JSON.stringify for string partial outputs` — string
+    /// partial outputs are emitted as raw strings, never JSON-encoded values.
+    #[test]
+    fn stream_text_result_partial_output_stream_text_output_keeps_raw_string_partials() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello, ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+
+        let partials = stream_text_partial_output_values(&result);
+        assert_eq!(partials, vec![json!("Hello, "), json!("Hello, world!")]);
+        // Every partial is a raw JSON string, never a serialized/quoted form.
+        for value in &partials {
+            assert!(matches!(value, JsonValue::String(_)));
+        }
+    }
+
+    /// Maps packages/ai stream-text.test.ts text-output row
+    /// `should resolve output promise with the correct content` — the resolved
+    /// `output` promise for default text output equals the full text.
+    #[test]
+    fn stream_text_result_text_output_resolves_output_promise() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello, ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+
+        let output: String = result.output_as().expect("text output is typed");
+        assert_eq!(output, "Hello, world!");
+    }
+
+    /// Maps packages/ai stream-text.test.ts object-output row
+    /// `should send partial output stream` — object output repairs incremental
+    /// JSON deltas into a progressively-completed object stream.
+    #[test]
+    fn stream_text_result_object_output_sends_partial_output_stream() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "{ ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "\"value\": ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "\"Hello, ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "!\"")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", " }")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+
+        assert_eq!(
+            stream_text_partial_output_values(&result),
+            vec![
+                json!({}),
+                json!({ "value": "Hello, " }),
+                json!({ "value": "Hello, world" }),
+                json!({ "value": "Hello, world!" }),
+            ]
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts object-output row
+    /// `should send partial output stream when last chunk contains content` —
+    /// the final delta carrying both content and the closing brace still yields
+    /// the completed object as the last partial.
+    #[test]
+    fn stream_text_result_object_output_partial_output_stream_last_chunk_with_content() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "{ ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "\"value\": ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "\"Hello, ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!\" }")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+
+        assert_eq!(
+            stream_text_partial_output_values(&result),
+            vec![
+                json!({}),
+                json!({ "value": "Hello, " }),
+                json!({ "value": "Hello, world!" }),
+            ]
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts object-output row
+    /// `should resolve text promise with the correct content` — object output
+    /// still resolves the raw text promise with the underlying JSON text.
+    #[test]
+    fn stream_text_result_object_output_resolves_text_promise() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "{ ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "\"value\": ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "\"Hello, ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!\" ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "}")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+
+        assert_eq!(result.text, "{ \"value\": \"Hello, world!\" }");
+    }
+
+    /// Maps packages/ai stream-text.test.ts object-output row
+    /// `should resolve output promise with the correct content` — object output
+    /// resolves the typed `output` promise with the completed object.
+    #[test]
+    fn stream_text_result_object_output_resolves_output_promise() {
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "{ ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "\"value\": ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "\"Hello, ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!\" ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "}")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+
+        let output: StreamTypedObjectOutput = result.output_as().expect("object output is typed");
+        assert_eq!(
+            output,
+            StreamTypedObjectOutput {
+                value: "Hello, world!".to_string()
+            }
+        );
+    }
+
     #[derive(Default)]
     struct MockStreamTextUiMessageResponse {
         status: Option<u16>,
@@ -17556,6 +17710,47 @@ mod tests {
             .clone()
             .expect("on_start ran");
         assert_eq!(event.provider_options, Some(expected));
+    }
+
+    // Upstream: stream-text.test.ts options.experimental_onStart
+    // "should expose timeout and stopWhen": the onStart event exposes the
+    // configured timeout (totalMs/stepMs) when timeout and stopWhen are set.
+    #[test]
+    fn stream_text_on_start_exposes_timeout() {
+        let model = MockLanguageModel::new().with_stream_result(stream_result_hello());
+        let captured = Arc::new(Mutex::new(None::<GenerateTextStartEvent>));
+        let captured_for_callback = Arc::clone(&captured);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_timeout(TimeoutConfiguration::detailed(
+                    TimeoutConfigurationOptions::new()
+                        .with_total_ms(5_000)
+                        .with_step_ms(1_000),
+                ))
+                .with_stop_condition(StopCondition::StepCount(3))
+                .with_on_start(move |event| {
+                    let captured = Arc::clone(&captured_for_callback);
+                    async move {
+                        *captured.lock().expect("captured lock") = Some(event);
+                    }
+                }),
+        ));
+
+        result.consume_stream();
+        let event = captured
+            .lock()
+            .expect("captured lock")
+            .clone()
+            .expect("on_start ran");
+        assert_eq!(
+            event.timeout,
+            Some(TimeoutConfiguration::detailed(
+                TimeoutConfigurationOptions::new()
+                    .with_total_ms(5_000)
+                    .with_step_ms(1_000),
+            ))
+        );
     }
 
     // Upstream: stream-text.test.ts result.toUIMessageStream
