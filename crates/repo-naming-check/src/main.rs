@@ -436,6 +436,10 @@ fn allowed_identifier_token(name: &str, token: &str, origin: &str) -> bool {
         return true;
     }
 
+    if token == "common" && name == "CommonModelConfig" {
+        return true;
+    }
+
     if token == "shared" && (name.contains("adapter_shared") || name.contains("adapter-shared")) {
         return true;
     }
@@ -495,6 +499,10 @@ mod tests {
                 "mdast_util_to_markdown",
             ),
             ("docs/chat.md:2 documented identifier", "adapter-shared"),
+            (
+                "crates/ai-sdk-openai-compatible/src/baseten.rs:53 documented identifier",
+                "CommonModelConfig",
+            ),
         ] {
             check_identifier(origin, name, &mut failures);
         }
