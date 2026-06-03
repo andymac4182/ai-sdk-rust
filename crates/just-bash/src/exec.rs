@@ -13365,6 +13365,10 @@ fn command_xan(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
         "sort" => xan_sort_cmd(state, &args[1..], stdin),
         "dedup" => xan_dedup(state, &args[1..], stdin),
         "search" => xan_search(state, &args[1..], stdin),
+        "agg" => xan_agg(state, &args[1..], stdin),
+        "sample" => xan_sample(state, &args[1..], stdin),
+        "flatten" | "f" => xan_flatten(state, &args[1..], stdin),
+        "frequency" => xan_frequency(state, &args[1..], stdin),
         "parallel" => stderr_result(1, "xan parallel: not yet implemented\n"),
         other => stderr_result(1, format!("xan: unknown command: {other}\n")),
     }
@@ -13711,6 +13715,659 @@ fn xan_search(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
         }
         Err(result) => result,
     }
+}
+
+/// One parsed `func(inner) as alias` aggregation specification.
+struct XanAggSpec {
+    func: String,
+    expr: String,
+    alias: String,
+}
+
+/// Port of upstream `parseAggExpr`: parse `func(inner) as alias` comma-separated
+/// specs, respecting nested parentheses inside the inner expression.
+fn parse_xan_agg_expr(expr: &str) -> Vec<XanAggSpec> {
+    let chars: Vec<char> = expr.chars().collect();
+    let mut specs = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        while i < chars.len() && (chars[i] == ' ' || chars[i] == ',') {
+            i += 1;
+        }
+        if i >= chars.len() {
+            break;
+        }
+        let func_start = i;
+        while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+            i += 1;
+        }
+        let func: String = chars[func_start..i].iter().collect();
+        while i < chars.len() && chars[i] == ' ' {
+            i += 1;
+        }
+        if i >= chars.len() || chars[i] != '(' {
+            break;
+        }
+        i += 1;
+        let mut paren_depth = 1;
+        let expr_start = i;
+        while i < chars.len() && paren_depth > 0 {
+            if chars[i] == '(' {
+                paren_depth += 1;
+            } else if chars[i] == ')' {
+                paren_depth -= 1;
+            }
+            if paren_depth > 0 {
+                i += 1;
+            }
+        }
+        let inner: String = chars[expr_start..i].iter().collect();
+        let inner = inner.trim().to_string();
+        i += 1; // skip ')'
+        while i < chars.len() && chars[i] == ' ' {
+            i += 1;
+        }
+        let mut alias = String::new();
+        let lookahead: String = chars[i..(i + 3).min(chars.len())].iter().collect();
+        if lookahead.to_lowercase() == "as " {
+            i += 3;
+            while i < chars.len() && chars[i] == ' ' {
+                i += 1;
+            }
+            let alias_start = i;
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            alias = chars[alias_start..i].iter().collect();
+        }
+        if alias.is_empty() {
+            alias = if inner.is_empty() {
+                format!("{func}()")
+            } else {
+                format!("{func}({inner})")
+            };
+        }
+        specs.push(XanAggSpec {
+            func,
+            expr: inner,
+            alias,
+        });
+    }
+    specs
+}
+
+fn xan_is_simple_column(expr: &str) -> bool {
+    !expr.is_empty()
+        && expr
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '_')
+}
+
+/// Evaluate a numeric arithmetic moonblade expression (`a`, `b + 1`,
+/// `add(a, b + 1)`) against a CSV row. Returns None on non-numeric/parse error.
+fn xan_eval_arith(headers: &[String], row: &[String], expr: &str) -> Option<f64> {
+    let tokens = xan_tokenize_arith(expr);
+    let mut pos = 0;
+    let value = xan_parse_add_sub(&tokens, &mut pos, headers, row)?;
+    if pos == tokens.len() {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn xan_tokenize_arith(expr: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = expr.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let character = chars[i];
+        if character.is_whitespace() {
+            i += 1;
+        } else if matches!(character, '+' | '-' | '*' | '/' | '(' | ')' | ',') {
+            tokens.push(character.to_string());
+            i += 1;
+        } else if character.is_alphanumeric() || character == '_' || character == '.' {
+            let start = i;
+            while i < chars.len()
+                && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.')
+            {
+                i += 1;
+            }
+            tokens.push(chars[start..i].iter().collect());
+        } else {
+            i += 1;
+        }
+    }
+    tokens
+}
+
+fn xan_parse_add_sub(
+    tokens: &[String],
+    pos: &mut usize,
+    headers: &[String],
+    row: &[String],
+) -> Option<f64> {
+    let mut value = xan_parse_mul_div(tokens, pos, headers, row)?;
+    while *pos < tokens.len() && (tokens[*pos] == "+" || tokens[*pos] == "-") {
+        let op = tokens[*pos].clone();
+        *pos += 1;
+        let rhs = xan_parse_mul_div(tokens, pos, headers, row)?;
+        value = if op == "+" { value + rhs } else { value - rhs };
+    }
+    Some(value)
+}
+
+fn xan_parse_mul_div(
+    tokens: &[String],
+    pos: &mut usize,
+    headers: &[String],
+    row: &[String],
+) -> Option<f64> {
+    let mut value = xan_parse_atom(tokens, pos, headers, row)?;
+    while *pos < tokens.len() && (tokens[*pos] == "*" || tokens[*pos] == "/") {
+        let op = tokens[*pos].clone();
+        *pos += 1;
+        let rhs = xan_parse_atom(tokens, pos, headers, row)?;
+        value = if op == "*" { value * rhs } else { value / rhs };
+    }
+    Some(value)
+}
+
+fn xan_parse_atom(
+    tokens: &[String],
+    pos: &mut usize,
+    headers: &[String],
+    row: &[String],
+) -> Option<f64> {
+    let token = tokens.get(*pos)?.clone();
+    if token == "(" {
+        *pos += 1;
+        let value = xan_parse_add_sub(tokens, pos, headers, row)?;
+        if tokens.get(*pos).map(String::as_str) != Some(")") {
+            return None;
+        }
+        *pos += 1;
+        return Some(value);
+    }
+    if token == "add" && tokens.get(*pos + 1).map(String::as_str) == Some("(") {
+        *pos += 2;
+        let lhs = xan_parse_add_sub(tokens, pos, headers, row)?;
+        if tokens.get(*pos).map(String::as_str) != Some(",") {
+            return None;
+        }
+        *pos += 1;
+        let rhs = xan_parse_add_sub(tokens, pos, headers, row)?;
+        if tokens.get(*pos).map(String::as_str) != Some(")") {
+            return None;
+        }
+        *pos += 1;
+        return Some(lhs + rhs);
+    }
+    *pos += 1;
+    if let Ok(number) = token.parse::<f64>() {
+        return Some(number);
+    }
+    let cell = headers
+        .iter()
+        .position(|header| header == &token)
+        .and_then(|index| row.get(index))?;
+    cell.parse::<f64>().ok()
+}
+
+/// Compute a single aggregation over CSV rows. Returns the rendered cell value.
+fn xan_compute_agg(csv: &CsvData, spec: &XanAggSpec) -> String {
+    let func = spec.func.as_str();
+    let expr = spec.expr.as_str();
+
+    if func == "count" && expr.is_empty() {
+        return csv.rows.len().to_string();
+    }
+
+    // Predicate-style aggregations evaluate the expression per row.
+    match func {
+        "count" if !xan_is_simple_column(expr) => {
+            let matched = csv
+                .rows
+                .iter()
+                .filter(|row| eval_csv_predicate(&csv.headers, row, expr))
+                .count();
+            return matched.to_string();
+        }
+        "all" => {
+            let all = csv
+                .rows
+                .iter()
+                .all(|row| eval_csv_predicate(&csv.headers, row, expr));
+            return all.to_string();
+        }
+        "any" => {
+            let any = csv
+                .rows
+                .iter()
+                .any(|row| eval_csv_predicate(&csv.headers, row, expr));
+            return any.to_string();
+        }
+        _ => {}
+    }
+
+    // Collect string values (simple column reference or arithmetic expression).
+    let raw_values: Vec<String> = if xan_is_simple_column(expr) {
+        let index = csv.headers.iter().position(|header| header == expr);
+        match index {
+            Some(index) => csv
+                .rows
+                .iter()
+                .filter_map(|row| row.get(index).cloned())
+                .collect(),
+            None => Vec::new(),
+        }
+    } else {
+        csv.rows
+            .iter()
+            .filter_map(|row| xan_eval_arith(&csv.headers, row, expr))
+            .map(|value| json_scalar_string(&json_number(value)))
+            .collect()
+    };
+
+    let numbers: Vec<f64> = raw_values
+        .iter()
+        .filter_map(|value| value.parse::<f64>().ok())
+        .collect();
+
+    match func {
+        "count" => raw_values.len().to_string(),
+        "sum" => json_scalar_string(&json_number(numbers.iter().sum())),
+        "mean" | "avg" => {
+            let mean = if numbers.is_empty() {
+                0.0
+            } else {
+                numbers.iter().sum::<f64>() / numbers.len() as f64
+            };
+            json_scalar_string(&json_number(mean))
+        }
+        "min" => numbers
+            .iter()
+            .cloned()
+            .reduce(f64::min)
+            .map(|value| json_scalar_string(&json_number(value)))
+            .unwrap_or_default(),
+        "max" => numbers
+            .iter()
+            .cloned()
+            .reduce(f64::max)
+            .map(|value| json_scalar_string(&json_number(value)))
+            .unwrap_or_default(),
+        "first" => raw_values.first().cloned().unwrap_or_default(),
+        "last" => raw_values.last().cloned().unwrap_or_default(),
+        "median" => {
+            let mut sorted = numbers.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(CmpOrdering::Equal));
+            if sorted.is_empty() {
+                String::new()
+            } else {
+                let mid = sorted.len() / 2;
+                let median = if sorted.len() % 2 == 0 {
+                    (sorted[mid - 1] + sorted[mid]) / 2.0
+                } else {
+                    sorted[mid]
+                };
+                json_scalar_string(&json_number(median))
+            }
+        }
+        "mode" => {
+            let mut counts: Vec<(String, usize)> = Vec::new();
+            for value in &raw_values {
+                if let Some(entry) = counts.iter_mut().find(|(key, _)| key == value) {
+                    entry.1 += 1;
+                } else {
+                    counts.push((value.clone(), 1));
+                }
+            }
+            counts
+                .into_iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(value, _)| value)
+                .unwrap_or_default()
+        }
+        "cardinality" => {
+            let mut unique: Vec<&String> = Vec::new();
+            for value in &raw_values {
+                if !unique.contains(&value) {
+                    unique.push(value);
+                }
+            }
+            unique.len().to_string()
+        }
+        "values" => raw_values.join("|"),
+        "distinct_values" => {
+            let mut unique: Vec<String> = Vec::new();
+            for value in &raw_values {
+                if !unique.contains(value) {
+                    unique.push(value.clone());
+                }
+            }
+            unique.sort();
+            unique.join("|")
+        }
+        _ => String::new(),
+    }
+}
+
+fn xan_agg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut expr: Option<&str> = None;
+    let mut file: Option<&str> = None;
+    for arg in args {
+        if arg.starts_with('-') {
+            continue;
+        }
+        if expr.is_none() {
+            expr = Some(arg.as_str());
+        } else if file.is_none() {
+            file = Some(arg.as_str());
+        }
+    }
+    let Some(expr) = expr else {
+        return stderr_result(1, "xan agg: no aggregation expression\n");
+    };
+    match read_csv_arg(state, file, stdin, "xan agg") {
+        Ok(csv) => {
+            let specs = parse_xan_agg_expr(expr);
+            let headers: Vec<String> = specs.iter().map(|spec| spec.alias.clone()).collect();
+            let values: Vec<String> = specs
+                .iter()
+                .map(|spec| xan_compute_agg(&csv, spec))
+                .collect();
+            let output = CsvData {
+                headers,
+                rows: vec![values],
+            };
+            stdout_result(render_csv(&output))
+        }
+        Err(result) => result,
+    }
+}
+
+fn xan_sample(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut num: Option<usize> = None;
+    let mut seed: Option<i64> = None;
+    let mut file: Option<&str> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "--seed" && index + 1 < args.len() {
+            seed = args[index + 1].parse::<i64>().ok();
+            index += 2;
+            continue;
+        }
+        if !arg.starts_with('-') {
+            let parsed = arg.parse::<i64>();
+            if num.is_none() && matches!(parsed, Ok(value) if value > 0) {
+                num = Some(parsed.expect("checked positive") as usize);
+            } else if file.is_none() {
+                file = Some(arg);
+            }
+        }
+        index += 1;
+    }
+
+    let Some(num) = num else {
+        return stderr_result(1, "xan sample: usage: xan sample <sample-size> [FILE]\n");
+    };
+
+    match read_csv_arg(state, file, stdin, "xan sample") {
+        Ok(mut csv) => {
+            if csv.rows.len() <= num {
+                return stdout_result(render_csv(&csv));
+            }
+            // Faithful port of upstream LCG + Fisher-Yates shuffle.
+            let mut rng: i64 = seed.unwrap_or(0);
+            let mut next_random = || {
+                rng = rng.wrapping_mul(1103515245).wrapping_add(12345) & 0x7fff_ffff;
+                rng as f64 / 0x7fff_ffff as f64
+            };
+            let mut indices: Vec<usize> = (0..csv.rows.len()).collect();
+            for i in (1..indices.len()).rev() {
+                let j = (next_random() * (i as f64 + 1.0)).floor() as usize;
+                indices.swap(i, j);
+            }
+            let mut chosen: Vec<usize> = indices.into_iter().take(num).collect();
+            chosen.sort_unstable();
+            csv.rows = chosen
+                .into_iter()
+                .filter_map(|i| csv.rows.get(i).cloned())
+                .collect();
+            stdout_result(render_csv(&csv))
+        }
+        Err(result) => result,
+    }
+}
+
+fn xan_flatten(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let limit = option_value(args, "-l")
+        .or_else(|| option_value(args, "--limit"))
+        .and_then(|value| value.parse::<usize>().ok());
+    let select = option_value(args, "-s").or_else(|| option_value(args, "--select"));
+    match read_csv_arg(state, positional_arg(args), stdin, "xan flatten") {
+        Ok(csv) => {
+            let display_headers: Vec<String> = match select {
+                Some(select) => select
+                    .split(',')
+                    .filter(|column| csv.headers.iter().any(|header| header == column))
+                    .map(str::to_string)
+                    .collect(),
+                None => csv.headers.clone(),
+            };
+            let rows: Vec<&Vec<String>> = match limit {
+                Some(limit) => csv.rows.iter().take(limit).collect(),
+                None => csv.rows.iter().collect(),
+            };
+            let max_header_width = display_headers
+                .iter()
+                .map(|header| header.chars().count())
+                .max()
+                .unwrap_or(0);
+            let separator = "\u{2500}".repeat(80);
+            let mut lines: Vec<String> = Vec::new();
+            for (i, row) in rows.iter().enumerate() {
+                lines.push(format!("Row n\u{b0}{i}"));
+                lines.push(separator.clone());
+                for header in &display_headers {
+                    let value = csv
+                        .headers
+                        .iter()
+                        .position(|candidate| candidate == header)
+                        .and_then(|index| row.get(index))
+                        .cloned()
+                        .unwrap_or_default();
+                    let padded = format!(
+                        "{header}{}",
+                        " ".repeat(max_header_width.saturating_sub(header.chars().count()))
+                    );
+                    lines.push(format!("{padded} {value}"));
+                }
+                if i + 1 < rows.len() {
+                    lines.push(String::new());
+                }
+            }
+            stdout_result(format!("{}\n", lines.join("\n")))
+        }
+        Err(result) => result,
+    }
+}
+
+fn xan_frequency(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut select_cols: Vec<String> = Vec::new();
+    let mut group_col: Option<String> = None;
+    let mut limit: i64 = 10;
+    let mut no_extra = false;
+    let mut file: Option<&str> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "-s" | "--select" if index + 1 < args.len() => {
+                select_cols = args[index + 1].split(',').map(str::to_string).collect();
+                index += 2;
+                continue;
+            }
+            "-g" | "--groupby" if index + 1 < args.len() => {
+                group_col = Some(args[index + 1].clone());
+                index += 2;
+                continue;
+            }
+            "-l" | "--limit" if index + 1 < args.len() => {
+                limit = args[index + 1].parse::<i64>().unwrap_or(10);
+                index += 2;
+                continue;
+            }
+            "--no-extra" => no_extra = true,
+            "-A" | "--all" => limit = 0,
+            _ if !arg.starts_with('-') && file.is_none() => {
+                file = Some(arg);
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    match read_csv_arg(state, file, stdin, "xan frequency") {
+        Ok(csv) => {
+            let target_cols: Vec<String> = if !select_cols.is_empty() {
+                select_cols
+            } else {
+                csv.headers
+                    .iter()
+                    .filter(|header| Some(header.as_str()) != group_col.as_deref())
+                    .cloned()
+                    .collect()
+            };
+
+            let header_index = |column: &str| csv.headers.iter().position(|h| h == column);
+
+            let mut output = CsvData {
+                headers: Vec::new(),
+                rows: Vec::new(),
+            };
+
+            let order_entries = |counts: &[(String, usize)]| -> Vec<(String, usize)> {
+                let mut entries = counts.to_vec();
+                entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                entries
+            };
+
+            if let Some(group_col) = group_col {
+                output.headers = vec![
+                    "field".to_string(),
+                    group_col.clone(),
+                    "value".to_string(),
+                    "count".to_string(),
+                ];
+                let group_idx = header_index(&group_col);
+                // Preserve first-seen group order.
+                let mut group_order: Vec<String> = Vec::new();
+                let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+                for (row_index, row) in csv.rows.iter().enumerate() {
+                    let key = group_idx
+                        .and_then(|i| row.get(i))
+                        .cloned()
+                        .unwrap_or_default();
+                    if let Some(entry) = groups.iter_mut().find(|(group, _)| group == &key) {
+                        entry.1.push(row_index);
+                    } else {
+                        group_order.push(key.clone());
+                        groups.push((key, vec![row_index]));
+                    }
+                }
+                for col in &target_cols {
+                    let Some(col_idx) = header_index(col) else {
+                        continue;
+                    };
+                    for group_key in &group_order {
+                        let row_indexes = groups
+                            .iter()
+                            .find(|(group, _)| group == group_key)
+                            .map(|(_, rows)| rows.clone())
+                            .unwrap_or_default();
+                        let counts = xan_count_values(&csv, col_idx, &row_indexes);
+                        let mut entries = order_entries(&counts);
+                        if no_extra {
+                            entries.retain(|(value, _)| !value.is_empty());
+                        }
+                        if limit > 0 {
+                            entries.truncate(limit as usize);
+                        }
+                        for (value, count) in entries {
+                            let display = if value.is_empty() {
+                                "<empty>".to_string()
+                            } else {
+                                value
+                            };
+                            output.rows.push(vec![
+                                col.clone(),
+                                group_key.clone(),
+                                display,
+                                count.to_string(),
+                            ]);
+                        }
+                    }
+                }
+            } else {
+                output.headers = vec![
+                    "field".to_string(),
+                    "value".to_string(),
+                    "count".to_string(),
+                ];
+                let all_rows: Vec<usize> = (0..csv.rows.len()).collect();
+                for col in &target_cols {
+                    let Some(col_idx) = header_index(col) else {
+                        continue;
+                    };
+                    let counts = xan_count_values(&csv, col_idx, &all_rows);
+                    let mut entries = order_entries(&counts);
+                    if no_extra {
+                        entries.retain(|(value, _)| !value.is_empty());
+                    }
+                    if limit > 0 {
+                        entries.truncate(limit as usize);
+                    }
+                    for (value, count) in entries {
+                        let display = if value.is_empty() {
+                            "<empty>".to_string()
+                        } else {
+                            value
+                        };
+                        output
+                            .rows
+                            .push(vec![col.clone(), display, count.to_string()]);
+                    }
+                }
+            }
+
+            stdout_result(render_csv(&output))
+        }
+        Err(result) => result,
+    }
+}
+
+/// Count occurrences of each value at `col_idx` for the given row indexes,
+/// preserving first-seen order so equal counts tie-break deterministically.
+fn xan_count_values(csv: &CsvData, col_idx: usize, row_indexes: &[usize]) -> Vec<(String, usize)> {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for &row_index in row_indexes {
+        let value = csv
+            .rows
+            .get(row_index)
+            .and_then(|row| row.get(col_idx))
+            .cloned()
+            .unwrap_or_default();
+        if let Some(entry) = counts.iter_mut().find(|(key, _)| key == &value) {
+            entry.1 += 1;
+        } else {
+            counts.push((value, 1));
+        }
+    }
+    counts
 }
 
 fn read_csv_arg(

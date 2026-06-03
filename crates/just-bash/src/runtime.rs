@@ -7920,6 +7920,262 @@ be, to a very large extent, the result of luck. Sherlock Holmes\n",
     }
 
     #[test]
+    fn structured_data_xan_agg_aggregations() {
+        // Ports packages/just-bash/src/commands/xan/xan.agg.test.ts:10-188.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/data.csv".to_string(), "n\n1\n2\n3\n4\n".to_string()),
+                (
+                    "/colors.csv".to_string(),
+                    "color\nred\nblue\nyellow\nred\n".to_string(),
+                ),
+                (
+                    "/names.csv".to_string(),
+                    "name\nJohn\nMary\nLucas\n".to_string(),
+                ),
+                (
+                    "/names2.csv".to_string(),
+                    "name\nJohn\nMary\nLucas\nMary\nLucas\n".to_string(),
+                ),
+                (
+                    "/expr.csv".to_string(),
+                    "a,b\n1,2\n2,0\n3,6\n4,2\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // count() counts all rows
+        assert_eq!(
+            env.exec("xan agg 'count() as count' /data.csv").stdout,
+            "count\n4\n"
+        );
+        // count(expr) counts matching rows
+        assert_eq!(
+            env.exec("xan agg 'count(n > 2) as count' /data.csv").stdout,
+            "count\n2\n"
+        );
+        // sum(col) sums values
+        assert_eq!(
+            env.exec("xan agg 'sum(n) as sum' /data.csv").stdout,
+            "sum\n10\n"
+        );
+        // mean(col) computes average
+        assert_eq!(
+            env.exec("xan agg 'mean(n) as mean' /data.csv").stdout,
+            "mean\n2.5\n"
+        );
+        // avg is alias for mean
+        assert_eq!(
+            env.exec("xan agg 'avg(n) as mean' /data.csv").stdout,
+            "mean\n2.5\n"
+        );
+        // min(col) gets minimum
+        assert_eq!(
+            env.exec("xan agg 'min(n) as min' /data.csv").stdout,
+            "min\n1\n"
+        );
+        // max(col) gets maximum
+        assert_eq!(
+            env.exec("xan agg 'max(n) as max' /data.csv").stdout,
+            "max\n4\n"
+        );
+        // first(col) gets first value
+        assert_eq!(
+            env.exec("xan agg 'first(n) as first' /data.csv").stdout,
+            "first\n1\n"
+        );
+        // last(col) gets last value
+        assert_eq!(
+            env.exec("xan agg 'last(n) as last' /data.csv").stdout,
+            "last\n4\n"
+        );
+        // median(col) computes median
+        assert_eq!(
+            env.exec("xan agg 'median(n) as median' /data.csv").stdout,
+            "median\n2.5\n"
+        );
+        // multiple aggregations
+        assert_eq!(
+            env.exec("xan agg 'count() as count, sum(n) as sum' /data.csv")
+                .stdout,
+            "count,sum\n4,10\n"
+        );
+        // all(expr) checks if all rows match
+        assert_eq!(
+            env.exec("xan agg 'all(n >= 1) as all' /data.csv").stdout,
+            "all\ntrue\n"
+        );
+        assert_eq!(
+            env.exec("xan agg 'all(n >= 2) as all' /data.csv").stdout,
+            "all\nfalse\n"
+        );
+        // any(expr) checks if any row matches
+        assert_eq!(
+            env.exec("xan agg 'any(n >= 1) as any' /data.csv").stdout,
+            "any\ntrue\n"
+        );
+        assert_eq!(
+            env.exec("xan agg 'any(n >= 5) as any' /data.csv").stdout,
+            "any\nfalse\n"
+        );
+        // mode finds most common value
+        assert_eq!(
+            env.exec("xan agg 'mode(color) as mode' /colors.csv").stdout,
+            "mode\nred\n"
+        );
+        // cardinality counts unique values
+        assert_eq!(
+            env.exec("xan agg 'cardinality(color) as cardinality' /colors.csv")
+                .stdout,
+            "cardinality\n3\n"
+        );
+        // values concatenates all values
+        assert_eq!(
+            env.exec("xan agg 'values(name) as V' /names.csv").stdout,
+            "V\nJohn|Mary|Lucas\n"
+        );
+        // distinct_values gets unique values
+        assert_eq!(
+            env.exec("xan agg 'distinct_values(name) as V' /names2.csv")
+                .stdout,
+            "V\nJohn|Lucas|Mary\n"
+        );
+        // aggregates computed expressions
+        assert_eq!(
+            env.exec("xan agg 'sum(add(a, b + 1)) as sum' /expr.csv")
+                .stdout,
+            "sum\n24\n"
+        );
+    }
+
+    #[test]
+    fn structured_data_xan_sample_and_flatten_rows() {
+        // Ports packages/just-bash/src/commands/xan/xan.basic.test.ts:222-282
+        // (xan sample positional/seed/error and xan flatten/-l/f alias).
+        let separator = "\u{2500}".repeat(80);
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/big.csv".to_string(),
+                    "n\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n".to_string(),
+                ),
+                ("/three.csv".to_string(), "n\n1\n2\n3\n".to_string()),
+                ("/one.csv".to_string(), "n\n1\n".to_string()),
+                (
+                    "/people.csv".to_string(),
+                    "name,age\nalice,30\nbob,25\n".to_string(),
+                ),
+                ("/single.csv".to_string(), "x\n1\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // xan sample: samples N rows (positional argument), seeded -> 4 lines.
+        let sampled = env.exec("xan sample 3 --seed 42 /big.csv");
+        assert_eq!(sampled.exit_code, 0);
+        let lines: Vec<&str> = sampled.stdout.trim().split('\n').collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "n");
+
+        // xan sample: returns all rows if sample size exceeds data.
+        assert_eq!(env.exec("xan sample 10 /three.csv").stdout, "n\n1\n2\n3\n");
+
+        // xan sample: errors without sample size.
+        let missing = env.exec("xan sample /one.csv");
+        assert_eq!(missing.exit_code, 1);
+        assert!(missing.stderr.contains("usage"));
+
+        // xan flatten: displays records vertically.
+        assert_eq!(
+            env.exec("xan flatten /people.csv").stdout,
+            format!(
+                "Row n\u{b0}0\n{separator}\nname alice\nage  30\n\nRow n\u{b0}1\n{separator}\nname bob\nage  25\n"
+            )
+        );
+
+        // xan flatten: limits rows with -l.
+        assert_eq!(
+            env.exec("xan flatten -l 1 /three.csv").stdout,
+            format!("Row n\u{b0}0\n{separator}\nn 1\n")
+        );
+
+        // xan flatten: works with alias f.
+        assert_eq!(
+            env.exec("xan f /single.csv").stdout,
+            format!("Row n\u{b0}0\n{separator}\nx 1\n")
+        );
+    }
+
+    #[test]
+    fn structured_data_xan_frequency_rows() {
+        // Ports packages/just-bash/src/commands/xan/xan.frequency.test.ts:12-83.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/in.csv".to_string(),
+                    "h1,h2\na,z\na,y\na,y\nb,z\n,z\n".to_string(),
+                ),
+                (
+                    "/data.csv".to_string(),
+                    "a\nx\nx\ny\ny\nz\nz\n".to_string(),
+                ),
+                (
+                    "/group.csv".to_string(),
+                    "name,color\njohn,blue\nmary,red\nmary,red\nmary,red\nmary,purple\njohn,yellow\njohn,blue\n".to_string(),
+                ),
+                (
+                    "/nums.csv".to_string(),
+                    "n\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // computes frequency of all columns
+        let all = env.exec("xan frequency --no-extra -l 0 /in.csv");
+        assert_eq!(all.exit_code, 0);
+        let lines: Vec<&str> = all.stdout.trim().split('\n').collect();
+        assert_eq!(lines[0], "field,value,count");
+        assert!(lines.len() > 1);
+
+        // selects specific column with -s
+        let h2 = env.exec("xan frequency -s h2 --no-extra -l 0 /in.csv");
+        assert_eq!(h2.exit_code, 0);
+        assert!(h2.stdout.contains("field,value,count\n"));
+        assert!(h2.stdout.contains("h2,z,3"));
+        assert!(h2.stdout.contains("h2,y,2"));
+
+        // limits results with -l
+        let limited = env.exec("xan frequency -l 1 --no-extra /in.csv");
+        assert_eq!(limited.exit_code, 0);
+        let limited_lines: Vec<&str> = limited.stdout.trim().split('\n').collect();
+        assert_eq!(limited_lines[0], "field,value,count");
+
+        // includes empty values
+        let empty = env.exec("xan frequency -s h1 -l 0 /in.csv");
+        assert_eq!(empty.exit_code, 0);
+        assert!(empty.stdout.contains("<empty>"));
+
+        // shows stability with equal counts
+        assert_eq!(
+            env.exec("xan frequency /data.csv").stdout,
+            "field,value,count\na,x,2\na,y,2\na,z,2\n"
+        );
+
+        // groups frequency by column with -g
+        let grouped = env.exec("xan frequency -g name /group.csv");
+        assert_eq!(grouped.exit_code, 0);
+        assert!(grouped.stdout.contains("field,name,value,count\n"));
+
+        // shows all values with -A
+        let show_all = env.exec("xan frequency -A /nums.csv");
+        assert_eq!(show_all.exit_code, 0);
+        let all_lines: Vec<&str> = show_all.stdout.trim().split('\n').collect();
+        assert_eq!(all_lines.len(), 12);
+    }
+
+    #[test]
     fn structured_data_sqlite3_options_errors_and_simple_select_rows() {
         let env = bash();
 
