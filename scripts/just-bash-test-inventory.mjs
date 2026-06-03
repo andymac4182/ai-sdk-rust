@@ -2801,7 +2801,25 @@ const jbc25CaseGroups = [
     owner: 'crates/just-bash::runtime::awk',
     rustTest: 'awk_jbc25_array_and_computed_field_rows',
     notes:
-      'JBC-25 verifies portable AWK array element creation, numeric and expression indices, missing elements, overwrite, concatenated keys, counting, grouped sums, SUBSEP-style two-dimensional keys, and compound assignment; in/delete/for-in iteration and split-array rows remain pending.',
+      'JBC-25 verifies portable AWK array element creation, numeric and expression indices, missing elements, overwrite, concatenated keys, counting, grouped sums, SUBSEP-style two-dimensional keys, and compound assignment.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.arrays.test.ts',
+    lines: [62, 71, 80, 89, 100, 109, 118, 129, 138],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc25_in_delete_and_for_in_array_rows',
+    notes:
+      'JBC-25 verifies portable AWK `in` membership (existing/missing/numeric keys, non-creating tests), `delete` of single elements, missing elements and whole arrays, and for-in key iteration with value indirection.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.arrays.test.ts',
+    lines: [147, 158, 167, 176, 185, 207, 240, 253, 264, 275, 288],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc25_split_subsep_and_array_field_rows',
+    notes:
+      'JBC-25 verifies portable AWK empty for-in, split() into arrays (explicit and whitespace separators, count and clear-before-fill), unique-value counting, SUBSEP matrix storage and parenthesised `(i,j) in a` membership, field-keyed accumulation, line storage by field, and array pre-increment.',
   },
   {
     file: 'packages/just-bash/src/commands/awk/awk.fields.test.ts',

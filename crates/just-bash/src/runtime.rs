@@ -2653,6 +2653,91 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn awk_jbc25_split_subsep_and_array_field_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/uniq.txt".to_string(), "a\nb\na\nc\nb\na\n".to_string()),
+                (
+                    "/totals.txt".to_string(),
+                    "alice 100\nbob 200\nalice 50\n".to_string(),
+                ),
+                (
+                    "/lines.txt".to_string(),
+                    "1 first\n2 second\n3 third\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // for-in over an empty array iterates zero times.
+        let empty = env.exec(r#"echo "" | awk 'BEGIN { for (k in a) print k; print "done" }'"#);
+        assert_eq!(empty.stdout, "done\n");
+        assert_eq!(empty.exit_code, 0);
+
+        // split(string, array, sep): returns the element count and populates the
+        // array with 1-based indices.
+        let split_colon = env.exec(
+            r#"echo "" | awk 'BEGIN { n = split("a:b:c", arr, ":"); print n, arr[1], arr[2], arr[3] }'"#,
+        );
+        assert_eq!(split_colon.stdout, "3 a b c\n");
+        assert_eq!(split_colon.exit_code, 0);
+
+        let split_count = env.exec(
+            r#"echo "" | awk 'BEGIN { n = split("one,two,three,four", arr, ","); print n }'"#,
+        );
+        assert_eq!(split_count.stdout, "4\n");
+        assert_eq!(split_count.exit_code, 0);
+
+        // Without an explicit separator, split() uses whitespace splitting.
+        let split_ws = env.exec(
+            r#"echo "" | awk 'BEGIN { n = split("a b c", arr); print n, arr[1], arr[2], arr[3] }'"#,
+        );
+        assert_eq!(split_ws.stdout, "3 a b c\n");
+        assert_eq!(split_ws.exit_code, 0);
+
+        // split() clears the destination array before populating it.
+        let split_clear = env.exec(
+            r#"echo "" | awk 'BEGIN { arr[5]="old"; split("a:b", arr, ":"); print (5 in arr), arr[1], arr[2] }'"#,
+        );
+        assert_eq!(split_clear.stdout, "0 a b\n");
+        assert_eq!(split_clear.exit_code, 0);
+
+        // Counting unique values via for-in over an accumulated array.
+        let unique =
+            env.exec(r#"awk '{ seen[$1]++ } END { for (k in seen) n++; print n }' /uniq.txt"#);
+        assert_eq!(unique.stdout, "3\n");
+        assert_eq!(unique.exit_code, 0);
+
+        // Multi-dimensional (SUBSEP) keys: matrix storage and membership tests
+        // with a parenthesised subscript list.
+        let matrix = env.exec(
+            r#"echo "" | awk 'BEGIN { a[0,0]=1; a[0,1]=2; a[1,0]=3; a[1,1]=4; print a[0,0], a[0,1], a[1,0], a[1,1] }'"#,
+        );
+        assert_eq!(matrix.stdout, "1 2 3 4\n");
+        assert_eq!(matrix.exit_code, 0);
+
+        let multi_in =
+            env.exec(r#"echo "" | awk 'BEGIN { a[1,2] = "x"; print ((1,2) in a), ((1,3) in a) }'"#);
+        assert_eq!(multi_in.stdout, "1 0\n");
+        assert_eq!(multi_in.exit_code, 0);
+
+        // Field values as array keys, accumulating across records.
+        let totals = env
+            .exec(r#"awk '{ totals[$1] += $2 } END { print totals["alice"], totals["bob"] }' /totals.txt"#);
+        assert_eq!(totals.stdout, "150 200\n");
+        assert_eq!(totals.exit_code, 0);
+
+        let lines = env.exec(r#"awk '{ lines[$1] = $2 } END { print lines[2] }' /lines.txt"#);
+        assert_eq!(lines.stdout, "second\n");
+        assert_eq!(lines.exit_code, 0);
+
+        // Pre-increment of an array element returns and stores the new value.
+        let pre_inc = env.exec(r#"echo "" | awk 'BEGIN { a["x"] = 5; print ++a["x"], a["x"] }'"#);
+        assert_eq!(pre_inc.stdout, "6 6\n");
+        assert_eq!(pre_inc.exit_code, 0);
+    }
+
+    #[test]
     fn awk_jbc35_field_rebuild_printf_and_edge_rows() {
         let env = Bash::with_options(BashOptions {
             files: BTreeMap::from([
