@@ -704,6 +704,49 @@ Additional AI-02E deterministic closure tests not represented by current upstrea
 
 Additional AI-02G deterministic closure tests not represented by current upstream `it(...)` declarations: `togetherai_image_model_validates_provider_options_before_request` covers the `togetheraiImageModelOptionsSchema` known-field validation edge; `togetherai_reranking_model_validates_provider_options_before_request` covers the `rankFields` validation edge; `togetherai_image_model_maps_api_error_to_metadata` and `togetherai_reranking_model_maps_api_error_to_metadata` pin Rust-native provider error metadata for thrown-error surfaces. Remote image/rerank API acceptance is represented by ignored `live_togetherai_image_and_rerank_validate_provider_contract`, gated by `TOGETHER_API_KEY` or deprecated `TOGETHER_AI_API_KEY`.
 
+## Baseten Exact Case Map
+
+`packages/baseten/src/baseten-provider.unit.test.ts` has 25 portable
+`it(...)` declarations covering `createBaseten` provider construction, the
+default Model APIs base URL, `BASETEN_API_KEY` Bearer headers, the
+`ai-sdk/baseten/{VERSION}` user-agent suffix, `/sync/v1` vs `/predict`
+endpoint validation for chat models, `/sync` URL rewriting for embeddings,
+and the `NoSuchModelError` image-model surface. Baseten is OpenAI-compatible,
+so its `createBaseten` configuration logic is ported into
+`crates/ai-sdk-openai-compatible/src/baseten.rs` (alongside
+`openai_compatible.rs`), and each case is mapped to a colocated
+`#[cfg(test)]` test that asserts the same provider name, constructed model
+id, built URL, resolved headers, or thrown-error message as the upstream
+unit test.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should create a BasetenProvider instance with default options | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0001_create_provider_with_default_options` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should create a BasetenProvider instance with custom options | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0002_create_provider_with_custom_options` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should support optional modelId parameter | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0003_call_as_function_supports_optional_model_id` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should construct a chat model with correct configuration for default Model APIs | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0004_chat_model_default_model_apis_configuration` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should construct a chat model with optional modelId | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0005_chat_model_optional_model_id` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should handle /sync/v1 endpoints correctly | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0006_sync_v1_endpoints_construct_and_build_url` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should throw error for /predict endpoints with chat models | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0007_predict_endpoints_throw_for_chat_models` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should be an alias for chatModel | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0008_language_model_is_alias_for_chat_model` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should support optional modelId parameter | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0009_language_model_optional_model_id` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should throw error when no modelURL is provided | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0010_embedding_throws_when_no_model_url` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should construct embedding model for /sync endpoints | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0011_embedding_sync_endpoint_builds_url_with_v1` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should throw error for /predict endpoints (not supported with Performance Client) | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0012_embedding_predict_endpoint_throws` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should support /sync/v1 endpoints (strips /v1 before passing to Performance Client) | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0013_embedding_sync_v1_strips_v1_for_performance_client` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should support custom modelId for embeddings | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0014_embedding_custom_model_id` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should throw NoSuchModelError for unsupported image models | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0015_image_model_throws_no_such_model` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should use default baseURL when no modelURL is provided | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0016_default_base_url_when_no_model_url` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should use custom baseURL when provided | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0017_custom_base_url` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should use modelURL for custom endpoints | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0018_model_url_for_custom_endpoints` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should include Authorization header with API key | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0019_authorization_header_with_api_key` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should include custom headers when provided | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0020_custom_headers_included` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should include user-agent with version | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0021_user_agent_with_version` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should handle missing modelURL for embeddings gracefully | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0022_missing_model_url_for_embeddings` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should handle unsupported image models | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0023_unsupported_image_models` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should implement all required provider methods | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0024_implements_all_required_provider_methods` | none |
+| `packages/baseten/src/baseten-provider.unit.test.ts` | should allow calling provider as function | `crates/ai-sdk-openai-compatible/src/baseten.rs::baseten_0025_provider_callable_as_function` | none |
+
 ## Live-Only Proof
 
 AI-02C, AI-02D, AI-02E, AI-02F, and AI-02G add ignored xAI, Groq, Cohere,
