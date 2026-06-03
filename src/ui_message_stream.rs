@@ -6257,6 +6257,51 @@ mod tests {
     }
 
     #[test]
+    fn pipe_ui_message_stream_to_response_can_pipe_a_stream_created_by_to_ui_message_stream() {
+        use crate::language_model::{LanguageModelTextEnd, LanguageModelTextStart};
+        use crate::stream_text::{
+            TextStreamPart, TextStreamStartPart, TextStreamTextDeltaPart, ToUiMessageChunkOptions,
+            to_ui_message_chunk,
+        };
+
+        // Mirror the upstream `toUIMessageStream` input: a high-level text stream
+        // of `start`, `text-start`, `text-delta`, `text-end` parts piped with
+        // `sendStart: false` so the leading `start` chunk is suppressed.
+        let parts = vec![
+            TextStreamPart::Start(TextStreamStartPart::new()),
+            TextStreamPart::TextStart(LanguageModelTextStart::new("t1")),
+            TextStreamPart::TextDelta(TextStreamTextDeltaPart::new("t1", "Hello")),
+            TextStreamPart::TextEnd(LanguageModelTextEnd::new("t1")),
+        ];
+
+        let mut options = ToUiMessageChunkOptions::new();
+        options.send_start = false;
+
+        let chunks: Vec<UiMessageChunk> = parts
+            .iter()
+            .filter_map(|part| to_ui_message_chunk(part, &options))
+            .collect();
+
+        let mut response = MockUiMessageStreamResponse::default();
+        pipe_ui_message_stream_to_response(
+            &mut response,
+            UiMessageStreamResponseOptions::new(chunks),
+        )
+        .expect("mock response writes");
+
+        assert_eq!(
+            response.decoded_chunks(),
+            vec![
+                "data: {\"type\":\"text-start\",\"id\":\"t1\"}\n\n".to_string(),
+                "data: {\"type\":\"text-delta\",\"id\":\"t1\",\"delta\":\"Hello\"}\n\n".to_string(),
+                "data: {\"type\":\"text-end\",\"id\":\"t1\"}\n\n".to_string(),
+                "data: [DONE]\n\n".to_string(),
+            ]
+        );
+        assert!(response.ended);
+    }
+
+    #[test]
     fn transform_text_to_ui_message_stream_emits_upstream_sequence() {
         let chunks = transform_text_to_ui_message_stream(["Hello", " ", "World"]);
 
