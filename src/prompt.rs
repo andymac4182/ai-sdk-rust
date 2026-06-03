@@ -1157,6 +1157,18 @@ pub fn prepare_language_model_call_options(
     Ok(options)
 }
 
+/// Deprecated alias for [`prepare_language_model_call_options`].
+///
+/// Mirrors the upstream `prepareCallSettings` deprecated alias, which simply
+/// re-exports `prepareLanguageModelCallOptions`. It behaves identically and
+/// throws the same errors.
+#[deprecated(note = "Use `prepare_language_model_call_options` instead.")]
+pub fn prepare_call_settings(
+    options: LanguageModelCallSettings,
+) -> Result<LanguageModelCallSettings, InvalidArgumentError> {
+    prepare_language_model_call_options(options)
+}
+
 /// Prepares the language-model tool choice for a high-level model call.
 pub fn prepare_tool_choice(
     tool_choice: Option<LanguageModelToolChoice>,
@@ -1639,6 +1651,8 @@ mod tests {
     use crate::provider::ProviderOptions;
     use crate::provider_utils::FilePartData;
 
+    #[allow(deprecated)]
+    use super::prepare_call_settings;
     use super::{
         ConvertedLanguageModelV4FilePart, Instructions, InvalidDataContentError,
         InvalidMessageRoleError, LanguageModelCallSettings, MessageConversionError, Prompt,
@@ -4353,6 +4367,54 @@ mod tests {
             prepare_language_model_call_options(settings.clone()).expect("settings are valid"),
             settings
         );
+    }
+
+    /// Mirrors upstream `prepareCallSettings (deprecated alias)` test
+    /// "should behave identically to prepareLanguageModelCallOptions".
+    #[test]
+    #[allow(deprecated)]
+    fn prepare_call_settings_should_behave_identically_to_prepare_language_model_call_options() {
+        let input = LanguageModelCallSettings::new()
+            .with_max_output_tokens(100)
+            .with_temperature(0.7);
+
+        assert_eq!(
+            prepare_call_settings(input.clone()).expect("alias accepts valid settings"),
+            prepare_language_model_call_options(input).expect("settings are valid"),
+        );
+    }
+
+    /// Mirrors upstream `prepareCallSettings (deprecated alias)` test
+    /// "should throw the same errors as prepareLanguageModelCallOptions".
+    ///
+    /// Upstream rejects a non-integer `maxOutputTokens` (10.5) with an
+    /// `InvalidArgumentError`. In Rust `max_output_tokens` is an integer field,
+    /// so a non-integer JS-shaped value is rejected identically at the serde
+    /// type boundary for both the alias and the canonical entry point.
+    #[test]
+    #[allow(deprecated)]
+    fn prepare_call_settings_should_throw_the_same_errors_as_prepare_language_model_call_options() {
+        // The dynamic JS-shaped non-integer value cannot construct a settings
+        // value: it is rejected at the type boundary, identically for both.
+        assert_call_settings_type_boundary_rejects(json!({
+            "maxOutputTokens": 10.5
+        }));
+
+        // For a value that both paths accept structurally but reject by rule
+        // (maxOutputTokens < 1), the alias must produce the same error as the
+        // canonical function.
+        let alias_error =
+            prepare_call_settings(LanguageModelCallSettings::new().with_max_output_tokens(0))
+                .expect_err("alias rejects zero max output tokens");
+        let canonical_error = prepare_language_model_call_options(
+            LanguageModelCallSettings::new().with_max_output_tokens(0),
+        )
+        .expect_err("canonical rejects zero max output tokens");
+
+        assert_eq!(alias_error.parameter(), canonical_error.parameter());
+        assert_eq!(alias_error.value(), canonical_error.value());
+        assert_eq!(alias_error.message(), canonical_error.message());
+        assert_eq!(alias_error.parameter(), "maxOutputTokens");
     }
 
     #[test]

@@ -389,6 +389,14 @@ pub struct EmbedManyOptions<'a, M: EmbeddingModel + ?Sized> {
     /// Abort signal for cancelling embedding model calls.
     pub abort_signal: Option<ProviderAbortSignal>,
 
+    /// Maximum number of concurrent provider calls.
+    ///
+    /// Upstream defaults this to `Infinity`; `None` here means unbounded. The
+    /// limit only takes effect when the model reports
+    /// [`EmbeddingModel::supports_parallel_calls`]; otherwise calls run one at a
+    /// time.
+    pub max_parallel_calls: Option<usize>,
+
     /// Callback invoked before embedding begins.
     pub on_start: Option<EmbedOnStart<'a>>,
 
@@ -412,10 +420,20 @@ impl<'a, M: EmbeddingModel + ?Sized> EmbedManyOptions<'a, M> {
             provider_options: None,
             headers: None,
             abort_signal: None,
+            max_parallel_calls: None,
             on_start: None,
             on_end: None,
             telemetry: None,
         }
+    }
+
+    /// Sets the maximum number of concurrent provider calls.
+    ///
+    /// Mirrors upstream `maxParallelCalls`. The limit is honoured only when the
+    /// model supports parallel calls.
+    pub fn with_max_parallel_calls(mut self, max_parallel_calls: usize) -> Self {
+        self.max_parallel_calls = Some(max_parallel_calls);
+        self
     }
 
     /// Adds provider-specific options.
@@ -710,6 +728,7 @@ pub async fn embed_many<M: EmbeddingModel + ?Sized>(
         provider_options,
         headers,
         abort_signal,
+        max_parallel_calls,
         on_start,
         on_end,
         telemetry,
@@ -736,10 +755,9 @@ pub async fn embed_many<M: EmbeddingModel + ?Sized>(
     }
 
     let max_embeddings_per_call = model.max_embeddings_per_call().await;
-    // Upstream resolves this capability before deciding whether chunking is
-    // needed. Parallel scheduling can be layered on without changing the public
-    // result shape.
-    let _supports_parallel_calls = model.supports_parallel_calls().await;
+    // Upstream resolves both capabilities (via `Promise.all`) before deciding how
+    // to schedule provider calls.
+    let supports_parallel_calls = model.supports_parallel_calls().await;
 
     let Some(chunk_size) = max_embeddings_per_call else {
         let EmbeddingModelResult {
@@ -789,29 +807,48 @@ pub async fn embed_many<M: EmbeddingModel + ?Sized>(
     let mut tokens = 0;
     let mut provider_metadata = None;
 
-    for chunk in split_values(&values, chunk_size) {
-        let EmbeddingModelResult {
+    let value_chunks = split_values(&values, chunk_size);
+
+    // Upstream batches the value chunks into parallel groups of size
+    // `supportsParallelCalls ? maxParallelCalls : 1`. Each group's provider
+    // calls run concurrently; the groups themselves run sequentially.
+    let parallel_group_size = if supports_parallel_calls {
+        max_parallel_calls.unwrap_or(usize::MAX).max(1)
+    } else {
+        1
+    };
+
+    for parallel_group in value_chunks.chunks(parallel_group_size) {
+        let group_futures = parallel_group
+            .iter()
+            .map(|chunk| {
+                model.do_embed(embedding_call_options(
+                    chunk.clone(),
+                    provider_options.as_ref(),
+                    &headers,
+                    abort_signal.as_ref(),
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        // Drive every future in the group concurrently, preserving call order
+        // when aggregating the results.
+        for EmbeddingModelResult {
             embeddings: chunk_embeddings,
             usage,
             provider_metadata: chunk_provider_metadata,
             response,
             warnings: chunk_warnings,
-        } = model
-            .do_embed(embedding_call_options(
-                chunk,
-                provider_options.as_ref(),
-                &headers,
-                abort_signal.as_ref(),
-            ))
-            .await;
+        } in join_all_ordered(group_futures).await
+        {
+            embeddings.extend(chunk_embeddings);
+            warnings.extend(chunk_warnings);
+            responses.push(response);
+            tokens += usage.map_or(0, |usage| usage.tokens);
 
-        embeddings.extend(chunk_embeddings);
-        warnings.extend(chunk_warnings);
-        responses.push(response);
-        tokens += usage.map_or(0, |usage| usage.tokens);
-
-        if let Some(chunk_provider_metadata) = chunk_provider_metadata {
-            merge_provider_metadata(&mut provider_metadata, chunk_provider_metadata);
+            if let Some(chunk_provider_metadata) = chunk_provider_metadata {
+                merge_provider_metadata(&mut provider_metadata, chunk_provider_metadata);
+            }
         }
     }
 
@@ -838,6 +875,74 @@ pub async fn embed_many<M: EmbeddingModel + ?Sized>(
     }
 
     result
+}
+
+/// Drives a set of futures concurrently, resolving to their outputs in the
+/// original input order once all have completed.
+///
+/// This mirrors `Promise.all` over a parallel group of `doEmbed` calls: every
+/// future is polled on each wake, so the calls make progress concurrently
+/// rather than strictly one after another, while result aggregation stays
+/// deterministic in call order.
+fn join_all_ordered<F: Future>(futures: Vec<F>) -> JoinAllOrdered<F> {
+    JoinAllOrdered {
+        slots: futures
+            .into_iter()
+            .map(|future| JoinSlot::Pending(Box::pin(future)))
+            .collect(),
+    }
+}
+
+enum JoinSlot<F: Future> {
+    Pending(Pin<Box<F>>),
+    Done(F::Output),
+}
+
+struct JoinAllOrdered<F: Future> {
+    slots: Vec<JoinSlot<F>>,
+}
+
+impl<F: Future> Future for JoinAllOrdered<F>
+where
+    F::Output: Unpin,
+{
+    type Output = Vec<F::Output>;
+
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        let mut all_done = true;
+
+        for slot in &mut this.slots {
+            if let JoinSlot::Pending(future) = slot {
+                match future.as_mut().poll(cx) {
+                    std::task::Poll::Ready(output) => {
+                        *slot = JoinSlot::Done(output);
+                    }
+                    std::task::Poll::Pending => {
+                        all_done = false;
+                    }
+                }
+            }
+        }
+
+        if !all_done {
+            return std::task::Poll::Pending;
+        }
+
+        let outputs = this
+            .slots
+            .drain(..)
+            .map(|slot| match slot {
+                JoinSlot::Done(output) => output,
+                JoinSlot::Pending(_) => unreachable!("all slots are resolved before draining"),
+            })
+            .collect();
+
+        std::task::Poll::Ready(outputs)
+    }
 }
 
 fn embedding_call_options(
@@ -1029,6 +1134,121 @@ mod tests {
                 });
 
             ready(result)
+        }
+    }
+
+    /// Embedding model whose `doEmbed` future records a `start-N` event on its
+    /// first poll, yields once, then records an `end-N` event and resolves.
+    ///
+    /// This is the Rust analogue of the upstream test that gates each `doEmbed`
+    /// on a pre-resolved promise: it lets sibling calls in a parallel group all
+    /// reach their `start` before any reaches its `end`, so the recorded event
+    /// order reveals exactly how `embedMany` schedules provider calls.
+    struct GatedEmbeddingModel {
+        max_embeddings_per_call: Option<usize>,
+        supports_parallel_calls: bool,
+        next_index: Arc<Mutex<usize>>,
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl GatedEmbeddingModel {
+        fn new(supports_parallel_calls: bool, events: Arc<Mutex<Vec<String>>>) -> Self {
+            Self {
+                max_embeddings_per_call: Some(1),
+                supports_parallel_calls,
+                next_index: Arc::new(Mutex::new(0)),
+                events,
+            }
+        }
+    }
+
+    struct GatedEmbedFuture {
+        index: usize,
+        embedding: Vec<f64>,
+        events: Arc<Mutex<Vec<String>>>,
+        started: bool,
+        yielded: bool,
+    }
+
+    impl Future for GatedEmbedFuture {
+        type Output = EmbeddingModelResult;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let this = self.get_mut();
+
+            if !this.started {
+                this.started = true;
+                this.events
+                    .lock()
+                    .expect("events lock is not poisoned")
+                    .push(format!("start-{}", this.index));
+            }
+
+            if !this.yielded {
+                // Yield exactly once so every sibling future in the same
+                // parallel group gets to record its `start` before any of them
+                // records its `end`. Re-arm the waker so the executor polls us
+                // again instead of parking.
+                this.yielded = true;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+
+            this.events
+                .lock()
+                .expect("events lock is not poisoned")
+                .push(format!("end-{}", this.index));
+
+            Poll::Ready(EmbeddingModelResult::new(vec![this.embedding.clone()]))
+        }
+    }
+
+    impl EmbeddingModel for GatedEmbeddingModel {
+        type MaxEmbeddingsPerCallFuture<'a>
+            = Ready<Option<usize>>
+        where
+            Self: 'a;
+
+        type SupportsParallelCallsFuture<'a>
+            = Ready<bool>
+        where
+            Self: 'a;
+
+        type EmbedFuture<'a>
+            = GatedEmbedFuture
+        where
+            Self: 'a;
+
+        fn provider(&self) -> &str {
+            "test-provider"
+        }
+
+        fn model_id(&self) -> &str {
+            "embedding-test"
+        }
+
+        fn max_embeddings_per_call(&self) -> Self::MaxEmbeddingsPerCallFuture<'_> {
+            ready(self.max_embeddings_per_call)
+        }
+
+        fn supports_parallel_calls(&self) -> Self::SupportsParallelCallsFuture<'_> {
+            ready(self.supports_parallel_calls)
+        }
+
+        fn do_embed(&self, _options: EmbeddingModelCallOptions) -> Self::EmbedFuture<'_> {
+            let mut next_index = self.next_index.lock().expect("index lock is not poisoned");
+            let index = *next_index;
+            *next_index += 1;
+
+            GatedEmbedFuture {
+                index,
+                // Encode the call index in the embedding so aggregation order is
+                // verifiable independently of the recorded events.
+                embedding: vec![index as f64],
+                events: Arc::clone(&self.events),
+                started: false,
+                yielded: false,
+            }
         }
     }
 
@@ -1276,6 +1496,72 @@ mod tests {
                 .as_ref()
                 .is_some_and(|headers| headers.get("x-trace").map(String::as_str) == Some("1"))
         }));
+    }
+
+    #[test]
+    fn embed_many_parallelizes_calls_when_model_supports_parallel_calls() {
+        // Upstream `embed-many.test.ts` "should parallelize when true": a model
+        // with `supportsParallelCalls: true` and `maxEmbeddingsPerCall: 1` must
+        // start every chunk before any chunk finishes, given the default
+        // unbounded `maxParallelCalls`.
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let model = GatedEmbeddingModel::new(true, Arc::clone(&events));
+
+        let result = futures_executor::block_on(super::embed_many(EmbedManyOptions::new(
+            &model,
+            ["a", "b", "c"],
+        )));
+
+        assert_eq!(
+            *events.lock().expect("events lock is not poisoned"),
+            vec!["start-0", "start-1", "start-2", "end-0", "end-1", "end-2"],
+        );
+        assert_eq!(
+            result.embeddings,
+            vec![vec![0.0], vec![1.0], vec![2.0]],
+            "embeddings aggregate in chunk order",
+        );
+    }
+
+    #[test]
+    fn embed_many_respects_max_parallel_calls_limit() {
+        // Upstream `embed-many.test.ts` "should support maxParallelCalls":
+        // with `maxParallelCalls: 2` the chunks run in parallel groups of two,
+        // so the first two start and finish before the third starts.
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let model = GatedEmbeddingModel::new(true, Arc::clone(&events));
+
+        let result = futures_executor::block_on(super::embed_many(
+            EmbedManyOptions::new(&model, ["a", "b", "c"]).with_max_parallel_calls(2),
+        ));
+
+        assert_eq!(
+            *events.lock().expect("events lock is not poisoned"),
+            vec!["start-0", "start-1", "end-0", "end-1", "start-2", "end-2"],
+        );
+        assert_eq!(
+            result.embeddings,
+            vec![vec![0.0], vec![1.0], vec![2.0]],
+            "embeddings aggregate in chunk order across parallel groups",
+        );
+    }
+
+    #[test]
+    fn embed_many_runs_serially_when_model_disallows_parallel_calls() {
+        // Guards the `supportsParallelCalls ? maxParallelCalls : 1` branch: a
+        // model that does not support parallel calls must finish each chunk
+        // before starting the next, regardless of `maxParallelCalls`.
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let model = GatedEmbeddingModel::new(false, Arc::clone(&events));
+
+        futures_executor::block_on(super::embed_many(
+            EmbedManyOptions::new(&model, ["a", "b", "c"]).with_max_parallel_calls(2),
+        ));
+
+        assert_eq!(
+            *events.lock().expect("events lock is not poisoned"),
+            vec!["start-0", "end-0", "start-1", "end-1", "start-2", "end-2"],
+        );
     }
 
     #[test]
