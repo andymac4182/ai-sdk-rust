@@ -3076,6 +3076,21 @@ where
                 })
                 .await;
         }
+        // Upstream dispatches the telemetry integration's `onAbort` event (with
+        // the completed `steps` and abort `reason`) but skips `onEnd`/`onError`
+        // when the stream is aborted.
+        if telemetry_dispatcher.is_enabled() {
+            let mut abort_event = serde_json::Map::new();
+            abort_event.insert("callId".to_string(), JsonValue::String(call_id.clone()));
+            abort_event.insert(
+                "steps".to_string(),
+                serde_json::to_value(&generate_steps).unwrap_or(JsonValue::Null),
+            );
+            if let Some(reason) = &abort_reason {
+                abort_event.insert("reason".to_string(), reason.clone());
+            }
+            telemetry_dispatcher.on_abort(JsonValue::Object(abort_event));
+        }
     } else if let Some(final_step) = stream_steps.last() {
         parts.push(TextStreamPart::Finish(TextStreamFinishPart::new(
             final_step.finish_reason.clone(),
@@ -3121,9 +3136,17 @@ where
             .iter()
             .flat_map(|step| step.tool_results.iter().cloned())
             .collect(),
-        response_messages: stream_steps
+        // Upstream `streamText` surfaces the synthesized tool-result message for
+        // an initially approved/denied tool-approval response as the first entry
+        // in `responseMessages`, ahead of the per-step assistant/tool messages.
+        response_messages: initial_response_messages
             .iter()
-            .flat_map(|step| step.response_messages.iter().cloned())
+            .cloned()
+            .chain(
+                stream_steps
+                    .iter()
+                    .flat_map(|step| step.response_messages.iter().cloned()),
+            )
             .collect(),
         custom_parts: stream_steps
             .iter()
@@ -13083,6 +13106,79 @@ mod tests {
         assert_eq!(events[0].reason, Some(json!("client-disconnected")));
     }
 
+    /// Maps packages/ai stream-text.test.ts:21343
+    /// `should call telemetry onAbort but not onEnd or onError when the abort
+    /// signal is triggered` — when the stream is aborted mid-step, the telemetry
+    /// integration receives exactly one `onAbort` event (carrying the empty
+    /// `steps` accumulated so far) and neither `onEnd` nor `onError`.
+    #[test]
+    fn stream_text_dispatches_telemetry_on_abort_but_not_on_end_or_error() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::StreamStart(LanguageModelStreamStart::new(Vec::new())),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let abort_controller = StreamTextAbortController::new();
+        let abort_signal = abort_controller.signal();
+
+        let telemetry_events = Arc::new(Mutex::new(Vec::<TelemetryEvent>::new()));
+        let mut integration = TelemetryIntegration::new();
+        for kind in [
+            TelemetryEventKind::OnAbort,
+            TelemetryEventKind::OnEnd,
+            TelemetryEventKind::OnError,
+        ] {
+            let captured = Arc::clone(&telemetry_events);
+            integration = integration.with_callback(kind, move |event| {
+                captured.lock().expect("telemetry event lock").push(event);
+            });
+        }
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_abort_signal(abort_signal)
+                .with_on_error(|_event| ready(()))
+                .with_on_chunk(move |event| {
+                    let abort_controller = abort_controller.clone();
+                    async move {
+                        if let TextStreamPart::TextDelta(part) = &event.chunk
+                            && part.text == "Hello"
+                        {
+                            abort_controller.abort_with_reason("client-disconnected");
+                        }
+                    }
+                })
+                .with_telemetry(
+                    TelemetryOptions::new()
+                        .with_function_id("stream-text-abort")
+                        .with_integration(integration),
+                ),
+        ));
+        result.consume_stream();
+
+        let events = telemetry_events.lock().expect("telemetry event lock");
+        // Exactly one telemetry event: onAbort. No onEnd, no onError.
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![TelemetryEventKind::OnAbort]
+        );
+        // The aborted stream completed no steps before the abort fired.
+        assert_eq!(events[0].event["steps"], json!([]));
+        // The abort event carries the active language-model call id.
+        assert!(
+            events[0].event["callId"]
+                .as_str()
+                .is_some_and(|call_id| call_id.starts_with("call")),
+            "abort event should carry the call id"
+        );
+    }
+
     #[test]
     fn stream_text_forwards_timeout_as_abort_signal_to_model() {
         let model =
@@ -18136,6 +18232,196 @@ mod tests {
         assert!(tool_output_index < ui_start_step_index);
     }
 
+    /// Shared fixture for the upstream
+    /// `when a call from a single tool with preliminary results that needs
+    /// approval is approved` block. The prompt carries a pre-approved `tool1`
+    /// call; the tool streams a preliminary result then a final result, and the
+    /// continuation model emits `Hello, world!`.
+    fn stream_text_approved_preliminary_tool_result() -> StreamTextResult {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-0")
+                        .with_model_id("mock-model-id")
+                        .with_timestamp(time::OffsetDateTime::UNIX_EPOCH),
+                ),
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "Hello, world!",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        // Pre-approved `tool1` call (mirrors the upstream messages fixture).
+        let prompt = vec![
+            user_message("test-input"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call-1",
+                    "tool1",
+                    json!({ "value": "value" }),
+                )),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new("id-1", "call-1"),
+                ),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolApprovalResponse(
+                    LanguageModelToolApprovalResponsePart::new("id-1", true),
+                ),
+            ])),
+        ];
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, prompt)
+                .with_tool(Tool::new("tool1", input_schema).with_execute_outputs(
+                    |_input, _options| {
+                        ready(Ok(vec![
+                            ExecuteToolOutput::preliminary(json!("preliminary-result")),
+                            ExecuteToolOutput::preliminary(json!("final-result")),
+                        ]))
+                    },
+                ))
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new()
+                        .with_tool_status("tool1", NormalizedToolApprovalStatus::UserApproval),
+                )
+                .with_max_steps(3),
+        ));
+        result.consume_stream();
+        result
+    }
+
+    /// Maps packages/ai stream-text.test.ts:27160
+    /// `should call the model with a prompt that includes the tool result` — an
+    /// approved preliminary-result tool feeds its FINAL output (text output
+    /// `final-result`) into the continuation prompt as a `tool-result`, before
+    /// the first model call.
+    #[test]
+    fn stream_text_approved_preliminary_tool_result_continuation_prompt_includes_final_result() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "Hello, world!",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let input_schema = json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let prompt = vec![
+            user_message("test-input"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call-1",
+                    "tool1",
+                    json!({ "value": "value" }),
+                )),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new("id-1", "call-1"),
+                ),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolApprovalResponse(
+                    LanguageModelToolApprovalResponsePart::new("id-1", true),
+                ),
+            ])),
+        ];
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, prompt.clone())
+                .with_tool(Tool::new("tool1", input_schema).with_execute_outputs(
+                    |_input, _options| {
+                        ready(Ok(vec![
+                            ExecuteToolOutput::preliminary(json!("preliminary-result")),
+                            ExecuteToolOutput::preliminary(json!("final-result")),
+                        ]))
+                    },
+                ))
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new()
+                        .with_tool_status("tool1", NormalizedToolApprovalStatus::UserApproval),
+                )
+                .with_max_steps(3),
+        ));
+        result.consume_stream();
+
+        // A single model call whose prompt carries the user/assistant prefix and
+        // ends with the approved tool's FINAL result.
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(&calls[0].prompt[..3], prompt.as_slice());
+        assert!(matches!(
+            &calls[0].prompt[3],
+            LanguageModelMessage::Tool(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelToolContentPart::ToolResult(part)
+                            if part.tool_call_id == "call-1"
+                                && part.tool_name == "tool1"
+                                && part.output
+                                    == LanguageModelToolResultOutput::text("final-result")
+                    )
+        ));
+    }
+
+    /// Maps packages/ai stream-text.test.ts:27211
+    /// `should include the tool result in the response messages` — the resolved
+    /// response messages start with the FINAL tool result, then the assistant
+    /// continuation text.
+    #[test]
+    fn stream_text_approved_preliminary_tool_result_response_messages_include_final_result() {
+        let result = stream_text_approved_preliminary_tool_result();
+        assert_eq!(result.response_messages.len(), 2);
+        assert!(matches!(
+            &result.response_messages[0],
+            LanguageModelMessage::Tool(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelToolContentPart::ToolResult(part)
+                            if part.tool_call_id == "call-1"
+                                && part.tool_name == "tool1"
+                                && part.output
+                                    == LanguageModelToolResultOutput::text("final-result")
+                    )
+        ));
+        assert!(matches!(
+            &result.response_messages[1],
+            LanguageModelMessage::Assistant(message)
+                if matches!(
+                    message.content.first(),
+                    Some(LanguageModelAssistantContentPart::Text(text))
+                        if text.text == "Hello, world!"
+                )
+        ));
+    }
+
     #[test]
     fn stream_text_serializes_initial_approved_tool_error_before_first_model_call() {
         let model =
@@ -18326,6 +18612,103 @@ mod tests {
             .position(|chunk| chunk["type"] == "start-step")
             .expect("UI start-step exists");
         assert!(tool_denied_chunk_index < ui_start_step_index);
+    }
+
+    /// Maps packages/ai stream-text.test.ts:27556
+    /// `should include the tool error in the response messages` — a denied tool
+    /// approval surfaces an `execution-denied` tool result in the resolved
+    /// response messages, followed by the assistant continuation text. The tool
+    /// is never executed.
+    #[test]
+    fn stream_text_denied_tool_approval_response_messages_include_execution_denied() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "1",
+                    "Hello, world!",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+        let execute_count = Arc::new(AtomicUsize::new(0));
+        let execute_count_for_tool = Arc::clone(&execute_count);
+        let input_schema = json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        let prompt = vec![
+            user_message("test-input"),
+            LanguageModelMessage::Assistant(LanguageModelAssistantMessage::new(vec![
+                LanguageModelAssistantContentPart::ToolCall(LanguageModelToolCallPart::new(
+                    "call-1",
+                    "tool1",
+                    json!({ "value": "value" }),
+                )),
+                LanguageModelAssistantContentPart::ToolApprovalRequest(
+                    LanguageModelToolApprovalRequestPart::new("id-1", "call-1"),
+                ),
+            ])),
+            LanguageModelMessage::Tool(LanguageModelToolMessage::new(vec![
+                LanguageModelToolContentPart::ToolApprovalResponse(
+                    LanguageModelToolApprovalResponsePart::new("id-1", false),
+                ),
+            ])),
+        ];
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, prompt)
+                .with_tool(Tool::new("tool1", input_schema).with_execute(
+                    move |_input, _options| {
+                        let execute_count = Arc::clone(&execute_count_for_tool);
+                        async move {
+                            execute_count.fetch_add(1, Ordering::SeqCst);
+                            Ok(json!("result1"))
+                        }
+                    },
+                ))
+                .with_tool_approval(
+                    ToolApprovalConfiguration::new()
+                        .with_tool_status("tool1", NormalizedToolApprovalStatus::UserApproval),
+                )
+                .with_max_steps(3),
+        ));
+        result.consume_stream();
+
+        // The denied tool is never executed.
+        assert_eq!(execute_count.load(Ordering::SeqCst), 0);
+        assert_eq!(result.response_messages.len(), 2);
+        assert!(matches!(
+            &result.response_messages[0],
+            LanguageModelMessage::Tool(message)
+                if message.content.len() == 1
+                    && matches!(
+                        &message.content[0],
+                        LanguageModelToolContentPart::ToolResult(part)
+                            if part.tool_call_id == "call-1"
+                                && part.tool_name == "tool1"
+                                && matches!(
+                                    part.output,
+                                    LanguageModelToolResultOutput::ExecutionDenied { .. }
+                                )
+                    )
+        ));
+        assert!(matches!(
+            &result.response_messages[1],
+            LanguageModelMessage::Assistant(message)
+                if matches!(
+                    message.content.first(),
+                    Some(LanguageModelAssistantContentPart::Text(text))
+                        if text.text == "Hello, world!"
+                )
+        ));
     }
 
     #[test]
