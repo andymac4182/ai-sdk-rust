@@ -22406,4 +22406,330 @@ mod tests {
             None,
         );
     }
+
+    // ----------------------------------------------------------------------
+    // packages/ai stream-text.test.ts "5 steps ... (dice game fixture)" block.
+    //
+    // Upstream drives a five-step tool loop: steps 1-4 emit a `rollDie` tool
+    // call (finishReason `tool-calls`) and the fifth step emits the final text
+    // (`Game Results`, finishReason `stop`). Steps 1 and 2 carry Anthropic
+    // `container` provider metadata. The Rust port reproduces the generic
+    // multi-step behaviour with the same shape: tool-call continuation, per-step
+    // finish reasons, prompt accumulation, provider-metadata pass-through, and
+    // the onStepFinish / onFinish aggregates.
+    // ----------------------------------------------------------------------
+
+    const DICE_CONTAINER_ID: &str = "container_011CWHPPTDTn1XufeRB9uHeH";
+
+    fn dice_container_metadata() -> ProviderMetadata {
+        ProviderMetadata::from([(
+            "anthropic".to_string(),
+            Map::from_iter([("container".to_string(), json!({ "id": DICE_CONTAINER_ID }))]),
+        )])
+    }
+
+    fn dice_tool_call_step(
+        call_id: &str,
+        with_container: bool,
+    ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+        let finish = if with_container {
+            LanguageModelStreamFinish::new(usage(), tool_calls_finish_reason())
+                .with_provider_metadata(dice_container_metadata())
+        } else {
+            LanguageModelStreamFinish::new(usage(), tool_calls_finish_reason())
+        };
+        LanguageModelStreamResult::new(vec![
+            LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                call_id,
+                "rollDie",
+                r#"{ "player": "player1" }"#,
+            )),
+            LanguageModelStreamPart::Finish(finish),
+        ])
+    }
+
+    /// Builds the shared five-step dice-game model. Steps 1-4 (indices 0-3)
+    /// emit a `rollDie` tool call; the fifth step emits the closing text.
+    fn dice_game_model() -> MockLanguageModel {
+        MockLanguageModel::new().with_stream_results([
+            dice_tool_call_step("call-1", true),
+            dice_tool_call_step("call-2", true),
+            dice_tool_call_step("call-3", false),
+            dice_tool_call_step("call-4", false),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("final")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new(
+                    "final",
+                    "Game Results: player1 wins!",
+                )),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("final")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ])
+    }
+
+    fn dice_roll_tool(executions: Arc<Mutex<Vec<String>>>) -> Tool {
+        let schema = json!({
+            "type": "object",
+            "properties": { "player": { "type": "string" } },
+            "required": ["player"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+        Tool::new("rollDie", schema).with_execute(move |input, _options| {
+            let executions = Arc::clone(&executions);
+            async move {
+                let player = input
+                    .get("player")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                executions.lock().expect("executions lock").push(player);
+                Ok(json!(4))
+            }
+        })
+    }
+
+    fn run_dice_game(
+        model: &MockLanguageModel,
+        executions: Arc<Mutex<Vec<String>>>,
+    ) -> StreamTextResult {
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(model, vec![user_message("Simulate a dice game")])
+                .with_tool(dice_roll_tool(executions))
+                .with_max_steps(5),
+        ));
+        result.consume_stream();
+        result
+    }
+
+    /// Maps packages/ai stream-text.test.ts:24276 `should contain 5 steps`.
+    #[test]
+    fn stream_text_dice_game_contains_five_steps() {
+        let model = dice_game_model();
+        let executions = Arc::new(Mutex::new(Vec::new()));
+        let result = run_dice_game(&model, executions);
+        assert_eq!(result.steps.len(), 5);
+    }
+
+    /// Maps packages/ai stream-text.test.ts:24280
+    /// `should have correct finishReason for each step` — steps 1-4 are
+    /// `tool-calls`, the final step is `stop`.
+    #[test]
+    fn stream_text_dice_game_step_finish_reasons() {
+        let model = dice_game_model();
+        let executions = Arc::new(Mutex::new(Vec::new()));
+        let result = run_dice_game(&model, executions);
+        let reasons: Vec<FinishReason> = result
+            .steps
+            .iter()
+            .map(|step| step.finish_reason.clone())
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![
+                FinishReason::ToolCalls,
+                FinishReason::ToolCalls,
+                FinishReason::ToolCalls,
+                FinishReason::ToolCalls,
+                FinishReason::Stop,
+            ]
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:24254
+    /// `should execute rollDie tool 4 times` — the loop runs the client tool
+    /// once for each of the four tool-call steps.
+    #[test]
+    fn stream_text_dice_game_executes_roll_die_four_times() {
+        let model = dice_game_model();
+        let executions = Arc::new(Mutex::new(Vec::new()));
+        let result = run_dice_game(&model, Arc::clone(&executions));
+        let _ = result;
+        let executions = executions.lock().expect("executions lock");
+        assert_eq!(executions.len(), 4);
+        assert!(executions.iter().all(|player| player == "player1"));
+    }
+
+    /// Maps packages/ai stream-text.test.ts:23802
+    /// `should include all previous messages in step 3 prompt (round 2)` — by
+    /// the third model call the prompt has accumulated the prior assistant
+    /// tool-call and tool-result messages, so it is longer than the first.
+    #[test]
+    fn stream_text_dice_game_step_three_prompt_includes_previous_messages() {
+        let model = dice_game_model();
+        let executions = Arc::new(Mutex::new(Vec::new()));
+        let result = run_dice_game(&model, executions);
+        let _ = result;
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 5);
+        let first_len = calls[0].prompt.len();
+        let third_len = calls[2].prompt.len();
+        assert!(
+            third_len > first_len,
+            "step 3 prompt ({third_len}) should include more messages than step 1 ({first_len})"
+        );
+        // The accumulated prompt must contain a tool-result message from the
+        // earlier rollDie executions.
+        assert!(
+            calls[2]
+                .prompt
+                .iter()
+                .any(|message| matches!(message, LanguageModelMessage::Tool(_))),
+            "step 3 prompt should include a tool-result message"
+        );
+    }
+
+    /// Maps packages/ai stream-text.test.ts:23912
+    /// `should include all previous messages in step 5 prompt (final step)` —
+    /// the final model call carries the full accumulated conversation.
+    #[test]
+    fn stream_text_dice_game_final_step_prompt_includes_all_previous_messages() {
+        let model = dice_game_model();
+        let executions = Arc::new(Mutex::new(Vec::new()));
+        let result = run_dice_game(&model, executions);
+        let _ = result;
+        let calls = model.stream_calls();
+        assert_eq!(calls.len(), 5);
+        let final_prompt = &calls[4].prompt;
+        // Original user message plus four assistant tool-call / tool-result
+        // rounds: the final prompt is the longest and ends with a tool result.
+        assert!(final_prompt.len() > calls[0].prompt.len());
+        let tool_messages = final_prompt
+            .iter()
+            .filter(|message| matches!(message, LanguageModelMessage::Tool(_)))
+            .count();
+        assert_eq!(tool_messages, 4);
+        assert!(matches!(
+            final_prompt.first(),
+            Some(LanguageModelMessage::User(_))
+        ));
+    }
+
+    /// Maps packages/ai stream-text.test.ts:24382
+    /// `should contain provider metadata with container ID for steps 1 and 2`.
+    #[test]
+    fn stream_text_dice_game_step_provider_metadata_container_id() {
+        let model = dice_game_model();
+        let executions = Arc::new(Mutex::new(Vec::new()));
+        let result = run_dice_game(&model, executions);
+        let expected = dice_container_metadata();
+        assert_eq!(result.steps[0].provider_metadata.as_ref(), Some(&expected));
+        assert_eq!(result.steps[1].provider_metadata.as_ref(), Some(&expected));
+        assert_eq!(result.steps[2].provider_metadata, None);
+    }
+
+    /// Maps packages/ai stream-text.test.ts:24368
+    /// `should be called for each step` — onStepFinish fires once per step.
+    #[test]
+    fn stream_text_dice_game_on_step_finish_called_for_each_step() {
+        let model = dice_game_model();
+        let executions = Arc::new(Mutex::new(Vec::new()));
+        let steps = Arc::new(Mutex::new(Vec::<GenerateTextStep>::new()));
+        let steps_for_callback = Arc::clone(&steps);
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Simulate a dice game")])
+                .with_tool(dice_roll_tool(executions))
+                .with_max_steps(5)
+                .with_on_step_finish(move |step| {
+                    let steps = Arc::clone(&steps_for_callback);
+                    async move {
+                        steps.lock().expect("steps lock").push(step);
+                    }
+                }),
+        ));
+        result.consume_stream();
+        assert_eq!(steps.lock().expect("steps lock").len(), 5);
+    }
+
+    /// Maps packages/ai stream-text.test.ts:24373
+    /// `should contain correct finishReason for each step` — onStepFinish
+    /// reports `tool-calls` for the first four steps and `stop` for the last.
+    #[test]
+    fn stream_text_dice_game_on_step_finish_finish_reason_per_step() {
+        let model = dice_game_model();
+        let executions = Arc::new(Mutex::new(Vec::new()));
+        let steps = Arc::new(Mutex::new(Vec::<GenerateTextStep>::new()));
+        let steps_for_callback = Arc::clone(&steps);
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("Simulate a dice game")])
+                .with_tool(dice_roll_tool(executions))
+                .with_max_steps(5)
+                .with_on_step_finish(move |step| {
+                    let steps = Arc::clone(&steps_for_callback);
+                    async move {
+                        steps.lock().expect("steps lock").push(step);
+                    }
+                }),
+        ));
+        result.consume_stream();
+        let reasons: Vec<FinishReason> = steps
+            .lock()
+            .expect("steps lock")
+            .iter()
+            .map(|step| step.finish_reason.clone())
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![
+                FinishReason::ToolCalls,
+                FinishReason::ToolCalls,
+                FinishReason::ToolCalls,
+                FinishReason::ToolCalls,
+                FinishReason::Stop,
+            ]
+        );
+    }
+
+    fn run_dice_game_on_finish(model: &MockLanguageModel) -> GenerateTextFinishEvent {
+        let executions = Arc::new(Mutex::new(Vec::new()));
+        let finish_events = Arc::new(Mutex::new(Vec::<GenerateTextFinishEvent>::new()));
+        let finish_for_callback = Arc::clone(&finish_events);
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(model, vec![user_message("Simulate a dice game")])
+                .with_tool(dice_roll_tool(executions))
+                .with_max_steps(5)
+                .with_on_finish(move |event| {
+                    let finish_events = Arc::clone(&finish_for_callback);
+                    async move {
+                        finish_events.lock().expect("finish lock").push(event);
+                    }
+                }),
+        ));
+        result.consume_stream();
+        let events = finish_events.lock().expect("finish lock");
+        assert_eq!(events.len(), 1);
+        events[0].clone()
+    }
+
+    /// Maps packages/ai stream-text.test.ts:24408
+    /// onFinish `should be called with correct text`.
+    #[test]
+    fn stream_text_dice_game_on_finish_text() {
+        let model = dice_game_model();
+        let event = run_dice_game_on_finish(&model);
+        assert!(event.text.contains("Game Results"));
+    }
+
+    /// Maps packages/ai stream-text.test.ts:24413
+    /// onFinish `should be called with correct finishReason`.
+    #[test]
+    fn stream_text_dice_game_on_finish_finish_reason() {
+        let model = dice_game_model();
+        let event = run_dice_game_on_finish(&model);
+        assert_eq!(event.finish_reason, FinishReason::Stop);
+    }
+
+    /// Maps packages/ai stream-text.test.ts:24418
+    /// onFinish `should contain all steps`.
+    #[test]
+    fn stream_text_dice_game_on_finish_contains_all_steps() {
+        let model = dice_game_model();
+        let event = run_dice_game_on_finish(&model);
+        assert_eq!(event.steps.len(), 5);
+    }
 }
