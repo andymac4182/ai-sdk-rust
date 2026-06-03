@@ -27,7 +27,7 @@ use crate::language_model::{
     LanguageModelReasoningEffort, LanguageModelResponseFormat, LanguageModelStreamPart,
     LanguageModelSystemMessage, LanguageModelToolChoice,
 };
-use crate::prompt::{Instructions, Prompt, PromptInput, TimeoutConfiguration};
+use crate::prompt::{Instructions, Prompt, PromptDownload, PromptInput, TimeoutConfiguration};
 use crate::provider::{InvalidPromptError, ProviderOptions, TypeValidationContext};
 use crate::provider_utils::{ExperimentalSandbox, FlexibleSchema, validate_types};
 use crate::skills::{
@@ -221,7 +221,15 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgent<'a, M> {
                 options.stop_conditions
             },
             include: options.include.or(self.settings.include),
+            experimental_download: self.settings.experimental_download.clone(),
         };
+
+        // Mirror upstream: the constructor-level `allowSystemInMessages` flag is
+        // folded into the prompt before `prepareCall` runs, so `prepareCall` can
+        // still override it by mutating the prompt it receives.
+        if self.settings.allow_system_in_messages {
+            prepared.prompt.allow_system_in_messages = true;
+        }
 
         if let Some(prepare_call) = &self.settings.prepare_call {
             prepared = prepare_call.prepare(prepared);
@@ -577,6 +585,19 @@ pub struct ToolLoopAgentSettings<'a, M: LanguageModel + ?Sized> {
 
     /// Optional call preparation callback.
     pub prepare_call: Option<ToolLoopAgentPrepareCall<'a, M>>,
+
+    /// Whether system messages are allowed in the prompt/messages fields.
+    ///
+    /// Mirrors upstream `ToolLoopAgentSettings.allowSystemInMessages`. When
+    /// `false` (the default) a system message supplied via `prompt`/`messages`
+    /// is rejected; the `instructions` option must be used instead.
+    pub allow_system_in_messages: bool,
+
+    /// Optional callback used to download URL-backed prompt assets.
+    ///
+    /// Mirrors upstream `ToolLoopAgentSettings.experimental_download`, forwarded
+    /// to `generateText`/`streamText`.
+    pub experimental_download: Option<PromptDownload>,
 }
 
 impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentSettings<'a, M> {
@@ -610,7 +631,21 @@ impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentSettings<'a, M> {
             stop_conditions: Vec::new(),
             include: None,
             prepare_call: None,
+            allow_system_in_messages: false,
+            experimental_download: None,
         }
+    }
+
+    /// Sets whether system messages may appear in the prompt/messages fields.
+    pub const fn with_allow_system_in_messages(mut self, allow_system_in_messages: bool) -> Self {
+        self.allow_system_in_messages = allow_system_in_messages;
+        self
+    }
+
+    /// Sets the callback used to download URL-backed prompt assets.
+    pub fn with_experimental_download(mut self, download: PromptDownload) -> Self {
+        self.experimental_download = Some(download);
+        self
     }
 
     /// Sets the agent identifier.
@@ -1405,6 +1440,7 @@ pub struct ToolLoopAgentPreparedCall<'a, M: LanguageModel + ?Sized> {
     pub max_steps: usize,
     pub stop_conditions: Vec<StopCondition>,
     pub include: Option<GenerateTextInclude>,
+    pub experimental_download: Option<PromptDownload>,
 }
 
 impl<'a, M: LanguageModel + ?Sized> ToolLoopAgentPreparedCall<'a, M> {
@@ -1540,6 +1576,7 @@ fn apply_generate_prepared_options<'a, M: LanguageModel + ?Sized>(
     if let Some(include) = prepared.include {
         options.include = include;
     }
+    options.download = prepared.experimental_download;
     options
 }
 
@@ -1574,6 +1611,7 @@ fn apply_stream_prepared_options<'a, M: LanguageModel + ?Sized>(
     options.timeout = prepared.timeout;
     options.max_steps = prepared.max_steps.max(1);
     options.stop_conditions = prepared.stop_conditions;
+    options.download = prepared.experimental_download;
     options
 }
 
@@ -1790,28 +1828,30 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::file_data::FileData;
     use crate::language_model::{
         FinishReason, LanguageModelAbortController, LanguageModelAbortSignal,
         LanguageModelAssistantContentPart, LanguageModelCallOptions, LanguageModelContent,
-        LanguageModelFinishReason, LanguageModelGenerateResult, LanguageModelMessage,
-        LanguageModelStreamFinish, LanguageModelStreamPart, LanguageModelStreamResult,
-        LanguageModelSystemMessage, LanguageModelText, LanguageModelTextDelta,
-        LanguageModelTextEnd, LanguageModelTextPart, LanguageModelTextStart, LanguageModelToolCall,
-        LanguageModelToolContentPart, LanguageModelToolResultContentPart,
-        LanguageModelToolResultOutput, LanguageModelUsage, LanguageModelUserContentPart,
-        LanguageModelUserMessage,
+        LanguageModelFilePart, LanguageModelFinishReason, LanguageModelGenerateResult,
+        LanguageModelMessage, LanguageModelStreamFinish, LanguageModelStreamPart,
+        LanguageModelStreamResult, LanguageModelSystemMessage, LanguageModelText,
+        LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextPart,
+        LanguageModelTextStart, LanguageModelToolCall, LanguageModelToolContentPart,
+        LanguageModelToolResultContentPart, LanguageModelToolResultOutput, LanguageModelUsage,
+        LanguageModelUserContentPart, LanguageModelUserMessage,
     };
     use crate::mock_models::MockLanguageModel;
     use crate::prompt::TimeoutConfigurationOptions;
     use crate::provider_utils::{
-        SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture, Schema, Tool,
-        ValidationResult,
+        DownloadedBlob, SandboxCommandOptions, SandboxCommandResult, SandboxRunCommandFuture,
+        Schema, Tool, ValidationResult,
     };
     use crate::stream_text::TextStreamPart;
     use crate::telemetry::{
         TelemetryEvent, TelemetryEventKind, TelemetryIntegration, register_telemetry_integration,
         reset_telemetry_state_for_tests, telemetry_test_guard_for_tests,
     };
+    use url::Url;
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
         let waker = Waker::noop();
@@ -2377,6 +2417,112 @@ mod tests {
                 user_message("Hello, world!")
             ]
         );
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_allows_system_messages_when_allow_system_in_messages_is_true() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model).with_allow_system_in_messages(true),
+        );
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_messages(vec![system_message("SYSTEM INSTRUCTIONS")]);
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        assert_eq!(
+            model.generate_calls()[0].prompt,
+            vec![system_message("SYSTEM INSTRUCTIONS")]
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_prepare_call_can_return_allow_system_in_messages() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_prepare_call(
+            |mut prepared| {
+                prepared.prompt.allow_system_in_messages = true;
+                prepared
+            },
+        ));
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_messages(vec![system_message("SYSTEM INSTRUCTIONS")]);
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        assert_eq!(
+            model.generate_calls()[0].prompt,
+            vec![system_message("SYSTEM INSTRUCTIONS")]
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_rejects_system_messages_when_allow_system_in_messages_is_unset() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model));
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_messages(vec![system_message("SYSTEM INSTRUCTIONS")]);
+
+        let error = poll_ready(agent.generate(options))
+            .expect_err("system messages are rejected by default");
+
+        assert_eq!(
+            error.message(),
+            "Invalid prompt: System messages are not allowed in the prompt or messages fields. Use the instructions option instead."
+        );
+        assert!(model.generate_calls().is_empty());
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_passes_experimental_download_to_generate_text() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let download_calls = Arc::new(Mutex::new(Vec::new()));
+        let download = PromptDownload::new({
+            let download_calls = Arc::clone(&download_calls);
+            move |requested_downloads| {
+                let download_calls = Arc::clone(&download_calls);
+                async move {
+                    download_calls.lock().expect("download calls lock").extend(
+                        requested_downloads.iter().map(|download| {
+                            (download.url.clone(), download.is_url_supported_by_model)
+                        }),
+                    );
+                    Ok(requested_downloads
+                        .into_iter()
+                        .map(|_| {
+                            Some(DownloadedBlob::new(vec![1, 2, 3]).with_media_type("image/png"))
+                        })
+                        .collect())
+                }
+            }
+        });
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model).with_experimental_download(download),
+        );
+        let image_url = Url::parse("https://example.com/image.png").expect("url parses");
+        let prompt = vec![LanguageModelMessage::User(LanguageModelUserMessage::new(
+            vec![LanguageModelUserContentPart::File(
+                LanguageModelFilePart::new(
+                    FileData::Url {
+                        url: image_url.clone(),
+                    },
+                    "image/png",
+                ),
+            )],
+        ))];
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_messages(prompt);
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        let recorded = download_calls.lock().expect("download calls lock");
+        assert_eq!(recorded.len(), 1);
+        // The mock model declares no supported URLs, so the image URL is not
+        // supported by the model and is forwarded for download.
+        assert_eq!(recorded[0], (image_url, false));
     }
 
     #[test]
@@ -3146,6 +3292,54 @@ mod tests {
     }
 
     #[test]
+    fn tool_loop_agent_generate_on_start_is_called_before_do_generate() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let call_order = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+        let call_order_for_callback = Rc::clone(&call_order);
+        let model_for_callback = model.clone();
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model));
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("Hello, world!").with_on_start(move |_event| {
+                let call_order = Rc::clone(&call_order_for_callback);
+                let model = model_for_callback.clone();
+                async move {
+                    // The model has not been invoked yet when on_start runs.
+                    assert!(model.generate_calls().is_empty());
+                    call_order.borrow_mut().push("onStart");
+                }
+            });
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        call_order.borrow_mut().push("doGenerate");
+        assert_eq!(&*call_order.borrow(), &["onStart", "doGenerate"]);
+        assert_eq!(model.generate_calls().len(), 1);
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_on_start_does_not_break_generation() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let ran = Rc::new(RefCell::new(false));
+        let ran_for_callback = Rc::clone(&ran);
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model));
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("Hello, world!").with_on_start(move |_event| {
+                let ran = Rc::clone(&ran_for_callback);
+                async move {
+                    // A failing callback (the Rust analog of an upstream throw)
+                    // must not abort the agent's generation.
+                    *ran.borrow_mut() = true;
+                }
+            });
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert!(*ran.borrow());
+        assert_eq!(result.text, "reply");
+    }
+
+    #[test]
     fn tool_loop_agent_merges_generate_start_callbacks_in_order() {
         let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
         let calls = Rc::new(RefCell::new(Vec::new()));
@@ -3242,6 +3436,58 @@ mod tests {
 
         assert_eq!(result.text, "reply");
         assert_eq!(&*calls.borrow(), &["settings", "call"]);
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_on_step_start_is_called_before_do_generate() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let call_order = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+        let call_order_for_callback = Rc::clone(&call_order);
+        let model_for_callback = model.clone();
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model));
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("Hello, world!").with_on_step_start(
+                move |_event| {
+                    let call_order = Rc::clone(&call_order_for_callback);
+                    let model = model_for_callback.clone();
+                    async move {
+                        // The model has not been invoked yet when on_step_start runs.
+                        assert!(model.generate_calls().is_empty());
+                        call_order.borrow_mut().push("onStepStart");
+                    }
+                },
+            );
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert_eq!(result.text, "reply");
+        call_order.borrow_mut().push("doGenerate");
+        assert_eq!(&*call_order.borrow(), &["onStepStart", "doGenerate"]);
+        assert_eq!(model.generate_calls().len(), 1);
+    }
+
+    #[test]
+    fn tool_loop_agent_generate_on_step_start_does_not_break_generation() {
+        let model = MockLanguageModel::new().with_generate_result(text_result("reply"));
+        let ran = Rc::new(RefCell::new(false));
+        let ran_for_callback = Rc::clone(&ran);
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model));
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_prompt("Hello, world!").with_on_step_start(
+                move |_event| {
+                    let ran = Rc::clone(&ran_for_callback);
+                    async move {
+                        // A failing callback (the Rust analog of an upstream throw)
+                        // must not abort the agent's generation.
+                        *ran.borrow_mut() = true;
+                    }
+                },
+            );
+
+        let result = poll_ready(agent.generate(options)).expect("agent generation succeeds");
+
+        assert!(*ran.borrow());
+        assert_eq!(result.text, "reply");
     }
 
     #[test]
@@ -3888,6 +4134,45 @@ mod tests {
                 system_message_with_provider_options("INSTRUCTIONS", provider_options),
                 user_message("Hello, world!")
             ]
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_allows_system_messages_when_allow_system_in_messages_is_true() {
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("hello"));
+        let agent = ToolLoopAgent::new(
+            ToolLoopAgentSettings::new(&model).with_allow_system_in_messages(true),
+        );
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_messages(vec![system_message("SYSTEM INSTRUCTIONS")]);
+
+        let result = poll_ready(agent.stream(options)).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "hello");
+        assert_eq!(
+            model.stream_calls()[0].prompt,
+            vec![system_message("SYSTEM INSTRUCTIONS")]
+        );
+    }
+
+    #[test]
+    fn tool_loop_agent_stream_prepare_call_can_return_allow_system_in_messages() {
+        let model = MockLanguageModel::new().with_stream_result(stream_text_result("hello"));
+        let agent = ToolLoopAgent::new(ToolLoopAgentSettings::new(&model).with_prepare_call(
+            |mut prepared| {
+                prepared.prompt.allow_system_in_messages = true;
+                prepared
+            },
+        ));
+        let options: ToolLoopAgentCallOptions<'_, MockLanguageModel> =
+            ToolLoopAgentCallOptions::from_messages(vec![system_message("SYSTEM INSTRUCTIONS")]);
+
+        let result = poll_ready(agent.stream(options)).expect("agent stream succeeds");
+
+        assert_eq!(result.text, "hello");
+        assert_eq!(
+            model.stream_calls()[0].prompt,
+            vec![system_message("SYSTEM INSTRUCTIONS")]
         );
     }
 
