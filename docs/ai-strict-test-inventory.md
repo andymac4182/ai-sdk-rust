@@ -10,11 +10,11 @@ Generated from upstream `vercel/ai` after `npx opensrc fetch https://github.com/
 | Local upstream source | `/Users/andrewmcclenaghan/.opensrc/repos/github.com/vercel/ai/main` |
 | Test files scanned | 561 |
 | Upstream cases scanned | 9013 |
-| Portable cases mapped to named Rust tests | 7609 |
-| Portable cases still missing named Rust tests | 9 |
+| Portable cases mapped to named Rust tests | 7612 |
+| Portable cases still missing named Rust tests | 6 |
 | JavaScript-only exceptions | 954 |
 | Type-system-impossible exceptions | 441 |
-| Portable mapped denominator | 7609 / 7618 |
+| Portable mapped denominator | 7612 / 7618 |
 
 This inventory is intentionally stricter than package-level progress. A package can only claim case-level parity after every portable upstream row below is either `portable-mapped` to a named Rust test or explicitly classified as `js-only-documented` or `type-system-impossible`.
 
@@ -80,7 +80,7 @@ This inventory is intentionally stricter than package-level progress. A package 
 | `packages/vue` | `@ai-sdk/vue` | JavaScript framework adapter | `js-only-documented` | none | 4 | 40 | 0 | 0 | 40 | 0 | none |
 | `packages/workflow` | `@ai-sdk/workflow` | AI SDK workflow package | `verified` | crates/ai-sdk-workflow; crates/workflow facade | 8 | 144 | 139 | 0 | 2 | 3 | none |
 | `packages/xai` | `@ai-sdk/xai` | provider package | `verified` | `src/xai.rs`, `src/openai_compatible.rs`, `src/open_responses.rs` | 14 | 338 | 338 | 0 | 0 | 0 | none |
-| `examples/ai-functions` | `examples/ai-functions` | example | `not-started` | unassigned | 25 | 64 | 16 | 4 | 0 | 44 | `examples-ai-functions-0053`; `examples-ai-functions-0062`; `examples-ai-functions-0063`; `examples-ai-functions-0064` |
+| `examples/ai-functions` | `examples/ai-functions` | example | `not-started` | unassigned | 25 | 64 | 19 | 1 | 0 | 44 | `examples-ai-functions-0053` |
 
 ## Case Inventory
 
@@ -9096,7 +9096,7 @@ This inventory is intentionally stricter than package-level progress. A package 
 | `examples-ai-functions-0059` | `examples/ai-functions` | `examples/ai-functions/src/e2e/huggingface.test.ts:87` it should handle system messages | `portable-mapped` | unassigned | `huggingface_responses_maps_system_provider_options_and_structured_output` | docs/ai-core-package-inventory.md | The named `src/huggingface.rs` test includes a `System` message in the call options and asserts the responses `input` array emits a `{ "role": "system", "content": "You are a helpful assistant." }` entry, proving system-message handling matching the upstream `instructions`/system case. |
 | `examples-ai-functions-0060` | `examples/ai-functions` | `examples/ai-functions/src/e2e/huggingface.test.ts:99` it should respect temperature settings | `portable-mapped` | unassigned | `huggingface_provider_generates_text_with_request_and_response_metadata` | docs/ai-core-package-inventory.md | The named `src/huggingface.rs` test sets `with_temperature(0.0)` and asserts the request body forwards `"temperature": 0.0` to the responses endpoint, proving temperature settings are respected as in the upstream temperature case. |
 | `examples-ai-functions-0061` | `examples/ai-functions` | `examples/ai-functions/src/e2e/huggingface.test.ts:110` it should respect max tokens | `portable-mapped` | unassigned | `huggingface_provider_generates_text_with_request_and_response_metadata` | docs/ai-core-package-inventory.md | The named `src/huggingface.rs` test sets `with_max_output_tokens(16)` and asserts the request body forwards `"max_output_tokens": 16` to the responses endpoint, proving the max-tokens cap is honored as in the upstream max-tokens case. |
-| `examples-ai-functions-0062` | `examples/ai-functions` | `examples/ai-functions/src/e2e/raw-chunks.test.ts:19` it should include raw chunks when include.rawChunks is enabled | `portable-unmapped` | unassigned | missing | strict inventory default | Portable upstream case still needs a named Rust test or an explicit non-portable exception. |
-| `examples-ai-functions-0063` | `examples/ai-functions` | `examples/ai-functions/src/e2e/raw-chunks.test.ts:36` it should not include raw chunks when include.rawChunks is disabled | `portable-unmapped` | unassigned | missing | strict inventory default | Portable upstream case still needs a named Rust test or an explicit non-portable exception. |
-| `examples-ai-functions-0064` | `examples/ai-functions` | `examples/ai-functions/src/e2e/raw-chunks.test.ts:53` it should forward provider-specific raw chunk data | `portable-unmapped` | unassigned | missing | strict inventory default | Portable upstream case still needs a named Rust test or an explicit non-portable exception. |
+| `examples-ai-functions-0062` | `examples/ai-functions` | `examples/ai-functions/src/e2e/raw-chunks.test.ts:19` it should include raw chunks when include.rawChunks is enabled | `portable-mapped` | unassigned | `stream_text_preserves_raw_chunks_when_requested` | docs/ai-core-package-inventory.md | R7 examples raw-chunks e2e row mapped to root crate streamText coverage asserting a Raw part is emitted when `with_include_raw_chunks(true)` is set. |
+| `examples-ai-functions-0063` | `examples/ai-functions` | `examples/ai-functions/src/e2e/raw-chunks.test.ts:36` it should not include raw chunks when include.rawChunks is disabled | `portable-mapped` | unassigned | `stream_text_passes_explicit_false_include_raw_chunks_to_model` | docs/ai-core-package-inventory.md | R7 examples raw-chunks e2e row mapped to root crate streamText coverage asserting no Raw part is emitted when `with_include_raw_chunks(false)` is set. |
+| `examples-ai-functions-0064` | `examples/ai-functions` | `examples/ai-functions/src/e2e/raw-chunks.test.ts:53` it should forward provider-specific raw chunk data | `portable-mapped` | unassigned | `stream_text_preserves_raw_chunks_when_requested` | docs/ai-core-package-inventory.md | R7 examples raw-chunks e2e row mapped to root crate streamText coverage asserting the provider-specific raw chunk `raw_value` payload is forwarded verbatim into the emitted Raw part. |
 
