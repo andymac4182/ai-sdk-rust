@@ -614,7 +614,7 @@ function parseFoundationalMappings(
     }
 
     const values = Object.fromEntries(headers.map((header, index) => [header, cells[index]]));
-    const location = values['Upstream case']?.match(/`(packages\/[^`]+):(\d+)`/);
+    const location = values['Upstream case']?.match(/`((?:packages|examples)\/[^`]+):(\d+)`/);
     if (!location) {
       continue;
     }
@@ -670,7 +670,7 @@ function mergeStrictCaseMappings(docPaths) {
 
 function parseInventoryCaseName(upstreamCaseCell) {
   const withoutLocation = String(upstreamCaseCell)
-    .replace(/`packages\/[^`]+:\d+`/, '')
+    .replace(/`(?:packages|examples)\/[^`]+:\d+`/, '')
     .trim();
   return withoutLocation
     .replace(/^(?:it|test)(?:\.[A-Za-z0-9_$]+)*\s+/, '')
