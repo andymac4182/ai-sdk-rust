@@ -4470,6 +4470,7 @@ fn encode_ui_message_sse_stream(stream: Vec<UiMessageChunk>) -> Vec<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::cell::RefCell;
     use std::convert::Infallible;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
@@ -7136,6 +7137,278 @@ mod tests {
             serde_json::to_value(chunks).expect("chunks serialize"),
             json!([{ "type": "error", "errorText": "error-message" }])
         );
+    }
+
+    // Upstream parity: createUIMessageStream should add error parts when execute
+    // throws with a promise. The synchronous Rust writer maps the JS async-throw
+    // case onto a fallible execute closure that returns an error.
+    #[test]
+    fn create_ui_message_stream_should_add_error_parts_when_execute_throws_with_promise() {
+        let chunks = create_ui_message_stream_with_result(
+            CreateUiMessageStreamOptions::new().with_on_error(|_| "error-message".to_string()),
+            |_| Err("execute-error"),
+        )
+        .expect("stream is created");
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([{ "type": "error", "errorText": "error-message" }])
+        );
+    }
+
+    // Upstream parity: writing to a writer after the stream has finished must be
+    // suppressed (not panic). The Rust writer holds an owned buffer, so a clone
+    // captured during execute can still be written to without error after the
+    // stream chunks have been collected.
+    #[test]
+    fn create_ui_message_stream_should_suppress_error_when_writing_to_closed_stream() {
+        let captured_writer: Rc<RefCell<Option<UiMessageStreamWriter>>> =
+            Rc::new(RefCell::new(None));
+        let captured_writer_for_execute = Rc::clone(&captured_writer);
+
+        let chunks = create_ui_message_stream(CreateUiMessageStreamOptions::new(), |writer| {
+            writer.write(UiMessageChunk::text_delta("1", "1a"));
+            *captured_writer_for_execute.borrow_mut() = Some(writer.clone());
+        })
+        .expect("stream is created");
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "1a"
+                }
+            ])
+        );
+
+        // Writing to the captured (now-closed) writer must not panic.
+        let mut closed_writer = captured_writer
+            .borrow_mut()
+            .take()
+            .expect("writer was captured");
+        closed_writer.write(UiMessageChunk::text_delta("1", "1b"));
+    }
+
+    // Upstream parity: streams merged after the initial execute call (delayed
+    // merges) must still be forwarded into the output stream in order.
+    #[test]
+    fn create_ui_message_stream_should_support_writing_from_delayed_merged_streams() {
+        let chunks = create_ui_message_stream(CreateUiMessageStreamOptions::new(), |writer| {
+            // First merged stream.
+            writer.merge([UiMessageChunk::text_delta("1", "1a")]);
+            // A delayed second merged stream added later on the same writer.
+            writer.merge([UiMessageChunk::text_delta("2", "2a")]);
+        })
+        .expect("stream is created");
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "1a"
+                },
+                {
+                    "type": "text-delta",
+                    "id": "2",
+                    "delta": "2a"
+                }
+            ])
+        );
+    }
+
+    // Upstream parity: onFinish should be invoked with the response message and
+    // persisted messages when no originalMessages are provided. The generated
+    // response message id (generateId in JS) maps to with_message_id in Rust.
+    #[test]
+    fn create_ui_message_stream_should_handle_on_finish_without_original_messages() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        create_ui_message_stream(
+            CreateUiMessageStreamOptions::new()
+                .with_message_id("response-message-id")
+                .with_on_finish(move |event| {
+                    finish_events_for_callback
+                        .lock()
+                        .expect("finish events lock")
+                        .push(event);
+                }),
+            |writer| {
+                writer.write(UiMessageChunk::text_start("1"));
+                writer.write(UiMessageChunk::text_delta("1", "1a"));
+                writer.write(UiMessageChunk::text_end("1"));
+            },
+        )
+        .expect("stream is created");
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        let event = &finish_events[0];
+        assert_eq!(event.finish_reason, None);
+        assert!(!event.is_aborted);
+        assert!(!event.is_continuation);
+        assert_eq!(event.response_message.id, "response-message-id");
+        assert_eq!(event.response_message.role, UiMessageRole::Assistant);
+        assert_eq!(
+            event.response_message.parts,
+            vec![json!({ "type": "text", "text": "1a", "state": "done" })]
+        );
+        assert_eq!(event.messages.len(), 1);
+        assert_eq!(event.messages[0], event.response_message);
+    }
+
+    // Upstream parity: onFinish should append to the existing assistant message
+    // (continuation) when the last original message is an assistant message.
+    #[test]
+    fn create_ui_message_stream_should_handle_on_finish_with_messages() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let original_messages = vec![
+            UiMessage::new("0", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "0a" })),
+            UiMessage::new("1", UiMessageRole::Assistant)
+                .with_part(json!({ "type": "text", "text": "1a", "state": "done" })),
+        ];
+
+        create_ui_message_stream(
+            CreateUiMessageStreamOptions::new()
+                .with_original_messages(original_messages.clone())
+                .with_on_finish(move |event| {
+                    finish_events_for_callback
+                        .lock()
+                        .expect("finish events lock")
+                        .push(event);
+                }),
+            |writer| {
+                writer.write(UiMessageChunk::text_start("1"));
+                writer.write(UiMessageChunk::text_delta("1", "1b"));
+                writer.write(UiMessageChunk::text_end("1"));
+            },
+        )
+        .expect("stream is created");
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        let event = &finish_events[0];
+        assert_eq!(event.finish_reason, None);
+        assert!(!event.is_aborted);
+        assert!(event.is_continuation);
+        assert_eq!(event.response_message.id, "1");
+        assert_eq!(
+            event.response_message.parts,
+            vec![
+                json!({ "type": "text", "text": "1a", "state": "done" }),
+                json!({ "type": "text", "text": "1b", "state": "done" }),
+            ]
+        );
+        assert_eq!(event.messages.len(), 2);
+        assert_eq!(event.messages[0], original_messages[0]);
+        assert_eq!(event.messages[1], event.response_message);
+    }
+
+    // Upstream parity: when originalMessages are provided but no assistant
+    // message exists, a generated messageId should be injected into the start
+    // chunk and used for the new response message.
+    #[test]
+    fn create_ui_message_stream_should_inject_message_id_when_original_messages_are_provided() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let original_messages = vec![
+            UiMessage::new("0", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "0a" })),
+        ];
+
+        let chunks = create_ui_message_stream(
+            CreateUiMessageStreamOptions::new()
+                .with_message_id("response-message-id")
+                .with_original_messages(original_messages.clone())
+                .with_on_finish(move |event| {
+                    finish_events_for_callback
+                        .lock()
+                        .expect("finish events lock")
+                        .push(event);
+                }),
+            |writer| {
+                writer.write(UiMessageChunk::start()); // no messageId
+            },
+        )
+        .expect("stream is created");
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                {
+                    "type": "start",
+                    "messageId": "response-message-id"
+                }
+            ])
+        );
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        let event = &finish_events[0];
+        assert!(!event.is_continuation);
+        assert_eq!(event.response_message.id, "response-message-id");
+        assert_eq!(event.response_message.role, UiMessageRole::Assistant);
+        assert!(event.response_message.parts.is_empty());
+        assert_eq!(event.messages.len(), 2);
+        assert_eq!(event.messages[0], original_messages[0]);
+        assert_eq!(event.messages[1], event.response_message);
+    }
+
+    // Upstream parity: an explicit messageId on the start chunk must be kept
+    // (not overwritten by the generated id) when originalMessages are provided.
+    #[test]
+    fn create_ui_message_stream_should_keep_existing_message_id_from_start_chunk() {
+        let finish_events = Arc::new(Mutex::new(Vec::<UiMessageStreamFinishCallbackEvent>::new()));
+        let finish_events_for_callback = Arc::clone(&finish_events);
+
+        let original_messages = vec![
+            UiMessage::new("0", UiMessageRole::User)
+                .with_part(json!({ "type": "text", "text": "0a" })),
+        ];
+
+        let chunks = create_ui_message_stream(
+            CreateUiMessageStreamOptions::new()
+                .with_message_id("response-message-id")
+                .with_original_messages(original_messages.clone())
+                .with_on_finish(move |event| {
+                    finish_events_for_callback
+                        .lock()
+                        .expect("finish events lock")
+                        .push(event);
+                }),
+            |writer| {
+                writer.write(UiMessageChunk::start_with_message_id("existing-message-id"));
+            },
+        )
+        .expect("stream is created");
+
+        assert_eq!(
+            serde_json::to_value(chunks).expect("chunks serialize"),
+            json!([
+                {
+                    "type": "start",
+                    "messageId": "existing-message-id"
+                }
+            ])
+        );
+
+        let finish_events = finish_events.lock().expect("finish events lock");
+        assert_eq!(finish_events.len(), 1);
+        let event = &finish_events[0];
+        assert!(!event.is_continuation);
+        assert_eq!(event.response_message.id, "existing-message-id");
+        assert!(event.response_message.parts.is_empty());
+        assert_eq!(event.messages.len(), 2);
+        assert_eq!(event.messages[0], original_messages[0]);
+        assert_eq!(event.messages[1], event.response_message);
     }
 
     #[test]
