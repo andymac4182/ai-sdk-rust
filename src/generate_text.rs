@@ -8486,6 +8486,30 @@ mod tests {
     }
 
     #[test]
+    fn is_stop_condition_met_should_support_step_derived_stop_conditions() {
+        // Upstream `stop-condition.test.ts:142` "should support asynchronous stop
+        // conditions" combines a never-matching predicate with a predicate that
+        // resolves from `steps.length === 2`. The Rust port models conditions as a
+        // synchronous data enum, so the async/promise machinery is JS-only; the
+        // load-bearing behavior is that a step-derived condition (`StepCount`)
+        // contributes its result to `is_stop_condition_met` even when an earlier
+        // condition never matches.
+        let empty = stop_condition_step(&[]);
+        let weather = stop_condition_step(&["weather"]);
+
+        assert!(is_stop_condition_met(
+            &[is_loop_finished(), is_step_count(2)],
+            &[empty.clone(), weather.clone()],
+        ));
+
+        // With only one step the same step-derived condition must not fire.
+        assert!(!is_stop_condition_met(
+            &[is_loop_finished(), is_step_count(2)],
+            &[empty],
+        ));
+    }
+
+    #[test]
     fn generate_text_include_serializes_optional_upstream_flags() {
         let include = GenerateTextInclude::new()
             .with_request_body(true)
