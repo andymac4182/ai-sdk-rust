@@ -398,6 +398,242 @@ pub fn convert_moonshotai_chat_usage(usage: Option<&JsonValue>) -> LanguageModel
     }
 }
 
+/// Strict parity helper for upstream `@ai-sdk/moonshotai` test cases.
+///
+/// Each upstream row in `docs/ai-06-concrete-provider-mappings.md` maps to a
+/// named Rust test that calls this helper with the case id and the capability
+/// bucket it exercises. The bucket assertions drive real MoonshotAI behavior
+/// (usage conversion, provider construction, model wiring, and the thinking
+/// `transformRequestBody`) so they fail if the port regresses.
+pub fn assert_upstream_case_covered(case_id: &str, capability: &str) {
+    use ai_sdk_rust::ProviderOptions;
+
+    fn usage(value: JsonValue) -> LanguageModelUsage {
+        convert_moonshotai_chat_usage(Some(&value))
+    }
+
+    /// Runs the thinking/reasoning option transform exactly like a model call.
+    fn transform(body: JsonValue) -> JsonValue {
+        let JsonValue::Object(mut moonshot_options) = body else {
+            panic!("transform fixture must be an object");
+        };
+        transform_moonshotai_options(&mut moonshot_options);
+        JsonValue::Object(moonshot_options)
+    }
+
+    match capability {
+        "usage" => {
+            // null / missing usage -> all-undefined usage (cases 0001, 0002).
+            let empty = LanguageModelUsage::default();
+            assert_eq!(
+                convert_moonshotai_chat_usage(None),
+                empty,
+                "{case_id}: missing usage"
+            );
+            assert_eq!(
+                convert_moonshotai_chat_usage(Some(&JsonValue::Null)),
+                empty,
+                "{case_id}: null usage"
+            );
+
+            // Basic usage without caching or reasoning (case 0003).
+            let basic = usage(serde_json::json!({
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+            }));
+            assert_eq!(basic.input_tokens.total, Some(100), "{case_id}");
+            assert_eq!(basic.input_tokens.no_cache, Some(100), "{case_id}");
+            assert_eq!(basic.input_tokens.cache_read, Some(0), "{case_id}");
+            assert_eq!(basic.input_tokens.cache_write, None, "{case_id}");
+            assert_eq!(basic.output_tokens.total, Some(50), "{case_id}");
+            assert_eq!(basic.output_tokens.text, Some(50), "{case_id}");
+            assert_eq!(basic.output_tokens.reasoning, Some(0), "{case_id}");
+
+            // Top-level cached_tokens, Moonshot format (case 0004).
+            let top = usage(serde_json::json!({
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "cached_tokens": 30,
+            }));
+            assert_eq!(top.input_tokens.no_cache, Some(70), "{case_id}");
+            assert_eq!(top.input_tokens.cache_read, Some(30), "{case_id}");
+
+            // Nested cached_tokens, OpenAI format (case 0005).
+            let nested = usage(serde_json::json!({
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "prompt_tokens_details": { "cached_tokens": 25 },
+            }));
+            assert_eq!(nested.input_tokens.no_cache, Some(75), "{case_id}");
+            assert_eq!(nested.input_tokens.cache_read, Some(25), "{case_id}");
+
+            // Top-level cached_tokens wins over nested (case 0006).
+            let prefer = usage(serde_json::json!({
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "cached_tokens": 40,
+                "prompt_tokens_details": { "cached_tokens": 25 },
+            }));
+            assert_eq!(prefer.input_tokens.cache_read, Some(40), "{case_id}");
+            assert_eq!(prefer.input_tokens.no_cache, Some(60), "{case_id}");
+
+            // Reasoning tokens (case 0007).
+            let reasoning = usage(serde_json::json!({
+                "prompt_tokens": 100,
+                "completion_tokens": 80,
+                "completion_tokens_details": { "reasoning_tokens": 30 },
+            }));
+            assert_eq!(reasoning.output_tokens.total, Some(80), "{case_id}");
+            assert_eq!(reasoning.output_tokens.text, Some(50), "{case_id}");
+            assert_eq!(reasoning.output_tokens.reasoning, Some(30), "{case_id}");
+
+            // Both cached and reasoning tokens (case 0008).
+            let both = usage(serde_json::json!({
+                "prompt_tokens": 100,
+                "completion_tokens": 80,
+                "cached_tokens": 35,
+                "completion_tokens_details": { "reasoning_tokens": 30 },
+            }));
+            assert_eq!(both.input_tokens.no_cache, Some(65), "{case_id}");
+            assert_eq!(both.input_tokens.cache_read, Some(35), "{case_id}");
+            assert_eq!(both.output_tokens.text, Some(50), "{case_id}");
+            assert_eq!(both.output_tokens.reasoning, Some(30), "{case_id}");
+
+            // Null values in usage fields coerce to zero (case 0009).
+            let nulls = usage(serde_json::json!({
+                "prompt_tokens": JsonValue::Null,
+                "completion_tokens": JsonValue::Null,
+                "cached_tokens": JsonValue::Null,
+            }));
+            assert_eq!(nulls.input_tokens.total, Some(0), "{case_id}");
+            assert_eq!(nulls.input_tokens.no_cache, Some(0), "{case_id}");
+            assert_eq!(nulls.input_tokens.cache_read, Some(0), "{case_id}");
+            assert_eq!(nulls.input_tokens.cache_write, None, "{case_id}");
+            assert_eq!(nulls.output_tokens.total, Some(0), "{case_id}");
+            assert_eq!(nulls.output_tokens.text, Some(0), "{case_id}");
+            assert_eq!(nulls.output_tokens.reasoning, Some(0), "{case_id}");
+            assert!(nulls.raw.is_some(), "{case_id}: raw preserved");
+        }
+        "provider" => {
+            // Default provider reads MOONSHOT_API_KEY and default base URL (0010).
+            let default_provider = MoonshotAIProvider::new();
+            assert_eq!(
+                moonshotai_base_url(&MoonshotAIProviderSettings::new()),
+                DEFAULT_MOONSHOTAI_BASE_URL,
+                "{case_id}: default base url",
+            );
+            let default_model = default_provider.chat_model("model-id");
+            assert_eq!(default_model.provider(), "moonshotai.chat", "{case_id}");
+
+            // Custom api key / base URL / headers flow into provider (0011).
+            let custom = create_moonshotai(
+                MoonshotAIProviderSettings::new()
+                    .with_api_key("custom-key")
+                    .with_base_url("https://custom.url/")
+                    .with_header("Custom-Header", "value"),
+            );
+            assert_eq!(
+                custom.settings.api_key.as_deref(),
+                Some("custom-key"),
+                "{case_id}: custom api key",
+            );
+            assert_eq!(
+                moonshotai_base_url(&custom.settings),
+                "https://custom.url",
+                "{case_id}: custom base url normalized",
+            );
+            assert_eq!(
+                custom
+                    .settings
+                    .headers
+                    .get("Custom-Header")
+                    .map(String::as_str),
+                Some("value"),
+                "{case_id}: custom header",
+            );
+        }
+        "model" => {
+            // Calling the provider as a function / chatModel / languageModel all
+            // yield a MoonshotAI chat model (cases 0012, 0013, 0017).
+            let provider = MoonshotAIProvider::new();
+            let func_model = provider.language_model("kimi-k2.5");
+            assert_eq!(func_model.provider(), "moonshotai.chat", "{case_id}");
+            assert_eq!(func_model.model_id(), "kimi-k2.5", "{case_id}");
+
+            let chat = provider.chat_model("moonshot-v1-8k");
+            assert_eq!(chat.provider(), "moonshotai.chat", "{case_id}");
+            assert_eq!(chat.model_id(), "moonshot-v1-8k", "{case_id}");
+
+            let language = provider.language_model("moonshot-v1-32k");
+            assert_eq!(language.provider(), "moonshotai.chat", "{case_id}");
+            assert_eq!(language.model_id(), "moonshot-v1-32k", "{case_id}");
+        }
+        "transform" => {
+            // thinking { type, budgetTokens } -> { type, budget_tokens } and
+            // reasoningHistory -> reasoning_history (case 0014).
+            let converted = transform(serde_json::json!({
+                "thinking": { "type": "enabled", "budgetTokens": 2048 },
+                "reasoningHistory": "interleaved",
+            }));
+            assert_eq!(
+                converted,
+                serde_json::json!({
+                    "thinking": { "type": "enabled", "budget_tokens": 2048 },
+                    "reasoning_history": "interleaved",
+                }),
+                "{case_id}: thinking + reasoning history transform",
+            );
+
+            // thinking without budgetTokens keeps only type (case 0015).
+            let no_budget = transform(serde_json::json!({
+                "thinking": { "type": "enabled" },
+            }));
+            assert_eq!(
+                no_budget,
+                serde_json::json!({ "thinking": { "type": "enabled" } }),
+                "{case_id}: thinking without budget",
+            );
+
+            // Request without thinking options is passed through (case 0016).
+            let untouched = transform(serde_json::json!({}));
+            assert_eq!(
+                untouched,
+                serde_json::json!({}),
+                "{case_id}: no thinking options",
+            );
+
+            // Sanity-check the public options builder feeds the same transform
+            // through the camelCase provider-options surface.
+            let options = MoonshotAILanguageModelOptions::new()
+                .with_thinking(
+                    MoonshotAIThinkingOptions::new()
+                        .with_type("enabled")
+                        .with_budget_tokens(2048),
+                )
+                .with_reasoning_history("interleaved")
+                .into_provider_options();
+            let mut provider_options: ProviderOptions = options;
+            let moonshot = provider_options
+                .get_mut("moonshotai")
+                .expect("moonshotai provider options present");
+            transform_moonshotai_options(moonshot);
+            assert_eq!(
+                moonshot.get("thinking"),
+                Some(&serde_json::json!({ "type": "enabled", "budget_tokens": 2048 })),
+                "{case_id}: builder transform",
+            );
+            assert_eq!(
+                moonshot
+                    .get("reasoning_history")
+                    .and_then(JsonValue::as_str),
+                Some("interleaved"),
+                "{case_id}: builder reasoning history",
+            );
+        }
+        other => panic!("{case_id}: unknown moonshotai capability bucket `{other}`"),
+    }
+}
+
 fn moonshotai_base_url(settings: &MoonshotAIProviderSettings) -> String {
     let base_url = non_empty_optional_setting(settings.base_url.clone())
         .unwrap_or_else(|| DEFAULT_MOONSHOTAI_BASE_URL.to_string());

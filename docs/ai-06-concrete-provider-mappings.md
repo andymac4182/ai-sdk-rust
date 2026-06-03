@@ -42,13 +42,42 @@ the strict inventory generator.
 | `packages/lmnt` | `crates/ai-sdk-lmnt` | 9 |
 | `packages/luma` | `crates/ai-sdk-luma` | 29 |
 | `packages/mistral` | `crates/ai-sdk-mistral` | 0 |
-| `packages/moonshotai` | `crates/ai-sdk-moonshotai` | 17 |
+| `packages/moonshotai` | `crates/ai-sdk-moonshotai` | 0 |
 | `packages/perplexity` | `crates/ai-sdk-perplexity` | 32 |
 | `packages/prodia` | `crates/ai-sdk-prodia` | 54 |
 | `packages/replicate` | `crates/ai-sdk-replicate` | 63 |
 | `packages/revai` | `crates/ai-sdk-revai` | 6 |
 | `packages/togetherai` | `src/togetherai.rs`, `src/openai_compatible.rs` | 10 |
 | `packages/voyage` | `src/voyage.rs` | 0 |
+
+## Black Forest Labs Exact Case Map
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | passes the correct parameters including aspect ratio and providerOptions | `black_forest_labs_image_model_passes_correct_parameters_including_aspect_ratio_and_provider_options` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | uses image field for flux-pro-1.0-fill input images | `black_forest_labs_image_model_uses_image_field_for_flux_pro_1_0_fill_input_images` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | uses input_image field for non-fill input images | `black_forest_labs_image_model_uses_input_image_field_for_non_fill_input_images` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | includes seed in providerMetadata images when provided by API | `black_forest_labs_image_model_includes_seed_in_provider_metadata_images_when_provided_by_api` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | includes all cost and megapixel fields when provided by submit API | `black_forest_labs_image_model_includes_all_cost_and_megapixel_fields_when_provided_by_submit_api` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | omits cost and megapixel fields from providerMetadata when not provided by submit API | `black_forest_labs_image_model_omits_cost_and_megapixel_fields_from_provider_metadata_when_not_provided_by_submit_api` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | handles null cost and megapixel fields from submit API | `black_forest_labs_image_model_handles_null_cost_and_megapixel_fields_from_submit_api` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | calls the expected URLs in sequence | `black_forest_labs_image_model_calls_the_expected_urls_in_sequence` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | merges provider and request headers for submit call | `black_forest_labs_image_model_merges_provider_and_request_headers_for_submit_call` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | passes merged headers to polling requests | `black_forest_labs_image_model_passes_merged_headers_to_polling_requests` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | warns and derives aspect_ratio when size is provided | `black_forest_labs_image_model_warns_and_derives_aspect_ratio_when_size_is_provided` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | warns and ignores size when both size and aspectRatio are provided | `black_forest_labs_image_model_warns_and_ignores_size_when_both_size_and_aspect_ratio_are_provided` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | handles API errors with message and detail | `black_forest_labs_image_model_handles_api_errors_with_message_and_detail` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | handles poll responses with state instead of status | `black_forest_labs_image_model_handles_poll_responses_with_state_instead_of_status` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | polls multiple times using configured interval until Ready | `black_forest_labs_image_model_polls_multiple_times_using_configured_interval_until_ready` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | uses configured pollTimeoutMillis and pollIntervalMillis to time out | `black_forest_labs_image_model_uses_configured_poll_timeout_millis_and_poll_interval_millis_to_time_out` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | throws when poll is Ready but sample is missing | `black_forest_labs_image_model_throws_when_poll_is_ready_but_sample_is_missing` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | throws when poll returns Error or Failed | `black_forest_labs_image_model_throws_when_poll_returns_error_or_failed` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | includes timestamp, headers, and modelId in response metadata | `black_forest_labs_image_model_includes_timestamp_headers_and_model_id_in_response_metadata` | none |
+| `packages/black-forest-labs/src/black-forest-labs-image-model.test.ts` | exposes correct provider and model information | `black_forest_labs_image_model_exposes_correct_provider_and_model_information` | none |
+| `packages/black-forest-labs/src/black-forest-labs-provider.test.ts` | creates image models via .image and .imageModel | `black_forest_labs_provider_creates_image_models_via_image_and_image_model` | none |
+| `packages/black-forest-labs/src/black-forest-labs-provider.test.ts` | configures baseURL and headers correctly | `black_forest_labs_provider_configures_base_url_and_headers_correctly` | none |
+| `packages/black-forest-labs/src/black-forest-labs-provider.test.ts` | uses provider polling options for timeout behavior | `black_forest_labs_provider_uses_provider_polling_options_for_timeout_behavior` | none |
+| `packages/black-forest-labs/src/black-forest-labs-provider.test.ts` | throws NoSuchModelError for unsupported model types | `black_forest_labs_provider_throws_nosuchmodelerror_for_unsupported_model_types` | none |
 
 ## Alibaba Exact Case Map
 
@@ -396,6 +425,85 @@ deterministic capability assertion exported from the crate
 | `packages/mistral/src/mistral-prepare-tools.test.ts` | should not include strict mode when strict is undefined | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0071_it_should_not_include_strict_mode_when_strict_is_undefined` | none |
 | `packages/mistral/src/mistral-prepare-tools.test.ts` | should pass through strict mode for multiple tools with different strict settings | `crates/ai-sdk-mistral/tests/upstream_mapping.rs::mistral_0072_it_should_pass_through_strict_mode_for_multiple_tools_with_different_strict_settings` | none |
 
+## DeepSeek Exact Case Map
+
+Row-level strict mapping for portable `packages/deepseek` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named Rust test in
+`crates/ai-sdk-deepseek/tests/upstream_mapping.rs` that delegates to the
+deterministic capability assertion exported from the crate
+(`assert_upstream_case_covered`), which exercises the ported DeepSeek
+message/tool/reasoning/usage behavior so the assertion fails on regression.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/deepseek/src/chat/convert-to-deepseek-chat-messages.test.ts` | should convert messages with only a text part to a string content | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0001_it_should_convert_messages_with_only_a_text_part_to_string_content` | none |
+| `packages/deepseek/src/chat/convert-to-deepseek-chat-messages.test.ts` | should warn about unsupported file parts | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0002_it_should_warn_about_unsupported_file_parts` | none |
+| `packages/deepseek/src/chat/convert-to-deepseek-chat-messages.test.ts` | should accept top-level-only mediaType without error and not read it (category D) | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0003_it_should_accept_top_level_only_media_type_without_reading_it` | none |
+| `packages/deepseek/src/chat/convert-to-deepseek-chat-messages.test.ts` | should stringify arguments to tool calls | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0004_it_should_stringify_arguments_to_tool_calls` | none |
+| `packages/deepseek/src/chat/convert-to-deepseek-chat-messages.test.ts` | should handle text output type in tool results | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0005_it_should_handle_text_output_type_in_tool_results` | none |
+| `packages/deepseek/src/chat/convert-to-deepseek-chat-messages.test.ts` | should support reasoning content in tool calls | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0006_it_should_support_reasoning_content_in_tool_calls` | none |
+| `packages/deepseek/src/chat/convert-to-deepseek-chat-messages.test.ts` | should filter out reasoning content from turns before the last user message | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0007_it_should_filter_out_reasoning_content_from_prior_turns` | none |
+| `packages/deepseek/src/chat/convert-to-deepseek-chat-messages.test.ts` | should preserve reasoning_content from prior turns for deepseek-v4 | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0008_it_should_preserve_reasoning_content_from_prior_turns_for_v4` | none |
+| `packages/deepseek/src/chat/convert-to-deepseek-chat-messages.test.ts` | should back-fill empty reasoning_content for deepseek-v4 assistant messages with no reasoning part | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0009_it_should_back_fill_empty_reasoning_content_for_v4` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should send correct request body | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0010_it_should_send_correct_request_body` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should extract text content | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0011_it_should_extract_text_content` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should send correct request body | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0012_it_should_send_correct_request_body_with_thinking` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should extract text content | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0013_it_should_extract_text_content_with_reasoning` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should map top-level reasoning to thinking enabled | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0014_it_should_map_top_level_reasoning_to_thinking_enabled` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should map top-level reasoning none to thinking disabled | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0015_it_should_map_top_level_reasoning_none_to_thinking_disabled` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should map top-level reasoning xhigh to reasoning_effort max | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0016_it_should_map_top_level_reasoning_xhigh_to_reasoning_effort_max` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should map top-level reasoning low to reasoning_effort low without a compatibility warning | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0017_it_should_map_top_level_reasoning_low_without_compatibility_warning` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should map top-level reasoning medium to reasoning_effort medium | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0018_it_should_map_top_level_reasoning_medium_to_reasoning_effort_medium` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should map top-level reasoning minimal to reasoning_effort low with compatibility warning | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0019_it_should_map_top_level_reasoning_minimal_to_low_with_warning` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should pass providerOptions reasoningEffort %s through to the API | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0020_it_should_pass_provider_options_reasoning_effort_through` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should pass providerOptions thinking.type=adaptive through to the API | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0021_it_should_pass_provider_options_thinking_adaptive_through` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should pass providerOptions reasoningEffort | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0022_it_should_pass_provider_options_reasoning_effort` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should prefer providerOptions thinking over top-level reasoning | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0023_it_should_prefer_provider_options_thinking_over_top_level_reasoning` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should prefer providerOptions reasoningEffort over top-level reasoning | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0024_it_should_prefer_provider_options_reasoning_effort_over_top_level` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should not set thinking when reasoning is not specified | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0025_it_should_not_set_thinking_when_reasoning_is_not_specified` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should send correct request body | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0026_it_should_send_correct_request_body_with_tools` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should send correct request body without schema | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0027_it_should_send_correct_request_body_without_schema` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should send correct request body with schema | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0028_it_should_send_correct_request_body_with_schema` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should extract text content | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0029_it_should_extract_text_content_in_json_mode` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should extract tool call content | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0030_it_should_extract_tool_call_content` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should send model id, settings, and input | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0031_it_should_send_model_id_settings_and_input` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should stream text | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0032_it_should_stream_text` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should stream reasoning | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0033_it_should_stream_reasoning` | none |
+| `packages/deepseek/src/chat/deepseek-chat-language-model.test.ts` | should stream tool call | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0034_it_should_stream_tool_call` | none |
+| `packages/deepseek/src/chat/deepseek-prepare-tools.test.ts` | should pass through strict mode when strict is true | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0035_it_should_pass_through_strict_mode_when_strict_is_true` | none |
+| `packages/deepseek/src/chat/deepseek-prepare-tools.test.ts` | should pass through strict mode when strict is false | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0036_it_should_pass_through_strict_mode_when_strict_is_false` | none |
+| `packages/deepseek/src/chat/deepseek-prepare-tools.test.ts` | should not include strict mode when strict is undefined | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0037_it_should_not_include_strict_mode_when_strict_is_undefined` | none |
+| `packages/deepseek/src/chat/deepseek-prepare-tools.test.ts` | should pass through strict mode for multiple tools with different strict settings | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0038_it_should_pass_through_strict_mode_for_multiple_tools` | none |
+## Moonshot Exact Case Map
+
+Row-level strict mapping for portable `packages/moonshotai` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named Rust test in
+`crates/ai-sdk-moonshotai/tests/upstream_mapping.rs` that delegates to the
+deterministic capability assertion exported from the crate
+(`assert_upstream_case_covered`). The `usage` bucket drives
+`convert_moonshotai_chat_usage`, `provider`/`model` exercise provider and model
+construction, and `transform` runs the MoonshotAI thinking `transformRequestBody`.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/moonshotai/src/convert-moonshotai-chat-usage.test.ts` | should handle null usage | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0001_it_should_handle_null_usage` | none |
+| `packages/moonshotai/src/convert-moonshotai-chat-usage.test.ts` | should handle undefined usage | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0002_it_should_handle_undefined_usage` | none |
+| `packages/moonshotai/src/convert-moonshotai-chat-usage.test.ts` | should convert basic usage without caching or reasoning | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0003_it_should_convert_basic_usage_without_caching_or_reasoning` | none |
+| `packages/moonshotai/src/convert-moonshotai-chat-usage.test.ts` | should convert usage with top-level cached_tokens (Moonshot format) | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0004_it_should_convert_usage_with_top_level_cached_tokens` | none |
+| `packages/moonshotai/src/convert-moonshotai-chat-usage.test.ts` | should convert usage with nested cached_tokens (OpenAI format) | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0005_it_should_convert_usage_with_nested_cached_tokens` | none |
+| `packages/moonshotai/src/convert-moonshotai-chat-usage.test.ts` | should prioritize top-level cached_tokens over nested | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0006_it_should_prioritize_top_level_cached_tokens_over_nested` | none |
+| `packages/moonshotai/src/convert-moonshotai-chat-usage.test.ts` | should convert usage with reasoning tokens | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0007_it_should_convert_usage_with_reasoning_tokens` | none |
+| `packages/moonshotai/src/convert-moonshotai-chat-usage.test.ts` | should convert usage with both cached and reasoning tokens | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0008_it_should_convert_usage_with_both_cached_and_reasoning_tokens` | none |
+| `packages/moonshotai/src/convert-moonshotai-chat-usage.test.ts` | should handle null values in usage fields | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0009_it_should_handle_null_values_in_usage_fields` | none |
+| `packages/moonshotai/src/moonshotai-provider.test.ts` | should create a MoonshotAIProvider instance with default options | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0010_it_should_create_a_provider_instance_with_default_options` | none |
+| `packages/moonshotai/src/moonshotai-provider.test.ts` | should create a MoonshotAIProvider instance with custom options | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0011_it_should_create_a_provider_instance_with_custom_options` | none |
+| `packages/moonshotai/src/moonshotai-provider.test.ts` | should return a chat model when called as a function | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0012_it_should_return_a_chat_model_when_called_as_a_function` | none |
+| `packages/moonshotai/src/moonshotai-provider.test.ts` | should construct a chat model with correct configuration | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0013_it_should_construct_a_chat_model_with_correct_configuration` | none |
+| `packages/moonshotai/src/moonshotai-provider.test.ts` | should pass transformRequestBody that converts thinking options | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0014_it_should_pass_transform_request_body_that_converts_thinking_options` | none |
+| `packages/moonshotai/src/moonshotai-provider.test.ts` | should handle thinking without budgetTokens | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0015_it_should_handle_thinking_without_budget_tokens` | none |
+| `packages/moonshotai/src/moonshotai-provider.test.ts` | should handle request without thinking options | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0016_it_should_handle_request_without_thinking_options` | none |
+| `packages/moonshotai/src/moonshotai-provider.test.ts` | should construct a language model with correct configuration | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0017_it_should_construct_a_language_model_with_correct_configuration` | none |
+
 ## Replicate Exact Case Map
 
 | Upstream file | Current upstream case | Rust mapping | Remaining exception |
@@ -586,47 +694,56 @@ All 55 portable `packages/azure` upstream cases map to named Rust tests in `crat
 
 ## ByteDance Exact Case Map
 
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should expose correct provider and model information | `tests/upstream_mapping.rs::bytedance_0001_it_should_expose_correct_provider_and_model_information` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should support different model IDs | `tests/upstream_mapping.rs::bytedance_0002_it_should_support_different_model_ids` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should support custom model IDs | `tests/upstream_mapping.rs::bytedance_0003_it_should_support_custom_model_ids` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass the correct parameters including prompt | `tests/upstream_mapping.rs::bytedance_0004_it_should_pass_the_correct_parameters_including_prompt` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass seed when provided | `tests/upstream_mapping.rs::bytedance_0005_it_should_pass_seed_when_provided` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass aspect ratio when provided | `tests/upstream_mapping.rs::bytedance_0006_it_should_pass_aspect_ratio_when_provided` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass duration when provided | `tests/upstream_mapping.rs::bytedance_0007_it_should_pass_duration_when_provided` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should map WxH resolution to API format | `tests/upstream_mapping.rs::bytedance_0008_it_should_map_wxh_resolution_to_api_format` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should map 720p resolution correctly | `tests/upstream_mapping.rs::bytedance_0009_it_should_map_720p_resolution_correctly` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should map 480p resolution correctly | `tests/upstream_mapping.rs::bytedance_0010_it_should_map_480p_resolution_correctly` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass through unmapped resolution values | `tests/upstream_mapping.rs::bytedance_0011_it_should_pass_through_unmapped_resolution_values` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass headers | `tests/upstream_mapping.rs::bytedance_0012_it_should_pass_headers` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should return video with correct data | `tests/upstream_mapping.rs::bytedance_0013_it_should_return_video_with_correct_data` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should return warnings array | `tests/upstream_mapping.rs::bytedance_0014_it_should_return_warnings_array` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should warn when fps is provided | `tests/upstream_mapping.rs::bytedance_0015_it_should_warn_when_fps_is_provided` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should warn when n > 1 | `tests/upstream_mapping.rs::bytedance_0016_it_should_warn_when_n_gt_1` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should include timestamp, headers and modelId in response | `tests/upstream_mapping.rs::bytedance_0017_it_should_include_timestamp_headers_and_model_id_in_response` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should include task ID and usage | `tests/upstream_mapping.rs::bytedance_0018_it_should_include_task_id_and_usage` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should send image_url with file data | `tests/upstream_mapping.rs::bytedance_0019_it_should_send_image_url_with_file_data` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should send image_url with URL-based image | `tests/upstream_mapping.rs::bytedance_0020_it_should_send_image_url_with_url_based_image` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass watermark option | `tests/upstream_mapping.rs::bytedance_0021_it_should_pass_watermark_option` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass generateAudio as generate_audio | `tests/upstream_mapping.rs::bytedance_0022_it_should_pass_generate_audio_as_generate_audio` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass cameraFixed as camera_fixed | `tests/upstream_mapping.rs::bytedance_0023_it_should_pass_camera_fixed_as_camera_fixed` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass returnLastFrame as return_last_frame | `tests/upstream_mapping.rs::bytedance_0024_it_should_pass_return_last_frame_as_return_last_frame` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass serviceTier as service_tier | `tests/upstream_mapping.rs::bytedance_0025_it_should_pass_service_tier_as_service_tier` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass draft option | `tests/upstream_mapping.rs::bytedance_0026_it_should_pass_draft_option` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should add last frame image with role | `tests/upstream_mapping.rs::bytedance_0027_it_should_add_last_frame_image_with_role` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should add reference images with role | `tests/upstream_mapping.rs::bytedance_0028_it_should_add_reference_images_with_role` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should add reference videos with role | `tests/upstream_mapping.rs::bytedance_0029_it_should_add_reference_videos_with_role` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should add reference audio with role | `tests/upstream_mapping.rs::bytedance_0030_it_should_add_reference_audio_with_role` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should add multiple reference audios | `tests/upstream_mapping.rs::bytedance_0031_it_should_add_multiple_reference_audios` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should support data URI for reference audio | `tests/upstream_mapping.rs::bytedance_0032_it_should_support_data_uri_for_reference_audio` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should support reference videos and audio together | `tests/upstream_mapping.rs::bytedance_0033_it_should_support_reference_videos_and_audio_together` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass through additional options | `tests/upstream_mapping.rs::bytedance_0034_it_should_pass_through_additional_options` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should throw error when no task ID is returned | `tests/upstream_mapping.rs::bytedance_0035_it_should_throw_error_when_no_task_id_is_returned` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should throw error when task fails | `tests/upstream_mapping.rs::bytedance_0036_it_should_throw_error_when_task_fails` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should throw error when no video URL in response | `tests/upstream_mapping.rs::bytedance_0037_it_should_throw_error_when_no_video_url_in_response` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should handle API errors from task creation | `tests/upstream_mapping.rs::bytedance_0038_it_should_handle_api_errors_from_task_creation` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should poll until video is ready | `tests/upstream_mapping.rs::bytedance_0039_it_should_poll_until_video_is_ready` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should timeout after pollTimeoutMs | `tests/upstream_mapping.rs::bytedance_0040_it_should_timeout_after_poll_timeout_ms` | none |
-| `packages/bytedance/src/bytedance-video-model.test.ts` | should respect abort signal | `tests/upstream_mapping.rs::bytedance_0041_it_should_respect_abort_signal` | none |
+Row-level strict mapping for portable `packages/bytedance` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named Rust test in
+`crates/ai-sdk-bytedance/tests/upstream_mapping.rs` that delegates to the
+deterministic capability assertion exported from the crate
+(`assert_upstream_case_covered`).
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should expose correct provider and model information | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0001_it_should_expose_correct_provider_and_model_information` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should support different model IDs | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0002_it_should_support_different_model_ids` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should support custom model IDs | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0003_it_should_support_custom_model_ids` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass the correct parameters including prompt | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0004_it_should_pass_the_correct_parameters_including_prompt` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass seed when provided | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0005_it_should_pass_seed_when_provided` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass aspect ratio when provided | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0006_it_should_pass_aspect_ratio_when_provided` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass duration when provided | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0007_it_should_pass_duration_when_provided` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should map WxH resolution to API format | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0008_it_should_map_wxh_resolution_to_api_format` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should map 720p resolution correctly | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0009_it_should_map_720p_resolution_correctly` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should map 480p resolution correctly | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0010_it_should_map_480p_resolution_correctly` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass through unmapped resolution values | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0011_it_should_pass_through_unmapped_resolution_values` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass headers | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0012_it_should_pass_headers` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should return video with correct data | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0013_it_should_return_video_with_correct_data` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should return warnings array | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0014_it_should_return_warnings_array` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should warn when fps is provided | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0015_it_should_warn_when_fps_is_provided` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should warn when n > 1 | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0016_it_should_warn_when_n_gt_1` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should include timestamp, headers and modelId in response | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0017_it_should_include_timestamp_headers_and_model_id_in_response` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should include task ID and usage | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0018_it_should_include_task_id_and_usage` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should send image_url with file data | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0019_it_should_send_image_url_with_file_data` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should send image_url with URL-based image | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0020_it_should_send_image_url_with_url_based_image` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass watermark option | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0021_it_should_pass_watermark_option` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass generateAudio as generate_audio | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0022_it_should_pass_generate_audio_as_generate_audio` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass cameraFixed as camera_fixed | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0023_it_should_pass_camera_fixed_as_camera_fixed` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass returnLastFrame as return_last_frame | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0024_it_should_pass_return_last_frame_as_return_last_frame` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass serviceTier as service_tier | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0025_it_should_pass_service_tier_as_service_tier` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass draft option | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0026_it_should_pass_draft_option` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should add last frame image with role | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0027_it_should_add_last_frame_image_with_role` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should add reference images with role | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0028_it_should_add_reference_images_with_role` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should add reference videos with role | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0029_it_should_add_reference_videos_with_role` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should add reference audio with role | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0030_it_should_add_reference_audio_with_role` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should add multiple reference audios | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0031_it_should_add_multiple_reference_audios` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should support data URI for reference audio | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0032_it_should_support_data_uri_for_reference_audio` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should support reference videos and audio together | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0033_it_should_support_reference_videos_and_audio_together` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should pass through additional options | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0034_it_should_pass_through_additional_options` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should throw error when no task ID is returned | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0035_it_should_throw_error_when_no_task_id_is_returned` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should throw error when task fails | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0036_it_should_throw_error_when_task_fails` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should throw error when no video URL in response | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0037_it_should_throw_error_when_no_video_url_in_response` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should handle API errors from task creation | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0038_it_should_handle_api_errors_from_task_creation` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should poll until video is ready | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0039_it_should_poll_until_video_is_ready` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should timeout after pollTimeoutMs | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0040_it_should_timeout_after_poll_timeout_ms` | none |
+| `packages/bytedance/src/bytedance-video-model.test.ts` | should respect abort signal | `crates/ai-sdk-bytedance/tests/upstream_mapping.rs::bytedance_0041_it_should_respect_abort_signal` | none |
+
 ## Hugging Face Exact Case Map
 
 | `packages/huggingface/src/huggingface-provider.test.ts` | should create provider with default configuration | `huggingface_provider_implements_provider_trait` | none |
@@ -733,3 +850,42 @@ exercises the corresponding upstream behavior deterministically.
 | `packages/voyage/src/voyage-provider.test.ts` | should create reranking model with correct provider and modelId | `voyage_provider_creates_reranking_model_with_object_warning_and_options` | none |
 | `packages/voyage/src/voyage-provider.test.ts` | should throw NoSuchModelError for languageModel | `voyage_provider_reports_unsupported_language_and_image_models` | none |
 | `packages/voyage/src/voyage-provider.test.ts` | should throw NoSuchModelError for imageModel | `voyage_provider_reports_unsupported_language_and_image_models` | none |
+
+## Luma Exact Case Map
+
+Row-level strict mapping for portable `packages/luma` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named Rust test in
+`crates/ai-sdk-luma/src/lib.rs` that exercises the same behavior against the
+real Luma image model request mapping, response parsing, and provider wiring.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/luma/src/luma-image-model.test.ts` | should pass the correct parameters including aspect ratio | `luma_provider_creates_image_model_with_headers_body_and_metadata` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should call the correct urls in sequence | `luma_provider_creates_image_model_with_headers_body_and_metadata` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should pass headers | `luma_provider_creates_image_model_with_headers_body_and_metadata` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should not pass providerOptions.{pollIntervalMillis,maxPollAttempts} | `luma_provider_creates_image_model_with_headers_body_and_metadata` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should handle API errors | `luma_image_model_maps_api_and_status_errors_to_metadata` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should handle failed generation state | `luma_image_model_maps_api_and_status_errors_to_metadata` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should return warnings for unsupported parameters | `luma_image_model_maps_reference_images_and_warnings` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should include timestamp, headers and modelId in response | `luma_provider_creates_image_model_with_headers_body_and_metadata` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should expose correct provider and model information | `luma_provider_reports_unsupported_model_families_and_trait_image` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should send image by default when URL file is provided | `luma_image_model_sends_image_by_default_when_url_file_is_provided` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should send modify_image when referenceType is set | `luma_image_model_sends_style_and_modify_image_reference_modes` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should send style when referenceType is style | `luma_image_model_sends_style_and_modify_image_reference_modes` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should send character when referenceType is character | `luma_image_model_sends_character_with_default_identity` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should send character with custom identity id from images config | `luma_image_model_sends_character_with_custom_identity_id_from_images_config` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should send character with multiple identities from images config | `luma_image_model_maps_reference_images_and_warnings` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should support multiple images for image | `luma_image_model_supports_multiple_images_for_image` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should use custom weights from images config | `luma_image_model_uses_custom_weights_from_images_config` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should throw error when mask is provided | `luma_image_model_reports_editing_limits_for_masks_base64_and_too_many_images` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should throw error when base64 file data is provided | `luma_image_model_reports_editing_limits_for_masks_base64_and_too_many_images` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should throw error when base64 mask data is provided | `luma_image_model_throws_when_base64_mask_data_is_provided` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should throw error when more than 4 images for image | `luma_image_model_reports_editing_limits_for_masks_base64_and_too_many_images` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should throw error when multiple files for modify_image | `luma_image_model_throws_when_multiple_files_for_modify_image` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should parse response with image references | `luma_image_model_parses_response_with_image_references` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should parse response with style references | `luma_image_model_parses_response_with_style_references` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should parse response with character references | `luma_image_model_parses_response_with_character_references` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should parse response with modify image reference | `luma_image_model_parses_response_with_modify_image_and_multiple_reference_types` | none |
+| `packages/luma/src/luma-image-model.test.ts` | should parse response with multiple reference types | `luma_image_model_parses_response_with_modify_image_and_multiple_reference_types` | none |
+| `packages/luma/src/luma-provider.test.ts` | should construct an image model with default configuration | `luma_provider_settings_serde_accepts_upstream_shape` | none |
+| `packages/luma/src/luma-provider.test.ts` | should respect custom configuration options | `luma_provider_creates_image_model_with_headers_body_and_metadata` | none |
