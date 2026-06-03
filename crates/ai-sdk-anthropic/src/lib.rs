@@ -19,8 +19,8 @@ use ai_sdk_provider::{
     LanguageModelProviderTool, LanguageModelRawStreamPart, LanguageModelReasoning,
     LanguageModelReasoningDelta, LanguageModelReasoningEffort, LanguageModelReasoningEnd,
     LanguageModelReasoningStart, LanguageModelRequest, LanguageModelResponse,
-    LanguageModelResponseFormat, LanguageModelStreamFinish, LanguageModelStreamPart,
-    LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
+    LanguageModelResponseFormat, LanguageModelSource, LanguageModelStreamFinish,
+    LanguageModelStreamPart, LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
     LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
     LanguageModelText, LanguageModelTextDelta, LanguageModelTextEnd, LanguageModelTextPart,
     LanguageModelTextStart, LanguageModelTool, LanguageModelToolCall, LanguageModelToolCallPart,
@@ -864,6 +864,7 @@ impl AnthropicLanguageModel {
         options: LanguageModelCallOptions,
     ) -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
         let plan = self.request_plan(&options, true);
+        let citation_documents = extract_citation_documents(&options.prompt);
         let request_body = plan.body.clone();
         let mut request = prepare_post_json_to_api_request(
             plan.url.clone(),
@@ -884,6 +885,7 @@ impl AnthropicLanguageModel {
                     plan.warnings.clone(),
                     options.include_raw_chunks.unwrap_or(false),
                     plan.uses_json_response_tool,
+                    &citation_documents,
                 )
             }
             Ok(response) => vec![
@@ -2775,18 +2777,168 @@ pub fn parse_sse_json_chunks(body: &str) -> Vec<Value> {
         .collect()
 }
 
+/// A citation document extracted from the prompt, used to resolve streaming
+/// (and non-streaming) `page_location` / `char_location` citations back to the
+/// originating PDF/plain-text file.
+#[derive(Clone, Debug)]
+pub struct CitationDocument {
+    /// Document title (falls back to `"Untitled Document"` when no filename).
+    pub title: String,
+    /// Optional originating filename.
+    pub filename: Option<String>,
+    /// IANA media type of the document.
+    pub media_type: String,
+}
+
+/// Extracts citation-eligible documents from the prompt, mirroring the upstream
+/// `extractCitationDocuments`: only user `file` parts of media type
+/// `application/pdf` or `text/plain` with `anthropic.citations.enabled === true`.
+pub fn extract_citation_documents(prompt: &[LanguageModelMessage]) -> Vec<CitationDocument> {
+    let mut documents = Vec::new();
+    for message in prompt {
+        let LanguageModelMessage::User(user) = message else {
+            continue;
+        };
+        for part in &user.content {
+            let LanguageModelUserContentPart::File(file) = part else {
+                continue;
+            };
+            if file.media_type != "application/pdf" && file.media_type != "text/plain" {
+                continue;
+            }
+            let citations_enabled = provider_options_object(&file.provider_options, "anthropic")
+                .and_then(|options| options.get("citations"))
+                .and_then(Value::as_object)
+                .and_then(|citations| citations.get("enabled"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if !citations_enabled {
+                continue;
+            }
+            documents.push(CitationDocument {
+                title: file
+                    .filename
+                    .clone()
+                    .unwrap_or_else(|| "Untitled Document".to_string()),
+                filename: file.filename.clone(),
+                media_type: file.media_type.clone(),
+            });
+        }
+    }
+    documents
+}
+
+/// Builds a source part from an Anthropic streaming/non-streaming citation,
+/// mirroring the upstream `createCitationSource`. Returns `None` for citation
+/// kinds that do not produce a source or when the referenced document is absent.
+pub fn create_citation_source(
+    citation: &Value,
+    documents: &[CitationDocument],
+    id: &str,
+) -> Option<LanguageModelSource> {
+    let citation_type = citation.get("type").and_then(Value::as_str).unwrap_or("");
+    if citation_type == "web_search_result_location" {
+        let mut metadata = ProviderMetadata::new();
+        metadata.insert(
+            "anthropic".to_string(),
+            object(json!({
+                "citedText": citation.get("cited_text").cloned().unwrap_or(Value::Null),
+                "encryptedIndex": citation.get("encrypted_index").cloned().unwrap_or(Value::Null),
+            })),
+        );
+        let url = citation.get("url").and_then(Value::as_str).unwrap_or("");
+        let mut source = ai_sdk_provider::LanguageModelUrlSource::new(id, url);
+        if let Some(title) = citation.get("title").and_then(Value::as_str) {
+            source = source.with_title(title);
+        }
+        return Some(LanguageModelSource::Url(
+            source.with_provider_metadata(metadata),
+        ));
+    }
+
+    if citation_type != "page_location" && citation_type != "char_location" {
+        return None;
+    }
+
+    let document_index = citation
+        .get("document_index")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let document_info = documents.get(document_index)?;
+
+    let title = citation
+        .get("document_title")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| document_info.title.clone());
+
+    let anthropic_metadata = if citation_type == "page_location" {
+        json!({
+            "citedText": citation.get("cited_text").cloned().unwrap_or(Value::Null),
+            "startPageNumber": citation.get("start_page_number").cloned().unwrap_or(Value::Null),
+            "endPageNumber": citation.get("end_page_number").cloned().unwrap_or(Value::Null),
+        })
+    } else {
+        json!({
+            "citedText": citation.get("cited_text").cloned().unwrap_or(Value::Null),
+            "startCharIndex": citation.get("start_char_index").cloned().unwrap_or(Value::Null),
+            "endCharIndex": citation.get("end_char_index").cloned().unwrap_or(Value::Null),
+        })
+    };
+    let mut metadata = ProviderMetadata::new();
+    metadata.insert("anthropic".to_string(), object(anthropic_metadata));
+
+    let mut document =
+        ai_sdk_provider::LanguageModelDocumentSource::new(id, &document_info.media_type, title);
+    if let Some(filename) = &document_info.filename {
+        document = document.with_filename(filename.clone());
+    }
+    Some(LanguageModelSource::Document(
+        document.with_provider_metadata(metadata),
+    ))
+}
+
+/// Maps the provider tool name reported by Anthropic streaming `server_tool_use`
+/// blocks to the unified code-execution tool name, mirroring upstream.
+fn map_server_tool_name(name: &str) -> &str {
+    match name {
+        "text_editor_code_execution" | "bash_code_execution" => "code_execution",
+        other => other,
+    }
+}
+
+/// State accumulated for a streaming content block while deltas arrive.
+#[derive(Clone, Debug)]
+enum StreamBlock {
+    Text,
+    Reasoning,
+    ToolCall {
+        tool_call_id: String,
+        tool_name: String,
+        provider_tool_name: Option<String>,
+        provider_executed: bool,
+        input: String,
+        first_delta: bool,
+    },
+}
+
 /// Maps Anthropic stream chunks to provider-v4 stream parts.
 pub fn map_anthropic_stream_chunks(
     chunks: &[Value],
     warnings: Vec<Warning>,
     include_raw_chunks: bool,
     uses_json_response_tool: bool,
+    citation_documents: &[CitationDocument],
 ) -> Vec<LanguageModelStreamPart> {
     let mut parts = vec![LanguageModelStreamPart::StreamStart(
         LanguageModelStreamStart::new(warnings),
     )];
-    let mut block_types = BTreeMap::<u64, String>::new();
+    let mut blocks = BTreeMap::<u64, StreamBlock>::new();
     let mut usage = JsonObject::new();
+    let mut raw_usage = Value::Null;
+    let mut container = Value::Null;
+    let mut stop_sequence = Value::Null;
+    let mut citation_id_counter: usize = 0;
     let mut finish_reason = LanguageModelFinishReason {
         unified: FinishReason::Other,
         raw: None,
@@ -2808,6 +2960,12 @@ pub fn map_anthropic_stream_chunks(
                     }
                     if let Some(value) = message.get("usage").and_then(Value::as_object) {
                         usage.extend(value.clone());
+                        raw_usage = Value::Object(value.clone());
+                    }
+                    if let Some(value) = message.get("container") {
+                        if !value.is_null() {
+                            container = value.clone();
+                        }
                     }
                 }
             }
@@ -2817,30 +2975,110 @@ pub fn map_anthropic_stream_chunks(
                 let block_type = block
                     .get("type")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                block_types.insert(index, block_type.clone());
-                match block_type.as_str() {
+                    .unwrap_or_default();
+                match block_type {
                     "text" if !uses_json_response_tool => {
+                        blocks.insert(index, StreamBlock::Text);
                         parts.push(LanguageModelStreamPart::TextStart(
                             LanguageModelTextStart::new(index.to_string()),
                         ));
                     }
                     "thinking" | "redacted_thinking" => {
+                        blocks.insert(index, StreamBlock::Reasoning);
                         parts.push(LanguageModelStreamPart::ReasoningStart(
                             LanguageModelReasoningStart::new(index.to_string()),
                         ));
                     }
-                    "tool_use" | "server_tool_use" | "mcp_tool_use" => {
+                    "tool_use" => {
+                        let id = block.get("id").and_then(Value::as_str).unwrap_or_default();
+                        let name = block
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        let has_input = block
+                            .get("input")
+                            .and_then(Value::as_object)
+                            .map(|input| !input.is_empty())
+                            .unwrap_or(false);
+                        let input = if has_input {
+                            block
+                                .get("input")
+                                .map(ToString::to_string)
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        blocks.insert(
+                            index,
+                            StreamBlock::ToolCall {
+                                tool_call_id: id.to_string(),
+                                tool_name: name.to_string(),
+                                provider_tool_name: None,
+                                provider_executed: false,
+                                first_delta: input.is_empty(),
+                                input,
+                            },
+                        );
                         parts.push(LanguageModelStreamPart::ToolInputStart(
-                            LanguageModelToolInputStart::new(
-                                block.get("id").and_then(Value::as_str).unwrap_or_default(),
-                                block
-                                    .get("name")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default(),
-                            )
-                            .with_provider_executed(block_type != "tool_use"),
+                            LanguageModelToolInputStart::new(id, name),
+                        ));
+                    }
+                    "server_tool_use" => {
+                        let id = block.get("id").and_then(Value::as_str).unwrap_or_default();
+                        let raw_name = block
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        let provider_tool_name = map_server_tool_name(raw_name).to_string();
+                        let has_input = block
+                            .get("input")
+                            .and_then(Value::as_object)
+                            .map(|input| !input.is_empty())
+                            .unwrap_or(false);
+                        let input = if has_input {
+                            block
+                                .get("input")
+                                .map(ToString::to_string)
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        blocks.insert(
+                            index,
+                            StreamBlock::ToolCall {
+                                tool_call_id: id.to_string(),
+                                tool_name: provider_tool_name.clone(),
+                                provider_tool_name: Some(provider_tool_name.clone()),
+                                provider_executed: true,
+                                first_delta: input.is_empty(),
+                                input,
+                            },
+                        );
+                        parts.push(LanguageModelStreamPart::ToolInputStart(
+                            LanguageModelToolInputStart::new(id, provider_tool_name)
+                                .with_provider_executed(true),
+                        ));
+                    }
+                    name if name.ends_with("_tool_result") => {
+                        // Provider-executed tool result arrives fully formed in a single
+                        // content_block_start (no deltas).
+                        let tool_use_id = block
+                            .get("tool_use_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        let result_value = block
+                            .get("content")
+                            .cloned()
+                            .unwrap_or_else(|| json!({ "type": name }));
+                        parts.push(LanguageModelStreamPart::ToolResult(
+                            LanguageModelToolResult::new(
+                                tool_use_id,
+                                tool_name_for_result(name),
+                                NonNullJsonValue::try_from(result_value).unwrap_or_else(|_| {
+                                    NonNullJsonValue::try_from(json!({}))
+                                        .expect("object is non-null")
+                                }),
+                            ),
                         ));
                     }
                     _ => {}
@@ -2849,32 +3087,69 @@ pub fn map_anthropic_stream_chunks(
             Some("content_block_delta") => {
                 let index = chunk.get("index").and_then(Value::as_u64).unwrap_or(0);
                 let delta = chunk.get("delta").unwrap_or(&Value::Null);
-                match block_types.get(&index).map(String::as_str) {
-                    Some("text") if !uses_json_response_tool => {
+                let delta_type = delta.get("type").and_then(Value::as_str).unwrap_or("");
+                match delta_type {
+                    "text_delta" if !uses_json_response_tool => {
                         if let Some(text) = delta.get("text").and_then(Value::as_str) {
                             parts.push(LanguageModelStreamPart::TextDelta(
                                 LanguageModelTextDelta::new(index.to_string(), text),
                             ));
                         }
                     }
-                    Some("thinking") | Some("redacted_thinking") => {
-                        if let Some(text) = delta
-                            .get("thinking")
-                            .or_else(|| delta.get("text"))
-                            .and_then(Value::as_str)
-                        {
+                    "thinking_delta" => {
+                        if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
                             parts.push(LanguageModelStreamPart::ReasoningDelta(
                                 LanguageModelReasoningDelta::new(index.to_string(), text),
                             ));
                         }
                     }
-                    Some("tool_use") | Some("server_tool_use") | Some("mcp_tool_use") => {
-                        if let Some(partial_json) =
-                            delta.get("partial_json").and_then(Value::as_str)
+                    "input_json_delta" => {
+                        let partial_json = delta
+                            .get("partial_json")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        if partial_json.is_empty() {
+                            continue;
+                        }
+                        if let Some(StreamBlock::ToolCall {
+                            tool_call_id,
+                            provider_tool_name,
+                            input,
+                            first_delta,
+                            ..
+                        }) = blocks.get_mut(&index)
                         {
+                            // For the code execution 20250825 tool, the first delta is
+                            // rewritten to inject the programmatic-tool-call discriminant.
+                            let emitted: String = if *first_delta
+                                && provider_tool_name.as_deref() == Some("code_execution")
+                            {
+                                format!(
+                                    "{{\"type\": \"programmatic-tool-call\",{}",
+                                    &partial_json[1..]
+                                )
+                            } else {
+                                partial_json.to_string()
+                            };
                             parts.push(LanguageModelStreamPart::ToolInputDelta(
-                                LanguageModelToolInputDelta::new(index.to_string(), partial_json),
+                                LanguageModelToolInputDelta::new(
+                                    tool_call_id.clone(),
+                                    emitted.clone(),
+                                ),
                             ));
+                            input.push_str(&emitted);
+                            *first_delta = false;
+                        }
+                    }
+                    "citations_delta" => {
+                        if let Some(citation) = delta.get("citation") {
+                            let id = format!("id-{citation_id_counter}");
+                            if let Some(source) =
+                                create_citation_source(citation, citation_documents, &id)
+                            {
+                                citation_id_counter += 1;
+                                parts.push(LanguageModelStreamPart::Source(source));
+                            }
                         }
                     }
                     _ => {}
@@ -2882,28 +3157,76 @@ pub fn map_anthropic_stream_chunks(
             }
             Some("content_block_stop") => {
                 let index = chunk.get("index").and_then(Value::as_u64).unwrap_or(0);
-                match block_types.get(&index).map(String::as_str) {
-                    Some("text") if !uses_json_response_tool => {
+                match blocks.remove(&index) {
+                    Some(StreamBlock::Text) => {
                         parts.push(LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new(
                             index.to_string(),
                         )));
                     }
-                    Some("thinking") | Some("redacted_thinking") => {
+                    Some(StreamBlock::Reasoning) => {
                         parts.push(LanguageModelStreamPart::ReasoningEnd(
                             LanguageModelReasoningEnd::new(index.to_string()),
                         ));
                     }
-                    Some("tool_use") | Some("server_tool_use") | Some("mcp_tool_use") => {
+                    Some(StreamBlock::ToolCall {
+                        tool_call_id,
+                        tool_name,
+                        provider_tool_name,
+                        provider_executed,
+                        input,
+                        ..
+                    }) => {
                         parts.push(LanguageModelStreamPart::ToolInputEnd(
-                            LanguageModelToolInputEnd::new(index.to_string()),
+                            LanguageModelToolInputEnd::new(tool_call_id.clone()),
                         ));
+                        let mut final_input = if input.is_empty() {
+                            "{}".to_string()
+                        } else {
+                            input
+                        };
+                        // For code_execution, inject 'programmatic-tool-call' type when
+                        // the input has a bare { code } shape (programmatic tool calling).
+                        if provider_tool_name.as_deref() == Some("code_execution") {
+                            if let Ok(parsed) = serde_json::from_str::<Value>(&final_input) {
+                                if let Some(object) = parsed.as_object() {
+                                    if object.contains_key("code") && !object.contains_key("type") {
+                                        let mut injected = serde_json::Map::new();
+                                        injected.insert(
+                                            "type".to_string(),
+                                            json!("programmatic-tool-call"),
+                                        );
+                                        injected.extend(object.clone());
+                                        final_input = Value::Object(injected).to_string();
+                                    }
+                                }
+                            }
+                        }
+                        let mut tool_call =
+                            LanguageModelToolCall::new(tool_call_id, tool_name, final_input);
+                        if provider_executed {
+                            tool_call = tool_call.with_provider_executed(true);
+                        }
+                        parts.push(LanguageModelStreamPart::ToolCall(tool_call));
                     }
-                    _ => {}
+                    None => {}
                 }
             }
             Some("message_delta") => {
                 if let Some(value) = chunk.get("usage").and_then(Value::as_object) {
                     usage.extend(value.clone());
+                    if let Value::Object(raw) = &mut raw_usage {
+                        raw.extend(value.clone());
+                    } else {
+                        raw_usage = Value::Object(value.clone());
+                    }
+                }
+                if let Some(value) = chunk
+                    .get("delta")
+                    .and_then(|delta| delta.get("stop_sequence"))
+                {
+                    if !value.is_null() {
+                        stop_sequence = value.clone();
+                    }
                 }
                 finish_reason = LanguageModelFinishReason {
                     unified: map_anthropic_stop_reason(
@@ -2928,8 +3251,21 @@ pub fn map_anthropic_stream_chunks(
             _ => {}
         }
     }
+
+    let mut anthropic_metadata = ProviderMetadata::new();
+    anthropic_metadata.insert(
+        "anthropic".to_string(),
+        object(json!({
+            "usage": if raw_usage.is_null() { Value::Null } else { raw_usage },
+            "stopSequence": stop_sequence,
+            "iterations": Value::Null,
+            "container": container,
+            "contextManagement": Value::Null,
+        })),
+    );
     parts.push(LanguageModelStreamPart::Finish(
-        LanguageModelStreamFinish::new(convert_anthropic_usage(&usage, None), finish_reason),
+        LanguageModelStreamFinish::new(convert_anthropic_usage(&usage, None), finish_reason)
+            .with_provider_metadata(anthropic_metadata),
     ));
     parts
 }
@@ -3395,6 +3731,239 @@ pub fn assert_upstream_case_covered(case_id: &str, capability: &str) {
                     "{case_id}",
                 );
             }
+        }
+        "streaming-pdf-citation" => {
+            // packages-anthropic-0210: a streaming `citations_delta` for a
+            // `page_location` citation emits a document Source part that resolves
+            // the originating PDF's media type/filename from the prompt and carries
+            // the cited text + page range in anthropic provider metadata.
+            let citations_options: ProviderOptions = serde_json::from_value(json!({
+                "anthropic": { "citations": { "enabled": true } }
+            }))
+            .expect("provider options");
+            let prompt = vec![LanguageModelMessage::User(
+                ai_sdk_provider::LanguageModelUserMessage::new(vec![
+                    LanguageModelUserContentPart::File(
+                        LanguageModelFilePart::new(
+                            FileData::Text {
+                                text: "base64PDFdata".to_string(),
+                            },
+                            "application/pdf",
+                        )
+                        .with_filename("financial-report.pdf")
+                        .with_provider_options(citations_options),
+                    ),
+                    LanguageModelUserContentPart::Text(LanguageModelTextPart::new(
+                        "What do the results show?",
+                    )),
+                ]),
+            )];
+            let documents = extract_citation_documents(&prompt);
+            let chunks = vec![
+                json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } }),
+                json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "Based on the document" } }),
+                json!({ "type": "content_block_stop", "index": 0 }),
+                json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "citations_delta",
+                        "citation": {
+                            "type": "page_location",
+                            "cited_text": "Revenue increased by 25% year over year",
+                            "document_index": 0,
+                            "document_title": "Financial Report 2023",
+                            "start_page_number": 5,
+                            "end_page_number": 6
+                        }
+                    }
+                }),
+                json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn", "stop_sequence": null }, "usage": { "output_tokens": 227 } }),
+                json!({ "type": "message_stop" }),
+            ];
+            let parts =
+                map_anthropic_stream_chunks(&chunks, Vec::new(), false, false, &documents);
+            let source = parts
+                .iter()
+                .find_map(|part| match part {
+                    LanguageModelStreamPart::Source(LanguageModelSource::Document(document)) => {
+                        Some(document)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("expected a document source for {case_id}"));
+            assert_eq!(source.media_type, "application/pdf", "{case_id}");
+            assert_eq!(source.title, "Financial Report 2023", "{case_id}");
+            assert_eq!(source.filename.as_deref(), Some("financial-report.pdf"), "{case_id}");
+            let metadata = source
+                .provider_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("anthropic"))
+                .unwrap_or_else(|| panic!("expected anthropic source metadata for {case_id}"));
+            assert_eq!(
+                metadata.get("citedText").and_then(Value::as_str),
+                Some("Revenue increased by 25% year over year"),
+                "{case_id}",
+            );
+            assert_eq!(metadata.get("startPageNumber").and_then(Value::as_u64), Some(5), "{case_id}");
+            assert_eq!(metadata.get("endPageNumber").and_then(Value::as_u64), Some(6), "{case_id}");
+        }
+        "streaming-container-upload-code-exec" => {
+            // packages-anthropic-0211: streaming a container-upload code-execution
+            // turn emits provider-executed `code_execution` tool-calls (with the
+            // accumulated input), the corresponding code-execution tool-results, and
+            // a finish part whose anthropic metadata carries the container id.
+            let chunks = vec![
+                json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_stream",
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                        "model": "claude-3-haiku-20240307",
+                        "stop_reason": null,
+                        "container": { "id": "container_011CbJQ7DqpL337rdwQ76jnu", "expires_at": "2025-01-01T00:00:00Z" },
+                        "usage": { "input_tokens": 10, "output_tokens": 1 }
+                    }
+                }),
+                json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": { "type": "server_tool_use", "id": "srvtoolu_01UAM7DM8XEfNwyddFNKpVp2", "name": "text_editor_code_execution", "input": {} }
+                }),
+                json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": "{\"command\": \"view\", \"path\": \"$INPUT_DIR/sample.csv\"}" } }),
+                json!({ "type": "content_block_stop", "index": 0 }),
+                json!({
+                    "type": "content_block_start",
+                    "index": 1,
+                    "content_block": {
+                        "type": "text_editor_code_execution_tool_result",
+                        "tool_use_id": "srvtoolu_01UAM7DM8XEfNwyddFNKpVp2",
+                        "content": { "type": "text_editor_code_execution_view_result", "content": "month,revenue,expenses,profit\n" }
+                    }
+                }),
+                json!({
+                    "type": "content_block_start",
+                    "index": 2,
+                    "content_block": { "type": "server_tool_use", "id": "srvtoolu_01P2RuXQdkVngtqpdr2dQhv2", "name": "bash_code_execution", "input": {} }
+                }),
+                json!({ "type": "content_block_delta", "index": 2, "delta": { "type": "input_json_delta", "partial_json": "{\"command\": \"python /tmp/analyze_data.py\"}" } }),
+                json!({ "type": "content_block_stop", "index": 2 }),
+                json!({
+                    "type": "content_block_start",
+                    "index": 3,
+                    "content_block": {
+                        "type": "bash_code_execution_tool_result",
+                        "tool_use_id": "srvtoolu_01P2RuXQdkVngtqpdr2dQhv2",
+                        "content": { "type": "bash_code_execution_result", "stdout": "Total Profit: $35,400.00\n", "stderr": "", "return_code": 0 }
+                    }
+                }),
+                json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn", "stop_sequence": null }, "usage": { "output_tokens": 50 } }),
+                json!({ "type": "message_stop" }),
+            ];
+            let parts = map_anthropic_stream_chunks(&chunks, Vec::new(), false, false, &[]);
+
+            // First server tool-call surfaces as a provider-executed code_execution call.
+            let view_call = parts
+                .iter()
+                .find_map(|part| match part {
+                    LanguageModelStreamPart::ToolCall(call)
+                        if call.tool_call_id == "srvtoolu_01UAM7DM8XEfNwyddFNKpVp2" =>
+                    {
+                        Some(call)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("expected text-editor tool call for {case_id}"));
+            assert_eq!(view_call.tool_name, "code_execution", "{case_id}");
+            assert_eq!(view_call.provider_executed, Some(true), "{case_id}");
+            assert!(view_call.input.contains("$INPUT_DIR/sample.csv"), "{case_id}");
+
+            // The matching code-execution tool-result echoes the view payload.
+            let view_result = parts
+                .iter()
+                .find_map(|part| match part {
+                    LanguageModelStreamPart::ToolResult(result)
+                        if result.tool_call_id == "srvtoolu_01UAM7DM8XEfNwyddFNKpVp2" =>
+                    {
+                        Some(result)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("expected text-editor tool result for {case_id}"));
+            assert_eq!(view_result.tool_name, "code_execution", "{case_id}");
+            let view_value: Value = view_result.result.clone().into();
+            assert_eq!(
+                view_value.get("type").and_then(Value::as_str),
+                Some("text_editor_code_execution_view_result"),
+                "{case_id}",
+            );
+            assert!(
+                view_value
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .contains("month,revenue,expenses,profit"),
+                "{case_id}",
+            );
+
+            // The bash tool-call/result pair surfaces with stdout intact.
+            let bash_call = parts
+                .iter()
+                .find_map(|part| match part {
+                    LanguageModelStreamPart::ToolCall(call)
+                        if call.tool_call_id == "srvtoolu_01P2RuXQdkVngtqpdr2dQhv2" =>
+                    {
+                        Some(call)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("expected bash tool call for {case_id}"));
+            assert!(bash_call.input.contains("python /tmp/analyze_data.py"), "{case_id}");
+            let bash_result = parts
+                .iter()
+                .find_map(|part| match part {
+                    LanguageModelStreamPart::ToolResult(result)
+                        if result.tool_call_id == "srvtoolu_01P2RuXQdkVngtqpdr2dQhv2" =>
+                    {
+                        Some(result)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("expected bash tool result for {case_id}"));
+            let bash_value: Value = bash_result.result.clone().into();
+            assert_eq!(
+                bash_value.get("type").and_then(Value::as_str),
+                Some("bash_code_execution_result"),
+                "{case_id}",
+            );
+            assert!(
+                bash_value
+                    .get("stdout")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .contains("Total Profit: $35,400.00"),
+                "{case_id}",
+            );
+
+            // The finish part carries the container id in anthropic provider metadata.
+            let finish_metadata = parts
+                .iter()
+                .find_map(|part| match part {
+                    LanguageModelStreamPart::Finish(finish) => finish.provider_metadata.as_ref(),
+                    _ => None,
+                })
+                .and_then(|metadata| metadata.get("anthropic"))
+                .unwrap_or_else(|| panic!("expected finish metadata for {case_id}"));
+            assert_eq!(
+                finish_metadata
+                    .get("container")
+                    .and_then(|container| container.get("id"))
+                    .and_then(Value::as_str),
+                Some("container_011CbJQ7DqpL337rdwQ76jnu"),
+                "{case_id}",
+            );
         }
         other => panic!("unknown Anthropic upstream capability {other} for {case_id}"),
     }
