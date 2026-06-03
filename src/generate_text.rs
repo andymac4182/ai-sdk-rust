@@ -1342,12 +1342,22 @@ impl fmt::Debug for GenerateTextOnFinish<'_> {
     }
 }
 
+/// Boxed predicate backing [`StopCondition::Custom`].
+///
+/// Mirrors the upstream `StopCondition` function signature
+/// `({ steps }) => boolean`, receiving the accumulated steps and returning
+/// whether the loop should stop after the current step.
+pub type CustomStopCondition = Arc<dyn Fn(&[GenerateTextStep]) -> bool + Send + Sync>;
+
 /// Predicate-style stop condition for high-level generate-text tool loops.
 ///
 /// The upstream SDK models stop conditions as async predicates. This Rust
-/// contract ports the public built-in predicates as data so callers can use
-/// them without committing the crate to an async trait or boxed closure API.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// contract ports the public built-in predicates as data, plus a [`Custom`]
+/// variant for the function-style predicates upstream callers pass to
+/// `stopWhen`.
+///
+/// [`Custom`]: StopCondition::Custom
+#[derive(Clone)]
 pub enum StopCondition {
     /// Stop when the number of completed steps exactly matches this count.
     StepCount(usize),
@@ -1357,6 +1367,40 @@ pub enum StopCondition {
 
     /// Stop when the most recent step includes any of these tool names.
     HasToolCall(Vec<String>),
+
+    /// Stop when a caller-supplied predicate returns `true` for the accumulated
+    /// steps. Mirrors the upstream function-style `StopCondition`.
+    Custom(CustomStopCondition),
+}
+
+impl fmt::Debug for StopCondition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StepCount(step_count) => formatter
+                .debug_tuple("StepCount")
+                .field(step_count)
+                .finish(),
+            Self::LoopFinished => formatter.write_str("LoopFinished"),
+            Self::HasToolCall(tool_names) => formatter
+                .debug_tuple("HasToolCall")
+                .field(tool_names)
+                .finish(),
+            Self::Custom(_) => formatter.debug_tuple("Custom").finish(),
+        }
+    }
+}
+
+impl PartialEq for StopCondition {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::StepCount(left), Self::StepCount(right)) => left == right,
+            (Self::LoopFinished, Self::LoopFinished) => true,
+            (Self::HasToolCall(left), Self::HasToolCall(right)) => left == right,
+            // Custom predicates are opaque closures and are never considered
+            // equal, even to themselves.
+            _ => false,
+        }
+    }
 }
 
 impl StopCondition {
@@ -1375,6 +1419,7 @@ impl StopCondition {
                     .iter()
                     .any(|tool_call| tool_names.iter().any(|name| name == &tool_call.tool_name))
             }
+            Self::Custom(predicate) => predicate(steps),
         }
     }
 }
@@ -1399,14 +1444,34 @@ pub fn has_tool_call(tool_names: impl IntoIterator<Item = impl Into<String>>) ->
     StopCondition::HasToolCall(tool_names.into_iter().map(Into::into).collect())
 }
 
+/// Creates a stop condition from a caller-supplied predicate.
+///
+/// Mirrors the upstream function-style `StopCondition`: the predicate receives
+/// the accumulated steps and returns whether the loop should stop.
+pub fn custom_stop_condition(
+    predicate: impl Fn(&[GenerateTextStep]) -> bool + Send + Sync + 'static,
+) -> StopCondition {
+    StopCondition::Custom(Arc::new(predicate))
+}
+
 /// Returns whether any stop condition is met for the completed steps.
+///
+/// Mirrors upstream `isStopConditionMet`, which awaits `Promise.all(...)` of
+/// every condition before applying `.some(...)`: each stop condition is
+/// evaluated for the accumulated steps (no short-circuiting), and the result is
+/// `true` when any condition returns `true`.
 pub fn is_stop_condition_met(
     stop_conditions: &[StopCondition],
     steps: &[GenerateTextStep],
 ) -> bool {
+    // Collect first so every condition is evaluated (matching `Promise.all`),
+    // then reduce with `.any()` (matching `.some(...)`).
     stop_conditions
         .iter()
-        .any(|condition| condition.is_met(steps))
+        .map(|condition| condition.is_met(steps))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .any(|met| met)
 }
 
 /// Filters high-level tools to the active tool subset.
@@ -8256,12 +8321,13 @@ mod tests {
         ToolInputRefinementError, ToolModelOutputErrorMode, TypedToolCall, TypedToolError,
         TypedToolOutputDenied, TypedToolResult, UiMessageStreamError, UnsupportedModelVersionError,
         calculate_tokens_per_second, collect_tool_approvals, create_tool_model_output,
-        execute_tool_calls, experimental_filter_active_tools, filter_active_tools, generate_text,
-        has_tool_call, is_loop_finished, is_step_count, is_stop_condition_met,
-        mark_invalid_tool_inputs, mark_runtime_dynamic_tool_calls, mark_tool_call_metadata,
-        mark_tool_call_titles, mark_unavailable_tool_calls, normalize_tool_approval_status,
-        prune_messages, refine_tool_inputs, repair_tool_calls, resolve_tool_approval,
-        response_messages_for_step, step_count_is, sum_token_counts, validate_tool_context,
+        custom_stop_condition, execute_tool_calls, experimental_filter_active_tools,
+        filter_active_tools, generate_text, has_tool_call, is_loop_finished, is_step_count,
+        is_stop_condition_met, mark_invalid_tool_inputs, mark_runtime_dynamic_tool_calls,
+        mark_tool_call_metadata, mark_tool_call_titles, mark_unavailable_tool_calls,
+        normalize_tool_approval_status, prune_messages, refine_tool_inputs, repair_tool_calls,
+        resolve_tool_approval, response_messages_for_step, step_count_is, sum_token_counts,
+        validate_tool_context,
     };
     use crate::PromptDownload;
     use crate::file_data::{FileData, FileDataContent};
@@ -8483,6 +8549,59 @@ mod tests {
             &[is_loop_finished(), has_tool_call(["finalAnswer"])],
             &[empty, weather],
         ));
+    }
+
+    #[test]
+    fn is_stop_condition_met_evaluates_every_custom_condition_for_the_same_steps() {
+        // Upstream `isStopConditionMet` awaits `Promise.all(...)` of every
+        // condition before applying `.some(...)`, so a `false`-returning
+        // condition placed before a `true`-returning one is still evaluated.
+        // The Rust port mirrors this by collecting all results before reducing,
+        // which this test pins down via two custom predicates that record the
+        // steps they observed.
+        let weather = stop_condition_step(&["weather"]);
+        let steps = [weather];
+
+        let observed = Arc::new(Mutex::new(Vec::<(u8, usize)>::new()));
+        let observed_first = Arc::clone(&observed);
+        let observed_second = Arc::clone(&observed);
+
+        let conditions = [
+            custom_stop_condition(move |steps| {
+                observed_first
+                    .lock()
+                    .expect("first condition log")
+                    .push((0, steps.len()));
+                false
+            }),
+            custom_stop_condition(move |steps| {
+                observed_second
+                    .lock()
+                    .expect("second condition log")
+                    .push((1, steps.len()));
+                true
+            }),
+        ];
+
+        assert!(is_stop_condition_met(&conditions, &steps));
+
+        // Both predicates were evaluated exactly once with the same accumulated
+        // steps, despite the first returning `false` (no short-circuiting).
+        let recorded = observed.lock().expect("condition log");
+        assert_eq!(recorded.as_slice(), &[(0, 1), (1, 1)]);
+    }
+
+    #[test]
+    fn custom_stop_condition_evaluates_its_predicate_against_accumulated_steps() {
+        let empty = stop_condition_step(&[]);
+        let weather = stop_condition_step(&["weather"]);
+
+        // Mirrors upstream function-style stop conditions: the predicate sees the
+        // accumulated steps and decides whether the loop should stop.
+        let stop_after_two = custom_stop_condition(|steps| steps.len() == 2);
+
+        assert!(!stop_after_two.is_met(&[empty.clone()]));
+        assert!(stop_after_two.is_met(&[empty, weather]));
     }
 
     #[test]

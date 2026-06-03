@@ -4519,6 +4519,85 @@ mod tests {
     }
 
     #[test]
+    fn amazon_bedrock_chat_generate_reports_null_stop_sequence_when_not_stopped() {
+        // Upstream examples/ai-functions amazon-bedrock-anthropic.test.ts:103 asserts
+        // providerMetadata.<anthropic>.stopSequence is null when the model is not stopped
+        // by a stop sequence. The Bedrock response here carries no
+        // additionalModelResponseFields/delta/stop_sequence, so the metadata key must be
+        // present and explicitly null.
+        let response = ProviderApiResponse::text(
+            200,
+            "OK",
+            json!({
+                "output": {
+                    "message": {
+                        "role": "assistant",
+                        "content": [{ "text": "Hello" }]
+                    }
+                },
+                "stopReason": "end_turn",
+                "usage": { "inputTokens": 7, "outputTokens": 5 }
+            })
+            .to_string(),
+        );
+        let (model, _requests) = model_with_responses(vec![response]);
+
+        let generated =
+            block_on(model.do_generate(LanguageModelCallOptions::new(user_prompt("Say hello."))));
+
+        let metadata = generated.provider_metadata.expect("provider metadata");
+        assert_eq!(metadata["amazonBedrock"]["stopSequence"], JsonValue::Null);
+    }
+
+    #[test]
+    fn amazon_bedrock_prepare_tools_maps_anthropic_computer_use_provider_tool() {
+        // Upstream examples/ai-functions amazon-bedrock-anthropic.test.ts:120 exercises the
+        // computer_20241022 provider-defined tool. On Bedrock it must be upgraded to
+        // computer_20250124 and request the computer-use-2025-01-24 beta.
+        let mut warnings = Vec::new();
+        let computer_tool = LanguageModelTool::Provider(LanguageModelProviderTool::new(
+            "anthropic.computer_20241022",
+            "computer",
+            serde_json::from_value(json!({
+                "type": "computer_20241022",
+                "displayWidthPx": 1024,
+                "displayHeightPx": 768
+            }))
+            .expect("args object"),
+        ));
+
+        let prepared = prepare_tools_for_bedrock(
+            &[computer_tool],
+            Some(&LanguageModelToolChoice::Auto),
+            "anthropic.claude-sonnet-4-5-20250929-v1:0",
+            &mut warnings,
+        )
+        .expect("computer tool prepares");
+
+        assert!(warnings.is_empty());
+        assert!(
+            prepared
+                .betas
+                .contains(&"computer-use-2025-01-24".to_string())
+        );
+        assert_eq!(
+            prepared.tool_config["tools"][0]["toolSpec"]["name"],
+            json!("computer")
+        );
+        assert_eq!(
+            prepared.tool_config["tools"][0]["toolSpec"]["description"],
+            json!("Anthropic provider tool computer_20250124")
+        );
+        assert_eq!(
+            prepared
+                .additional_tools
+                .expect("anthropic tool choice")
+                .get("tool_choice"),
+            Some(&json!({ "auto": {} }))
+        );
+    }
+
+    #[test]
     fn amazon_bedrock_embedding_models_prepare_requests_and_parse_responses() {
         let (requests, transport) = capture_transport(vec![ProviderApiResponse::text(
             200,

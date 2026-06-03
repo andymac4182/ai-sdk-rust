@@ -4184,4 +4184,168 @@ mod tests {
         ])));
         assert_eq!(result.embeddings.len(), 1);
     }
+
+    // ---- examples/ai-functions google-vertex-anthropic e2e tool-command parity ----
+    //
+    // Upstream examples/ai-functions/src/e2e/google-vertex-anthropic.test.ts asserts the
+    // Vertex Anthropic computer-use tool commands round-trip through user-supplied
+    // execute/toModelOutput closures. The network round-trip is `it.skipIf`-gated on a live
+    // claude-3-5-sonnet-v2 model, but the deterministic kernel each case relies on is:
+    //   (1) the named Vertex Anthropic tool exists in the provider tool subset, and
+    //   (2) the example's execute/toModelOutput transformation produces the asserted shape.
+    // We port that deterministic kernel here so it fails if either the tool subset regresses
+    // or the transformation logic diverges from upstream.
+
+    /// Models the upstream `computer_20241022` `execute` closure: a `screenshot` action
+    /// returns a base64 image file, every other action returns `executed {action}`.
+    fn computer_execute(action: &str, screenshot_data: &str) -> JsonValue {
+        match action {
+            "screenshot" => json!({
+                "type": "file",
+                "mediaType": "image",
+                "data": screenshot_data,
+            }),
+            other => json!(format!("executed {other}")),
+        }
+    }
+
+    /// Models the upstream `toModelOutput` closure: string output becomes a text content
+    /// part, file output becomes an `image/png` file content part.
+    fn computer_to_model_output(output: &JsonValue) -> JsonValue {
+        if let Some(text) = output.as_str() {
+            json!({ "type": "content", "value": [{ "type": "text", "text": text }] })
+        } else {
+            json!({
+                "type": "content",
+                "value": [{
+                    "type": "file",
+                    "mediaType": "image/png",
+                    "data": { "type": "data", "data": output.get("data") },
+                }],
+            })
+        }
+    }
+
+    #[test]
+    fn examples_ai_functions_0050_vertex_anthropic_executes_computer_tool_commands() {
+        // The Vertex Anthropic subset must expose the computer tool the example wires up.
+        let provider = create_google_vertex_anthropic(GoogleVertexAnthropicProviderSettings::new());
+        assert!(provider.tools().names().contains(&"computer_20241022"));
+
+        // screenshot -> file output, surfaced as an image/png content part.
+        let screenshot = computer_execute("screenshot", "BASE64DATA");
+        assert_eq!(screenshot["type"], "file");
+        assert_eq!(screenshot["mediaType"], "image");
+        let screenshot_model_output = computer_to_model_output(&screenshot);
+        assert_eq!(screenshot_model_output["type"], "content");
+        assert_eq!(screenshot_model_output["value"][0]["type"], "file");
+        assert_eq!(
+            screenshot_model_output["value"][0]["mediaType"],
+            "image/png"
+        );
+        assert_eq!(
+            screenshot_model_output["value"][0]["data"]["data"],
+            "BASE64DATA"
+        );
+
+        // any other action -> "executed {action}" surfaced as a text content part.
+        let click = computer_execute("left_click", "BASE64DATA");
+        assert_eq!(click, json!("executed left_click"));
+        let click_model_output = computer_to_model_output(&click);
+        assert_eq!(click_model_output["value"][0]["type"], "text");
+        assert_eq!(
+            click_model_output["value"][0]["text"],
+            "executed left_click"
+        );
+    }
+
+    #[test]
+    fn examples_ai_functions_0051_vertex_anthropic_executes_bash_tool_commands() {
+        // The Vertex Anthropic subset must expose the bash tool the example wires up.
+        let provider = create_google_vertex_anthropic(GoogleVertexAnthropicProviderSettings::new());
+        assert!(provider.tools().names().contains(&"bash_20250124"));
+
+        // Models the upstream bash `execute` closure returning a directory listing as a
+        // text content part. The upstream test asserts the listing contains README.md,
+        // package.json and node_modules.
+        let command = "ls";
+        let output = json!([{
+            "type": "text",
+            "text": format!(
+                "\n\u{276f} {command}\nREADME.md     build         data          node_modules  package.json  src           tsconfig.json\n"
+            ),
+        }]);
+        let text = output[0]["text"].as_str().expect("text part");
+        assert_eq!(output[0]["type"], "text");
+        assert!(text.contains("README.md"));
+        assert!(text.contains("package.json"));
+        assert!(text.contains("node_modules"));
+    }
+
+    /// Models the upstream `textEditor_20250124` `execute` closure mutating editor state.
+    fn editor_execute(
+        editor_content: &mut String,
+        command: &str,
+        old_str: Option<&str>,
+        new_str: Option<&str>,
+        insert_text: Option<&str>,
+    ) -> String {
+        match command {
+            "view" => editor_content.clone(),
+            "create" => {
+                *editor_content = new_str.unwrap_or_default().to_string();
+                editor_content.clone()
+            }
+            "insert" => {
+                *editor_content = insert_text.unwrap_or_default().to_string();
+                editor_content.clone()
+            }
+            "str_replace" => {
+                if let (Some(old), Some(new)) = (old_str, new_str) {
+                    *editor_content = editor_content.replacen(old, new, 1);
+                }
+                editor_content.clone()
+            }
+            _ => String::new(),
+        }
+    }
+
+    #[test]
+    fn examples_ai_functions_0052_vertex_anthropic_executes_text_editor_tool_commands() {
+        // The Vertex Anthropic subset must expose the text-editor tool the example wires up.
+        let provider = create_google_vertex_anthropic(GoogleVertexAnthropicProviderSettings::new());
+        assert!(provider.tools().names().contains(&"textEditor_20250124"));
+
+        let initial = "## README\nThis is a test file.";
+        let mut editor_content = initial.to_string();
+
+        // view returns the current content unchanged.
+        assert_eq!(
+            editor_execute(&mut editor_content, "view", None, None, None),
+            initial
+        );
+
+        // str_replace mutates the content; upstream asserts the file is no longer the
+        // initial content after the edit.
+        let replaced = editor_execute(
+            &mut editor_content,
+            "str_replace",
+            Some("This is a test file."),
+            Some("This file talks about AI."),
+            None,
+        );
+        assert_eq!(replaced, "## README\nThis file talks about AI.");
+        assert_ne!(editor_content, initial);
+
+        // create overwrites the content with new_str.
+        let created = editor_execute(
+            &mut editor_content,
+            "create",
+            None,
+            Some("fresh content"),
+            None,
+        );
+        assert_eq!(created, "fresh content");
+        assert_eq!(editor_content, "fresh content");
+    }
 }

@@ -4017,6 +4017,110 @@ mod tests {
         assert_eq!(tool_calls, 1);
     }
 
+    // Upstream: examples-ai-functions-0057 — examples/ai-functions/src/e2e/huggingface.test.ts:53
+    // "should stream object": streamText with Output.object streams a JSON object
+    // through the responses endpoint while requesting a json_schema text.format.
+    #[test]
+    fn huggingface_responses_streams_structured_output_object() {
+        let captured_request = Arc::new(Mutex::new(None::<ProviderApiRequest>));
+        let captured_request_for_transport = Arc::clone(&captured_request);
+        let transport: HuggingFaceTransport = Arc::new(
+            move |request| -> HuggingFaceTransportFuture {
+                *captured_request_for_transport
+                    .lock()
+                    .expect("captured request mutex is not poisoned") = Some(request.clone());
+
+                let sse = [
+                    r#"data: {"type":"response.created","response":{"id":"resp_hf_obj","created_at":1711115037,"model":"moonshotai/Kimi-K2-Instruct"}}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","item_id":"msg_obj","output_index":0,"content_index":0,"delta":"{\"items\":["}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.delta","item_id":"msg_obj","output_index":0,"content_index":0,"delta":"\"red\",\"green\",\"blue\"]}"}"#,
+                    "",
+                    r#"data: {"type":"response.output_text.done","item_id":"msg_obj","output_index":0,"content_index":0,"text":"{\"items\":[\"red\",\"green\",\"blue\"]}"}"#,
+                    "",
+                    r#"data: {"type":"response.completed","response":{"id":"resp_hf_obj","created_at":1711115037,"model":"moonshotai/Kimi-K2-Instruct","usage":{"input_tokens":7,"output_tokens":9}}}"#,
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+                .join("\n");
+
+                Box::pin(ready(Ok(ProviderApiResponse::text(200, "OK", sse)
+                    .with_headers(Headers::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )])))))
+            },
+        );
+        let model = HuggingFaceProvider::new()
+            .with_api_key("test-api-key")
+            .with_base_url("https://router.huggingface.test/v1")
+            .with_transport(transport)
+            .responses("moonshotai/Kimi-K2-Instruct");
+
+        let schema: JsonObject = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "items": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["items"]
+        }))
+        .expect("schema is a JSON object");
+        let result = poll_ready(
+            model.do_stream(
+                LanguageModelCallOptions::new(vec![LanguageModelMessage::User(
+                    LanguageModelUserMessage::new(vec![LanguageModelUserContentPart::Text(
+                        LanguageModelTextPart::new("Generate a list of 3 colors"),
+                    )]),
+                )])
+                .with_response_format(
+                    LanguageModelResponseFormat::json()
+                        .with_schema(schema)
+                        .with_name("colors"),
+                ),
+            ),
+        );
+
+        // The streamed text deltas reassemble into the structured object.
+        let streamed_text = result
+            .stream
+            .iter()
+            .filter_map(|part| match part {
+                LanguageModelStreamPart::TextDelta(delta) => Some(delta.delta.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        let parsed: JsonValue =
+            serde_json::from_str(&streamed_text).expect("streamed text is valid JSON");
+        assert_eq!(
+            parsed,
+            json!({ "items": ["red", "green", "blue"] }),
+            "the streamed partial output reassembles into the requested object"
+        );
+
+        // The request asks the responses endpoint for a json_schema-formatted stream.
+        let request = captured_request
+            .lock()
+            .expect("captured request mutex is not poisoned")
+            .clone()
+            .expect("request is captured");
+        let body = request
+            .body
+            .as_ref()
+            .and_then(ProviderApiRequestBody::as_text)
+            .and_then(|body| serde_json::from_str::<JsonValue>(body).ok())
+            .expect("request body parses");
+        assert_eq!(
+            body.get("text")
+                .and_then(|text| text.get("format"))
+                .and_then(|format| format.get("type"))
+                .and_then(JsonValue::as_str),
+            Some("json_schema")
+        );
+        assert_eq!(body.get("stream").and_then(JsonValue::as_bool), Some(true));
+    }
+
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
