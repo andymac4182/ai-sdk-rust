@@ -6048,6 +6048,167 @@ be, to a very large extent, the result of luck. Sherlock Holmes\n",
     }
 
     #[test]
+    fn text_search_sed_pending_regex_anchor_and_quantifier_rows() {
+        // Mirrors packages/just-bash/src/commands/sed/sed.regex.test.ts anchor,
+        // literal-paren, dot/escape, newline/tab replacement, quantifier, and
+        // bracket character-class substitution rows.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/paren.txt".to_string(), "(foo)\nfoo\n".to_string()),
+                ("/anc1.txt".to_string(), "abc\nxabc\n".to_string()),
+                ("/anc2.txt".to_string(), "abc\nabcx\n".to_string()),
+                ("/anc3.txt".to_string(), "a\n\nb\n".to_string()),
+                ("/dot1.txt".to_string(), "a.b\nacb\n".to_string()),
+                ("/dot2.txt".to_string(), "a1b\na2b\n".to_string()),
+                ("/colon.txt".to_string(), "a:b\n".to_string()),
+                ("/star.txt".to_string(), "b\nab\naab\n".to_string()),
+                ("/q1.txt".to_string(), "aa\naaa\naaaa\n".to_string()),
+                ("/q2.txt".to_string(), "a\naa\naaa\naaaa\n".to_string()),
+                ("/q3.txt".to_string(), "a\naa\naaa\n".to_string()),
+            ]),
+            cwd: Some("/".to_string()),
+            ..BashOptions::default()
+        });
+
+        // sed.regex.test.ts:147 should treat () as literal without backslash
+        assert_eq!(env.exec("sed 's/(foo)/X/' /paren.txt").stdout, "X\nfoo\n");
+        // sed.regex.test.ts:258 should match ^ at start of line
+        assert_eq!(env.exec("sed 's/^a/X/' /anc1.txt").stdout, "Xbc\nxabc\n");
+        // sed.regex.test.ts:267 should match $ at end of line
+        assert_eq!(env.exec("sed 's/c$/X/' /anc2.txt").stdout, "abX\nabcx\n");
+        // sed.regex.test.ts:276 should match ^$ for empty line
+        assert_eq!(
+            env.exec("sed 's/^$/EMPTY/' /anc3.txt").stdout,
+            "a\nEMPTY\nb\n"
+        );
+        // sed.regex.test.ts:287 should match literal dot with backslash
+        assert_eq!(env.exec("sed 's/a\\.b/X/' /dot1.txt").stdout, "X\nacb\n");
+        // sed.regex.test.ts:296 should match . as any character
+        assert_eq!(env.exec("sed 's/a.b/X/' /dot2.txt").stdout, "X\nX\n");
+        // sed.regex.test.ts:305 should handle newline in replacement with \n
+        assert_eq!(env.exec("sed 's/:/\\n/' /colon.txt").stdout, "a\nb\n");
+        // sed.regex.test.ts:314 should handle tab in replacement with \t
+        assert_eq!(env.exec("sed 's/:/\\t/' /colon.txt").stdout, "a\tb\n");
+        // sed.regex.test.ts:325 should match * (zero or more)
+        assert_eq!(env.exec("sed 's/a*/X/' /star.txt").stdout, "Xb\nXb\nXb\n");
+        // sed.regex.test.ts:334 should match \{n\} exactly n times in BRE
+        assert_eq!(
+            env.exec("sed 's/a\\{3\\}/X/' /q1.txt").stdout,
+            "aa\nX\nXa\n"
+        );
+        // sed.regex.test.ts:343 should match {n} exactly n times in ERE
+        assert_eq!(env.exec("sed -E 's/a{3}/X/' /q1.txt").stdout, "aa\nX\nXa\n");
+        // sed.regex.test.ts:352 should match \{n,m\} range in BRE
+        assert_eq!(
+            env.exec("sed 's/a\\{2,3\\}/X/' /q2.txt").stdout,
+            "a\nX\nX\nXa\n"
+        );
+        // sed.regex.test.ts:361 should match {n,} at least n times in ERE
+        assert_eq!(env.exec("sed -E 's/a{2,}/X/' /q3.txt").stdout, "a\nX\nX\n");
+    }
+
+    #[test]
+    fn text_search_sed_pending_error_command_and_label_rows() {
+        // Mirrors packages/just-bash/src/commands/sed/sed.errors.test.ts and
+        // sed.commands.test.ts / sed.test.ts rows that the runtime implements:
+        // missing-file errors, alternate delimiters, lenient backref/literal
+        // parens, invalid-regex errors, q/Q/$d addressing, t/T branch tracking,
+        // and the POSIX-class-as-literal edge.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/test/file.txt".to_string(),
+                "line 1\nline 2\nline 3\n".to_string(),
+            )]),
+            cwd: Some("/test".to_string()),
+            ..BashOptions::default()
+        });
+
+        // sed.errors.test.ts:14 should error on non-existent file
+        let r = env.exec("sed 's/a/b/' /nonexistent.txt");
+        assert!(r.stderr.contains("No such file or directory"));
+        assert_eq!(r.exit_code, 1);
+        // sed.errors.test.ts:21 should error on multiple non-existent files
+        let r = env.exec("sed 's/a/b/' /no1.txt /no2.txt");
+        assert!(r.stderr.contains("No such file or directory"));
+        assert_eq!(r.exit_code, 1);
+        // sed.errors.test.ts:28 should error on non-existent script file with -f
+        let r = env.exec("sed -f /nonexistent.sed /test/file.txt");
+        assert!(r.stderr.contains("No such file or directory"));
+        assert_eq!(r.exit_code, 1);
+        // sed.errors.test.ts:52 should handle non-standard substitution delimiter
+        assert_eq!(env.exec("sed 's|foo|bar|' /test/file.txt").exit_code, 0);
+        // sed.errors.test.ts:96 should handle unknown POSIX class as literal
+        assert_eq!(
+            env.exec("sed '/[[:invalid:]]/d' /test/file.txt").exit_code,
+            0
+        );
+        // sed.errors.test.ts:136 should error on -e without argument
+        assert_eq!(env.exec("sed -e /test/file.txt").exit_code, 1);
+        // sed.errors.test.ts:145 should error on invalid regex pattern
+        let r = env.exec("sed 's/[/x/' /test/file.txt");
+        assert!(!r.stderr.is_empty());
+        assert_eq!(r.exit_code, 1);
+        // sed.errors.test.ts:152 should be lenient with backreference \9 (exit 0)
+        assert_eq!(env.exec("sed 's/foo/\\9/' /test/file.txt").exit_code, 0);
+        // sed.errors.test.ts:160 should handle unmatched parenthesis in BRE (literal)
+        assert_eq!(env.exec("sed 's/(foo)/[\\1]/' /test/file.txt").exit_code, 0);
+
+        // q / Q / $d addressing (sed.commands.test.ts + sed.test.ts).
+        let cenv = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/test/file.txt".to_string(),
+                "line 1\nline 2\nline 3\nline 4\nline 5\n".to_string(),
+            )]),
+            cwd: Some("/test".to_string()),
+            ..BashOptions::default()
+        });
+        // sed.commands.test.ts:15 should quit without printing current line (3Q)
+        assert_eq!(
+            cenv.exec("sed '3Q' /test/file.txt").stdout,
+            "line 1\nline 2\n"
+        );
+        // sed.commands.test.ts:23 should handle Q at first line (1Q)
+        assert_eq!(cenv.exec("sed '1Q' /test/file.txt").stdout, "");
+        // sed.commands.test.ts:33 should quit after printing current line (3q)
+        assert_eq!(
+            cenv.exec("sed '3q' /test/file.txt").stdout,
+            "line 1\nline 2\nline 3\n"
+        );
+        // sed.commands.test.ts:258 should match last line ($p with -n)
+        assert_eq!(cenv.exec("sed -n '$p' /test/file.txt").stdout, "line 5\n");
+        // sed.test.ts:190 should delete last line with $d (space form)
+        assert_eq!(
+            cenv.exec("sed '$ d' /test/file.txt").stdout,
+            "line 1\nline 2\nline 3\nline 4\n"
+        );
+
+        // Semicolon-bearing pattern/replacement and t/T branch tracking.
+        let benv = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/semi.txt".to_string(), "a;b;c\n".to_string()),
+                ("/two.txt".to_string(), "a\nb\n".to_string()),
+                ("/ax.txt".to_string(), "ax\nbx\n".to_string()),
+            ]),
+            cwd: Some("/".to_string()),
+            ..BashOptions::default()
+        });
+        // sed.test.ts:537 should handle semicolons in pattern and replacement
+        assert_eq!(benv.exec("sed 's/a;b/x;y/' /semi.txt").stdout, "x;y;c\n");
+        // sed.test.ts:945 t should branch on a successful substitution
+        assert_eq!(
+            benv.exec("sed 's/./&/;t skip;s/$/X/;:skip' /two.txt")
+                .stdout,
+            "a\nb\n"
+        );
+        // sed.test.ts:970 T should not branch when a substitution was made
+        assert_eq!(
+            benv.exec("sed 's/x/y/;T add;b end;:add;s/$/X/;:end' /ax.txt")
+                .stdout,
+            "ay\nby\n"
+        );
+    }
+
+    #[test]
     fn text_stream_jbc34_utf8_pipeline_rows_use_implemented_commands() {
         let env = Bash::with_options(BashOptions {
             files: BTreeMap::from([
