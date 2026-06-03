@@ -45,6 +45,7 @@ the strict inventory generator.
 | `packages/moonshotai` | `crates/ai-sdk-moonshotai` | 0 |
 | `packages/perplexity` | `crates/ai-sdk-perplexity` | 32 |
 | `packages/prodia` | `crates/ai-sdk-prodia` | 54 |
+| `packages/quiverai` | `crates/ai-sdk-quiverai` | 15 |
 | `packages/replicate` | `crates/ai-sdk-replicate` | 63 |
 | `packages/revai` | `crates/ai-sdk-revai` | 0 |
 | `packages/togetherai` | `src/togetherai.rs`, `src/openai_compatible.rs` | 10 |
@@ -643,6 +644,37 @@ The Prodia Rust port (`crates/ai-sdk-prodia`) covers the image, video, provider,
 | `packages/prodia/src/prodia-video-model.test.ts` | includes timestamp and modelId in response | `prodia_0052_it_includes_timestamp_and_model_id_in_response` | none |
 | `packages/prodia/src/prodia-video-model.test.ts` | handles API errors | `prodia_0053_it_handles_api_errors` | none |
 | `packages/prodia/src/prodia-video-model.test.ts` | sends multipart form-data when image is provided | `prodia_0054_it_sends_multipart_form_data_when_image_is_provided` | none |
+
+## QuiverAI Exact Case Map
+
+The QuiverAI Rust port (`crates/ai-sdk-quiverai`) covers the SVG image
+generation provider surface. Each upstream case maps to a named test in
+`crates/ai-sdk-quiverai/tests/upstream_mapping.rs`, calling
+`assert_upstream_case_covered` against a real QuiverAI capability bucket
+(error-envelope mapping with the provider-specific retry rule, generate/vectorize
+request-body builders, operation-path routing, per-model reference-image limits,
+unsupported-feature warnings, provider/model construction, auth and user-agent
+header building, provider metadata, and usage mapping). All buckets exercise the
+deterministic porting helpers directly, so a mapped test fails if the behavior
+regresses.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/quiverai/src/quiverai-image-model.test.ts` | maps QuiverAI error envelopes into API call errors | `quiverai_0001_it_maps_quiverai_error_envelopes_into_api_call_errors` | none |
+| `packages/quiverai/src/quiverai-image-model.test.ts` | marks client errors as non-retryable | `quiverai_0002_it_marks_client_errors_as_non_retryable` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | uses the default base URL and auth headers | `quiverai_0003_it_uses_the_default_base_url_and_auth_headers` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | reads the base URL and API key from the environment | `quiverai_0004_it_reads_the_base_url_and_api_key_from_the_environment` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | throws when the QuiverAI API key is missing | `quiverai_0005_it_throws_when_the_quiverai_api_key_is_missing` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | prefers explicit options and exposes image factory methods | `quiverai_0006_it_prefers_explicit_options_and_exposes_image_factory_methods` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | throws for unsupported language and embedding models | `quiverai_0007_it_throws_for_unsupported_language_and_embedding_models` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | supports all canonical Quiver model ids | `quiverai_0008_it_supports_all_canonical_quiver_model_ids` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | vectorizes an image when requested through providerOptions | `quiverai_0009_it_vectorizes_an_image_when_requested_through_provider_options` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | forwards docs-backed generation options and reference images | `quiverai_0010_it_forwards_docs_backed_generation_options_and_reference_images` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | accepts up to 16 reference images for arrow-1.1-max | `quiverai_0011_it_accepts_up_to_16_reference_images_for_arrow_1_1_max` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | rejects more than 16 reference images for arrow-1.1-max | `quiverai_0012_it_rejects_more_than_16_reference_images_for_arrow_1_1_max` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | forwards docs-backed vectorize options | `quiverai_0013_it_forwards_docs_backed_vectorize_options` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | fails fast when vectorize is requested without an input image | `quiverai_0014_it_fails_fast_when_vectorize_is_requested_without_an_input_image` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | warns on unsupported call options | `quiverai_0015_it_warns_on_unsupported_call_options` | none |
 
 ## Revai Exact Case Map
 
