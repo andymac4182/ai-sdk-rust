@@ -8813,4 +8813,131 @@ be, to a very large extent, the result of luck. Sherlock Holmes\n",
         let exit_log = logger.find("exit").expect("exit log defined");
         assert_eq!(exit_log.data, BashLogData::ExitCode(2));
     }
+
+    #[test]
+    fn structured_data_yq_prototype_pollution_defense_rows() {
+        // packages/just-bash/src/commands/yq/yq.prototype-pollution.test.ts:21,34,46,58,67,76,87,97,109,120
+        let env = Bash::with_options(BashOptions {
+            env: BTreeMap::from([
+                ("constructor".to_string(), "ctor_value".to_string()),
+                ("prototype".to_string(), "proto_value".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // YAML input with dangerous keys (DANGEROUS_KEYWORDS.slice(0, 3)).
+        for keyword in ["constructor", "__proto__", "prototype"] {
+            let result = env.exec(&format!("echo '{keyword}: value' | yq '.{keyword}'"));
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(result.stdout.trim_end(), "value");
+        }
+
+        // JSON input with dangerous keys.
+        for keyword in ["constructor", "__proto__", "prototype"] {
+            let result = env.exec(&format!(
+                "echo '{{\"{keyword}\": \"value\"}}' | yq -p json '.{keyword}'"
+            ));
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(result.stdout.trim_end(), "value");
+        }
+
+        // keys lists dangerous keys.
+        let keys = env.exec("printf '__proto__: a\\nconstructor: b\\nnormal: c\\n' | yq 'keys'");
+        assert_eq!(keys.exit_code, 0);
+        assert!(keys.stdout.contains("__proto__"));
+        assert!(keys.stdout.contains("constructor"));
+
+        // to_entries preserves dangerous key.
+        let entries = env.exec("echo 'constructor: val' | yq 'to_entries | .[0].key'");
+        assert_eq!(entries.exit_code, 0);
+        assert_eq!(entries.stdout.trim_end(), "constructor");
+
+        // has() with dangerous key.
+        let has_true = env.exec("echo 'constructor: value' | yq 'has(\"constructor\")'");
+        assert_eq!(has_true.exit_code, 0);
+        assert_eq!(has_true.stdout.trim_end(), "true");
+        let has_false = env.exec("echo 'other: value' | yq 'has(\"__proto__\")'");
+        assert_eq!(has_false.exit_code, 0);
+        assert_eq!(has_false.stdout.trim_end(), "false");
+
+        // $ENV access with dangerous keyword names.
+        let env_ctor = env.exec("echo 'null' | yq '$ENV.constructor'");
+        assert_eq!(env_ctor.exit_code, 0);
+        assert_eq!(env_ctor.stdout.trim_end(), "ctor_value");
+        let env_proto = env.exec("echo 'null' | yq '$ENV.prototype'");
+        assert_eq!(env_proto.exit_code, 0);
+        assert_eq!(env_proto.stdout.trim_end(), "proto_value");
+
+        // add merges objects with a dangerous key.
+        let added = env
+            .exec("echo '[{\"constructor\": \"a\"}, {\"normal\": \"b\"}]' | yq -p json 'add | .constructor'");
+        assert_eq!(added.exit_code, 0);
+        assert_eq!(added.stdout.trim_end(), "a");
+
+        // getpath with dangerous key.
+        let path = env.exec("echo 'constructor: value' | yq 'getpath([\"constructor\"])'");
+        assert_eq!(path.exit_code, 0);
+        assert_eq!(path.stdout.trim_end(), "value");
+    }
+
+    #[test]
+    fn structured_data_yq_json_stdin_and_jq_filter_rows() {
+        // packages/just-bash/src/commands/yq/yq.test.ts:89,194,201,210,232,251,269
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.yaml".to_string(),
+                "name: test\nvalue: 42\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+
+        // should output as JSON with -o json
+        let json_out = env.exec("yq -o json '.' /data.yaml");
+        assert_eq!(json_out.exit_code, 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json_out.stdout).unwrap(),
+            serde_json::json!({"name": "test", "value": 42})
+        );
+
+        // should read from stdin
+        let stdin = env.exec("echo 'name: test' | yq '.name'");
+        assert_eq!(stdin.exit_code, 0);
+        assert_eq!(stdin.stdout, "test\n");
+
+        // should accept - for stdin
+        let dash = env.exec("echo 'value: 42' | yq '.value' -");
+        assert_eq!(dash.exit_code, 0);
+        assert_eq!(dash.stdout, "42\n");
+
+        // should support -n for null input with object construction
+        let null_input = env.exec("yq -n '{name: \"created\"}' -o json");
+        assert_eq!(null_input.exit_code, 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&null_input.stdout).unwrap(),
+            serde_json::json!({"name": "created"})
+        );
+
+        // should support map filter
+        let mapped =
+            env.exec("printf 'numbers:\\n  - 1\\n  - 2\\n  - 3\\n' | yq '.numbers | map(. * 2)'");
+        assert_eq!(mapped.exit_code, 0);
+        let map_lines: Vec<&str> = mapped.stdout.trim().split('\n').collect();
+        assert!(map_lines.contains(&"- 2"));
+        assert!(map_lines.contains(&"- 4"));
+        assert!(map_lines.contains(&"- 6"));
+
+        // should support keys filter
+        let keys = env.exec(
+            "printf 'config:\\n  host: localhost\\n  port: 8080\\n  debug: true\\n' | yq '.config | keys'",
+        );
+        assert_eq!(keys.exit_code, 0);
+        assert!(keys.stdout.contains("debug"));
+        assert!(keys.stdout.contains("host"));
+        assert!(keys.stdout.contains("port"));
+
+        // should support length filter
+        let length = env.exec("printf 'items:\\n  - a\\n  - b\\n  - c\\n' | yq '.items | length'");
+        assert_eq!(length.exit_code, 0);
+        assert_eq!(length.stdout, "3\n");
+    }
 }

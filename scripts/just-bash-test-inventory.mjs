@@ -3466,6 +3466,33 @@ const jbc37CaseGroups = [
     notes:
       'JBC-37 verifies xan preserves multibyte UTF-8 CSV fields through the Rust virtual pipe path.',
   },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.prototype-pollution.test.ts',
+    lines: [21, 34, 46, 58, 67, 76, 87, 97, 109, 120],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_yq_prototype_pollution_defense_rows',
+    notes:
+      'JBC-yq verifies the Rust yq engine reads dangerous YAML/JSON keys (constructor, __proto__, prototype) as ordinary data, lists them via keys/to_entries, answers has() correctly, resolves $ENV entries named after the keywords, merges objects with add, and reads them through getpath without prototype pollution.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.prototype-pollution.test.ts',
+    lines: [131, 145],
+    status: 'js-only-documented',
+    owner: 'docs/just-bash::yq-host-prototype-isolation',
+    rustTest: 'js-only-documented',
+    notes:
+      'JBC-yq documents these rows as JavaScript host assertions: they probe whether the Node Object.prototype was mutated after yq parsed dangerous YAML/JSON keys. Rust serde_json has no shared global prototype object, so the host-pollution observation is not expressible; the portable parsing behavior is covered by structured_data_yq_prototype_pollution_defense_rows.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.test.ts',
+    lines: [89, 194, 201, 210, 232, 251, 269],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_yq_json_stdin_and_jq_filter_rows',
+    notes:
+      'JBC-yq verifies yq JSON output with -o json, reading from stdin (implicit and via -), -n null-input object construction, and the jq-style map/keys/length filters over in-memory YAML.',
+  },
 ];
 
 const jbc44CaseGroups = [
