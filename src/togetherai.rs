@@ -1540,6 +1540,51 @@ mod tests {
     }
 
     #[test]
+    fn togetherai_image_model_omits_seed_when_undefined() {
+        let (requests, transport) = recording_transport(ProviderApiResponse::text(
+            200,
+            "OK",
+            json!({
+                "data": [
+                    {
+                        "b64_json": "together-image-data"
+                    }
+                ]
+            })
+            .to_string(),
+        ));
+        let model = TogetherAIProvider::new()
+            .with_transport(transport)
+            .image_model("stabilityai/stable-diffusion-xl");
+
+        let result = poll_ready(
+            model.do_generate(ImageModelCallOptions::new(1).with_prompt("A watercolor mountain")),
+        );
+        assert_eq!(
+            result.images,
+            vec![FileDataContent::Base64("together-image-data".to_string())]
+        );
+
+        let requests = requests
+            .lock()
+            .expect("request list mutex is not poisoned")
+            .clone();
+        let body = request_body_json(&requests[0]);
+        assert!(
+            body.get("seed").is_none(),
+            "seed must be omitted when undefined, got {body}"
+        );
+        assert_eq!(
+            body,
+            json!({
+                "model": "stabilityai/stable-diffusion-xl",
+                "prompt": "A watercolor mountain",
+                "response_format": "base64"
+            })
+        );
+    }
+
+    #[test]
     fn togetherai_image_model_maps_file_inputs_to_image_url() {
         let (requests, transport) = recording_transport(ProviderApiResponse::text(
             200,
