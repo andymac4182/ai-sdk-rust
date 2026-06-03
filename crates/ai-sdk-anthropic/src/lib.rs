@@ -3404,7 +3404,9 @@ pub fn assert_upstream_case_covered(case_id: &str, capability: &str) {
         ),
         "files" => {
             let provider = AnthropicProvider::from_settings(
-                AnthropicProviderSettings::new().with_api_key("test-key"),
+                AnthropicProviderSettings::new()
+                    .with_api_key("test-key")
+                    .with_base_url(DEFAULT_ANTHROPIC_BASE_URL),
             );
             let request = provider.files().upload_file_request(
                 &FilesUploadFileCallOptions::new(
@@ -3492,7 +3494,9 @@ pub fn assert_upstream_case_covered(case_id: &str, capability: &str) {
         }
         "skills" => {
             let provider = AnthropicProvider::from_settings(
-                AnthropicProviderSettings::new().with_api_key("test-key"),
+                AnthropicProviderSettings::new()
+                    .with_api_key("test-key")
+                    .with_base_url(DEFAULT_ANTHROPIC_BASE_URL),
             );
             let request = provider.skills().upload_skill_request(
                 &SkillsUploadSkillCallOptions::new(vec![ai_sdk_provider::SkillsFile::new(
