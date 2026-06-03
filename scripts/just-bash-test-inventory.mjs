@@ -1094,6 +1094,51 @@ const jbc13CaseGroups = [
     notes:
       'JBC-13 verifies mount/unmount validation, route dispatch, virtual mount parents, busy mount errors, cross-mount copy/move/link, symlinks, modes, path resolution, and edge-case normalization.',
   },
+  {
+    file: 'packages/just-bash/src/syntax/break-continue.test.ts',
+    lines: [6, 19, 34, 49, 64, 72, 85, 98, 113, 129, 139, 153],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbc13_syntax_break_continue_matches_upstream_behavior',
+    notes:
+      'JBC-13 verifies portable break/continue across for/while/until loops, multi-level break/continue n, no-op outside loops, invalid-arg exit 128, case-in-loop, and subshell containment.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/set-pipefail.test.ts',
+    lines: [6, 17, 28, 39, 52, 64, 78, 91, 105],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbc13_syntax_set_pipefail_matches_upstream_behavior',
+    notes:
+      'JBC-13 verifies portable set -o pipefail status propagation (first/middle/rightmost stage), +o pipefail disable, errexit interaction, and single-command pipelines.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/loops.test.ts',
+    lines: [79, 117],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbc13_syntax_loop_guard_conditions_match_upstream',
+    notes:
+      'JBC-13 verifies portable while/until guard conditions that skip the body when initially unsatisfied.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/control-flow.test.ts',
+    lines: [230, 277],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbc13_syntax_local_keyword_scopes_match_upstream',
+    notes:
+      'JBC-13 verifies portable local-variable scoping: shadowing an outer variable and keeping reassignments within the same function scope.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/control-flow.test.ts',
+    lines: [287, 293, 299, 306, 329],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbc13_syntax_negation_operator_matches_upstream',
+    notes:
+      'JBC-13 verifies portable ! negation of pipeline status, && / || chaining, and use inside an if condition.',
+  },
 ];
 
 const jbc26SourceGroups = [

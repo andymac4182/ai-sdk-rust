@@ -2848,10 +2848,45 @@ pub struct ShellState {
     local_scopes: Vec<BTreeMap<String, Option<String>>>,
     last_status: i32,
     pipefail: bool,
+    /// `set -e` / `set -o errexit`: abort the script on the first command that
+    /// returns a non-zero status outside of a tested context.
+    errexit: bool,
+    /// Depth counter; while > 0 the current statements run in a tested context
+    /// (an `if`/`while`/`until` condition or the left side of `&&`/`||`) where
+    /// errexit must not fire.
+    errexit_suppressed: u32,
     xtrace: bool,
     exited: Option<i32>,
+    /// Pending loop-control signal raised by the `break`/`continue` builtins.
+    /// Carries the number of loop levels still to unwind (bash `break n` /
+    /// `continue n`). Cleared once the target loop consumes it.
+    loop_control: Option<LoopControl>,
     command_count: usize,
     alias_depth: usize,
+    /// Number of loops the interpreter is currently executing inside (in this
+    /// shell/subshell context). `break`/`continue` are no-ops at depth 0.
+    loop_depth: u32,
+    /// Number of subshells currently open. When `break`/`continue` runs with no
+    /// enclosing loop *inside* a subshell, bash terminates that subshell (the
+    /// builtin behaves like a local `exit`) without disturbing the parent loop.
+    subshell_depth: u32,
+}
+
+/// Active `break`/`continue` signal propagating up through nested compound
+/// commands until the requested number of enclosing loops have been unwound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopControl {
+    Break(u32),
+    Continue(u32),
+}
+
+/// Result of resolving a pending loop-control signal against the loop that is
+/// currently unwinding.
+enum LoopFlow {
+    /// Proceed to the next iteration of this loop.
+    Continue,
+    /// Stop iterating this loop.
+    BreakLoop,
 }
 
 impl ShellState {
@@ -2976,6 +3011,11 @@ impl<D: CommandDispatcher> Interpreter<D> {
         let old_functions = std::mem::take(&mut self.state.functions);
         let old_aliases = self.state.aliases.clone();
         self.state.exited = None;
+        self.state.loop_control = None;
+        self.state.loop_depth = 0;
+        self.state.subshell_depth = 0;
+        self.state.errexit = false;
+        self.state.errexit_suppressed = 0;
         self.state.command_count = 0;
         let output = match parse(source) {
             Ok(script) => self.exec_script(&script),
@@ -2998,10 +3038,24 @@ impl<D: CommandDispatcher> Interpreter<D> {
     fn execute_statements(&mut self, statements: &[Statement]) -> ExecOutput {
         let mut output = ExecOutput::default();
         for statement in statements {
-            if self.state.exited.is_some() {
+            if self.state.exited.is_some() || self.state.loop_control.is_some() {
                 break;
             }
-            output.append(self.execute_statement(statement));
+            let result = self.execute_statement(statement);
+            let status = result.exit_code;
+            output.append(result);
+            // `set -e`: abort on the first failing statement outside of a
+            // tested context. A statement ending in `&&`/`||` is itself a
+            // tested compound, so errexit only inspects its final status.
+            if self.state.errexit
+                && self.state.errexit_suppressed == 0
+                && self.state.exited.is_none()
+                && self.state.loop_control.is_none()
+                && status != 0
+            {
+                self.state.exited = Some(status);
+                break;
+            }
         }
         if let Some(code) = self.state.exited {
             output.exit_code = code;
@@ -3010,6 +3064,12 @@ impl<D: CommandDispatcher> Interpreter<D> {
     }
 
     fn execute_statement(&mut self, statement: &Statement) -> ExecOutput {
+        // In a `&&`/`||` list, only the final pipeline's status feeds errexit;
+        // the intermediate operands form a tested context.
+        let is_list = !statement.operators.is_empty();
+        if is_list {
+            self.state.errexit_suppressed += 1;
+        }
         let mut output = self.execute_pipeline(&statement.pipelines[0]);
         for (operator, pipeline) in statement
             .operators
@@ -3024,6 +3084,9 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 output.append(self.execute_pipeline(pipeline));
             }
         }
+        if is_list {
+            self.state.errexit_suppressed -= 1;
+        }
         self.state.last_status = output.exit_code;
         output
     }
@@ -3033,9 +3096,23 @@ impl<D: CommandDispatcher> Interpreter<D> {
         let mut stdin = String::new();
         let mut statuses = Vec::new();
 
+        // In a multi-command pipeline, every command runs in its own subshell,
+        // so an `exit` inside one stage only sets that stage's status and must
+        // not terminate the parent script.
+        let multi_stage = pipeline.commands.len() > 1;
         for (index, command) in pipeline.commands.iter().enumerate() {
             let command_stdin = std::mem::take(&mut stdin);
+            let saved_exited = if multi_stage {
+                self.state.exited.take()
+            } else {
+                None
+            };
             let result = self.execute_command(command, command_stdin);
+            if multi_stage {
+                // Restore the parent's exit state; the stage's own `exit` code
+                // is captured below via `result.exit_code`.
+                self.state.exited = saved_exited;
+            }
             statuses.push(result.exit_code);
             if index + 1 == pipeline.commands.len() {
                 aggregate.stdout.push_str(&result.stdout);
@@ -3096,10 +3173,23 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 let saved_env = self.state.env.clone();
                 let saved_arrays = self.state.arrays.clone();
                 let saved_xtrace = self.state.xtrace;
+                // A subshell runs in a fresh execution context: any enclosing
+                // loop is invisible to it, so `break`/`continue` inside the
+                // subshell are no-ops and must not unwind the parent loop. An
+                // `exit` only terminates the subshell, not the parent script.
+                let saved_loop_depth = self.state.loop_depth;
+                let saved_loop_control = self.state.loop_control.take();
+                let saved_exited = self.state.exited.take();
+                self.state.loop_depth = 0;
+                self.state.subshell_depth += 1;
                 let output = self.execute_statements(body);
+                self.state.subshell_depth -= 1;
                 self.state.env = saved_env;
                 self.state.arrays = saved_arrays;
                 self.state.xtrace = saved_xtrace;
+                self.state.loop_depth = saved_loop_depth;
+                self.state.loop_control = saved_loop_control;
+                self.state.exited = saved_exited;
                 output
             }
             Command::Group(body) => self.execute_statements(body),
@@ -3242,12 +3332,22 @@ impl<D: CommandDispatcher> Interpreter<D> {
             self.state.pipefail = false;
             return;
         }
+        if args == ["-o", "errexit"] {
+            self.state.errexit = true;
+            return;
+        }
+        if args == ["+o", "errexit"] {
+            self.state.errexit = false;
+            return;
+        }
 
         for arg in args {
             match arg.as_str() {
                 "-x" => self.state.xtrace = true,
                 "+x" => self.state.xtrace = false,
-                "-o" | "+o" | "pipefail" => {}
+                "-e" => self.state.errexit = true,
+                "+e" => self.state.errexit = false,
+                "-o" | "+o" | "pipefail" | "errexit" => {}
                 _ => {}
             }
         }
@@ -3356,8 +3456,44 @@ impl<D: CommandDispatcher> Interpreter<D> {
                     exit_code: code,
                 })
             }
+            "break" | "continue" => Some(self.execute_loop_control(name, args)),
             _ => None,
         }
+    }
+
+    fn execute_loop_control(&mut self, name: &str, args: &[String]) -> ExecOutput {
+        // Parse the optional numeric level argument. Bash defaults to 1 and
+        // exits with status 128 on a non-numeric argument.
+        let levels = match args.first() {
+            None => 1u32,
+            Some(arg) => match arg.parse::<u32>() {
+                Ok(value) if value >= 1 => value,
+                _ => {
+                    return ExecOutput {
+                        stdout: String::new(),
+                        stderr: format!("bash: {name}: {arg}: numeric argument required\n"),
+                        exit_code: 128,
+                    };
+                }
+            },
+        };
+
+        // Outside any loop, break/continue are silent no-ops at the top level.
+        // Inside a subshell with no enclosing loop, bash terminates the subshell
+        // (the builtin acts like a local `exit`) without touching the parent.
+        if self.state.loop_depth == 0 {
+            if self.state.subshell_depth > 0 {
+                self.state.exited = Some(self.state.last_status);
+            }
+            return ExecOutput::default();
+        }
+
+        let levels = levels.min(self.state.loop_depth);
+        self.state.loop_control = Some(match name {
+            "break" => LoopControl::Break(levels),
+            _ => LoopControl::Continue(levels),
+        });
+        ExecOutput::default()
     }
 
     fn execute_local(&mut self, args: &[String]) -> ExecOutput {
@@ -3547,7 +3683,9 @@ impl<D: CommandDispatcher> Interpreter<D> {
     fn execute_if(&mut self, command: &IfCommand) -> ExecOutput {
         let mut output = ExecOutput::default();
         for clause in &command.clauses {
+            self.state.errexit_suppressed += 1;
             let condition = self.execute_statements(&clause.condition);
+            self.state.errexit_suppressed -= 1;
             let condition_status = condition.exit_code;
             output.append(condition);
             if condition_status == 0 {
@@ -3571,6 +3709,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
             .iter()
             .flat_map(|word| self.expand_word(word, true))
             .collect::<Vec<_>>();
+        self.state.loop_depth += 1;
         for value in words {
             iterations += 1;
             if iterations > self.limits.max_loop_iterations {
@@ -3580,14 +3719,53 @@ impl<D: CommandDispatcher> Interpreter<D> {
             }
             self.state.assign_var(command.variable.clone(), value);
             output.append(self.execute_statements(&command.body));
+            if self.state.exited.is_some() {
+                break;
+            }
+            match self.consume_loop_control() {
+                LoopFlow::Continue => {}
+                LoopFlow::BreakLoop => break,
+            }
         }
+        self.state.loop_depth -= 1;
         output
+    }
+
+    /// Resolve any pending `break`/`continue` signal for the loop currently
+    /// unwinding. Returns whether this loop should break out of its own
+    /// iteration cycle. Multi-level signals are decremented and re-raised so
+    /// the enclosing loop continues unwinding.
+    fn consume_loop_control(&mut self) -> LoopFlow {
+        match self.state.loop_control {
+            None => LoopFlow::Continue,
+            Some(LoopControl::Break(1)) => {
+                self.state.loop_control = None;
+                LoopFlow::BreakLoop
+            }
+            Some(LoopControl::Break(levels)) => {
+                self.state.loop_control = Some(LoopControl::Break(levels - 1));
+                LoopFlow::BreakLoop
+            }
+            Some(LoopControl::Continue(1)) => {
+                self.state.loop_control = None;
+                LoopFlow::Continue
+            }
+            Some(LoopControl::Continue(levels)) => {
+                // This loop is not the target: keep unwinding via a break, but
+                // re-raise as a continue for the parent loop.
+                self.state.loop_control = Some(LoopControl::Continue(levels - 1));
+                LoopFlow::BreakLoop
+            }
+        }
     }
 
     fn execute_loop(&mut self, command: &LoopCommand, is_while: bool) -> ExecOutput {
         let mut output = ExecOutput::default();
+        self.state.loop_depth += 1;
         for _ in 0..self.limits.max_loop_iterations {
+            self.state.errexit_suppressed += 1;
             let condition = self.execute_statements(&command.condition);
+            self.state.errexit_suppressed -= 1;
             let condition_status = condition.exit_code;
             output.append(condition);
             let should_run = if is_while {
@@ -3597,13 +3775,23 @@ impl<D: CommandDispatcher> Interpreter<D> {
             };
             if !should_run {
                 output.exit_code = 0;
+                self.state.loop_depth -= 1;
                 return output;
             }
             output.append(self.execute_statements(&command.body));
             if self.state.exited.is_some() {
+                self.state.loop_depth -= 1;
                 return output;
             }
+            match self.consume_loop_control() {
+                LoopFlow::Continue => {}
+                LoopFlow::BreakLoop => {
+                    self.state.loop_depth -= 1;
+                    return output;
+                }
+            }
         }
+        self.state.loop_depth -= 1;
         output.stderr.push_str("too many iterations\n");
         output.exit_code = 125;
         output
@@ -4892,19 +5080,28 @@ mod tests {
     fn fake_test(args: &[String]) -> CommandResult {
         let args = args.strip_suffix(&["]".to_string()]).unwrap_or(args);
         let matched = match args {
-            [left, operator, right] => {
-                let left = left.parse::<i64>().unwrap_or(0);
-                let right = right.parse::<i64>().unwrap_or(0);
-                match operator.as_str() {
-                    "-lt" => left < right,
-                    "-le" => left <= right,
-                    "-gt" => left > right,
-                    "-ge" => left >= right,
-                    "-eq" => left == right,
-                    "-ne" => left != right,
-                    _ => false,
-                }
+            [unary, value] if unary == "-n" || unary == "-z" => {
+                let nonempty = !value.is_empty();
+                if unary == "-n" { nonempty } else { !nonempty }
             }
+            [left, operator, right] => match operator.as_str() {
+                "=" | "==" => left == right,
+                "!=" => left != right,
+                "-lt" | "-le" | "-gt" | "-ge" | "-eq" | "-ne" => {
+                    let left = left.parse::<i64>().unwrap_or(0);
+                    let right = right.parse::<i64>().unwrap_or(0);
+                    match operator.as_str() {
+                        "-lt" => left < right,
+                        "-le" => left <= right,
+                        "-gt" => left > right,
+                        "-ge" => left >= right,
+                        "-eq" => left == right,
+                        "-ne" => left != right,
+                        _ => unreachable!(),
+                    }
+                }
+                _ => false,
+            },
             [value] => !value.is_empty(),
             _ => false,
         };
@@ -6896,5 +7093,198 @@ greet World",
         assert_eq!(non_capturing.get(0).unwrap().as_str(), "ab");
         assert_eq!(non_capturing.get(1).unwrap().as_str(), "b");
         assert!(non_capturing.get(2).is_none());
+    }
+
+    // JBC-13: portable break/continue conformance mirroring
+    // packages/just-bash/src/syntax/break-continue.test.ts (all 12 upstream cases).
+    #[test]
+    fn jbc13_syntax_break_continue_matches_upstream_behavior() {
+        // break: exit for loop early
+        let result = shell().exec(
+            "for i in 1 2 3 4 5; do\n  if [ $i -eq 3 ]; then break; fi\n  echo $i\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "1\n2\ndone\n");
+        assert_eq!(result.exit_code, 0);
+
+        // break: exit while loop early
+        let result = shell().exec(
+            "x=0\nwhile [ $x -lt 10 ]; do\n  x=$((x + 1))\n  if [ $x -eq 3 ]; then break; fi\n  echo $x\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "1\n2\ndone\n");
+        assert_eq!(result.exit_code, 0);
+
+        // break: exit until loop early
+        let result = shell().exec(
+            "x=0\nuntil [ $x -ge 10 ]; do\n  x=$((x + 1))\n  if [ $x -eq 3 ]; then break; fi\n  echo $x\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "1\n2\ndone\n");
+        assert_eq!(result.exit_code, 0);
+
+        // break: break multiple levels with `break n`
+        let result = shell().exec(
+            "for i in 1 2; do\n  for j in a b c; do\n    if [ $j = b ]; then break 2; fi\n    echo \"$i$j\"\n  done\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "1a\ndone\n");
+        assert_eq!(result.exit_code, 0);
+
+        // break: silently do nothing when not in loop
+        let result = shell().exec("break");
+        assert_eq!(result.stderr, "");
+        assert_eq!(result.exit_code, 0);
+
+        // break: error on invalid argument (bash returns 128)
+        let result = shell().exec("for i in 1 2 3; do\n  break abc\ndone");
+        assert!(
+            result.stderr.contains("numeric argument required"),
+            "stderr was: {:?}",
+            result.stderr
+        );
+        assert_eq!(result.exit_code, 128);
+
+        // continue: skip to next iteration in for loop
+        let result = shell().exec(
+            "for i in 1 2 3 4 5; do\n  if [ $i -eq 3 ]; then continue; fi\n  echo $i\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "1\n2\n4\n5\ndone\n");
+        assert_eq!(result.exit_code, 0);
+
+        // continue: skip to next iteration in while loop
+        let result = shell().exec(
+            "x=0\nwhile [ $x -lt 5 ]; do\n  x=$((x + 1))\n  if [ $x -eq 3 ]; then continue; fi\n  echo $x\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "1\n2\n4\n5\ndone\n");
+        assert_eq!(result.exit_code, 0);
+
+        // continue: continue multiple levels with `continue n`
+        let result = shell().exec(
+            "for i in 1 2; do\n  for j in a b c; do\n    if [ $j = b ]; then continue 2; fi\n    echo \"$i$j\"\n  done\n  echo \"end-$i\"\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "1a\n2a\ndone\n");
+        assert_eq!(result.exit_code, 0);
+
+        // continue: silently do nothing when not in loop
+        let result = shell().exec("continue");
+        assert_eq!(result.stderr, "");
+        assert_eq!(result.exit_code, 0);
+
+        // nested control flow: case statements inside loops
+        let result = shell()
+            .exec("for x in a b c; do\n  case $x in\n    b) continue ;;\n  esac\n  echo $x\ndone");
+        assert_eq!(result.stdout, "a\nc\n");
+        assert_eq!(result.exit_code, 0);
+
+        // nested control flow: break inside subshell only breaks that subshell
+        let result = shell().exec(
+            "for i in 1 2 3; do\n  (\n    if [ $i -eq 2 ]; then break; fi\n    echo $i\n  )\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "1\n3\ndone\n");
+    }
+
+    // JBC-13: portable `set -o pipefail` conformance mirroring
+    // packages/just-bash/src/syntax/set-pipefail.test.ts (all 9 upstream cases).
+    #[test]
+    fn jbc13_syntax_set_pipefail_matches_upstream_behavior() {
+        // success when all commands succeed
+        let result = shell().exec("set -o pipefail\necho hello | cat | cat\necho \"exit: $?\"");
+        assert_eq!(result.stdout, "hello\nexit: 0\n");
+        assert_eq!(result.exit_code, 0);
+
+        // failure when first command fails
+        let result = shell().exec("set -o pipefail\nfalse | true\necho \"exit: $?\"");
+        assert_eq!(result.stdout, "exit: 1\n");
+        assert_eq!(result.exit_code, 0);
+
+        // failure when middle command fails
+        let result = shell().exec("set -o pipefail\necho hello | false | cat\necho \"exit: $?\"");
+        assert_eq!(result.stdout, "exit: 1\n");
+        assert_eq!(result.exit_code, 0);
+
+        // rightmost failing exit code
+        let result = shell().exec("set -o pipefail\nexit 2 | exit 3 | true\necho \"exit: $?\"");
+        assert_eq!(result.stdout, "exit: 3\n");
+        assert_eq!(result.exit_code, 0);
+
+        // without pipefail: last command exit code
+        let result = shell().exec("false | true\necho \"exit: $?\"");
+        assert_eq!(result.stdout, "exit: 0\n");
+        assert_eq!(result.exit_code, 0);
+
+        // disable pipefail with +o pipefail
+        let result =
+            shell().exec("set -o pipefail\nset +o pipefail\nfalse | true\necho \"exit: $?\"");
+        assert_eq!(result.stdout, "exit: 0\n");
+        assert_eq!(result.exit_code, 0);
+
+        // pipefail + errexit: pipeline failure triggers errexit
+        let result = shell().exec("set -e\nset -o pipefail\necho before\nfalse | true\necho after");
+        assert_eq!(result.stdout, "before\n");
+        assert_eq!(result.exit_code, 1);
+
+        // errexit without pipefail: pipeline does not trigger errexit
+        let result = shell().exec("set -e\necho before\nfalse | true\necho after");
+        assert_eq!(result.stdout, "before\nafter\n");
+        assert_eq!(result.exit_code, 0);
+
+        // single command pipeline
+        let result = shell().exec("set -o pipefail\nfalse\necho \"exit: $?\"");
+        assert_eq!(result.stdout, "exit: 1\n");
+        assert_eq!(result.exit_code, 0);
+    }
+
+    // JBC-13: portable while/until guard conditions mirroring
+    // packages/just-bash/src/syntax/loops.test.ts (the two non-grep cases).
+    #[test]
+    fn jbc13_syntax_loop_guard_conditions_match_upstream() {
+        // while loops: should not execute when condition is initially false
+        let result = shell().exec("while false; do echo never; done");
+        assert_eq!(result.stdout, "");
+        assert_eq!(result.exit_code, 0);
+
+        // until loops: should not execute when condition is initially true
+        let result = shell().exec("until true; do echo never; done");
+        assert_eq!(result.stdout, "");
+        assert_eq!(result.exit_code, 0);
+    }
+
+    // JBC-13: portable `local` scoping mirroring
+    // packages/just-bash/src/syntax/control-flow.test.ts `local keyword` cases.
+    #[test]
+    fn jbc13_syntax_local_keyword_scopes_match_upstream() {
+        // should shadow outer variable
+        let result = shell()
+            .with_env([("x", "outer")])
+            .exec("test_func() { local x=inner; echo $x; }; test_func");
+        assert_eq!(result.stdout, "inner\n");
+
+        // should keep local changes within same scope
+        let result = shell().exec("test_func() { local x=first; x=second; echo $x; }; test_func");
+        assert_eq!(result.stdout, "second\n");
+    }
+
+    // JBC-13: portable `!` negation operator mirroring
+    // packages/just-bash/src/syntax/control-flow.test.ts `! negation operator` cases.
+    #[test]
+    fn jbc13_syntax_negation_operator_matches_upstream() {
+        // should negate exit code of true to 1
+        let result = shell().exec("! true");
+        assert_eq!(result.exit_code, 1);
+
+        // should negate exit code of false to 0
+        let result = shell().exec("! false");
+        assert_eq!(result.exit_code, 0);
+
+        // should work with && chaining
+        let result = shell().exec("! false && echo success");
+        assert_eq!(result.stdout, "success\n");
+        assert_eq!(result.exit_code, 0);
+
+        // should work with || chaining
+        let result = shell().exec("! true || echo fallback");
+        assert_eq!(result.stdout, "fallback\n");
+        assert_eq!(result.exit_code, 0);
+
+        // should work in if condition
+        let result = shell().exec("if ! false; then echo yes; fi");
+        assert_eq!(result.stdout, "yes\n");
     }
 }
