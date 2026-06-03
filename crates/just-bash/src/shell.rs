@@ -2791,11 +2791,58 @@ impl Default for ExecutionLimits {
     }
 }
 
+/// Insertion-ordered alias storage.
+///
+/// Bash lists aliases in the order they were first defined and re-defining an
+/// existing alias updates its value in place without changing its position.
+/// Upstream just-bash keeps aliases inside the insertion-ordered environment
+/// `Map`; this mirrors that ordering for `alias` listing parity.
+#[derive(Debug, Clone, Default)]
+struct AliasTable {
+    entries: Vec<(String, String)>,
+}
+
+impl AliasTable {
+    fn insert(&mut self, name: String, value: String) {
+        if let Some(entry) = self.entries.iter_mut().find(|(key, _)| key == &name) {
+            entry.1 = value;
+        } else {
+            self.entries.push((name, value));
+        }
+    }
+
+    fn get(&self, name: &str) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    fn remove(&mut self, name: &str) -> bool {
+        if let Some(index) = self.entries.iter().position(|(key, _)| key == name) {
+            self.entries.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.entries
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ShellState {
     env: BTreeMap<String, String>,
     arrays: BTreeMap<String, Vec<String>>,
-    aliases: BTreeMap<String, String>,
+    aliases: AliasTable,
     functions: BTreeMap<String, FunctionDef>,
     positionals: Vec<String>,
     local_scopes: Vec<BTreeMap<String, Option<String>>>,
@@ -2818,6 +2865,10 @@ impl ShellState {
 
     pub fn set_alias(&mut self, name: impl Into<String>, value: impl Into<String>) {
         self.aliases.insert(name.into(), value.into());
+    }
+
+    pub fn get_alias(&self, name: &str) -> Option<&str> {
+        self.aliases.get(name)
     }
 
     pub fn set_array(&mut self, name: impl Into<String>, values: Vec<String>) {
@@ -2917,7 +2968,13 @@ impl<D: CommandDispatcher> Interpreter<D> {
     }
 
     pub fn exec(&mut self, source: &str) -> ExecOutput {
+        // Each exec call models a fresh non-interactive shell: functions and
+        // aliases defined during the call do not persist to the next exec, even
+        // though variables/files on the long-lived session do. Aliases seeded on
+        // the session before exec stay available within the call, so snapshot
+        // and restore rather than clearing outright.
         let old_functions = std::mem::take(&mut self.state.functions);
+        let old_aliases = self.state.aliases.clone();
         self.state.exited = None;
         self.state.command_count = 0;
         let output = match parse(source) {
@@ -2929,6 +2986,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
             },
         };
         self.state.functions = old_functions;
+        self.state.aliases = old_aliases;
         self.state.exited = None;
         output
     }
@@ -3089,7 +3147,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
             .collect::<Vec<_>>();
         let trace = self.trace_simple_command(&assignments, Some((&name, &args)));
 
-        if let Some(alias) = self.state.aliases.get(&name).cloned()
+        if let Some(alias) = self.state.aliases.get(&name).map(str::to_string)
             && self.state.alias_depth < 20
         {
             self.state.alias_depth += 1;
@@ -3284,14 +3342,8 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 self.apply_set_options(args);
                 Some(ExecOutput::default())
             }
-            "alias" => {
-                for arg in args {
-                    if let Some((name, value)) = split_assignment_text(arg) {
-                        self.state.aliases.insert(name, value);
-                    }
-                }
-                Some(ExecOutput::default())
-            }
+            "alias" => Some(self.execute_alias(args)),
+            "unalias" => Some(self.execute_unalias(args)),
             "exit" => {
                 let code = args
                     .first()
@@ -3391,6 +3443,96 @@ impl<D: CommandDispatcher> Interpreter<D> {
             }
         }
         ExecOutput::default()
+    }
+
+    fn execute_alias(&mut self, args: &[String]) -> ExecOutput {
+        if args.iter().any(|arg| arg == "--help") {
+            return ExecOutput {
+                stdout: alias_help_text(),
+                stderr: String::new(),
+                exit_code: 0,
+            };
+        }
+
+        // No arguments: list all aliases in definition order.
+        if args.is_empty() {
+            let stdout = self
+                .state
+                .aliases
+                .iter()
+                .map(|(name, value)| format!("alias {name}='{value}'\n"))
+                .collect();
+            return ExecOutput {
+                stdout,
+                stderr: String::new(),
+                exit_code: 0,
+            };
+        }
+
+        // Skip the "--" option separator (POSIX standard).
+        let process_args: &[String] = if args.first().map(String::as_str) == Some("--") {
+            &args[1..]
+        } else {
+            args
+        };
+
+        for arg in process_args {
+            if let Some((name, value)) = split_alias_assignment(arg) {
+                self.state.aliases.insert(name, value);
+            } else if let Some(value) = self.state.aliases.get(arg) {
+                return ExecOutput {
+                    stdout: format!("alias {arg}='{value}'\n"),
+                    stderr: String::new(),
+                    exit_code: 0,
+                };
+            } else {
+                return ExecOutput {
+                    stdout: String::new(),
+                    stderr: format!("alias: {arg}: not found\n"),
+                    exit_code: 1,
+                };
+            }
+        }
+
+        ExecOutput::default()
+    }
+
+    fn execute_unalias(&mut self, args: &[String]) -> ExecOutput {
+        if args.iter().any(|arg| arg == "--help") {
+            return ExecOutput {
+                stdout: unalias_help_text(),
+                stderr: String::new(),
+                exit_code: 0,
+            };
+        }
+
+        if args.is_empty() {
+            return ExecOutput {
+                stdout: String::new(),
+                stderr: "unalias: usage: unalias [-a] name [name ...]\n".to_string(),
+                exit_code: 1,
+            };
+        }
+
+        if args.first().map(String::as_str) == Some("-a") {
+            self.state.aliases.clear();
+            return ExecOutput::default();
+        }
+
+        let mut stderr = String::new();
+        let mut exit_code = 0;
+        for name in args {
+            if !self.state.aliases.remove(name) {
+                stderr.push_str(&format!("unalias: {name}: not found\n"));
+                exit_code = 1;
+            }
+        }
+
+        ExecOutput {
+            stdout: String::new(),
+            stderr,
+            exit_code,
+        }
     }
 
     fn call_function(&mut self, function: FunctionDef, args: Vec<String>) -> ExecOutput {
@@ -4137,6 +4279,44 @@ where
 
 fn shell_quote_arg(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Splits an `alias name=value` argument into its name and value.
+///
+/// Mirrors the upstream alias builtin: an argument is treated as a definition
+/// only when it contains an `=`, the name is everything before the first `=`,
+/// and a single matching pair of surrounding quotes is stripped from the value
+/// (word expansion usually removes these already, but the builtin strips any
+/// that survive). Returns `None` when there is no `=`, which signals a lookup.
+fn split_alias_assignment(arg: &str) -> Option<(String, String)> {
+    let equals = arg.find('=')?;
+    let name = arg[..equals].to_string();
+    let mut value = arg[equals + 1..].to_string();
+    let bytes = value.as_bytes();
+    if value.len() >= 2
+        && ((bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
+            || (bytes[0] == b'"' && bytes[value.len() - 1] == b'"'))
+    {
+        value = value[1..value.len() - 1].to_string();
+    }
+    Some((name, value))
+}
+
+fn alias_help_text() -> String {
+    let mut output = String::from("alias - define or display aliases\n\n");
+    output.push_str("Usage: alias [name[=value] ...]\n");
+    output.push_str("\nOptions:\n");
+    output.push_str("      --help display this help and exit\n");
+    output
+}
+
+fn unalias_help_text() -> String {
+    let mut output = String::from("unalias - remove alias definitions\n\n");
+    output.push_str("Usage: unalias name [name ...]\n");
+    output.push_str("\nOptions:\n");
+    output.push_str("  -a      remove all aliases\n");
+    output.push_str("      --help display this help and exit\n");
+    output
 }
 
 fn split_assignment_text(text: &str) -> Option<(String, String)> {
@@ -5126,6 +5306,84 @@ mod tests {
         shell.state_mut().set_alias("ll", "echo listed");
         let result = shell.exec("ll /tmp");
         assert_eq!(result.stdout, "listed /tmp\n");
+    }
+
+    #[test]
+    fn just_bash_alias_lists_no_aliases_initially() {
+        let result = shell().exec("alias");
+        assert_eq!(result.stdout, "");
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn just_bash_alias_sets_and_lists_within_same_exec() {
+        let result = shell().exec("alias ll='ls -la'; alias");
+        assert_eq!(result.stdout, "alias ll='ls -la'\n");
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn just_bash_alias_shows_specific_alias_within_same_exec() {
+        let result = shell().exec("alias ll='ls -la'; alias ll");
+        assert_eq!(result.stdout, "alias ll='ls -la'\n");
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn just_bash_alias_errors_when_alias_not_found() {
+        let result = shell().exec("alias notexists");
+        assert!(result.stderr.contains("not found"));
+        assert_eq!(result.exit_code, 1);
+    }
+
+    #[test]
+    fn just_bash_alias_sets_multiple_within_same_exec_in_definition_order() {
+        let result = shell().exec("alias ll='ls -la' la='ls -a'; alias");
+        assert_eq!(result.stdout, "alias ll='ls -la'\nalias la='ls -a'\n");
+    }
+
+    #[test]
+    fn just_bash_alias_shows_help_with_help_flag() {
+        let result = shell().exec("alias --help");
+        assert!(result.stdout.contains("alias"));
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn just_bash_alias_does_not_persist_across_exec_calls() {
+        let mut shell = shell();
+        shell.exec("alias ll='ls -la'");
+        let result = shell.exec("alias ll");
+        assert!(result.stderr.contains("not found"));
+        assert_eq!(result.exit_code, 1);
+    }
+
+    #[test]
+    fn just_bash_unalias_removes_an_alias_within_same_exec() {
+        let result = shell().exec("alias ll='ls -la'; unalias ll; alias ll");
+        assert!(result.stderr.contains("not found"));
+        assert_eq!(result.exit_code, 1);
+    }
+
+    #[test]
+    fn just_bash_unalias_errors_when_unaliasing_nonexistent_alias() {
+        let result = shell().exec("unalias notexists");
+        assert!(result.stderr.contains("not found"));
+        assert_eq!(result.exit_code, 1);
+    }
+
+    #[test]
+    fn just_bash_unalias_removes_all_aliases_with_a_flag() {
+        let result = shell().exec("alias ll='ls -la' la='ls -a'; unalias -a; alias");
+        assert_eq!(result.stdout, "");
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn just_bash_unalias_shows_help_with_help_flag() {
+        let result = shell().exec("unalias --help");
+        assert!(result.stdout.contains("unalias"));
+        assert_eq!(result.exit_code, 0);
     }
 
     #[test]

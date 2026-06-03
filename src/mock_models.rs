@@ -1231,6 +1231,23 @@ mod tests {
     }
 
     #[test]
+    fn mock_embedding_model_v3_returns_array_backed_embed_results_from_the_first_entry() {
+        let model = MockEmbeddingModel::new().with_embed_results([
+            EmbeddingModelResult::new(vec![vec![1.0]]),
+            EmbeddingModelResult::new(vec![vec![2.0]]),
+        ]);
+
+        let first =
+            poll_ready(model.do_embed(EmbeddingModelCallOptions::new(vec!["first".to_string()])));
+        let second =
+            poll_ready(model.do_embed(EmbeddingModelCallOptions::new(vec!["second".to_string()])));
+
+        assert_eq!(first.embeddings, vec![vec![1.0]]);
+        assert_eq!(second.embeddings, vec![vec![2.0]]);
+        assert_eq!(model.embed_calls().len(), 2);
+    }
+
+    #[test]
     fn mock_media_models_record_calls_and_return_scripted_results() {
         let image = MockImageModel::new().with_generate_result(ImageModelResult::new(
             vec![FileDataContent::Base64("aW1hZ2U=".to_string())],
