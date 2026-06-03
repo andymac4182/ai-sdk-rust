@@ -2140,3 +2140,16 @@ fn packages_anthropic_0380_it_should_convert_anthropic_web_search_tool_call_with
  {
     assert_upstream_case_covered("packages-anthropic-0380", "web-search-error-result");
 }
+
+#[test]
+fn packages_anthropic_0210_it_should_process_pdf_citation_responses_in_streaming() {
+    assert_upstream_case_covered("packages-anthropic-0210", "streaming-pdf-citation");
+}
+
+#[test]
+fn packages_anthropic_0211_it_should_stream_container_upload_code_execution_results() {
+    assert_upstream_case_covered(
+        "packages-anthropic-0211",
+        "streaming-container-upload-code-exec",
+    );
+}
