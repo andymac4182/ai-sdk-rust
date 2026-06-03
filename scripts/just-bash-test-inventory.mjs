@@ -1399,6 +1399,42 @@ const jbc16CaseGroups = [
       'JBC-16 verifies portable jq join, startswith, ascii_downcase, and index string helpers.',
   },
   {
+    file: 'packages/just-bash/src/commands/jq/jq.keyword-field-access.test.ts',
+    lines: [115, 121, 127, 135, 141, 151, 158],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_keyword_field_access_space_rows',
+    notes:
+      'JBC-16 verifies that a space-separated keyword/identifier after a dot is rejected as not-a-field-access (nonzero exit) while a space-separated string after a dot stays field access, including chained forms.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.prototype-pollution.test.ts',
+    lines: [141, 150, 161, 170, 179, 189, 323, 344, 386],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_prototype_pollution_safe_key_rows',
+    notes:
+      'JBC-16 verifies that with_entries renaming, setpath (including nested and mixed-safe paths), and object construction with computed dangerous keys drop __proto__/constructor/prototype while preserving safe keys and leaving keys empty.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.test.ts',
+    lines: [93, 209, 287, 375],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_multi_file_range_limit_and_tab_rows',
+    notes:
+      'JBC-16 verifies parallel multi-file input, find|xargs piping, slurp length over concatenated NDJSON, and --tab indentation.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.limits.test.ts',
+    lines: [90, 124],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_multi_file_range_limit_and_tab_rows',
+    notes:
+      'JBC-16 verifies that limit(n; range(...)) caps output and that moderate ranges complete deterministically.',
+  },
+  {
     file: 'packages/just-bash/src/commands/yq/yq.test.ts',
     lines: [
       6, 17, 33, 50, 66, 100, 111, 124, 135, 287, 305, 314, 324, 331,
@@ -2801,7 +2837,25 @@ const jbc25CaseGroups = [
     owner: 'crates/just-bash::runtime::awk',
     rustTest: 'awk_jbc25_array_and_computed_field_rows',
     notes:
-      'JBC-25 verifies portable AWK array element creation, numeric and expression indices, missing elements, overwrite, concatenated keys, counting, grouped sums, SUBSEP-style two-dimensional keys, and compound assignment; in/delete/for-in iteration and split-array rows remain pending.',
+      'JBC-25 verifies portable AWK array element creation, numeric and expression indices, missing elements, overwrite, concatenated keys, counting, grouped sums, SUBSEP-style two-dimensional keys, and compound assignment.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.arrays.test.ts',
+    lines: [62, 71, 80, 89, 100, 109, 118, 129, 138],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc25_in_delete_and_for_in_array_rows',
+    notes:
+      'JBC-25 verifies portable AWK `in` membership (existing/missing/numeric keys, non-creating tests), `delete` of single elements, missing elements and whole arrays, and for-in key iteration with value indirection.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.arrays.test.ts',
+    lines: [147, 158, 167, 176, 185, 207, 240, 253, 264, 275, 288],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc25_split_subsep_and_array_field_rows',
+    notes:
+      'JBC-25 verifies portable AWK empty for-in, split() into arrays (explicit and whitespace separators, count and clear-before-fill), unique-value counting, SUBSEP matrix storage and parenthesised `(i,j) in a` membership, field-keyed accumulation, line storage by field, and array pre-increment.',
   },
   {
     file: 'packages/just-bash/src/commands/awk/awk.fields.test.ts',
