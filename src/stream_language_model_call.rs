@@ -132,6 +132,11 @@ pub struct ModelCallToolCall {
 }
 
 /// A high-level model-call part emitted by [`stream_language_model_call`].
+// The `ModelCallEnd` variant aggregates usage, provider metadata, and the full
+// performance metrics struct, so it is intentionally larger than the streaming
+// delta variants; boxing those fields would only add indirection without a
+// meaningful size win for the short-lived parts this enum carries.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum ModelCallStreamPart {
     /// Start of a streamed text block.
