@@ -48,7 +48,7 @@ the strict inventory generator.
 | `packages/replicate` | `crates/ai-sdk-replicate` | 63 |
 | `packages/revai` | `crates/ai-sdk-revai` | 6 |
 | `packages/togetherai` | `src/togetherai.rs`, `src/openai_compatible.rs` | 10 |
-| `packages/voyage` | `src/voyage.rs` | 21 |
+| `packages/voyage` | `src/voyage.rs` | 0 |
 
 ## Alibaba Exact Case Map
 
@@ -205,6 +205,18 @@ the strict inventory generator.
 | `packages/fal/src/fal-video-model.test.ts` | should timeout after pollTimeoutMs | `fal_video_model_polls_until_ready_and_times_out` | none |
 | `packages/fal/src/fal-video-model.test.ts` | should respect abort signal | `fal_video_model_respects_abort_signal_during_polling` | none |
 | `packages/fal/src/fal-video-model.test.ts` | should default to video/mp4 when content_type is not provided | `fal_video_model_polls_until_ready_and_times_out` | none |
+| `packages/fal/src/fal-image-model.test.ts` | should handle null file_name and file_size values | `fal_image_model_parses_single_multiple_null_and_empty_metadata_responses` | none |
+| `packages/fal/src/fal-image-model.test.ts` | should handle null width and height values with images array only | `fal_image_model_parses_single_multiple_null_and_empty_metadata_responses` | none |
+| `packages/fal/src/fal-speech-model.test.ts` | should pass text and default output_format | `fal_speech_model_passes_text_and_default_output_format` | none |
+| `packages/fal/src/fal-speech-model.test.ts` | should pass headers | `fal_speech_model_passes_headers` | none |
+| `packages/fal/src/fal-speech-model.test.ts` | should return audio data | `fal_speech_model_returns_audio_data` | none |
+| `packages/fal/src/fal-speech-model.test.ts` | should include response data with timestamp, modelId and headers | `fal_speech_model_includes_response_timestamp_model_id_and_headers` | none |
+| `packages/fal/src/fal-speech-model.test.ts` | should include warnings for unsupported settings | `fal_speech_model_includes_warnings_for_unsupported_settings` | none |
+| `packages/fal/src/fal-transcription-model.test.ts` | should pass the model | `fal_transcription_model_passes_the_model` | none |
+| `packages/fal/src/fal-transcription-model.test.ts` | should pass headers | `fal_transcription_model_passes_headers` | none |
+| `packages/fal/src/fal-transcription-model.test.ts` | should extract the transcription text | `fal_transcription_model_extracts_transcription_text` | none |
+| `packages/fal/src/fal-transcription-model.test.ts` | should include response data with timestamp, modelId and headers | `fal_transcription_model_includes_response_timestamp_model_id_and_headers` | none |
+| `packages/fal/src/fal-transcription-model.test.ts` | should use real date when no custom date provider is specified | `fal_transcription_model_uses_real_date_when_no_custom_provider` | none |
 
 ## KlingAI Exact Case Map
 
@@ -454,7 +466,7 @@ deterministic capability assertion exported from the crate
 
 ## Prodia Exact Case Map
 
-The Prodia Rust port (`crates/ai-sdk-prodia`) is a media-generation provider slice. Image, video, and provider cases map to named tests in `crates/ai-sdk-prodia/tests/upstream_mapping.rs`, each calling `assert_upstream_case_covered` against a real Prodia capability bucket (request-body builders, provider metadata, provider/model construction, header merging, endpoint shaping, multipart response parsing, error surfacing). The upstream `prodia-language-model.test.ts` cases (`packages-prodia-0020..0036`) and the provider `.languageModel` accessor case (`packages-prodia-0038`) exercise the LLM surface, which is intentionally not ported in this slice (the provider returns `NoSuchModelError`); those rows remain `portable-unmapped` rather than mapped to unrelated tests.
+The Prodia Rust port (`crates/ai-sdk-prodia`) covers the image, video, provider, and language-model surfaces. Each upstream case maps to a named test in `crates/ai-sdk-prodia/tests/upstream_mapping.rs`, calling `assert_upstream_case_covered` against a real Prodia capability bucket (request-body builders, prompt/system text extraction, image media-type detection, unsupported-feature warnings, provider metadata, provider/model construction, header merging, endpoint shaping, multipart response parsing, stream-part wrapping, error surfacing). The `prodia-language-model.test.ts` cases (`packages-prodia-0020..0036`) and the provider `.languageModel` accessor case (`packages-prodia-0038`) drive the `ProdiaLanguageModel` surface and its `do_generate_content` flow through deterministic ready transports.
 
 | Upstream file | Current upstream case | Rust mapping | Remaining exception |
 | --- | --- | --- | --- |
@@ -477,9 +489,25 @@ The Prodia Rust port (`crates/ai-sdk-prodia`) is a media-generation provider sli
 | `packages/prodia/src/prodia-image-model.test.ts` | omits dollars from metadata when price is null | `prodia_0017_it_omits_dollars_from_metadata_when_price_is_null` | none |
 | `packages/prodia/src/prodia-image-model.test.ts` | includes timestamp, headers, and modelId in response metadata | `prodia_0018_it_includes_timestamp_headers_and_model_id_in_response_metadata` | none |
 | `packages/prodia/src/prodia-image-model.test.ts` | exposes correct provider and model information | `prodia_0019_it_exposes_correct_provider_and_model_information` | none |
-| `packages/prodia/src/prodia-language-model.test.ts` | exposes correct provider and model information | missing | LLM surface not ported in the Prodia media-generation slice (`languageModel` returns `NoSuchModelError`). |
+| `packages/prodia/src/prodia-language-model.test.ts` | exposes correct provider and model information | crates/ai-sdk-prodia/tests/upstream_mapping.rs::prodia_0020_it_exposes_correct_provider_and_model_information | none |
+| `packages/prodia/src/prodia-language-model.test.ts` | extracts text from user message and sends correct request | crates/ai-sdk-prodia/tests/upstream_mapping.rs::prodia_0021_it_extracts_text_from_user_message_and_sends_correct_request | none |
+| `packages/prodia/src/prodia-language-model.test.ts` | routes top-level-only "image" mediaType into multipart input with detected full MIME | crates/ai-sdk-prodia/tests/upstream_mapping.rs::prodia_0022_it_routes_top_level_only_image_media_type_with_detected_full_mime | none |
+| `packages/prodia/src/prodia-language-model.test.ts` | top-level-only "image" mediaType with undetectable bytes keeps default content-type | crates/ai-sdk-prodia/tests/upstream_mapping.rs::prodia_0023_it_top_level_only_image_media_type_undetectable_keeps_default | none |
+| `packages/prodia/src/prodia-language-model.test.ts` | includes system message in prompt | crates/ai-sdk-prodia/tests/upstream_mapping.rs::prodia_0024_it_includes_system_message_in_prompt | none |
+| `packages/prodia/src/prodia-language-model.test.ts` | sends include_messages: true in config | crates/ai-sdk-prodia/tests/upstream_mapping.rs::prodia_0025_it_sends_include_messages_true_in_config | none |
+| `packages/prodia/src/prodia-language-model.test.ts` | returns text content from message.txt response part | crates/ai-sdk-prodia/tests/upstream_mapping.rs::prodia_0026_it_returns_text_content_from_message_txt_response_part | none |
+| `packages/prodia/src/prodia-language-model.test.ts` | returns image content from image.png response part | crates/ai-sdk-prodia/tests/upstream_mapping.rs::prodia_0027_it_returns_image_content_from_image_png_response_part | none |
+| `packages/prodia/src/prodia-language-model.test.ts` | returns finish reason as stop | crates/ai-sdk-prodia/tests/upstream_mapping.rs::prodia_0028_it_returns_finish_reason_as_stop | none |
+| `packages/prodia/src/prodia-language-model.test.ts` | returns provider metadata | crates/ai-sdk-prodia/tests/upstream_mapping.rs::prodia_0029_it_returns_provider_metadata | none |
+| `packages/prodia/src/prodia-language-model.test.ts` | emits warnings for unsupported LLM features | crates/ai-sdk-prodia/tests/upstream_mapping.rs::prodia_0030_it_emits_warnings_for_unsupported_llm_features | none |
+| `packages/prodia/src/prodia-language-model.test.ts` | passes aspectRatio from provider options | crates/ai-sdk-prodia/tests/upstream_mapping.rs::prodia_0031_it_passes_aspect_ratio_from_provider_options | none |
+| `packages/prodia/src/prodia-language-model.test.ts` | merges provider and request headers | crates/ai-sdk-prodia/tests/upstream_mapping.rs::prodia_0032_it_merges_provider_and_request_headers | none |
+| `packages/prodia/src/prodia-language-model.test.ts` | includes timestamp and modelId in response | crates/ai-sdk-prodia/tests/upstream_mapping.rs::prodia_0033_it_includes_timestamp_and_model_id_in_response | none |
+| `packages/prodia/src/prodia-language-model.test.ts` | handles API errors | crates/ai-sdk-prodia/tests/upstream_mapping.rs::prodia_0034_it_handles_api_errors | none |
+| `packages/prodia/src/prodia-language-model.test.ts` | handles response with text only (no image) | crates/ai-sdk-prodia/tests/upstream_mapping.rs::prodia_0035_it_handles_response_with_text_only_no_image | none |
+| `packages/prodia/src/prodia-language-model.test.ts` | wraps doGenerate result into stream parts | crates/ai-sdk-prodia/tests/upstream_mapping.rs::prodia_0036_it_wraps_do_generate_result_into_stream_parts | none |
 | `packages/prodia/src/prodia-provider.test.ts` | creates image models via .image and .imageModel | `prodia_0037_it_creates_image_models_via_image_and_image_model` | none |
-| `packages/prodia/src/prodia-provider.test.ts` | creates language models via .languageModel | missing | LLM surface not ported in the Prodia media-generation slice (`languageModel` returns `NoSuchModelError`). |
+| `packages/prodia/src/prodia-provider.test.ts` | creates language models via .languageModel | crates/ai-sdk-prodia/tests/upstream_mapping.rs::prodia_0038_it_creates_language_models_via_language_model | none |
 | `packages/prodia/src/prodia-provider.test.ts` | creates video models via .video and .videoModel | `prodia_0039_it_creates_video_models_via_video_and_video_model` | none |
 | `packages/prodia/src/prodia-provider.test.ts` | configures baseURL and headers correctly | `prodia_0040_it_configures_base_url_and_headers_correctly` | none |
 | `packages/prodia/src/prodia-provider.test.ts` | throws NoSuchModelError for unsupported model types | `prodia_0041_it_throws_no_such_model_error_for_unsupported_model_types` | none |
@@ -640,6 +668,13 @@ All 55 portable `packages/azure` upstream cases map to named Rust tests in `crat
 | `packages/huggingface/src/responses/huggingface-responses-language-model.test.ts` | normalizes image/* wildcard via detection | `huggingface_responses_resolves_top_level_image_media_types` | none |
 ## Perplexity Exact Case Map
 
+Row-level strict mapping for portable `packages/perplexity` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named colocated Rust
+test in `crates/ai-sdk-perplexity/src/lib.rs` (`#[cfg(test)] mod tests`) that
+exercises the corresponding upstream behavior deterministically.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
 | `packages/perplexity/src/convert-to-perplexity-messages.test.ts` | should convert a system message with text content | `convert_to_perplexity_messages_converts_system_user_assistant_messages` | none |
 | `packages/perplexity/src/convert-to-perplexity-messages.test.ts` | should convert a user message with text parts | `convert_to_perplexity_messages_converts_system_user_assistant_messages` | none |
 | `packages/perplexity/src/convert-to-perplexity-messages.test.ts` | should convert a user message with image parts | `convert_to_perplexity_messages_handles_top_level_media_type_resolution` | none |
@@ -672,3 +707,29 @@ All 55 portable `packages/azure` upstream cases map to named Rust tests in `crat
 | `packages/perplexity/src/perplexity-language-model.test.ts` | should stream images | `perplexity_provider_streams_sources_and_usage` | none |
 | `packages/perplexity/src/perplexity-language-model.test.ts` | should stream extended usage | `perplexity_provider_streams_sources_and_usage` | none |
 | `packages/perplexity/src/perplexity-language-model.test.ts` | should stream raw chunks | `perplexity_provider_streams_raw_chunks` | none |
+
+## Voyage Exact Case Map
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should send request with stringified json documents | `voyage_provider_creates_reranking_model_with_object_warning_and_options` | none |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should send request with the correct headers | `voyage_provider_creates_reranking_model_with_object_warning_and_options` | none |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should return result with warnings | `voyage_provider_creates_reranking_model_with_object_warning_and_options` | none |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should return result with the correct ranking | `voyage_provider_creates_reranking_model_with_object_warning_and_options; voyage_reranking_model_with_text_documents_sends_plain_strings_without_warnings` | none |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should return result with the correct response body | `voyage_reranking_model_with_text_documents_sends_plain_strings_without_warnings` | none |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should send request with text documents | `voyage_reranking_model_with_text_documents_sends_plain_strings_without_warnings` | none |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should return result without warnings | `voyage_reranking_model_with_text_documents_sends_plain_strings_without_warnings` | none |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should send request with the correct headers | `voyage_reranking_model_with_text_documents_sends_plain_strings_without_warnings` | none |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should return result with the correct ranking | `voyage_reranking_model_with_text_documents_sends_plain_strings_without_warnings` | none |
+| `packages/voyage/src/reranking/voyage-reranking-model.test.ts` | should return result with the correct response body | `voyage_reranking_model_with_text_documents_sends_plain_strings_without_warnings` | none |
+| `packages/voyage/src/voyage-embedding-model.test.ts` | should extract embedding | `voyage_provider_creates_embedding_model_with_options_headers_and_sorted_results` | none |
+| `packages/voyage/src/voyage-embedding-model.test.ts` | should expose the raw response | `voyage_provider_creates_embedding_model_with_options_headers_and_sorted_results` | none |
+| `packages/voyage/src/voyage-embedding-model.test.ts` | should extract usage | `voyage_provider_creates_embedding_model_with_options_headers_and_sorted_results` | none |
+| `packages/voyage/src/voyage-embedding-model.test.ts` | should pass the model and the values | `voyage_provider_creates_embedding_model_with_options_headers_and_sorted_results` | none |
+| `packages/voyage/src/voyage-embedding-model.test.ts` | should pass the input_type setting | `voyage_provider_creates_embedding_model_with_options_headers_and_sorted_results` | none |
+| `packages/voyage/src/voyage-embedding-model.test.ts` | should pass the output_dimension setting | `voyage_provider_creates_embedding_model_with_options_headers_and_sorted_results` | none |
+| `packages/voyage/src/voyage-embedding-model.test.ts` | should pass headers | `voyage_provider_creates_embedding_model_with_options_headers_and_sorted_results` | none |
+| `packages/voyage/src/voyage-provider.test.ts` | should create embedding model with correct provider and modelId | `voyage_provider_creates_embedding_model_with_options_headers_and_sorted_results` | none |
+| `packages/voyage/src/voyage-provider.test.ts` | should create reranking model with correct provider and modelId | `voyage_provider_creates_reranking_model_with_object_warning_and_options` | none |
+| `packages/voyage/src/voyage-provider.test.ts` | should throw NoSuchModelError for languageModel | `voyage_provider_reports_unsupported_language_and_image_models` | none |
+| `packages/voyage/src/voyage-provider.test.ts` | should throw NoSuchModelError for imageModel | `voyage_provider_reports_unsupported_language_and_image_models` | none |
