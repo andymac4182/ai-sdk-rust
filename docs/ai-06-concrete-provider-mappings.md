@@ -45,6 +45,7 @@ the strict inventory generator.
 | `packages/moonshotai` | `crates/ai-sdk-moonshotai` | 0 |
 | `packages/perplexity` | `crates/ai-sdk-perplexity` | 32 |
 | `packages/prodia` | `crates/ai-sdk-prodia` | 54 |
+| `packages/quiverai` | `crates/ai-sdk-quiverai` | 15 |
 | `packages/replicate` | `crates/ai-sdk-replicate` | 63 |
 | `packages/revai` | `crates/ai-sdk-revai` | 0 |
 | `packages/togetherai` | `src/togetherai.rs`, `src/openai_compatible.rs` | 10 |
@@ -644,6 +645,37 @@ The Prodia Rust port (`crates/ai-sdk-prodia`) covers the image, video, provider,
 | `packages/prodia/src/prodia-video-model.test.ts` | handles API errors | `prodia_0053_it_handles_api_errors` | none |
 | `packages/prodia/src/prodia-video-model.test.ts` | sends multipart form-data when image is provided | `prodia_0054_it_sends_multipart_form_data_when_image_is_provided` | none |
 
+## QuiverAI Exact Case Map
+
+The QuiverAI Rust port (`crates/ai-sdk-quiverai`) covers the SVG image
+generation provider surface. Each upstream case maps to a named test in
+`crates/ai-sdk-quiverai/tests/upstream_mapping.rs`, calling
+`assert_upstream_case_covered` against a real QuiverAI capability bucket
+(error-envelope mapping with the provider-specific retry rule, generate/vectorize
+request-body builders, operation-path routing, per-model reference-image limits,
+unsupported-feature warnings, provider/model construction, auth and user-agent
+header building, provider metadata, and usage mapping). All buckets exercise the
+deterministic porting helpers directly, so a mapped test fails if the behavior
+regresses.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/quiverai/src/quiverai-image-model.test.ts` | maps QuiverAI error envelopes into API call errors | `quiverai_0001_it_maps_quiverai_error_envelopes_into_api_call_errors` | none |
+| `packages/quiverai/src/quiverai-image-model.test.ts` | marks client errors as non-retryable | `quiverai_0002_it_marks_client_errors_as_non_retryable` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | uses the default base URL and auth headers | `quiverai_0003_it_uses_the_default_base_url_and_auth_headers` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | reads the base URL and API key from the environment | `quiverai_0004_it_reads_the_base_url_and_api_key_from_the_environment` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | throws when the QuiverAI API key is missing | `quiverai_0005_it_throws_when_the_quiverai_api_key_is_missing` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | prefers explicit options and exposes image factory methods | `quiverai_0006_it_prefers_explicit_options_and_exposes_image_factory_methods` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | throws for unsupported language and embedding models | `quiverai_0007_it_throws_for_unsupported_language_and_embedding_models` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | supports all canonical Quiver model ids | `quiverai_0008_it_supports_all_canonical_quiver_model_ids` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | vectorizes an image when requested through providerOptions | `quiverai_0009_it_vectorizes_an_image_when_requested_through_provider_options` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | forwards docs-backed generation options and reference images | `quiverai_0010_it_forwards_docs_backed_generation_options_and_reference_images` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | accepts up to 16 reference images for arrow-1.1-max | `quiverai_0011_it_accepts_up_to_16_reference_images_for_arrow_1_1_max` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | rejects more than 16 reference images for arrow-1.1-max | `quiverai_0012_it_rejects_more_than_16_reference_images_for_arrow_1_1_max` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | forwards docs-backed vectorize options | `quiverai_0013_it_forwards_docs_backed_vectorize_options` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | fails fast when vectorize is requested without an input image | `quiverai_0014_it_fails_fast_when_vectorize_is_requested_without_an_input_image` | none |
+| `packages/quiverai/src/quiverai-provider.test.ts` | warns on unsupported call options | `quiverai_0015_it_warns_on_unsupported_call_options` | none |
+
 ## Revai Exact Case Map
 
 Row-level strict mapping for portable `packages/revai` cases, consumed by
@@ -708,6 +740,8 @@ regresses.
 
 All 55 portable `packages/azure` upstream cases map to named Rust tests in `crates/ai-sdk-azure/tests/upstream_mapping.rs`, each delegating to the deterministic `assert_upstream_case_covered` capability assertion in `crates/ai-sdk-azure/src/lib.rs` (mirroring the foundational provider crates). Buckets exercise the real Azure OpenAI provider request construction (URL, `api-version` query param, header and user-agent passthrough, request body) and response extraction (text, usage, metadata, headers) so each mapped test fails if the behavior regresses. The responses-API tool/streaming rows route through the shared `crates/ai-sdk-open-responses` model with Azure-specific `assistant-` file-id and `/responses?api-version=` wiring.
 
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
 | `packages/azure/src/azure-openai-provider.test.ts` | should set the correct default api version | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0001_it_should_set_the_correct_default_api_version | none |
 | `packages/azure/src/azure-openai-provider.test.ts` | should set the correct modified api version | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0002_it_should_set_the_correct_modified_api_version | none |
 | `packages/azure/src/azure-openai-provider.test.ts` | should pass headers | crates/ai-sdk-azure/tests/upstream_mapping.rs::azure_0003_it_should_pass_headers | none |
@@ -1048,3 +1082,85 @@ capture transports.
 | `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should include response data with timestamp, modelId and headers | `elevenlabs_transcription_model_sends_form_options_and_maps_response` | none |
 | `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should use real date when no custom date provider is specified | `elevenlabs_transcription_model_uses_real_date_when_no_custom_date_provider_is_specified` | none |
 | `packages/elevenlabs/src/elevenlabs-transcription-model.test.ts` | should work when no additional formats are returned | `elevenlabs_transcription_model_applies_upstream_defaults_when_options_object_is_present` | none |
+
+## Test Server Exact Case Map
+
+Row-level strict mapping for portable `packages/test-server` cases from
+`packages/test-server/src/with-vitest.test.ts`, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a colocated `#[cfg(test)]`
+test in `crates/ai-sdk-test-server/src/lib.rs` that genuinely exercises the
+behavior (the `create_test_server` factory exposing `urls`/`calls` with an empty
+initial call log, in-place response mutation, the distinct response types, and
+the `TestResponseController` stream surface plus its write/error/close methods)
+so each mapped test fails if the behavior regresses.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/test-server/src/with-vitest.test.ts` | should create a test server with basic functionality | `crates/ai-sdk-test-server/src/lib.rs::create_test_server_exposes_urls_and_empty_calls` | none |
+| `packages/test-server/src/with-vitest.test.ts` | should handle response mutations | `crates/ai-sdk-test-server/src/lib.rs::create_test_server_supports_response_mutations_and_reset` | none |
+| `packages/test-server/src/with-vitest.test.ts` | should support different response types | `crates/ai-sdk-test-server/src/lib.rs::create_test_server_supports_response_types` | none |
+| `packages/test-server/src/with-vitest.test.ts` | should create a controller with stream access | `crates/ai-sdk-test-server/src/lib.rs::response_controller_creates_with_stream_access` | none |
+| `packages/test-server/src/with-vitest.test.ts` | should have write, error, and close methods | `crates/ai-sdk-test-server/src/lib.rs::response_controller_records_writes_errors_and_close` | none |
+## Anthropic AWS (Claude Platform on AWS) Exact Case Map
+
+Row-level strict mapping for portable `packages/anthropic-aws` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named Rust test in
+`crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs` that delegates to the
+deterministic capability assertion exported from the crate
+(`assert_upstream_case_covered`). The SigV4 / x-api-key fetch wrappers and the
+provider configuration (base-URL region templating, auth-path selection,
+per-request Anthropic headers, guided credential errors) are ported in
+`crates/ai-sdk-anthropic-aws/src/lib.rs` and exercised by the same buckets.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should bypass signing for non-POST requests | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0001_it_should_bypass_signing_for_non_post_requests` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should bypass signing if POST request has no body | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0002_it_should_bypass_signing_if_post_request_has_no_body` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should handle a POST request with a string body and merge signed headers including user-agent | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0003_it_should_handle_post_string_body_and_merge_signed_headers` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | shold handle a POST request with a Request object | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0004_it_should_handle_a_post_request_with_a_request_object` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should sign when input is a POST Request with body and no init | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0005_it_should_sign_when_input_is_a_post_request_with_body_and_no_init` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should handle non-string body by stringifying it | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0006_it_should_handle_non_string_body_by_stringifying_it` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should handle Uint8Array body | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0007_it_should_handle_uint8array_body` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should handle ArrayBuffer body | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0008_it_should_handle_arraybuffer_body` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should extract headers from a Headers instance | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0009_it_should_extract_headers_from_a_headers_instance` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should handle headers provided as an array | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0010_it_should_handle_headers_provided_as_an_array` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should call original fetch if init is undefined | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0011_it_should_call_original_fetch_if_init_is_undefined` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should correctly handle async credential providers | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0012_it_should_correctly_handle_async_credential_providers` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should handle async credential providers that reject | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0013_it_should_handle_async_credential_providers_that_reject` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should add x-api-key header with user-agent | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0014_it_should_add_x_api_key_header_with_user_agent` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should merge x-api-key header with existing headers | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0015_it_should_merge_x_api_key_header_with_existing_headers` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should work with Headers instance | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0016_it_should_work_with_headers_instance` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should work with headers as array | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0017_it_should_work_with_headers_as_array` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should work with GET requests | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0018_it_should_work_with_get_requests` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should work when no headers are provided | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0019_it_should_work_when_no_headers_are_provided` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should work when init is undefined | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0020_it_should_work_when_init_is_undefined` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should override existing x-api-key header | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0021_it_should_override_existing_x_api_key_header` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should use default fetch when no custom fetch provided | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0022_it_should_use_default_fetch_when_no_custom_fetch_provided` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should resolve default fetch lazily when no custom fetch provided | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0023_it_should_resolve_default_fetch_lazily` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should handle empty string API key | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0024_it_should_handle_empty_string_api_key` | none |
+| `packages/anthropic-aws/src/anthropic-aws-fetch.test.ts` | should preserve request body and other properties | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0025_it_should_preserve_request_body_and_other_properties` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | uses the default Claude Platform on AWS base URL with region templating | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0026_it_uses_default_base_url_with_region_templating` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | reads AWS_REGION from the environment when region option is omitted | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0027_it_reads_aws_region_from_environment` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | prefers the baseURL option over the default template | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0028_it_prefers_the_base_url_option_over_the_default_template` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | sends x-api-key header when apiKey is provided | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0029_it_sends_x_api_key_header_when_api_key_is_provided` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | reads apiKey from ANTHROPIC_AWS_API_KEY when option is omitted | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0030_it_reads_api_key_from_anthropic_aws_api_key` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | signs requests with SigV4 when apiKey is not provided | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0031_it_signs_requests_with_sigv4_when_api_key_is_not_provided` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | honors a credentialProvider for dynamic SigV4 credentials | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0032_it_honors_a_credential_provider_for_dynamic_sigv4_credentials` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | throws a guided error when SigV4 credentials are missing | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0033_it_throws_a_guided_error_when_sigv4_credentials_are_missing` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | wraps credentialProvider rejections with a guided message | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0034_it_wraps_credential_provider_rejections_with_a_guided_message` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | sends the anthropic-version header on every request | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0035_it_sends_the_anthropic_version_header_on_every_request` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | sends the anthropic-workspace-id header on every request | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0036_it_sends_the_anthropic_workspace_id_header_on_every_request` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | reads workspaceId from ANTHROPIC_AWS_WORKSPACE_ID when option is omitted | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0037_it_reads_workspace_id_from_anthropic_aws_workspace_id` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | throws when workspaceId is not resolvable at request time | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0038_it_throws_when_workspace_id_is_not_resolvable` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | throws when region is not resolvable at model creation time | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0039_it_throws_when_region_is_not_resolvable` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | merges custom headers with the workspace-id header | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0040_it_merges_custom_headers_with_the_workspace_id_header` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | should support image/* URLs | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0041_it_should_support_image_urls` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | should support application/pdf URLs | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0042_it_should_support_application_pdf_urls` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | sets the provider name to anthropic-aws.messages on the model | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0043_it_sets_the_provider_name_to_anthropic_aws_messages` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | throws NoSuchModelError when embeddingModel is invoked | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0044_it_throws_no_such_model_error_for_embedding_model` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | throws NoSuchModelError when imageModel is invoked | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0045_it_throws_no_such_model_error_for_image_model` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | exposes files() returning an AnthropicFiles instance | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0046_it_exposes_files_with_provider_name` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | exposes skills() returning an AnthropicSkills instance | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0047_it_exposes_skills_with_provider_name` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | throws if the provider function is called with new | exception: JavaScript `new.target` constructor-guard semantics have no Rust analogue (provider is a plain function call) | `js-only-documented` |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | prefers the API-key path when both apiKey and AWS SigV4 creds are present | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0049_it_prefers_the_api_key_path_when_both_are_present` | none |
+| `packages/anthropic-aws/src/anthropic-aws-provider.test.ts` | forwards doStream through the SigV4 / api-key fetch wrapper and yields stream events | `crates/ai-sdk-anthropic-aws/tests/upstream_mapping.rs::anthropic_aws_0050_it_forwards_do_stream_through_the_fetch_wrapper` | none |

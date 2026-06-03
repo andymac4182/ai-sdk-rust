@@ -3,17 +3,17 @@
 _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.tsv` with strict test inventory `docs/ai-strict-test-inventory.md`._
 
 - Displayed package rows: 54
-- Average estimated completion: 95.5%
-- Portable package average: 94.5%
-- Closed package rows: 50 / 54
-- Strict portable verified rows: 40 / 44
-- In-progress rows: 4
+- Average estimated completion: 99.3%
+- Portable package average: 99.1%
+- Closed package rows: 53 / 54
+- Strict portable verified rows: 43 / 44
+- In-progress rows: 1
 - Not-started rows: 0
 - Strict inventory full upstream cases scanned: 9013
-- Strict inventory full portable cases mapped: 6599 / 7669
-- Strict inventory full portable cases unmapped: 1070
-- Displayed-row strict portable test cases mapped: 6281 / 7266
-- Displayed-row strict portable test cases unmapped: 985
+- Strict inventory full portable cases mapped: 6724 / 7668
+- Strict inventory full portable cases unmapped: 944
+- Displayed-row strict portable test cases mapped: 6342 / 7266
+- Displayed-row strict portable test cases unmapped: 924
 
 ## 100% Closed
 
@@ -27,10 +27,12 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/open-responses` | 100% | Verified | provider package |
 | `@ai-sdk/anthropic` | 100% | Verified | provider package |
 | `@ai-sdk/amazon-bedrock` | 100% | Verified | provider package |
+| `@ai-sdk/google` | 100% | Verified | provider package |
 | `@ai-sdk/google-vertex` | 100% | Verified | provider package |
 | `@ai-sdk/xai` | 100% | Verified | provider package |
 | `@ai-sdk/alibaba` | 100% | Verified | provider package |
 | `@ai-sdk/assemblyai` | 100% | Verified | provider package |
+| `@ai-sdk/azure` | 100% | Verified | provider package |
 | `@ai-sdk/baseten` | 100% | Verified | provider package |
 | `@ai-sdk/black-forest-labs` | 100% | Verified | provider package |
 | `@ai-sdk/bytedance` | 100% | Verified | provider package |
@@ -59,6 +61,7 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | `@ai-sdk/vercel` | 100% | Verified | provider package |
 | `@ai-sdk/voyage` | 100% | Verified | provider package |
 | `@ai-sdk/otel` | 100% | Verified | telemetry package |
+| `@ai-sdk/test-server` | 100% | Verified | testing support package |
 | `@ai-sdk/devtools` | 100% | JavaScript-only | JavaScript devtools package |
 | `@ai-sdk/codemod` | 100% | JavaScript-only | JavaScript migration tooling |
 | `@ai-sdk/angular` | 100% | JavaScript-only | JavaScript framework adapter |
@@ -75,9 +78,6 @@ _Generated from `docs/upstream-parity.md` and `docs/package-progress-estimates.t
 | Package | Est. completion | Status | Kind | Basis / remaining work |
 | --- | ---: | --- | --- | --- |
 | `ai` | 60% | In progress | root core SDK package | strict test inventory: 924 portable upstream cases still need named Rust tests; sample failing IDs:... |
-| `@ai-sdk/google` | 99% | In progress | provider package | strict test inventory: 1 portable upstream cases still need named Rust tests; sample failing IDs: `packages-google-0291` |
-| `@ai-sdk/azure` | 0% | In progress | provider package | strict test inventory: 55 portable upstream cases still need named Rust tests; sample failing IDs:... |
-| `@ai-sdk/test-server` | 0% | In progress | testing support package | strict test inventory: 5 portable upstream cases still need named Rust tests; sample failing IDs:... |
 
 ## Not Started
 
