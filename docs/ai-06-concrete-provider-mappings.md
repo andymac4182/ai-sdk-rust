@@ -42,7 +42,7 @@ the strict inventory generator.
 | `packages/lmnt` | `crates/ai-sdk-lmnt` | 9 |
 | `packages/luma` | `crates/ai-sdk-luma` | 29 |
 | `packages/mistral` | `crates/ai-sdk-mistral` | 0 |
-| `packages/moonshotai` | `crates/ai-sdk-moonshotai` | 17 |
+| `packages/moonshotai` | `crates/ai-sdk-moonshotai` | 0 |
 | `packages/perplexity` | `crates/ai-sdk-perplexity` | 32 |
 | `packages/prodia` | `crates/ai-sdk-prodia` | 54 |
 | `packages/replicate` | `crates/ai-sdk-replicate` | 63 |
@@ -474,6 +474,35 @@ message/tool/reasoning/usage behavior so the assertion fails on regression.
 | `packages/deepseek/src/chat/deepseek-prepare-tools.test.ts` | should pass through strict mode when strict is false | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0036_it_should_pass_through_strict_mode_when_strict_is_false` | none |
 | `packages/deepseek/src/chat/deepseek-prepare-tools.test.ts` | should not include strict mode when strict is undefined | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0037_it_should_not_include_strict_mode_when_strict_is_undefined` | none |
 | `packages/deepseek/src/chat/deepseek-prepare-tools.test.ts` | should pass through strict mode for multiple tools with different strict settings | `crates/ai-sdk-deepseek/tests/upstream_mapping.rs::deepseek_0038_it_should_pass_through_strict_mode_for_multiple_tools` | none |
+## Moonshot Exact Case Map
+
+Row-level strict mapping for portable `packages/moonshotai` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named Rust test in
+`crates/ai-sdk-moonshotai/tests/upstream_mapping.rs` that delegates to the
+deterministic capability assertion exported from the crate
+(`assert_upstream_case_covered`). The `usage` bucket drives
+`convert_moonshotai_chat_usage`, `provider`/`model` exercise provider and model
+construction, and `transform` runs the MoonshotAI thinking `transformRequestBody`.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/moonshotai/src/convert-moonshotai-chat-usage.test.ts` | should handle null usage | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0001_it_should_handle_null_usage` | none |
+| `packages/moonshotai/src/convert-moonshotai-chat-usage.test.ts` | should handle undefined usage | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0002_it_should_handle_undefined_usage` | none |
+| `packages/moonshotai/src/convert-moonshotai-chat-usage.test.ts` | should convert basic usage without caching or reasoning | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0003_it_should_convert_basic_usage_without_caching_or_reasoning` | none |
+| `packages/moonshotai/src/convert-moonshotai-chat-usage.test.ts` | should convert usage with top-level cached_tokens (Moonshot format) | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0004_it_should_convert_usage_with_top_level_cached_tokens` | none |
+| `packages/moonshotai/src/convert-moonshotai-chat-usage.test.ts` | should convert usage with nested cached_tokens (OpenAI format) | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0005_it_should_convert_usage_with_nested_cached_tokens` | none |
+| `packages/moonshotai/src/convert-moonshotai-chat-usage.test.ts` | should prioritize top-level cached_tokens over nested | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0006_it_should_prioritize_top_level_cached_tokens_over_nested` | none |
+| `packages/moonshotai/src/convert-moonshotai-chat-usage.test.ts` | should convert usage with reasoning tokens | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0007_it_should_convert_usage_with_reasoning_tokens` | none |
+| `packages/moonshotai/src/convert-moonshotai-chat-usage.test.ts` | should convert usage with both cached and reasoning tokens | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0008_it_should_convert_usage_with_both_cached_and_reasoning_tokens` | none |
+| `packages/moonshotai/src/convert-moonshotai-chat-usage.test.ts` | should handle null values in usage fields | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0009_it_should_handle_null_values_in_usage_fields` | none |
+| `packages/moonshotai/src/moonshotai-provider.test.ts` | should create a MoonshotAIProvider instance with default options | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0010_it_should_create_a_provider_instance_with_default_options` | none |
+| `packages/moonshotai/src/moonshotai-provider.test.ts` | should create a MoonshotAIProvider instance with custom options | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0011_it_should_create_a_provider_instance_with_custom_options` | none |
+| `packages/moonshotai/src/moonshotai-provider.test.ts` | should return a chat model when called as a function | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0012_it_should_return_a_chat_model_when_called_as_a_function` | none |
+| `packages/moonshotai/src/moonshotai-provider.test.ts` | should construct a chat model with correct configuration | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0013_it_should_construct_a_chat_model_with_correct_configuration` | none |
+| `packages/moonshotai/src/moonshotai-provider.test.ts` | should pass transformRequestBody that converts thinking options | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0014_it_should_pass_transform_request_body_that_converts_thinking_options` | none |
+| `packages/moonshotai/src/moonshotai-provider.test.ts` | should handle thinking without budgetTokens | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0015_it_should_handle_thinking_without_budget_tokens` | none |
+| `packages/moonshotai/src/moonshotai-provider.test.ts` | should handle request without thinking options | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0016_it_should_handle_request_without_thinking_options` | none |
+| `packages/moonshotai/src/moonshotai-provider.test.ts` | should construct a language model with correct configuration | `crates/ai-sdk-moonshotai/tests/upstream_mapping.rs::moonshotai_0017_it_should_construct_a_language_model_with_correct_configuration` | none |
 
 ## Replicate Exact Case Map
 
