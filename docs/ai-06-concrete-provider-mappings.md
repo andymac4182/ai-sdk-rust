@@ -39,7 +39,7 @@ the strict inventory generator.
 | `packages/huggingface` | `src/huggingface.rs` | 37 |
 | `packages/hume` | `crates/ai-sdk-hume` | 9 |
 | `packages/klingai` | `crates/ai-sdk-klingai` | 0 |
-| `packages/lmnt` | `crates/ai-sdk-lmnt` | 9 |
+| `packages/lmnt` | `crates/ai-sdk-lmnt` | 0 |
 | `packages/luma` | `crates/ai-sdk-luma` | 29 |
 | `packages/mistral` | `crates/ai-sdk-mistral` | 0 |
 | `packages/moonshotai` | `crates/ai-sdk-moonshotai` | 0 |
@@ -960,3 +960,23 @@ provider wiring.
 | `packages/hume/src/hume-speech-model.test.ts` | should use real date when no custom date provider is specified | `hume_speech_model_uses_real_date_when_no_custom_date_provider_is_specified` | none |
 | `packages/hume/src/hume-speech-model.test.ts` | should handle different audio formats | `hume_speech_model_handles_different_audio_formats` | none |
 | `packages/hume/src/hume-speech-model.test.ts` | should include warnings if any are generated | `hume_speech_model_includes_warnings_if_any_are_generated` | none |
+
+## LMNT Exact Case Map
+
+Row-level strict mapping for portable `packages/lmnt` cases, consumed by
+`scripts/ai-strict-test-inventory.mjs`. Each row maps a named Rust test in
+`crates/ai-sdk-lmnt/src/lib.rs` that exercises the same behavior against the
+real LMNT speech model request mapping, response parsing, error schema, and
+provider wiring.
+
+| Upstream file | Current upstream case | Rust mapping | Remaining exception |
+| --- | --- | --- | --- |
+| `packages/lmnt/src/lmnt-error.test.ts` | should parse LMNT resource exhausted error | `lmnt_error_schema_parses_resource_exhausted_message` | none |
+| `packages/lmnt/src/lmnt-speech-model.test.ts` | should pass the model and text | `lmnt_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/lmnt/src/lmnt-speech-model.test.ts` | should pass headers | `lmnt_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/lmnt/src/lmnt-speech-model.test.ts` | should pass options | `lmnt_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/lmnt/src/lmnt-speech-model.test.ts` | should return audio data with correct content type | `lmnt_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/lmnt/src/lmnt-speech-model.test.ts` | should include response data with timestamp, modelId and headers | `lmnt_provider_creates_speech_model_with_headers_options_and_body` | none |
+| `packages/lmnt/src/lmnt-speech-model.test.ts` | should use real date when no custom date provider is specified | `lmnt_speech_model_uses_real_date_provider_by_default` | none |
+| `packages/lmnt/src/lmnt-speech-model.test.ts` | should handle different audio formats | `lmnt_speech_model_handles_different_audio_formats` | none |
+| `packages/lmnt/src/lmnt-speech-model.test.ts` | should include warnings if any are generated | `lmnt_speech_model_emits_no_warnings_for_supported_request` | none |
