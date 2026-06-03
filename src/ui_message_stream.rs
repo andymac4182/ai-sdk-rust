@@ -7,7 +7,7 @@ use crate::json::{JsonObject, JsonValue};
 use crate::language_model::FinishReason;
 use crate::provider::{ProviderMetadata, TypeValidationContext, TypeValidationError};
 use crate::provider_utils::{FlexibleSchema, normalize_headers, validate_types};
-use crate::util::{InvalidArgumentError, merge_objects};
+use crate::util::{InvalidArgumentError, merge_objects, parse_partial_json};
 
 /// Default content type used by upstream UI-message stream response helpers.
 pub const UI_MESSAGE_STREAM_CONTENT_TYPE: &str = "text/event-stream";
@@ -2980,11 +2980,14 @@ Ensure a \"tool-input-start\" chunk is sent before any \"tool-input-delta\" chun
                     .or_default();
                 buffer.push_str(&input_text_delta);
                 if let Some(index) = state.tool_part_indices.get(&tool_call_id).copied() {
-                    let parsed_input = serde_json::from_str::<JsonValue>(buffer).ok();
+                    // Mirror upstream `parsePartialJson`: repair incomplete JSON
+                    // prefixes during streaming so the part input reflects the
+                    // best-effort parsed value rather than the raw text buffer.
+                    let parsed_input = parse_partial_json(Some(buffer)).value().cloned();
                     update_tool_part_input_streaming(
                         &mut state.message.parts[index],
                         None,
-                        parsed_input.or_else(|| Some(JsonValue::String(buffer.clone()))),
+                        parsed_input,
                     );
                 }
                 updates.push(state.message.clone());
@@ -3258,9 +3261,9 @@ Ensure a \"tool-input-start\" chunk is sent before any \"tool-input-delta\" chun
                 updates.push(state.message.clone());
             }
             UiMessageChunk::Error { error_text } => {
+                let error = UiMessageStreamProcessError::new("error", "", error_text);
+                on_error(&error);
                 if terminate_on_error {
-                    let error = UiMessageStreamProcessError::new("error", "", error_text);
-                    on_error(&error);
                     return Err(error);
                 }
             }
@@ -7659,6 +7662,955 @@ Ensure a \"reasoning-start\" chunk is sent before any \"reasoning-end\" chunks."
 
         assert_eq!(error.message(), "Test error message");
         assert_eq!(error.chunk_type(), "error");
+    }
+
+    /// Parses an array of upstream wire chunks into [`UiMessageChunk`]s, mirroring
+    /// the `createUIMessageStream(parts)` helper used by the upstream snapshot
+    /// tests for `processUIMessageStream`.
+    fn wire_chunks(values: JsonValue) -> Vec<UiMessageChunk> {
+        serde_json::from_value::<Vec<UiMessageChunk>>(values).expect("wire chunks deserialize")
+    }
+
+    fn write_call_values(messages: &[UiMessage]) -> Vec<JsonValue> {
+        messages
+            .iter()
+            .map(|message| serde_json::to_value(message).expect("write-call message serializes"))
+            .collect()
+    }
+
+    fn final_state_value(state: &StreamingUiMessageState) -> JsonValue {
+        serde_json::to_value(&state.message).expect("final message serializes")
+    }
+
+    // ai-core: process-ui-message-stream.test.ts `text` describe block.
+    // Covers the write-call sequence (writeCalls snapshot) and the final
+    // message state for a simple step-start/text streaming roundtrip.
+    #[test]
+    fn process_ui_message_stream_text_block_write_calls_and_final_state() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let messages = process_ui_message_stream(
+            &mut state,
+            wire_chunks(json!([
+                { "type": "start", "messageId": "msg-123" },
+                { "type": "start-step" },
+                { "type": "text-start", "id": "text-1" },
+                { "type": "text-delta", "id": "text-1", "delta": "Hello, " },
+                { "type": "text-delta", "id": "text-1", "delta": "world!" },
+                { "type": "text-end", "id": "text-1" },
+                { "type": "finish-step" },
+                { "type": "finish" }
+            ])),
+            false,
+        )
+        .expect("text stream processes");
+
+        assert_eq!(
+            write_call_values(&messages),
+            vec![
+                json!({ "id": "msg-123", "role": "assistant", "parts": [] }),
+                json!({
+                    "id": "msg-123", "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "state": "streaming", "text": "" }
+                    ]
+                }),
+                json!({
+                    "id": "msg-123", "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "state": "streaming", "text": "Hello, " }
+                    ]
+                }),
+                json!({
+                    "id": "msg-123", "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "state": "streaming", "text": "Hello, world!" }
+                    ]
+                }),
+                json!({
+                    "id": "msg-123", "role": "assistant",
+                    "parts": [
+                        { "type": "step-start" },
+                        { "type": "text", "state": "done", "text": "Hello, world!" }
+                    ]
+                }),
+            ]
+        );
+        assert_eq!(
+            final_state_value(&state),
+            json!({
+                "id": "msg-123", "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "state": "done", "text": "Hello, world!" }
+                ]
+            })
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts `errors` describe block.
+    // An `error` chunk produces no write calls, leaves the message empty, and
+    // invokes the onError callback exactly once even without terminating.
+    #[test]
+    fn process_ui_message_stream_error_block_write_calls_final_state_and_on_error() {
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_cb = Arc::clone(&captured);
+
+        let messages = process_ui_message_stream_with_callbacks(
+            &mut state,
+            wire_chunks(json!([{ "type": "error", "errorText": "test error" }])),
+            false,
+            &mut |_| {},
+            &mut |_| {},
+            &mut |error| {
+                captured_for_cb
+                    .lock()
+                    .expect("captured lock")
+                    .push(error.message().to_string());
+            },
+        )
+        .expect("non-terminating error chunk processes");
+
+        assert!(write_call_values(&messages).is_empty());
+        assert_eq!(
+            final_state_value(&state),
+            json!({ "id": "msg-123", "role": "assistant", "parts": [] })
+        );
+        assert_eq!(
+            captured.lock().expect("captured lock").as_slice(),
+            ["test error".to_string()]
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts `server-side tool roundtrip`.
+    // A non-streamed tool input/output step followed by a text step yields the
+    // documented write-call count and final message state.
+    #[test]
+    fn process_ui_message_stream_server_side_tool_roundtrip_state() {
+        let chunks = wire_chunks(json!([
+            { "type": "start", "messageId": "msg-123" },
+            { "type": "start-step" },
+            { "type": "tool-input-available", "toolCallId": "tool-call-id", "toolName": "tool-name", "input": { "city": "London" } },
+            { "type": "tool-output-available", "toolCallId": "tool-call-id", "output": { "weather": "sunny" } },
+            { "type": "finish-step" },
+            { "type": "start-step" },
+            { "type": "text-start", "id": "text-1" },
+            { "type": "text-delta", "id": "text-1", "delta": "The weather in London is sunny." },
+            { "type": "text-end", "id": "text-1" },
+            { "type": "finish-step" },
+            { "type": "finish" }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let messages =
+            process_ui_message_stream(&mut state, chunks, false).expect("roundtrip processes");
+
+        // start, tool-input-available, tool-output-available, second step-start
+        // (via text-start), text-delta, text-end.
+        assert_eq!(messages.len(), 6);
+        let final_state = final_state_value(&state);
+        assert_eq!(
+            final_state["parts"],
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "tool-tool-name", "toolCallId": "tool-call-id",
+                    "state": "output-available",
+                    "input": { "city": "London" }, "output": { "weather": "sunny" }
+                },
+                { "type": "step-start" },
+                { "type": "text", "state": "done", "text": "The weather in London is sunny." }
+            ])
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts
+    // `server-side tool roundtrip with existing assistant message`.
+    // Existing assistant parts are preserved ahead of the new step parts.
+    #[test]
+    fn process_ui_message_stream_server_side_tool_roundtrip_existing_assistant_message() {
+        let last_message =
+            UiMessage::new("original-id", UiMessageRole::Assistant).with_part(json!({
+                "type": "tool-tool-name-original",
+                "toolCallId": "tool-call-id-original",
+                "state": "output-available",
+                "input": {},
+                "output": { "location": "Berlin" }
+            }));
+
+        let chunks = wire_chunks(json!([
+            { "type": "start", "messageId": "msg-123" },
+            { "type": "start-step" },
+            { "type": "tool-input-available", "toolCallId": "tool-call-id", "toolName": "tool-name", "input": { "city": "London" } },
+            { "type": "tool-output-available", "toolCallId": "tool-call-id", "output": { "weather": "sunny" } },
+            { "type": "finish-step" },
+            { "type": "start-step" },
+            { "type": "text-start", "id": "text-1" },
+            { "type": "text-delta", "id": "text-1", "delta": "The weather in London is sunny." },
+            { "type": "text-end", "id": "text-1" },
+            { "type": "finish-step" },
+            { "type": "finish" }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("msg-123", Some(last_message));
+        process_ui_message_stream(&mut state, chunks, false).expect("roundtrip processes");
+
+        let final_state = final_state_value(&state);
+        assert_eq!(final_state["id"], json!("msg-123"));
+        assert_eq!(
+            final_state["parts"],
+            json!([
+                {
+                    "type": "tool-tool-name-original",
+                    "toolCallId": "tool-call-id-original",
+                    "state": "output-available",
+                    "input": {}, "output": { "location": "Berlin" }
+                },
+                { "type": "step-start" },
+                {
+                    "type": "tool-tool-name", "toolCallId": "tool-call-id",
+                    "state": "output-available",
+                    "input": { "city": "London" }, "output": { "weather": "sunny" }
+                },
+                { "type": "step-start" },
+                { "type": "text", "state": "done", "text": "The weather in London is sunny." }
+            ])
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts
+    // `server-side tool roundtrip with multiple assistant texts`.
+    #[test]
+    fn process_ui_message_stream_server_side_tool_roundtrip_multiple_texts() {
+        let chunks = wire_chunks(json!([
+            { "type": "start", "messageId": "msg-123" },
+            { "type": "start-step" },
+            { "type": "text-start", "id": "text-1" },
+            { "type": "text-delta", "id": "text-1", "delta": "I will " },
+            { "type": "text-delta", "id": "text-1", "delta": "use a tool to get the weather in London." },
+            { "type": "text-end", "id": "text-1" },
+            { "type": "tool-input-available", "toolCallId": "tool-call-id", "toolName": "tool-name", "input": { "city": "London" } },
+            { "type": "tool-output-available", "toolCallId": "tool-call-id", "output": { "weather": "sunny" } },
+            { "type": "finish-step" },
+            { "type": "start-step" },
+            { "type": "text-start", "id": "text-2" },
+            { "type": "text-delta", "id": "text-2", "delta": "The weather in London " },
+            { "type": "text-delta", "id": "text-2", "delta": "is sunny." },
+            { "type": "text-end", "id": "text-2" },
+            { "type": "finish-step" },
+            { "type": "finish" }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        process_ui_message_stream(&mut state, chunks, false).expect("roundtrip processes");
+
+        assert_eq!(
+            final_state_value(&state)["parts"],
+            json!([
+                { "type": "step-start" },
+                { "type": "text", "state": "done", "text": "I will use a tool to get the weather in London." },
+                {
+                    "type": "tool-tool-name", "toolCallId": "tool-call-id",
+                    "state": "output-available",
+                    "input": { "city": "London" }, "output": { "weather": "sunny" }
+                },
+                { "type": "step-start" },
+                { "type": "text", "state": "done", "text": "The weather in London is sunny." }
+            ])
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts
+    // `server-side tool roundtrip with multiple assistant reasoning`. Reasoning
+    // provider metadata is preserved on each completed reasoning part.
+    #[test]
+    fn process_ui_message_stream_server_side_tool_roundtrip_multiple_reasoning() {
+        let chunks = wire_chunks(json!([
+            { "type": "start", "messageId": "msg-123" },
+            { "type": "start-step" },
+            { "type": "reasoning-start", "id": "reasoning-1" },
+            { "type": "reasoning-delta", "id": "reasoning-1", "delta": "I will ", "providerMetadata": { "testProvider": { "signature": "1234567890" } } },
+            { "type": "reasoning-delta", "id": "reasoning-1", "delta": "use a tool to get the weather in London." },
+            { "type": "reasoning-end", "id": "reasoning-1" },
+            { "type": "tool-input-available", "toolCallId": "tool-call-id", "toolName": "tool-name", "input": { "city": "London" } },
+            { "type": "tool-output-available", "toolCallId": "tool-call-id", "output": { "weather": "sunny" } },
+            { "type": "finish-step" },
+            { "type": "start-step" },
+            { "type": "reasoning-start", "id": "reasoning-2" },
+            { "type": "reasoning-delta", "id": "reasoning-2", "delta": "I now know the weather in London.", "providerMetadata": { "testProvider": { "signature": "abc123" } } },
+            { "type": "reasoning-end", "id": "reasoning-2" },
+            { "type": "text-start", "id": "text-1" },
+            { "type": "text-delta", "id": "text-1", "delta": "The weather in London is sunny." },
+            { "type": "text-end", "id": "text-1" },
+            { "type": "finish-step" },
+            { "type": "finish" }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        process_ui_message_stream(&mut state, chunks, false).expect("roundtrip processes");
+
+        assert_eq!(
+            final_state_value(&state)["parts"],
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "reasoning", "state": "done",
+                    "text": "I will use a tool to get the weather in London.",
+                    "providerMetadata": { "testProvider": { "signature": "1234567890" } }
+                },
+                {
+                    "type": "tool-tool-name", "toolCallId": "tool-call-id",
+                    "state": "output-available",
+                    "input": { "city": "London" }, "output": { "weather": "sunny" }
+                },
+                { "type": "step-start" },
+                {
+                    "type": "reasoning", "state": "done",
+                    "text": "I now know the weather in London.",
+                    "providerMetadata": { "testProvider": { "signature": "abc123" } }
+                },
+                { "type": "text", "state": "done", "text": "The weather in London is sunny." }
+            ])
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts
+    // `server-side tool roundtrip with output-error`.
+    #[test]
+    fn process_ui_message_stream_server_side_tool_roundtrip_output_error() {
+        let chunks = wire_chunks(json!([
+            { "type": "start", "messageId": "msg-123" },
+            { "type": "start-step" },
+            { "type": "tool-input-available", "toolCallId": "tool-call-id", "toolName": "tool-name", "input": { "city": "London" } },
+            { "type": "tool-output-error", "toolCallId": "tool-call-id", "errorText": "error-text" },
+            { "type": "finish-step" },
+            { "type": "start-step" },
+            { "type": "text-start", "id": "text-1" },
+            { "type": "text-delta", "id": "text-1", "delta": "The weather in London is sunny." },
+            { "type": "text-end", "id": "text-1" },
+            { "type": "finish-step" },
+            { "type": "finish" }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        process_ui_message_stream(&mut state, chunks, false).expect("roundtrip processes");
+
+        assert_eq!(
+            final_state_value(&state)["parts"],
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "tool-tool-name", "toolCallId": "tool-call-id",
+                    "state": "output-error", "errorText": "error-text",
+                    "input": { "city": "London" }
+                },
+                { "type": "step-start" },
+                { "type": "text", "state": "done", "text": "The weather in London is sunny." }
+            ])
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts `message metadata` describe.
+    // Metadata from start/message-metadata/finish deep-merges into the message.
+    #[test]
+    fn process_ui_message_stream_message_metadata_block() {
+        let chunks = wire_chunks(json!([
+            { "type": "start", "messageId": "msg-123", "messageMetadata": { "start": "start-1", "shared": { "key1": "value-1a", "key2": "value-2a" } } },
+            { "type": "start-step" },
+            { "type": "text-start", "id": "text-1" },
+            { "type": "text-delta", "id": "text-1", "delta": "t1" },
+            { "type": "message-metadata", "messageMetadata": { "metadata": "metadata-1" } },
+            { "type": "text-delta", "id": "text-1", "delta": "t2" },
+            { "type": "text-end", "id": "text-1" },
+            { "type": "finish-step" },
+            { "type": "finish", "messageMetadata": { "finish": "finish-1", "shared": { "key1": "value-1e", "key6": "value-6e" } } }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let messages = process_ui_message_stream(&mut state, chunks, false)
+            .expect("metadata stream processes");
+
+        // start, text-start, text-delta(t1), message-metadata, text-delta(t2),
+        // text-end, finish(with metadata) => 7 write calls.
+        assert_eq!(messages.len(), 7);
+        let final_state = final_state_value(&state);
+        assert_eq!(
+            final_state["metadata"],
+            json!({
+                "finish": "finish-1",
+                "metadata": "metadata-1",
+                "shared": { "key1": "value-1e", "key2": "value-2a", "key6": "value-6e" },
+                "start": "start-1"
+            })
+        );
+        assert_eq!(
+            final_state["parts"],
+            json!([
+                { "type": "step-start" },
+                { "type": "text", "state": "done", "text": "t1t2" }
+            ])
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts
+    // `message metadata delayed after finish`.
+    #[test]
+    fn process_ui_message_stream_message_metadata_delayed_after_finish() {
+        let chunks = wire_chunks(json!([
+            { "type": "start", "messageId": "msg-123" },
+            { "type": "start-step" },
+            { "type": "text-start", "id": "text-1" },
+            { "type": "text-delta", "id": "text-1", "delta": "t1" },
+            { "type": "text-end", "id": "text-1" },
+            { "type": "finish-step" },
+            { "type": "finish" },
+            { "type": "message-metadata", "messageMetadata": { "key1": "value-1" } }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let messages = process_ui_message_stream(&mut state, chunks, false)
+            .expect("metadata stream processes");
+
+        // start, text-start, text-delta, text-end, message-metadata => 5 writes.
+        assert_eq!(messages.len(), 5);
+        let final_state = final_state_value(&state);
+        assert_eq!(final_state["metadata"], json!({ "key1": "value-1" }));
+        assert_eq!(
+            final_state["parts"],
+            json!([
+                { "type": "step-start" },
+                { "type": "text", "state": "done", "text": "t1" }
+            ])
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts
+    // `message metadata with existing assistant lastMessage`. Existing message
+    // metadata is merged with start metadata.
+    #[test]
+    fn process_ui_message_stream_message_metadata_with_existing_last_message() {
+        let last_message = UiMessage::new("original-id", UiMessageRole::Assistant)
+            .with_metadata(json!({ "key1": "value-1a", "key3": "value-3a" }));
+
+        let chunks = wire_chunks(json!([
+            { "type": "start", "messageId": "msg-123", "messageMetadata": { "key1": "value-1b", "key2": "value-2b" } },
+            { "type": "start-step" },
+            { "type": "text-start", "id": "text-1" },
+            { "type": "text-delta", "id": "text-1", "delta": "t1" },
+            { "type": "text-end", "id": "text-1" },
+            { "type": "finish-step" },
+            { "type": "finish" }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("msg-123", Some(last_message));
+        process_ui_message_stream(&mut state, chunks, false).expect("metadata stream processes");
+
+        let final_state = final_state_value(&state);
+        assert_eq!(
+            final_state["metadata"],
+            json!({ "key1": "value-1b", "key2": "value-2b", "key3": "value-3a" })
+        );
+        assert_eq!(
+            final_state["parts"],
+            json!([
+                { "type": "step-start" },
+                { "type": "text", "state": "done", "text": "t1" }
+            ])
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts `tool call streaming`. Partial
+    // JSON deltas update the input through the input-streaming state, then settle
+    // to input-available and output-available.
+    #[test]
+    fn process_ui_message_stream_tool_call_streaming_block() {
+        let chunks = wire_chunks(json!([
+            { "type": "start", "messageId": "msg-123" },
+            { "type": "start-step" },
+            { "type": "tool-input-start", "toolCallId": "tool-call-0", "toolName": "test-tool" },
+            { "type": "tool-input-delta", "toolCallId": "tool-call-0", "inputTextDelta": "{\"testArg\":\"t" },
+            { "type": "tool-input-delta", "toolCallId": "tool-call-0", "inputTextDelta": "est-value\"}}" },
+            { "type": "tool-input-available", "toolCallId": "tool-call-0", "toolName": "test-tool", "input": { "testArg": "test-value" } },
+            { "type": "tool-output-available", "toolCallId": "tool-call-0", "output": "test-result" },
+            { "type": "finish-step" },
+            { "type": "finish" }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let messages =
+            process_ui_message_stream(&mut state, chunks, false).expect("tool streaming processes");
+
+        let writes = write_call_values(&messages);
+        // The first input-streaming delta repairs partial JSON to { testArg: "t" }.
+        assert_eq!(
+            writes[2]["parts"][1],
+            json!({
+                "type": "tool-test-tool", "toolCallId": "tool-call-0",
+                "state": "input-streaming", "input": { "testArg": "t" }
+            })
+        );
+        assert_eq!(
+            final_state_value(&state)["parts"],
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "tool-test-tool", "toolCallId": "tool-call-0",
+                    "state": "output-available",
+                    "input": { "testArg": "test-value" }, "output": "test-result"
+                }
+            ])
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts `start with message id`. Same
+    // shape as the text block but exercised via the explicit start messageId.
+    #[test]
+    fn process_ui_message_stream_start_with_message_id_block() {
+        let chunks = wire_chunks(json!([
+            { "type": "start", "messageId": "msg-123" },
+            { "type": "start-step" },
+            { "type": "text-start", "id": "text-1" },
+            { "type": "text-delta", "id": "text-1", "delta": "Hello, " },
+            { "type": "text-delta", "id": "text-1", "delta": "world!" },
+            { "type": "text-end", "id": "text-1" },
+            { "type": "finish-step" },
+            { "type": "finish" }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("other-id", None);
+        let messages =
+            process_ui_message_stream(&mut state, chunks, false).expect("stream processes");
+
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0].id, "msg-123");
+        assert_eq!(
+            final_state_value(&state),
+            json!({
+                "id": "msg-123", "role": "assistant",
+                "parts": [
+                    { "type": "step-start" },
+                    { "type": "text", "state": "done", "text": "Hello, world!" }
+                ]
+            })
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts `reasoning` describe block.
+    #[test]
+    fn process_ui_message_stream_reasoning_block() {
+        let chunks = wire_chunks(json!([
+            { "type": "start", "messageId": "msg-123" },
+            { "type": "start-step" },
+            { "type": "reasoning-start", "id": "reasoning-1" },
+            { "type": "reasoning-delta", "id": "reasoning-1", "delta": "I will open the conversation" },
+            { "type": "reasoning-delta", "id": "reasoning-1", "delta": " with witty banter. ", "providerMetadata": { "testProvider": { "signature": "1234567890" } } },
+            { "type": "reasoning-end", "id": "reasoning-1" },
+            { "type": "reasoning-start", "id": "reasoning-2" },
+            { "type": "reasoning-delta", "id": "reasoning-2", "delta": "redacted-data", "providerMetadata": { "testProvider": { "isRedacted": true } } },
+            { "type": "reasoning-end", "id": "reasoning-2" },
+            { "type": "reasoning-start", "id": "reasoning-3" },
+            { "type": "reasoning-delta", "id": "reasoning-3", "delta": "Once the user has relaxed," },
+            { "type": "reasoning-delta", "id": "reasoning-3", "delta": " I will pry for valuable information.", "providerMetadata": { "testProvider": { "signature": "abc123" } } },
+            { "type": "reasoning-end", "id": "reasoning-3" },
+            { "type": "text-start", "id": "text-1" },
+            { "type": "text-delta", "id": "text-1", "delta": "Hi there!" },
+            { "type": "text-end", "id": "text-1" },
+            { "type": "finish-step" },
+            { "type": "finish" }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        process_ui_message_stream(&mut state, chunks, false).expect("reasoning stream processes");
+
+        assert_eq!(
+            final_state_value(&state)["parts"],
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "reasoning", "state": "done",
+                    "text": "I will open the conversation with witty banter. ",
+                    "providerMetadata": { "testProvider": { "signature": "1234567890" } }
+                },
+                {
+                    "type": "reasoning", "state": "done", "text": "redacted-data",
+                    "providerMetadata": { "testProvider": { "isRedacted": true } }
+                },
+                {
+                    "type": "reasoning", "state": "done",
+                    "text": "Once the user has relaxed, I will pry for valuable information.",
+                    "providerMetadata": { "testProvider": { "signature": "abc123" } }
+                },
+                { "type": "text", "state": "done", "text": "Hi there!" }
+            ])
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts `onToolCall is executed`.
+    // Without an output, the tool settles at input-available and the callback is
+    // invoked once. Two write calls are emitted (start + tool-input-available).
+    #[test]
+    fn process_ui_message_stream_on_tool_call_executed_block() {
+        let chunks = wire_chunks(json!([
+            { "type": "start", "messageId": "msg-123" },
+            { "type": "start-step" },
+            { "type": "tool-input-available", "toolCallId": "tool-call-id", "toolName": "tool-name", "input": { "city": "London" } },
+            { "type": "finish-step" },
+            { "type": "finish" }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let tool_calls = Arc::new(Mutex::new(0usize));
+        let tool_calls_for_cb = Arc::clone(&tool_calls);
+
+        let messages = process_ui_message_stream_with_callbacks(
+            &mut state,
+            chunks,
+            false,
+            &mut |_| {},
+            &mut |_| {
+                *tool_calls_for_cb.lock().expect("tool-call lock") += 1;
+            },
+            &mut |_| {},
+        )
+        .expect("on-tool-call stream processes");
+
+        assert_eq!(*tool_calls.lock().expect("tool-call lock"), 1);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            final_state_value(&state)["parts"],
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "tool-tool-name", "toolCallId": "tool-call-id",
+                    "state": "input-available", "input": { "city": "London" }
+                }
+            ])
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts `sources` describe block.
+    // The onFinish case asserts the final state which includes the source-url part.
+    #[test]
+    fn process_ui_message_stream_sources_block() {
+        let chunks = wire_chunks(json!([
+            { "type": "start", "messageId": "msg-123" },
+            { "type": "start-step" },
+            { "type": "text-start", "id": "text-1" },
+            { "type": "text-delta", "id": "text-1", "delta": "The weather in London is sunny." },
+            { "type": "text-end", "id": "text-1" },
+            { "type": "source-url", "sourceId": "source-id", "url": "https://example.com", "title": "Example" },
+            { "type": "finish-step" },
+            { "type": "finish" }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let messages =
+            process_ui_message_stream(&mut state, chunks, false).expect("sources stream processes");
+
+        // start, text-start, text-delta, text-end, source-url => 5 write calls.
+        assert_eq!(messages.len(), 5);
+        assert_eq!(
+            final_state_value(&state)["parts"],
+            json!([
+                { "type": "step-start" },
+                { "type": "text", "state": "done", "text": "The weather in London is sunny." },
+                {
+                    "type": "source-url", "sourceId": "source-id",
+                    "title": "Example", "url": "https://example.com"
+                }
+            ])
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts `file parts` describe block.
+    #[test]
+    fn process_ui_message_stream_file_parts_block() {
+        let chunks = wire_chunks(json!([
+            { "type": "start", "messageId": "msg-123" },
+            { "type": "start-step" },
+            { "type": "text-start", "id": "text-1" },
+            { "type": "text-delta", "id": "text-1", "delta": "Here is a file:" },
+            { "type": "text-end", "id": "text-1" },
+            { "type": "file", "url": "data:text/plain;base64,SGVsbG8gV29ybGQ=", "mediaType": "text/plain" },
+            { "type": "text-start", "id": "text-2" },
+            { "type": "text-delta", "id": "text-2", "delta": "And another one:" },
+            { "type": "text-end", "id": "text-2" },
+            { "type": "file", "url": "data:application/json;base64,eyJrZXkiOiJ2YWx1ZSJ9", "mediaType": "application/json" },
+            { "type": "finish-step" },
+            { "type": "finish" }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        process_ui_message_stream(&mut state, chunks, false).expect("file stream processes");
+
+        assert_eq!(
+            final_state_value(&state)["parts"],
+            json!([
+                { "type": "step-start" },
+                { "type": "text", "state": "done", "text": "Here is a file:" },
+                { "type": "file", "mediaType": "text/plain", "url": "data:text/plain;base64,SGVsbG8gV29ybGQ=" },
+                { "type": "text", "state": "done", "text": "And another one:" },
+                { "type": "file", "mediaType": "application/json", "url": "data:application/json;base64,eyJrZXkiOiJ2YWx1ZSJ9" }
+            ])
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts `file parts with providerMetadata`.
+    #[test]
+    fn process_ui_message_stream_file_parts_with_provider_metadata_block() {
+        let chunks = wire_chunks(json!([
+            { "type": "start", "messageId": "msg-123" },
+            { "type": "start-step" },
+            { "type": "file", "url": "data:text/plain;base64,SGVsbG8gV29ybGQ=", "mediaType": "text/plain", "providerMetadata": { "testProvider": { "signature": "sig-1" } } },
+            { "type": "file", "url": "data:image/jpeg;base64,QkFVRw==", "mediaType": "image/jpeg" },
+            { "type": "finish-step" },
+            { "type": "finish" }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        process_ui_message_stream(&mut state, chunks, false).expect("file stream processes");
+
+        assert_eq!(
+            final_state_value(&state)["parts"],
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "file", "mediaType": "text/plain",
+                    "url": "data:text/plain;base64,SGVsbG8gV29ybGQ=",
+                    "providerMetadata": { "testProvider": { "signature": "sig-1" } }
+                },
+                { "type": "file", "mediaType": "image/jpeg", "url": "data:image/jpeg;base64,QkFVRw==" }
+            ])
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts `data ui parts (single part)`.
+    // Covers writeCalls, final state, and the onData callback.
+    #[test]
+    fn process_ui_message_stream_data_single_part_block() {
+        let chunks = wire_chunks(json!([
+            { "type": "start", "messageId": "msg-123" },
+            { "type": "start-step" },
+            { "type": "data-test", "data": "example-data-can-be-anything" },
+            { "type": "finish-step" },
+            { "type": "finish" }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let data_calls = Arc::new(Mutex::new(Vec::new()));
+        let data_calls_for_cb = Arc::clone(&data_calls);
+
+        let messages = process_ui_message_stream_with_callbacks(
+            &mut state,
+            chunks,
+            false,
+            &mut |chunk| {
+                data_calls_for_cb
+                    .lock()
+                    .expect("data lock")
+                    .push(serde_json::to_value(chunk).expect("data chunk serializes"));
+            },
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .expect("data stream processes");
+
+        // start, data-test => 2 write calls.
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            write_call_values(&messages)[1]["parts"],
+            json!([
+                { "type": "step-start" },
+                { "type": "data-test", "data": "example-data-can-be-anything" }
+            ])
+        );
+        assert_eq!(
+            final_state_value(&state)["parts"],
+            json!([
+                { "type": "step-start" },
+                { "type": "data-test", "data": "example-data-can-be-anything" }
+            ])
+        );
+        assert_eq!(
+            data_calls.lock().expect("data lock").as_slice(),
+            [json!({ "type": "data-test", "data": "example-data-can-be-anything" })]
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts
+    // `data ui parts (single part with id and merge update)`. The second data
+    // chunk with the same id replaces the prior data payload.
+    #[test]
+    fn process_ui_message_stream_data_single_part_with_id_merge_update_block() {
+        let chunks = wire_chunks(json!([
+            { "type": "start", "messageId": "msg-123" },
+            { "type": "start-step" },
+            { "type": "data-test", "id": "data-part-id", "data": { "a": "a1", "b": "b1" } },
+            { "type": "data-test", "id": "data-part-id", "data": { "b": "b2", "c": "c2" } },
+            { "type": "finish-step" },
+            { "type": "finish" }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let messages =
+            process_ui_message_stream(&mut state, chunks, false).expect("data stream processes");
+
+        let writes = write_call_values(&messages);
+        assert_eq!(
+            writes[1]["parts"][1],
+            json!({ "type": "data-test", "id": "data-part-id", "data": { "a": "a1", "b": "b1" } })
+        );
+        assert_eq!(
+            writes[2]["parts"][1],
+            json!({ "type": "data-test", "id": "data-part-id", "data": { "b": "b2", "c": "c2" } })
+        );
+        assert_eq!(
+            final_state_value(&state)["parts"],
+            json!([
+                { "type": "step-start" },
+                { "type": "data-test", "id": "data-part-id", "data": { "b": "b2", "c": "c2" } }
+            ])
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts `dynamic tools` describe block.
+    #[test]
+    fn process_ui_message_stream_dynamic_tools_block() {
+        let chunks = wire_chunks(json!([
+            { "type": "start", "messageId": "msg-123" },
+            { "type": "start-step" },
+            { "type": "tool-input-start", "toolCallId": "tool-call-1", "toolName": "t1", "dynamic": true },
+            { "type": "tool-input-delta", "toolCallId": "tool-call-1", "inputTextDelta": "{ \"query\": \"test\" }" },
+            { "type": "tool-input-available", "toolCallId": "tool-call-1", "toolName": "t1", "input": { "query": "test" }, "dynamic": true },
+            { "type": "tool-input-available", "toolCallId": "tool-call-2", "toolName": "t1", "input": { "query": "test" }, "dynamic": true },
+            { "type": "tool-output-available", "toolCallId": "tool-call-1", "output": { "result": "provider-result" }, "dynamic": true },
+            { "type": "tool-output-error", "toolCallId": "tool-call-2", "errorText": "error-text", "dynamic": true },
+            { "type": "finish-step" },
+            { "type": "finish" }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        let tool_calls = Arc::new(Mutex::new(0usize));
+        let tool_calls_for_cb = Arc::clone(&tool_calls);
+
+        process_ui_message_stream_with_callbacks(
+            &mut state,
+            chunks,
+            false,
+            &mut |_| {},
+            &mut |_| {
+                *tool_calls_for_cb.lock().expect("tool-call lock") += 1;
+            },
+            &mut |_| {},
+        )
+        .expect("dynamic tool stream processes");
+
+        assert!(*tool_calls.lock().expect("tool-call lock") >= 1);
+        assert_eq!(
+            final_state_value(&state)["parts"],
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "dynamic-tool", "toolName": "t1", "toolCallId": "tool-call-1",
+                    "state": "output-available",
+                    "input": { "query": "test" }, "output": { "result": "provider-result" }
+                },
+                {
+                    "type": "dynamic-tool", "toolName": "t1", "toolCallId": "tool-call-2",
+                    "state": "output-error", "errorText": "error-text",
+                    "input": { "query": "test" }
+                }
+            ])
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts `provider metadata` describe.
+    // Text part provider metadata is preserved and tool call provider metadata is
+    // surfaced as callProviderMetadata.
+    #[test]
+    fn process_ui_message_stream_provider_metadata_block() {
+        let chunks = wire_chunks(json!([
+            { "type": "start", "messageId": "msg-123" },
+            { "type": "start-step" },
+            { "type": "text-start", "id": "1", "providerMetadata": { "testProvider": { "signature": "1" } } },
+            { "type": "text-delta", "id": "1", "delta": "Hello" },
+            { "type": "text-delta", "id": "1", "delta": ", " },
+            { "type": "text-delta", "id": "1", "delta": "world!" },
+            { "type": "text-end", "id": "1" },
+            { "type": "tool-input-available", "toolCallId": "tool-call-id", "toolName": "tool-name", "input": { "query": "test" }, "providerMetadata": { "testProvider": { "signature": "2" } } },
+            { "type": "finish-step" },
+            { "type": "finish" }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("msg-123", None);
+        process_ui_message_stream(&mut state, chunks, false).expect("provider metadata processes");
+
+        assert_eq!(
+            final_state_value(&state)["parts"],
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "text", "state": "done", "text": "Hello, world!",
+                    "providerMetadata": { "testProvider": { "signature": "1" } }
+                },
+                {
+                    "type": "tool-tool-name", "toolCallId": "tool-call-id",
+                    "state": "input-available", "input": { "query": "test" },
+                    "callProviderMetadata": { "testProvider": { "signature": "2" } }
+                }
+            ])
+        );
+    }
+
+    // ai-core: process-ui-message-stream.test.ts
+    // `tool execution denial (static tool)`. A tool-output-denied chunk against
+    // an existing approval-responded part moves it to output-denied while keeping
+    // the original message id (start has no messageId).
+    #[test]
+    fn process_ui_message_stream_tool_execution_denial_static_tool_block() {
+        let last_message = UiMessage::new("original-id", UiMessageRole::Assistant)
+            .with_part(json!({ "type": "step-start" }))
+            .with_part(json!({
+                "type": "tool-tool1",
+                "toolCallId": "call-1",
+                "state": "approval-responded",
+                "approval": { "id": "id-1", "approved": false },
+                "input": { "value": "value" }
+            }));
+
+        let chunks = wire_chunks(json!([
+            { "type": "start" },
+            { "type": "tool-output-denied", "toolCallId": "call-1" },
+            { "type": "start-step" },
+            { "type": "text-start", "id": "1" },
+            { "type": "text-delta", "id": "1", "delta": "I did not execute the tool." },
+            { "type": "text-end", "id": "1" },
+            { "type": "finish-step" },
+            { "type": "finish" }
+        ]));
+
+        let mut state = StreamingUiMessageState::new("msg-123", Some(last_message));
+        process_ui_message_stream(&mut state, chunks, false).expect("denial stream processes");
+
+        let final_state = final_state_value(&state);
+        assert_eq!(final_state["id"], json!("original-id"));
+        assert_eq!(
+            final_state["parts"],
+            json!([
+                { "type": "step-start" },
+                {
+                    "type": "tool-tool1", "toolCallId": "call-1",
+                    "state": "output-denied",
+                    "approval": { "id": "id-1", "approved": false },
+                    "input": { "value": "value" }
+                },
+                { "type": "step-start" },
+                { "type": "text", "state": "done", "text": "I did not execute the tool." }
+            ])
+        );
     }
 
     #[test]

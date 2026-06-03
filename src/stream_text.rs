@@ -4810,7 +4810,7 @@ mod tests {
         LanguageModelStreamResponseMetadata, LanguageModelStreamResult,
         LanguageModelStreamResultResponse, LanguageModelStreamStart, LanguageModelSupportedUrls,
         LanguageModelSystemMessage, LanguageModelTextDelta, LanguageModelTextPart,
-        LanguageModelToolApprovalRequest, LanguageModelToolApprovalRequestPart,
+        LanguageModelTool, LanguageModelToolApprovalRequest, LanguageModelToolApprovalRequestPart,
         LanguageModelToolApprovalResponsePart, LanguageModelToolCall, LanguageModelToolCallPart,
         LanguageModelToolContentPart, LanguageModelToolInputDelta, LanguageModelToolInputEnd,
         LanguageModelToolInputStart, LanguageModelToolMessage, LanguageModelToolResult,
@@ -4978,6 +4978,19 @@ mod tests {
             &model,
             vec![user_message("test-input")],
         )))
+    }
+
+    fn stream_result_hello() -> LanguageModelStreamResult<Vec<LanguageModelStreamPart>> {
+        LanguageModelStreamResult::new(vec![
+            LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello, ")),
+            LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+            LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ])
     }
 
     fn stream_text_result_from_text(text: &str) -> StreamTextResult {
@@ -16317,5 +16330,320 @@ mod tests {
         assert_eq!(result.tool_results[0].input, json!({}));
         assert_eq!(result.tool_results[0].output["forecast"], "sunny");
         assert_eq!(result.tool_results[0].output["calledWith"], json!({}));
+    }
+
+    // Upstream: stream-text.test.ts errors "should swallow error to prevent server crash".
+    // A pre-text stream error must not panic; textStream is empty and the result errors.
+    #[test]
+    fn stream_text_swallows_error_and_yields_empty_text_stream() {
+        let result = stream_text_result_from_parts(vec![LanguageModelStreamPart::Error(
+            LanguageModelErrorStreamPart::new(json!({ "message": "test error" })),
+        )]);
+
+        assert!(result.text_stream.is_empty());
+        assert_eq!(result.text, "");
+        assert_eq!(result.errors, vec![json!({ "message": "test error" })]);
+        assert_eq!(result.finish_reason, FinishReason::Error);
+    }
+
+    // Upstream: stream-text.test.ts errors "should reject text promise when error is thrown".
+    // When no output is generated and the stream errors, result.text resolves to empty
+    // (the Rust port surfaces the error via result.errors rather than a rejected promise).
+    #[test]
+    fn stream_text_text_is_empty_when_error_is_thrown() {
+        let result = stream_text_result_from_parts(vec![LanguageModelStreamPart::Error(
+            LanguageModelErrorStreamPart::new(json!({ "message": "test error" })),
+        )]);
+
+        assert_eq!(result.text, "");
+        assert!(!result.errors.is_empty());
+        assert!(
+            result
+                .parts
+                .iter()
+                .any(|part| matches!(part, TextStreamPart::Error(_)))
+        );
+    }
+
+    // Upstream: stream-text.test.ts options.experimental_onStart
+    // "should send correct information with system and messages": the start event exposes
+    // provider, modelId, messages, maxOutputTokens and temperature.
+    #[test]
+    fn stream_text_on_start_exposes_provider_model_and_settings() {
+        let model = MockLanguageModel::new().with_stream_result(stream_result_hello());
+        let captured = Arc::new(Mutex::new(None::<GenerateTextStartEvent>));
+        let captured_for_callback = Arc::clone(&captured);
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(
+                &model,
+                vec![
+                    LanguageModelMessage::System(LanguageModelSystemMessage::new(
+                        "you are a helpful assistant",
+                    )),
+                    user_message("test-message"),
+                ],
+            )
+            .with_max_output_tokens(100)
+            .with_temperature(0.5)
+            .with_on_start(move |event| {
+                let captured = Arc::clone(&captured_for_callback);
+                async move {
+                    *captured.lock().expect("captured lock") = Some(event);
+                }
+            }),
+        ));
+
+        let _ = result.text;
+        let event = captured
+            .lock()
+            .expect("captured lock")
+            .clone()
+            .expect("on_start ran");
+        assert_eq!(event.provider, "mock-provider");
+        assert_eq!(event.model_id, "mock-model-id");
+        assert_eq!(event.messages.len(), 2);
+        assert_eq!(event.max_output_tokens, Some(100));
+        assert_eq!(event.temperature, Some(0.5));
+        assert_eq!(event.max_retries, DEFAULT_MAX_RETRIES);
+    }
+
+    // Upstream: stream-text.test.ts options.experimental_onStart
+    // "should expose tools and toolChoice".
+    #[test]
+    fn stream_text_on_start_exposes_tools_and_tool_choice() {
+        let model = MockLanguageModel::new().with_stream_result(stream_result_hello());
+        let captured = Arc::new(Mutex::new(None::<GenerateTextStartEvent>));
+        let captured_for_callback = Arc::clone(&captured);
+
+        let input_schema =
+            json!({ "type": "object", "properties": { "value": { "type": "string" } } })
+                .as_object()
+                .expect("schema is object")
+                .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(Tool::new("myTool", input_schema))
+                .with_tool_choice(LanguageModelToolChoice::Auto)
+                .with_on_start(move |event| {
+                    let captured = Arc::clone(&captured_for_callback);
+                    async move {
+                        *captured.lock().expect("captured lock") = Some(event);
+                    }
+                }),
+        ));
+
+        let _ = result.text;
+        let event = captured
+            .lock()
+            .expect("captured lock")
+            .clone()
+            .expect("on_start ran");
+        assert_eq!(event.tools.len(), 1);
+        let tool_name = match &event.tools[0] {
+            LanguageModelTool::Function(tool) => tool.name.as_str(),
+            LanguageModelTool::Provider(tool) => tool.name.as_str(),
+        };
+        assert_eq!(tool_name, "myTool");
+        assert_eq!(event.tool_choice, Some(LanguageModelToolChoice::Auto));
+    }
+
+    // Upstream: stream-text.test.ts options.experimental_onStart
+    // "should expose providerOptions".
+    #[test]
+    fn stream_text_on_start_exposes_provider_options() {
+        let model = MockLanguageModel::new().with_stream_result(stream_result_hello());
+        let captured = Arc::new(Mutex::new(None::<GenerateTextStartEvent>));
+        let captured_for_callback = Arc::clone(&captured);
+
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "openai".to_string(),
+            json!({ "logprobs": true })
+                .as_object()
+                .expect("provider options object")
+                .clone(),
+        );
+        let expected = provider_options.clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_provider_options(provider_options)
+                .with_on_start(move |event| {
+                    let captured = Arc::clone(&captured_for_callback);
+                    async move {
+                        *captured.lock().expect("captured lock") = Some(event);
+                    }
+                }),
+        ));
+
+        let _ = result.text;
+        let event = captured
+            .lock()
+            .expect("captured lock")
+            .clone()
+            .expect("on_start ran");
+        assert_eq!(event.provider_options, Some(expected));
+    }
+
+    // Upstream: stream-text.test.ts result.toUIMessageStream
+    // "should create a ui message stream with provider metadata": reasoning and text
+    // parts carry providerMetadata through to the UI message stream chunks.
+    #[test]
+    fn stream_text_to_ui_message_stream_includes_provider_metadata() {
+        fn signature(value: &str) -> ProviderMetadata {
+            ProviderMetadata::from([(
+                "testProvider".to_string(),
+                Map::from_iter([("signature".to_string(), json!(value))]),
+            )])
+        }
+
+        let result = stream_text_result_from_parts(vec![
+            LanguageModelStreamPart::ReasoningStart(
+                LanguageModelReasoningStart::new("r1").with_provider_metadata(signature("r1")),
+            ),
+            LanguageModelStreamPart::ReasoningDelta(
+                LanguageModelReasoningDelta::new("r1", "Hello")
+                    .with_provider_metadata(signature("r2")),
+            ),
+            LanguageModelStreamPart::ReasoningDelta(
+                LanguageModelReasoningDelta::new("r1", ", ")
+                    .with_provider_metadata(signature("r3")),
+            ),
+            LanguageModelStreamPart::ReasoningEnd(
+                LanguageModelReasoningEnd::new("r1").with_provider_metadata(signature("r4")),
+            ),
+            LanguageModelStreamPart::TextStart(
+                LanguageModelTextStart::new("1").with_provider_metadata(signature("1")),
+            ),
+            LanguageModelStreamPart::TextDelta(
+                LanguageModelTextDelta::new("1", "Hello").with_provider_metadata(signature("2")),
+            ),
+            LanguageModelStreamPart::TextDelta(
+                LanguageModelTextDelta::new("1", ", ").with_provider_metadata(signature("3")),
+            ),
+            LanguageModelStreamPart::TextDelta(
+                LanguageModelTextDelta::new("1", "world!").with_provider_metadata(signature("4")),
+            ),
+            LanguageModelStreamPart::TextEnd(
+                LanguageModelTextEnd::new("1").with_provider_metadata(signature("5")),
+            ),
+            LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                usage(),
+                finish_reason(),
+            )),
+        ]);
+
+        assert_eq!(
+            serde_json::to_value(result.to_ui_message_stream()).expect("chunks serialize"),
+            json!([
+                { "type": "start" },
+                { "type": "start-step" },
+                {
+                    "type": "reasoning-start",
+                    "id": "r1",
+                    "providerMetadata": { "testProvider": { "signature": "r1" } }
+                },
+                {
+                    "type": "reasoning-delta",
+                    "id": "r1",
+                    "delta": "Hello",
+                    "providerMetadata": { "testProvider": { "signature": "r2" } }
+                },
+                {
+                    "type": "reasoning-delta",
+                    "id": "r1",
+                    "delta": ", ",
+                    "providerMetadata": { "testProvider": { "signature": "r3" } }
+                },
+                {
+                    "type": "reasoning-end",
+                    "id": "r1",
+                    "providerMetadata": { "testProvider": { "signature": "r4" } }
+                },
+                {
+                    "type": "text-start",
+                    "id": "1",
+                    "providerMetadata": { "testProvider": { "signature": "1" } }
+                },
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "Hello",
+                    "providerMetadata": { "testProvider": { "signature": "2" } }
+                },
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": ", ",
+                    "providerMetadata": { "testProvider": { "signature": "3" } }
+                },
+                {
+                    "type": "text-delta",
+                    "id": "1",
+                    "delta": "world!",
+                    "providerMetadata": { "testProvider": { "signature": "4" } }
+                },
+                {
+                    "type": "text-end",
+                    "id": "1",
+                    "providerMetadata": { "testProvider": { "signature": "5" } }
+                },
+                { "type": "finish-step" },
+                { "type": "finish", "finishReason": "stop" }
+            ])
+        );
+    }
+
+    // Upstream: stream-text.test.ts options.experimental_onStepStart
+    // "should expose providerOptions and runtimeContext".
+    #[test]
+    fn stream_text_on_step_start_exposes_provider_options_and_runtime_context() {
+        let model = MockLanguageModel::new().with_stream_result(stream_result_hello());
+        let captured = Arc::new(Mutex::new(None::<GenerateTextStepStartEvent>));
+        let captured_for_callback = Arc::clone(&captured);
+
+        let mut provider_options = ProviderOptions::new();
+        provider_options.insert(
+            "openai".to_string(),
+            json!({ "logprobs": true })
+                .as_object()
+                .expect("provider options object")
+                .clone(),
+        );
+        let expected_provider_options = provider_options.clone();
+
+        let runtime_context = json!({ "userId": "test-user" })
+            .as_object()
+            .expect("runtime context object")
+            .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_provider_options(provider_options)
+                .with_runtime_context(runtime_context)
+                .with_on_step_start(move |event| {
+                    let captured = Arc::clone(&captured_for_callback);
+                    async move {
+                        *captured.lock().expect("captured lock") = Some(event);
+                    }
+                }),
+        ));
+
+        let _ = result.text;
+        let event = captured
+            .lock()
+            .expect("captured lock")
+            .clone()
+            .expect("on_step_start ran");
+        assert_eq!(event.provider_options, Some(expected_provider_options));
+        assert_eq!(
+            event.runtime_context,
+            json!({ "userId": "test-user" })
+                .as_object()
+                .unwrap()
+                .clone()
+        );
     }
 }
