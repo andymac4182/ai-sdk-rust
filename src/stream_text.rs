@@ -15548,6 +15548,103 @@ mod tests {
         assert_eq!(result.tool_results[0].output["forecast"], "sunny");
     }
 
+    /// Maps packages/ai stream-text.test.ts row
+    /// `should complete tool loop with isLoopFinished()` — with an
+    /// `is_loop_finished()` stop condition the loop runs the tool-call step and
+    /// then the follow-up text step, finishing with the final-step text.
+    #[test]
+    fn stream_text_completes_tool_loop_with_is_loop_finished_stop_condition() {
+        let model = MockLanguageModel::new().with_stream_results([
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::ResponseMetadata(
+                    LanguageModelStreamResponseMetadata::new()
+                        .with_id("id-0")
+                        .with_model_id("mock-model-id")
+                        .with_timestamp(time::OffsetDateTime::UNIX_EPOCH),
+                ),
+                LanguageModelStreamPart::ToolCall(LanguageModelToolCall::new(
+                    "call-1",
+                    "tool1",
+                    r#"{ "value": "value" }"#,
+                )),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    tool_calls_finish_reason(),
+                )),
+            ]),
+            LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Done!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]),
+        ]);
+        let input_schema = json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "required": ["value"]
+        })
+        .as_object()
+        .expect("schema is an object")
+        .clone();
+
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")])
+                .with_tool(
+                    Tool::new("tool1", input_schema)
+                        .with_execute(|_input, _options| async move { Ok(json!("result1")) }),
+                )
+                .with_max_steps(10)
+                .with_stop_condition(crate::generate_text::is_loop_finished()),
+        ));
+
+        assert_eq!(result.text, "Done!");
+        assert_eq!(result.steps.len(), 2);
+        assert_eq!(model.stream_calls().len(), 2);
+    }
+
+    /// Maps packages/ai stream-text.test.ts `options.headers` row
+    /// `should set headers` — request headers configured on the call options are
+    /// forwarded to the provider `doStream` call.
+    #[test]
+    fn stream_text_sets_request_headers_on_provider_call() {
+        let model =
+            MockLanguageModel::new().with_stream_result(LanguageModelStreamResult::new(vec![
+                LanguageModelStreamPart::TextStart(LanguageModelTextStart::new("1")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "Hello")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", ", ")),
+                LanguageModelStreamPart::TextDelta(LanguageModelTextDelta::new("1", "world!")),
+                LanguageModelStreamPart::TextEnd(LanguageModelTextEnd::new("1")),
+                LanguageModelStreamPart::Finish(LanguageModelStreamFinish::new(
+                    usage(),
+                    finish_reason(),
+                )),
+            ]));
+
+        let mut options = StreamTextOptions::new(&model, vec![user_message("test-input")]);
+        options.call_options.headers = Some(Headers::from_iter([(
+            "custom-request-header".to_string(),
+            "request-header-value".to_string(),
+        )]));
+
+        let result = poll_ready(stream_text(options));
+
+        assert_eq!(result.text_stream, vec!["Hello", ", ", "world!"]);
+        let stream_calls = model.stream_calls();
+        assert_eq!(stream_calls.len(), 1);
+        let headers = stream_calls[0]
+            .headers
+            .as_ref()
+            .expect("headers forwarded to provider call");
+        assert_eq!(
+            headers.get("custom-request-header").map(String::as_str),
+            Some("request-header-value")
+        );
+    }
+
     #[test]
     fn stream_text_honors_stop_condition_after_streamed_tool_call() {
         let model = MockLanguageModel::new().with_stream_results([
@@ -17921,6 +18018,119 @@ mod tests {
         assert_eq!(end.tool_call.tool_call_id, "call-1");
         assert_eq!(end.tool_context, Some(json!({ "value": "test" })));
         assert_eq!(end.tool_output.output, json!("test-result"));
+    }
+
+    /// Maps packages/ai stream-text.test.ts `tool execution errors` row
+    /// `should include tool error part in the full stream` — a local tool whose
+    /// execution fails surfaces an error tool-result part in the high-level
+    /// stream parts (carrying `is_error` and the failure message).
+    #[test]
+    fn stream_text_includes_tool_error_part_in_full_stream() {
+        let model = execute_tools_single_call_model("tool1");
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_tool(
+                Tool::new("tool1", execute_tools_value_schema()).with_execute(
+                    |_input, _options| async move {
+                        Err::<JsonValue, ToolExecutionError>(ToolExecutionError::new("test error"))
+                    },
+                ),
+            ),
+        ));
+
+        let error_result = result
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TextStreamPart::ToolResult(tool_result) if tool_result.is_error == Some(true) => {
+                    Some(tool_result)
+                }
+                _ => None,
+            })
+            .expect("error tool-result part present in full stream");
+
+        assert_eq!(error_result.tool_call_id, "call-1");
+        assert_eq!(error_result.tool_name, "tool1");
+        assert!(
+            error_result
+                .output
+                .as_str()
+                .expect("error output is a string")
+                .contains("test error")
+        );
+        assert_eq!(result.tool_results.len(), 1);
+        assert_eq!(result.tool_results[0].is_error, Some(true));
+    }
+
+    /// Maps packages/ai stream-text.test.ts `tool execution errors` row
+    /// `should include error result in response messages` — the failed tool
+    /// result is recorded in the accumulated response messages as a tool message
+    /// with an errored tool-result content part.
+    #[test]
+    fn stream_text_includes_tool_error_result_in_response_messages() {
+        let model = execute_tools_single_call_model("tool1");
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_tool(
+                Tool::new("tool1", execute_tools_value_schema()).with_execute(
+                    |_input, _options| async move {
+                        Err::<JsonValue, ToolExecutionError>(ToolExecutionError::new("test error"))
+                    },
+                ),
+            ),
+        ));
+
+        let tool_message = result
+            .response_messages
+            .iter()
+            .find_map(|message| match message {
+                LanguageModelMessage::Tool(tool_message) => Some(tool_message),
+                _ => None,
+            })
+            .expect("tool response message present");
+
+        let tool_result = tool_message
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LanguageModelToolContentPart::ToolResult(tool_result) => Some(tool_result),
+                _ => None,
+            })
+            .expect("tool-result content part present");
+
+        assert_eq!(tool_result.tool_call_id, "call-1");
+        assert_eq!(tool_result.tool_name, "tool1");
+    }
+
+    /// Maps packages/ai stream-text.test.ts `tool execution errors` row
+    /// `should add tool-error parts to ui message stream` — a failed local tool
+    /// emits a `tool-output-error` chunk in the UI message stream.
+    #[test]
+    fn stream_text_adds_tool_error_parts_to_ui_message_stream() {
+        let model = execute_tools_single_call_model("tool1");
+        let result = poll_ready(stream_text(
+            StreamTextOptions::new(&model, vec![user_message("test-input")]).with_tool(
+                Tool::new("tool1", execute_tools_value_schema()).with_execute(
+                    |_input, _options| async move {
+                        Err::<JsonValue, ToolExecutionError>(ToolExecutionError::new("test error"))
+                    },
+                ),
+            ),
+        ));
+
+        let chunks = result.to_ui_message_stream();
+        let error_chunk = chunks
+            .iter()
+            .find_map(|chunk| match chunk {
+                UiMessageChunk::ToolOutputError {
+                    tool_call_id,
+                    error_text,
+                    ..
+                } => Some((tool_call_id, error_text)),
+                _ => None,
+            })
+            .expect("tool-output-error chunk present in ui message stream");
+
+        assert_eq!(error_chunk.0, "call-1");
+        assert!(error_chunk.1.contains("test error"));
     }
 
     #[test]
