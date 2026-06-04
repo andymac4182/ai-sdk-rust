@@ -3462,31 +3462,49 @@ impl<D: CommandDispatcher> Interpreter<D> {
     }
 
     fn execute_loop_control(&mut self, name: &str, args: &[String]) -> ExecOutput {
-        // Parse the optional numeric level argument. Bash defaults to 1 and
-        // exits with status 128 on a non-numeric argument.
-        let levels = match args.first() {
-            None => 1u32,
-            Some(arg) => match arg.parse::<u32>() {
-                Ok(value) if value >= 1 => value,
-                _ => {
-                    return ExecOutput {
-                        stdout: String::new(),
-                        stderr: format!("bash: {name}: {arg}: numeric argument required\n"),
-                        exit_code: 128,
-                    };
-                }
-            },
-        };
-
         // Outside any loop, break/continue are silent no-ops at the top level.
         // Inside a subshell with no enclosing loop, bash terminates the subshell
         // (the builtin acts like a local `exit`) without touching the parent.
+        // This loop-depth check happens BEFORE any argument validation, matching
+        // bash (and the upstream break/continue builtins).
         if self.state.loop_depth == 0 {
             if self.state.subshell_depth > 0 {
                 self.state.exited = Some(self.state.last_status);
             }
             return ExecOutput::default();
         }
+
+        // bash: too many arguments is a fatal error (like `exit 1`) for both
+        // `break` and `continue`; it aborts the entire script.
+        if args.len() > 1 {
+            self.state.exited = Some(1);
+            return ExecOutput {
+                stdout: String::new(),
+                stderr: format!("bash: {name}: too many arguments\n"),
+                exit_code: 1,
+            };
+        }
+
+        // Parse the optional numeric level argument. Bash defaults to 1. An
+        // invalid (non-numeric or < 1) argument is fatal: `break` exits with
+        // status 128, `continue` exits with status 1.
+        let invalid_exit = if name == "break" { 128 } else { 1 };
+        let levels = match args.first() {
+            None => 1u32,
+            Some(arg) => match arg.parse::<i64>() {
+                Ok(value) if value >= 1 => value as u32,
+                _ => {
+                    // A numeric-argument error is fatal (like `exit`) and aborts
+                    // the script: `break` exits 128, `continue` exits 1.
+                    self.state.exited = Some(invalid_exit);
+                    return ExecOutput {
+                        stdout: String::new(),
+                        stderr: format!("bash: {name}: {arg}: numeric argument required\n"),
+                        exit_code: invalid_exit,
+                    };
+                }
+            },
+        };
 
         let levels = levels.min(self.state.loop_depth);
         self.state.loop_control = Some(match name {
@@ -4744,6 +4762,30 @@ impl<'a> ArithmeticEvaluator<'a> {
     fn resolve_name(&mut self, name: &str) -> i64 {
         if self.depth > 64 {
             return 0;
+        }
+        // A positional parameter (`$1`, `$2`, ...) referenced inside arithmetic
+        // resolves to its value. `$0` and out-of-range positions are 0.
+        if !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()) {
+            let raw = match name.parse::<usize>() {
+                Ok(0) | Err(_) => return 0,
+                Ok(index) => match self.state.positionals.get(index - 1) {
+                    Some(value) => value.clone(),
+                    None => return 0,
+                },
+            };
+            if raw.trim().is_empty() {
+                return 0;
+            }
+            if let Some(value) = parse_arith_literal(raw.trim()) {
+                return value;
+            }
+            let mut nested = ArithmeticEvaluator {
+                tokens: tokenize_arithmetic(&raw),
+                pos: 0,
+                state: self.state,
+                depth: self.depth + 1,
+            };
+            return nested.parse();
         }
         let Some(raw) = self.state.lookup_var(name).map(str::to_string) else {
             return 0;
@@ -7873,6 +7915,195 @@ greet World",
             "for i in 1 2 3; do\n  (\n    if [ $i -eq 2 ]; then break; fi\n    echo $i\n  )\ndone\necho done",
         );
         assert_eq!(result.stdout, "1\n3\ndone\n");
+    }
+
+    /// Mirrors every `it(...)` in
+    /// `packages/just-bash/src/interpreter/builtins/break.test.ts` 1:1, exercising
+    /// the Rust `break` builtin over the virtual shell.
+    #[test]
+    fn r5_interpreter_builtin_break_matches_upstream() {
+        // L6 exit for loop early
+        let result = shell().exec(
+            "for i in 1 2 3 4 5; do\n  if [ $i -eq 3 ]; then break; fi\n  echo $i\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "1\n2\ndone\n");
+        assert_eq!(result.exit_code, 0);
+
+        // L19 exit while loop early
+        let result = shell().exec(
+            "x=0\nwhile [ $x -lt 10 ]; do\n  x=$((x + 1))\n  if [ $x -eq 3 ]; then break; fi\n  echo $x\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "1\n2\ndone\n");
+        assert_eq!(result.exit_code, 0);
+
+        // L34 exit until loop early
+        let result = shell().exec(
+            "x=0\nuntil [ $x -ge 10 ]; do\n  x=$((x + 1))\n  if [ $x -eq 3 ]; then break; fi\n  echo $x\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "1\n2\ndone\n");
+        assert_eq!(result.exit_code, 0);
+
+        // L51 break multiple levels with `break n`
+        let result = shell().exec(
+            "for i in 1 2; do\n  for j in a b c; do\n    if [ $j = b ]; then break 2; fi\n    echo \"$i$j\"\n  done\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "1a\ndone\n");
+        assert_eq!(result.exit_code, 0);
+
+        // L66 break single level with `break 1`
+        let result = shell().exec(
+            "for i in 1 2 3; do\n  if [ $i -eq 2 ]; then break 1; fi\n  echo $i\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "1\ndone\n");
+
+        // L78 break with level exceeding loop depth just breaks out
+        let result = shell().exec("for i in 1 2; do\n  break 10\n  echo $i\ndone\necho done");
+        assert_eq!(result.stdout, "done\n");
+
+        // L93 break outside a loop is a silent no-op
+        let result = shell().exec("break");
+        assert_eq!(result.stderr, "");
+        assert_eq!(result.exit_code, 0);
+
+        // L101 break with a non-numeric argument: numeric argument required, code 128
+        let result = shell().exec("for i in 1 2 3; do\n  break abc\ndone");
+        assert!(
+            result.stderr.contains("numeric argument required"),
+            "stderr was: {:?}",
+            result.stderr
+        );
+        assert_eq!(result.exit_code, 128);
+
+        // L112 break 0 is invalid: numeric argument required, code 128
+        let result = shell().exec("for i in 1 2 3; do\n  break 0\ndone");
+        assert!(result.stderr.contains("numeric argument required"));
+        assert_eq!(result.exit_code, 128);
+
+        // L123 break -1 is invalid: numeric argument required, code 128
+        let result = shell().exec("for i in 1 2 3; do\n  break -1\ndone");
+        assert!(result.stderr.contains("numeric argument required"));
+        assert_eq!(result.exit_code, 128);
+
+        // L134 break with too many arguments errors with code 1
+        let result = shell().exec("for x in a b c; do\n  echo $x\n  break 1 2 3\ndone\necho --");
+        assert_eq!(result.stdout, "a\n");
+        assert!(result.stderr.contains("too many arguments"));
+        assert_eq!(result.exit_code, 1);
+
+        // L151 break works with case statements inside loops
+        let result = shell().exec(
+            "for x in a b c; do\n  case $x in\n    b) break ;;\n  esac\n  echo $x\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "a\ndone\n");
+
+        // L165 break works with if statements inside loops
+        let result = shell().exec(
+            "for i in 1 2 3 4 5; do\n  if [ $i -gt 2 ]; then\n    break\n  fi\n  echo $i\ndone",
+        );
+        assert_eq!(result.stdout, "1\n2\n");
+
+        // L178 break in a function inside a loop breaks the outer loop
+        let result = shell().exec(
+            "check() {\n  if [ $1 -eq 3 ]; then\n    break\n  fi\n}\nfor i in 1 2 3 4 5; do\n  check $i\n  echo $i\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "1\n2\ndone\n");
+    }
+
+    /// Mirrors every `it(...)` in
+    /// `packages/just-bash/src/interpreter/builtins/continue.test.ts` 1:1,
+    /// exercising the Rust `continue` builtin over the virtual shell.
+    #[test]
+    fn r5_interpreter_builtin_continue_matches_upstream() {
+        // L6 skip to next iteration in for loop
+        let result = shell().exec(
+            "for i in 1 2 3 4 5; do\n  if [ $i -eq 3 ]; then continue; fi\n  echo $i\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "1\n2\n4\n5\ndone\n");
+        assert_eq!(result.exit_code, 0);
+
+        // L19 skip to next iteration in while loop
+        let result = shell().exec(
+            "x=0\nwhile [ $x -lt 5 ]; do\n  x=$((x + 1))\n  if [ $x -eq 3 ]; then continue; fi\n  echo $x\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "1\n2\n4\n5\ndone\n");
+        assert_eq!(result.exit_code, 0);
+
+        // L34 skip to next iteration in until loop
+        let result = shell().exec(
+            "x=0\nuntil [ $x -ge 5 ]; do\n  x=$((x + 1))\n  if [ $x -eq 3 ]; then continue; fi\n  echo $x\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "1\n2\n4\n5\ndone\n");
+        assert_eq!(result.exit_code, 0);
+
+        // L51 continue multiple levels with `continue n`
+        let result = shell().exec(
+            "for i in 1 2; do\n  for j in a b c; do\n    if [ $j = b ]; then continue 2; fi\n    echo \"$i$j\"\n  done\n  echo \"end-$i\"\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "1a\n2a\ndone\n");
+        assert_eq!(result.exit_code, 0);
+
+        // L67 continue single level with `continue 1`
+        let result = shell()
+            .exec("for i in 1 2 3; do\n  if [ $i -eq 2 ]; then continue 1; fi\n  echo $i\ndone");
+        assert_eq!(result.stdout, "1\n3\n");
+
+        // L78 continue with level exceeding loop depth continues the current loop
+        let result = shell().exec(
+            "for i in 1 2 3; do\n  if [ $i -eq 2 ]; then continue 10; fi\n  echo $i\ndone\necho done",
+        );
+        assert_eq!(result.stdout, "1\n3\ndone\n");
+
+        // L93 continue outside a loop is a silent no-op
+        let result = shell().exec("continue");
+        assert_eq!(result.stderr, "");
+        assert_eq!(result.exit_code, 0);
+
+        // L101 continue with a non-numeric argument: numeric argument required, code 1
+        let result = shell().exec("for i in 1 2 3; do\n  continue abc\ndone");
+        assert!(
+            result.stderr.contains("numeric argument required"),
+            "stderr was: {:?}",
+            result.stderr
+        );
+        assert_eq!(result.exit_code, 1);
+
+        // L112 continue 0 is invalid: numeric argument required, code 1
+        let result = shell().exec("for i in 1 2 3; do\n  continue 0\ndone");
+        assert!(result.stderr.contains("numeric argument required"));
+        assert_eq!(result.exit_code, 1);
+
+        // L123 continue -1 is invalid: numeric argument required, code 1
+        let result = shell().exec("for i in 1 2 3; do\n  continue -1\ndone");
+        assert!(result.stderr.contains("numeric argument required"));
+        assert_eq!(result.exit_code, 1);
+
+        // L134 continue with too many arguments errors with code 1
+        let result = shell().exec("for x in a b c; do\n  echo $x\n  continue 1 2 3\ndone\necho --");
+        assert_eq!(result.stdout, "a\n");
+        assert!(result.stderr.contains("too many arguments"));
+        assert_eq!(result.exit_code, 1);
+
+        // L151 continue works with case statements inside loops
+        let result = shell()
+            .exec("for x in a b c; do\n  case $x in\n    b) continue ;;\n  esac\n  echo $x\ndone");
+        assert_eq!(result.stdout, "a\nc\n");
+        assert_eq!(result.exit_code, 0);
+
+        // L165 continue works with if statements inside loops
+        let result = shell().exec(
+            "for i in 1 2 3 4 5; do\n  if [ $i -eq 2 ] || [ $i -eq 4 ]; then\n    continue\n  fi\n  echo $i\ndone",
+        );
+        assert_eq!(result.stdout, "1\n3\n5\n");
+
+        // L178 continue in a function inside a loop continues the outer loop
+        let result = shell().exec(
+            "skip_even() {\n  if [ $(($1 % 2)) -eq 0 ]; then\n    continue\n  fi\n}\nfor i in 1 2 3 4 5; do\n  skip_even $i\n  echo $i\ndone",
+        );
+        assert_eq!(result.stdout, "1\n3\n5\n");
+
+        // L197/L208 (continue in a C-style `for (( ))` loop) are intentionally
+        // excluded: the Rust interpreter does not yet implement C-style for
+        // loops, so those two upstream rows stay pending.
     }
 
     // JBC-13: portable `set -o pipefail` conformance mirroring
