@@ -15,9 +15,9 @@
     "expectedFailures": 0
   },
   "summary": {
-    "totalCases": 405,
+    "totalCases": 444,
     "byKind": {
-      "comparison-fixture": 405
+      "comparison-fixture": 444
     },
     "byDomain": {
       "awk": 12,
@@ -38,13 +38,14 @@
       "sed": 42,
       "sort": 11,
       "strings-split": 4,
-      "tar": 30,
+      "tar": 57,
       "test": 1,
       "tr": 14,
-      "uniq": 10
+      "uniq": 10,
+      "yq": 12
     },
     "byStatus": {
-      "portable-verified": 405
+      "portable-verified": 444
     }
   },
   "cases": [
@@ -20766,6 +20767,1287 @@
       }
     },
     {
+      "id": "tar:131:9136294db4b39fd1",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 131,
+        "suite": "tar",
+        "testName": "should handle combined short options -cvf",
+        "declaration": "it"
+      },
+      "command": "tar -cvf /archive.tar /test.txt",
+      "script": "tar -cvf /archive.tar /test.txt",
+      "initialFiles": {
+        "/test.txt": "Hello"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "",
+        "stderr": "test.txt\n",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:131:it:should handle combined short options -cvf",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_131_9136294db4b39fd1",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_131_9136294db4b39fd1",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:467:573b48f997b25e65",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 467,
+        "suite": "tar",
+        "testName": "should archive and extract symlinks",
+        "declaration": "it"
+      },
+      "command": "ln -s /target.txt /link.txt && tar -cvf /archive.tar /link.txt && tar -tvf /archive.tar",
+      "script": "ln -s /target.txt /link.txt && tar -cvf /archive.tar /link.txt && tar -tvf /archive.tar",
+      "initialFiles": {
+        "/target.txt": "Target content"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "lrwxr-xr-x user/user     0 1970-01-01 link.txt\n",
+        "stderr": "link.txt\n",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:467:it:should archive and extract symlinks",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_467_573b48f997b25e65",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_467_573b48f997b25e65",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:483:844f1e740e1b40fe",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 483,
+        "suite": "tar",
+        "testName": "should handle empty directory",
+        "declaration": "it"
+      },
+      "command": "mkdir /emptydir && tar -cvf /archive.tar /emptydir && tar -tf /archive.tar",
+      "script": "mkdir /emptydir && tar -cvf /archive.tar /emptydir && tar -tf /archive.tar",
+      "initialFiles": {},
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "emptydir\n",
+        "stderr": "emptydir\n",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:483:it:should handle empty directory",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_483_844f1e740e1b40fe",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_483_844f1e740e1b40fe",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:496:a3ceea320ae4d99d",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 496,
+        "suite": "tar",
+        "testName": "should handle file with special characters in name",
+        "declaration": "it"
+      },
+      "command": "tar -cvf /archive.tar '/file with spaces.txt'",
+      "script": "tar -cvf /archive.tar '/file with spaces.txt'",
+      "initialFiles": {
+        "/file with spaces.txt": "Content"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "",
+        "stderr": "file with spaces.txt\n",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:496:it:should handle file with special characters in name",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_496_a3ceea320ae4d99d",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_496_a3ceea320ae4d99d",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:525:f5a36ac0078c75d7",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 525,
+        "suite": "tar",
+        "testName": "should handle large-ish directory tree",
+        "declaration": "it"
+      },
+      "command": "tar -cf /archive.tar /bigdir && tar -tf /archive.tar | wc -l",
+      "script": "tar -cf /archive.tar /bigdir && tar -tf /archive.tar | wc -l",
+      "initialFiles": {
+        "/bigdir/file000.txt": "Content 0",
+        "/bigdir/file001.txt": "Content 1",
+        "/bigdir/file002.txt": "Content 2",
+        "/bigdir/file003.txt": "Content 3",
+        "/bigdir/file004.txt": "Content 4",
+        "/bigdir/file005.txt": "Content 5",
+        "/bigdir/file006.txt": "Content 6",
+        "/bigdir/file007.txt": "Content 7",
+        "/bigdir/file008.txt": "Content 8",
+        "/bigdir/file009.txt": "Content 9",
+        "/bigdir/file010.txt": "Content 10",
+        "/bigdir/file011.txt": "Content 11",
+        "/bigdir/file012.txt": "Content 12",
+        "/bigdir/file013.txt": "Content 13",
+        "/bigdir/file014.txt": "Content 14",
+        "/bigdir/file015.txt": "Content 15",
+        "/bigdir/file016.txt": "Content 16",
+        "/bigdir/file017.txt": "Content 17",
+        "/bigdir/file018.txt": "Content 18",
+        "/bigdir/file019.txt": "Content 19",
+        "/bigdir/file020.txt": "Content 20",
+        "/bigdir/file021.txt": "Content 21",
+        "/bigdir/file022.txt": "Content 22",
+        "/bigdir/file023.txt": "Content 23",
+        "/bigdir/file024.txt": "Content 24",
+        "/bigdir/file025.txt": "Content 25",
+        "/bigdir/file026.txt": "Content 26",
+        "/bigdir/file027.txt": "Content 27",
+        "/bigdir/file028.txt": "Content 28",
+        "/bigdir/file029.txt": "Content 29",
+        "/bigdir/file030.txt": "Content 30",
+        "/bigdir/file031.txt": "Content 31",
+        "/bigdir/file032.txt": "Content 32",
+        "/bigdir/file033.txt": "Content 33",
+        "/bigdir/file034.txt": "Content 34",
+        "/bigdir/file035.txt": "Content 35",
+        "/bigdir/file036.txt": "Content 36",
+        "/bigdir/file037.txt": "Content 37",
+        "/bigdir/file038.txt": "Content 38",
+        "/bigdir/file039.txt": "Content 39",
+        "/bigdir/file040.txt": "Content 40",
+        "/bigdir/file041.txt": "Content 41",
+        "/bigdir/file042.txt": "Content 42",
+        "/bigdir/file043.txt": "Content 43",
+        "/bigdir/file044.txt": "Content 44",
+        "/bigdir/file045.txt": "Content 45",
+        "/bigdir/file046.txt": "Content 46",
+        "/bigdir/file047.txt": "Content 47",
+        "/bigdir/file048.txt": "Content 48",
+        "/bigdir/file049.txt": "Content 49"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "51\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:525:it:should handle large-ish directory tree",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_525_f5a36ac0078c75d7",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_525_f5a36ac0078c75d7",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:541:fc72800a560f939d",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 541,
+        "suite": "tar",
+        "testName": "should handle long filenames",
+        "declaration": "it"
+      },
+      "command": "tar -cvf /archive.tar /dir && tar -tf /archive.tar",
+      "script": "tar -cvf /archive.tar /dir && tar -tf /archive.tar",
+      "initialFiles": {
+        "/dir/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt": "Long filename content"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "dir\ndir/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt\n",
+        "stderr": "dir\ndir/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt\n",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:541:it:should handle long filenames",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_541_fc72800a560f939d",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_541_fc72800a560f939d",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:615:448c0a023ee4728c",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 615,
+        "suite": "tar",
+        "testName": "should not create files when using -O",
+        "declaration": "it"
+      },
+      "command": "tar -cf /archive.tar /source && rm -rf /source && tar -xOf /archive.tar; ls /source 2>&1 || echo 'not found'",
+      "script": "tar -cf /archive.tar /source && rm -rf /source && tar -xOf /archive.tar; ls /source 2>&1 || echo 'not found'",
+      "initialFiles": {
+        "/source/test.txt": "Original"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "Originalls: /source: No such file or directory\nnot found\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:615:it:should not create files when using -O",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_615_448c0a023ee4728c",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_615_448c0a023ee4728c",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:648:af16e2e93572e62c",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 648,
+        "suite": "tar",
+        "testName": "should not overwrite existing files with -k",
+        "declaration": "it"
+      },
+      "command": "tar -cf /archive.tar /test.txt && echo 'Modified content' > /test.txt && tar -xkf /archive.tar; cat /test.txt",
+      "script": "tar -cf /archive.tar /test.txt && echo 'Modified content' > /test.txt && tar -xkf /archive.tar; cat /test.txt",
+      "initialFiles": {
+        "/test.txt": "Original content"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "Modified content\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:648:it:should not overwrite existing files with -k",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_648_af16e2e93572e62c",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_648_af16e2e93572e62c",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:667:e8cdac6d0a2da8ac",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 667,
+        "suite": "tar",
+        "testName": "should extract non-existing files with -k",
+        "declaration": "it"
+      },
+      "command": "tar -cf /archive.tar /existing.txt /new.txt && rm /new.txt && echo 'Modified existing' > /existing.txt && tar -xkf /archive.tar; echo '--'; cat /existing.txt; echo '--'; cat /new.txt",
+      "script": "tar -cf /archive.tar /existing.txt /new.txt && rm /new.txt && echo 'Modified existing' > /existing.txt && tar -xkf /archive.tar; echo '--'; cat /existing.txt; echo '--'; cat /new.txt",
+      "initialFiles": {
+        "/existing.txt": "Existing",
+        "/new.txt": "New content"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "--\nModified existing\n--\nNew content",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:667:it:should extract non-existing files with -k",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_667_e8cdac6d0a2da8ac",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_667_e8cdac6d0a2da8ac",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:780:b8a375b2661a6e8c",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 780,
+        "suite": "tar",
+        "testName": "should update archive with newer files",
+        "declaration": "it"
+      },
+      "command": "tar -cf /archive.tar /file.txt && echo \"Updated content\" > /file.txt && tar -uf /archive.tar /file.txt; rm /file.txt && tar -xf /archive.tar && cat /file.txt",
+      "script": "tar -cf /archive.tar /file.txt && echo \"Updated content\" > /file.txt && tar -uf /archive.tar /file.txt; rm /file.txt && tar -xf /archive.tar && cat /file.txt",
+      "initialFiles": {
+        "/file.txt": "Original content"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "Updated content\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:780:it:should update archive with newer files",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_780_b8a375b2661a6e8c",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_780_b8a375b2661a6e8c",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:804:8e7f4093178f3936",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 804,
+        "suite": "tar",
+        "testName": "should not update archive with older files",
+        "declaration": "it"
+      },
+      "command": "tar -cf /archive.tar /file.txt && tar -uvf /archive.tar /file.txt",
+      "script": "tar -cf /archive.tar /file.txt && tar -uvf /archive.tar /file.txt",
+      "initialFiles": {
+        "/file.txt": "Content"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "",
+        "stderr": "file.txt\n",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:804:it:should not update archive with older files",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_804_8e7f4093178f3936",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_804_8e7f4093178f3936",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:832:4bf9540d3dbc0621",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 832,
+        "suite": "tar",
+        "testName": "should not work with compressed archives",
+        "declaration": "it"
+      },
+      "command": "tar -uzf /archive.tar.gz /file.txt",
+      "script": "tar -uzf /archive.tar.gz /file.txt",
+      "initialFiles": {
+        "/file.txt": "Content"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "",
+        "stderr": "tar: Cannot append/update compressed archives\n",
+        "exitCode": 2
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:832:it:should not work with compressed archives",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_832_4bf9540d3dbc0621",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_832_4bf9540d3dbc0621",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:846:da7481e6d703ba06",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 846,
+        "suite": "tar",
+        "testName": "should extract files matching wildcard pattern",
+        "declaration": "it"
+      },
+      "command": "tar -cf /archive.tar /dir && rm -rf /dir && tar -xf /archive.tar --wildcards '*.txt'; echo '--'; cat /dir/file1.txt; echo '--'; cat /dir/other.log 2>&1 || echo 'not found'",
+      "script": "tar -cf /archive.tar /dir && rm -rf /dir && tar -xf /archive.tar --wildcards '*.txt'; echo '--'; cat /dir/file1.txt; echo '--'; cat /dir/other.log 2>&1 || echo 'not found'",
+      "initialFiles": {
+        "/dir/file1.txt": "Text 1",
+        "/dir/file2.txt": "Text 2",
+        "/dir/other.log": "Log"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "--\nText 1--\ncat: /dir/other.log: No such file or directory\nnot found\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:846:it:should extract files matching wildcard pattern",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_846_da7481e6d703ba06",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_846_da7481e6d703ba06",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:908:7ef1f4dd2752c27c",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 908,
+        "suite": "tar",
+        "testName": "should extract only matching files",
+        "declaration": "it"
+      },
+      "command": "tar -cf /archive.tar /dir && rm -rf /dir && tar -xf /archive.tar /dir/file1.txt; echo '--'; cat /dir/file1.txt; echo '--'; cat /dir/file2.txt 2>&1 || echo 'not found'",
+      "script": "tar -cf /archive.tar /dir && rm -rf /dir && tar -xf /archive.tar /dir/file1.txt; echo '--'; cat /dir/file1.txt; echo '--'; cat /dir/file2.txt 2>&1 || echo 'not found'",
+      "initialFiles": {
+        "/dir/file1.txt": "Content 1",
+        "/dir/file2.txt": "Content 2",
+        "/dir/other.log": "Log content"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "--\nContent 1--\ncat: /dir/file2.txt: No such file or directory\nnot found\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:908:it:should extract only matching files",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_908_7ef1f4dd2752c27c",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_908_7ef1f4dd2752c27c",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:933:ceadc9d386978c05",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 933,
+        "suite": "tar",
+        "testName": "should extract directory and its contents by pattern",
+        "declaration": "it"
+      },
+      "command": "tar -cf /archive.tar /project && rm -rf /project && tar -xf /archive.tar /project/src; echo '--'; cat /project/src/main.js; echo '--'; ls /project/docs 2>&1 || echo 'not found'",
+      "script": "tar -cf /archive.tar /project && rm -rf /project && tar -xf /archive.tar /project/src; echo '--'; cat /project/src/main.js; echo '--'; ls /project/docs 2>&1 || echo 'not found'",
+      "initialFiles": {
+        "/project/src/main.js": "main",
+        "/project/src/lib.js": "lib",
+        "/project/docs/readme.md": "docs"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "--\nmain--\nls: /project/docs: No such file or directory\nnot found\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:933:it:should extract directory and its contents by pattern",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_933_ceadc9d386978c05",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_933_ceadc9d386978c05",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:973:61b6428e8534a32d",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 973,
+        "suite": "tar",
+        "testName": "should auto-detect bzip2 from .tar.bz2 extension",
+        "declaration": "it"
+      },
+      "command": "tar -caf /archive.tar.bz2 /test.txt && tar -tjf /archive.tar.bz2",
+      "script": "tar -caf /archive.tar.bz2 /test.txt && tar -tjf /archive.tar.bz2",
+      "initialFiles": {
+        "/test.txt": "Hello World"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "test.txt\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:973:it:should auto-detect bzip2 from .tar.bz2 extension",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_973_61b6428e8534a32d",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_973_61b6428e8534a32d",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:1001:5a7b63c77d1e284c",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 1001,
+        "suite": "tar",
+        "testName": "should auto-detect zstd from .tar.zst extension and block (native codec)",
+        "declaration": "it"
+      },
+      "command": "tar -caf /archive.tar.zst /test.txt",
+      "script": "tar -caf /archive.tar.zst /test.txt",
+      "initialFiles": {
+        "/test.txt": "Hello World"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "",
+        "stderr": "tar: zstd compression is disabled by default (native codec risk)\n",
+        "exitCode": 2
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:1001:it:should auto-detect zstd from .tar.zst extension and block (native codec)",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_1001_5a7b63c77d1e284c",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_1001_5a7b63c77d1e284c",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:1013:481d5b8b4e5fe2f2",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 1013,
+        "suite": "tar",
+        "testName": "should create plain tar for .tar extension",
+        "declaration": "it"
+      },
+      "command": "tar -caf /archive.tar /test.txt && tar -tf /archive.tar",
+      "script": "tar -caf /archive.tar /test.txt && tar -tf /archive.tar",
+      "initialFiles": {
+        "/test.txt": "Hello World"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "test.txt\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:1013:it:should create plain tar for .tar extension",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_1013_481d5b8b4e5fe2f2",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_1013_481d5b8b4e5fe2f2",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:1050:06b413004c14f5c3",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 1050,
+        "suite": "tar",
+        "testName": "should ignore comments and blank lines in files-from",
+        "declaration": "it"
+      },
+      "command": "tar -cf /archive.tar -T /files.list && tar -tf /archive.tar",
+      "script": "tar -cf /archive.tar -T /files.list && tar -tf /archive.tar",
+      "initialFiles": {
+        "/file1.txt": "Content 1",
+        "/file2.txt": "Content 2",
+        "/files.list": "# This is a comment\n/file1.txt\n\n/file2.txt\n# Another comment"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "file1.txt\nfile2.txt\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:1050:it:should ignore comments and blank lines in files-from",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_1050_06b413004c14f5c3",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_1050_06b413004c14f5c3",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:1068:e0fb73fc06bdc0ab",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 1068,
+        "suite": "tar",
+        "testName": "should combine -T with positional files",
+        "declaration": "it"
+      },
+      "command": "tar -cf /archive.tar -T /files.list /file3.txt && tar -tf /archive.tar",
+      "script": "tar -cf /archive.tar -T /files.list /file3.txt && tar -tf /archive.tar",
+      "initialFiles": {
+        "/file1.txt": "Content 1",
+        "/file2.txt": "Content 2",
+        "/file3.txt": "Content 3",
+        "/files.list": "/file1.txt"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "file1.txt\nfile3.txt\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:1068:it:should combine -T with positional files",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_1068_e0fb73fc06bdc0ab",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_1068_e0fb73fc06bdc0ab",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:1101:49cedc2f347922ab",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 1101,
+        "suite": "tar",
+        "testName": "should read exclude patterns from a file",
+        "declaration": "it"
+      },
+      "command": "tar -cf /archive.tar -X /excludes.list /dir && tar -tf /archive.tar",
+      "script": "tar -cf /archive.tar -X /excludes.list /dir && tar -tf /archive.tar",
+      "initialFiles": {
+        "/dir/file1.txt": "Content 1",
+        "/dir/file2.log": "Log 2",
+        "/dir/file3.txt": "Content 3",
+        "/excludes.list": "*.log"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "dir\ndir/file1.txt\ndir/file3.txt\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:1101:it:should read exclude patterns from a file",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_1101_49cedc2f347922ab",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_1101_49cedc2f347922ab",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:1122:a7689cbc5c84b2a5",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 1122,
+        "suite": "tar",
+        "testName": "should combine -X with --exclude",
+        "declaration": "it"
+      },
+      "command": "tar -cf /archive.tar -X /excludes.list --exclude='*.bak' /dir && tar -tf /archive.tar",
+      "script": "tar -cf /archive.tar -X /excludes.list --exclude='*.bak' /dir && tar -tf /archive.tar",
+      "initialFiles": {
+        "/dir/file1.txt": "Content 1",
+        "/dir/file2.log": "Log 2",
+        "/dir/file3.bak": "Backup 3",
+        "/excludes.list": "*.log"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "dir\ndir/file1.txt\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:1122:it:should combine -X with --exclude",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_1122_a7689cbc5c84b2a5",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_1122_a7689cbc5c84b2a5",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:1143:5672e4ffe1243d06",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 1143,
+        "suite": "tar",
+        "testName": "should error on non-existent exclude-from file",
+        "declaration": "it"
+      },
+      "command": "tar -cf /archive.tar -X /nonexistent.list /test.txt",
+      "script": "tar -cf /archive.tar -X /nonexistent.list /test.txt",
+      "initialFiles": {
+        "/test.txt": "Content"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "",
+        "stderr": "tar: /nonexistent.list: Cannot open: No such file or directory\n",
+        "exitCode": 2
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:1143:it:should error on non-existent exclude-from file",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_1143_5672e4ffe1243d06",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_1143_5672e4ffe1243d06",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:1159:da3834c691ac2f5e",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 1159,
+        "suite": "tar",
+        "testName": "should reject zstd compression by default",
+        "declaration": "it"
+      },
+      "command": "tar --zstd -cf /archive.tar.zst /test.txt",
+      "script": "tar --zstd -cf /archive.tar.zst /test.txt",
+      "initialFiles": {
+        "/test.txt": "Hello World"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "",
+        "stderr": "tar: zstd compression is disabled by default (native codec risk)\n",
+        "exitCode": 2
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:1159:it:should reject zstd compression by default",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_1159_da3834c691ac2f5e",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_1159_da3834c691ac2f5e",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:1176:fe44e244dd7593ce",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 1176,
+        "suite": "tar",
+        "testName": "should correctly handle binary archive data from stdin for list",
+        "declaration": "it"
+      },
+      "command": "tar -cf /test.tar /file1.txt /file2.txt && cat /test.tar | tar -t",
+      "script": "tar -cf /test.tar /file1.txt /file2.txt && cat /test.tar | tar -t",
+      "initialFiles": {
+        "/file1.txt": "content one",
+        "/file2.txt": "content two"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "file1.txt\nfile2.txt\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:1176:it:should correctly handle binary archive data from stdin for list",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_1176_fe44e244dd7593ce",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_1176_fe44e244dd7593ce",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:1195:edb4b517698e0348",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 1195,
+        "suite": "tar",
+        "testName": "should correctly handle binary archive data from stdin for extract",
+        "declaration": "it"
+      },
+      "command": "tar -cf /test.tar -C /src file.txt && cat /test.tar | tar -x -C /dest; cat /dest/file.txt",
+      "script": "tar -cf /test.tar -C /src file.txt && cat /test.tar | tar -x -C /dest; cat /dest/file.txt",
+      "initialFiles": {
+        "/src/file.txt": "test content 12345"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "test content 12345",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:1195:it:should correctly handle binary archive data from stdin for extract",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_1195_edb4b517698e0348",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_1195_edb4b517698e0348",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "tar:1217:22be0f4c53eb93fb",
+      "kind": "comparison-fixture",
+      "classification": "handwritten-tar-behavior",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/tar/tar.test.ts",
+        "line": 1217,
+        "suite": "tar",
+        "testName": "should handle gzip-compressed archive from stdin",
+        "declaration": "it"
+      },
+      "command": "tar -czf /test.tar.gz -C /src data.txt && tar -tzf /test.tar.gz; cat /test.tar.gz | tar -xz -C /dest && echo EXTRACTOK",
+      "script": "tar -czf /test.tar.gz -C /src data.txt && tar -tzf /test.tar.gz; cat /test.tar.gz | tar -xz -C /dest && echo EXTRACTOK",
+      "initialFiles": {
+        "/src/data.txt": "Hello World"
+      },
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "data.txt\nEXTRACTOK\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/tar/tar.test.ts:1217:it:should handle gzip-compressed archive from stdin",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::commands::tar",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::tar_1217_22be0f4c53eb93fb",
+        "notes": "JBC tar Rust corpus runner exact match for stdout, stderr, and exit code over the virtual filesystem (no host tar).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::tar_1217_22be0f4c53eb93fb",
+      "runnerProof": {
+        "source": "JBC-tar",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
       "id": "comparison:sed:sed-cmd-227-d1f905ded3c2f302",
       "kind": "comparison-fixture",
       "classification": "comparison-golden",
@@ -21651,6 +22933,546 @@
       "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_598_ca4b9c5889964884",
       "runnerProof": {
         "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:fx_yaml_active",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts",
+        "line": 112,
+        "suite": "yq command",
+        "testName": "should filter active users from users.yaml",
+        "declaration": "it"
+      },
+      "command": "yq '[.users[] | select(.active)] | length' /fixtures/yaml/users.yaml",
+      "script": "yq '[.users[] | select(.active)] | length' /fixtures/yaml/users.yaml",
+      "initialFiles": {
+        "/fixtures/yaml/users.yaml": "users:\n  - name: alice\n    age: 30\n    email: alice@example.com\n    active: true\n  - name: bob\n    age: 25\n    email: bob@example.com\n    active: false\n  - name: charlie\n    age: 35\n    email: charlie@example.com\n    active: true\nmetadata:\n  version: 1.0\n  generated: \"2024-01-01\"\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "2\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts:112:it:should filter active users from users.yaml",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_fx_yaml_active",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_fx_yaml_active",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:fx_yaml_ver",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts",
+        "line": 121,
+        "suite": "yq command",
+        "testName": "should get metadata version from users.yaml",
+        "declaration": "it"
+      },
+      "command": "yq '.metadata.version' /fixtures/yaml/users.yaml",
+      "script": "yq '.metadata.version' /fixtures/yaml/users.yaml",
+      "initialFiles": {
+        "/fixtures/yaml/users.yaml": "users:\n  - name: alice\n    age: 30\n    email: alice@example.com\n    active: true\n  - name: bob\n    age: 25\n    email: bob@example.com\n    active: false\n  - name: charlie\n    age: 35\n    email: charlie@example.com\n    active: true\nmetadata:\n  version: 1.0\n  generated: \"2024-01-01\"\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "1\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts:121:it:should get metadata version from users.yaml",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_fx_yaml_ver",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_fx_yaml_ver",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:fx_yaml_tags",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts",
+        "line": 130,
+        "suite": "yq command",
+        "testName": "should extract tags from simple.yaml",
+        "declaration": "it"
+      },
+      "command": "yq '.tags[]' /fixtures/yaml/simple.yaml",
+      "script": "yq '.tags[]' /fixtures/yaml/simple.yaml",
+      "initialFiles": {
+        "/fixtures/yaml/simple.yaml": "title: Simple Document\ncount: 42\nenabled: true\ntags:\n  - important\n  - featured\n  - new\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "important\nfeatured\nnew\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts:130:it:should extract tags from simple.yaml",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_fx_yaml_tags",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_fx_yaml_tags",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:auto_json",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.test.ts",
+        "line": 886,
+        "suite": "yq command",
+        "testName": "should auto-detect JSON from .json extension",
+        "declaration": "it"
+      },
+      "command": "yq '.name' /data.json",
+      "script": "yq '.name' /data.json",
+      "initialFiles": {
+        "/data.json": "{\"name\": \"test\", \"value\": 42}"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "test\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.test.ts:886:it:should auto-detect JSON from .json extension",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_auto_json",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_auto_json",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:nav_select",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.navigation.test.ts",
+        "line": 179,
+        "suite": "yq command",
+        "testName": "parent after select",
+        "declaration": "it"
+      },
+      "command": "yq -o json '.items[] | select(.active == true) | .name' /data.yaml",
+      "script": "yq -o json '.items[] | select(.active == true) | .name' /data.yaml",
+      "initialFiles": {
+        "/data.yaml": "items:\n  - name: foo\n    active: true\n  - name: bar\n    active: false\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "\"foo\"\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.navigation.test.ts:179:it:parent after select",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_nav_select",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_nav_select",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:prefer_p",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.test.ts",
+        "line": 931,
+        "suite": "yq command",
+        "testName": "should prefer explicit -p over auto-detection",
+        "declaration": "it"
+      },
+      "command": "yq -p yaml '.name' /data.json",
+      "script": "yq -p yaml '.name' /data.json",
+      "initialFiles": {
+        "/data.json": "name: yaml-content\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "yaml-content\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.test.ts:931:it:should prefer explicit -p over auto-detection",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_prefer_p",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_prefer_p",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:conv_y2j",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts",
+        "line": 436,
+        "suite": "yq command",
+        "testName": "should convert YAML to JSON",
+        "declaration": "it"
+      },
+      "command": "yq '.title' /fixtures/yaml/simple.yaml -o json -r",
+      "script": "yq '.title' /fixtures/yaml/simple.yaml -o json -r",
+      "initialFiles": {
+        "/fixtures/yaml/simple.yaml": "title: Simple Document\ncount: 42\nenabled: true\ntags:\n  - important\n  - featured\n  - new\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "Simple Document\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts:436:it:should convert YAML to JSON",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_conv_y2j",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_conv_y2j",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:conv_j2y",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts",
+        "line": 445,
+        "suite": "yq command",
+        "testName": "should convert JSON to YAML",
+        "declaration": "it"
+      },
+      "command": "yq -p json '.company.name' /fixtures/json/nested.json",
+      "script": "yq -p json '.company.name' /fixtures/json/nested.json",
+      "initialFiles": {
+        "/fixtures/json/nested.json": "{\n  \"company\": {\n    \"name\": \"Acme Corp\",\n    \"departments\": [\n      {\n        \"name\": \"Engineering\",\n        \"employees\": 50,\n        \"budget\": 500000\n      },\n      {\n        \"name\": \"Sales\",\n        \"employees\": 30,\n        \"budget\": 300000\n      },\n      {\n        \"name\": \"Marketing\",\n        \"employees\": 20,\n        \"budget\": 200000\n      }\n    ]\n  }\n}\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "Acme Corp\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts:445:it:should convert JSON to YAML",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_conv_j2y",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_conv_j2y",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:sj_deep",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts",
+        "line": 573,
+        "suite": "yq command",
+        "testName": "should handle deeply nested structures",
+        "declaration": "it"
+      },
+      "command": "yq -p json '.deeply.nested.structure.value' /fixtures/json/special.json",
+      "script": "yq -p json '.deeply.nested.structure.value' /fixtures/json/special.json",
+      "initialFiles": {
+        "/fixtures/json/special.json": "{\n  \"empty_string\": \"\",\n  \"null_value\": null,\n  \"unicode\": \"Hello \\u4e16\\u754c\",\n  \"escaped\": \"quotes: \\\"nested\\\" and backslash: \\\\path\",\n  \"numbers\": {\n    \"integer\": 42,\n    \"float\": 3.14159,\n    \"negative\": -17,\n    \"scientific\": 1.5e10,\n    \"zero\": 0,\n    \"max_safe\": 9007199254740991\n  },\n  \"booleans\": {\n    \"true_val\": true,\n    \"false_val\": false\n  },\n  \"arrays\": {\n    \"empty\": [],\n    \"mixed\": [1, \"two\", true, null, { \"nested\": \"object\" }],\n    \"nested\": [[1, 2], [3, 4], [5, 6]]\n  },\n  \"objects\": {\n    \"empty\": {},\n    \"with-dash\": \"value\",\n    \"with.dot\": \"value\",\n    \"with space\": \"value\",\n    \"123numeric\": \"starts with number\"\n  },\n  \"deeply\": {\n    \"nested\": {\n      \"structure\": {\n        \"value\": \"found it\"\n      }\n    }\n  }\n}\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "found it\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts:573:it:should handle deeply nested structures",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_sj_deep",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_sj_deep",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:sj_dash",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts",
+        "line": 582,
+        "suite": "yq command",
+        "testName": "should handle keys with special characters",
+        "declaration": "it"
+      },
+      "command": "yq -p json '.objects[\"with-dash\"]' /fixtures/json/special.json",
+      "script": "yq -p json '.objects[\"with-dash\"]' /fixtures/json/special.json",
+      "initialFiles": {
+        "/fixtures/json/special.json": "{\n  \"empty_string\": \"\",\n  \"null_value\": null,\n  \"unicode\": \"Hello \\u4e16\\u754c\",\n  \"escaped\": \"quotes: \\\"nested\\\" and backslash: \\\\path\",\n  \"numbers\": {\n    \"integer\": 42,\n    \"float\": 3.14159,\n    \"negative\": -17,\n    \"scientific\": 1.5e10,\n    \"zero\": 0,\n    \"max_safe\": 9007199254740991\n  },\n  \"booleans\": {\n    \"true_val\": true,\n    \"false_val\": false\n  },\n  \"arrays\": {\n    \"empty\": [],\n    \"mixed\": [1, \"two\", true, null, { \"nested\": \"object\" }],\n    \"nested\": [[1, 2], [3, 4], [5, 6]]\n  },\n  \"objects\": {\n    \"empty\": {},\n    \"with-dash\": \"value\",\n    \"with.dot\": \"value\",\n    \"with space\": \"value\",\n    \"123numeric\": \"starts with number\"\n  },\n  \"deeply\": {\n    \"nested\": {\n      \"structure\": {\n        \"value\": \"found it\"\n      }\n    }\n  }\n}\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "value\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts:582:it:should handle keys with special characters",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_sj_dash",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_sj_dash",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:sj_mixed",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts",
+        "line": 591,
+        "suite": "yq command",
+        "testName": "should handle mixed arrays",
+        "declaration": "it"
+      },
+      "command": "yq -p json '.arrays.mixed | length' /fixtures/json/special.json",
+      "script": "yq -p json '.arrays.mixed | length' /fixtures/json/special.json",
+      "initialFiles": {
+        "/fixtures/json/special.json": "{\n  \"empty_string\": \"\",\n  \"null_value\": null,\n  \"unicode\": \"Hello \\u4e16\\u754c\",\n  \"escaped\": \"quotes: \\\"nested\\\" and backslash: \\\\path\",\n  \"numbers\": {\n    \"integer\": 42,\n    \"float\": 3.14159,\n    \"negative\": -17,\n    \"scientific\": 1.5e10,\n    \"zero\": 0,\n    \"max_safe\": 9007199254740991\n  },\n  \"booleans\": {\n    \"true_val\": true,\n    \"false_val\": false\n  },\n  \"arrays\": {\n    \"empty\": [],\n    \"mixed\": [1, \"two\", true, null, { \"nested\": \"object\" }],\n    \"nested\": [[1, 2], [3, 4], [5, 6]]\n  },\n  \"objects\": {\n    \"empty\": {},\n    \"with-dash\": \"value\",\n    \"with.dot\": \"value\",\n    \"with space\": \"value\",\n    \"123numeric\": \"starts with number\"\n  },\n  \"deeply\": {\n    \"nested\": {\n      \"structure\": {\n        \"value\": \"found it\"\n      }\n    }\n  }\n}\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "5\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts:591:it:should handle mixed arrays",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_sj_mixed",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_sj_mixed",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:an_max",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts",
+        "line": 738,
+        "suite": "yq command",
+        "testName": "should find highest budget department from nested.json",
+        "declaration": "it"
+      },
+      "command": "yq -p json '[.company.departments[] | {name, budget}] | max_by(.budget) | .name' /fixtures/json/nested.json",
+      "script": "yq -p json '[.company.departments[] | {name, budget}] | max_by(.budget) | .name' /fixtures/json/nested.json",
+      "initialFiles": {
+        "/fixtures/json/nested.json": "{\n  \"company\": {\n    \"name\": \"Acme Corp\",\n    \"departments\": [\n      {\n        \"name\": \"Engineering\",\n        \"employees\": 50,\n        \"budget\": 500000\n      },\n      {\n        \"name\": \"Sales\",\n        \"employees\": 30,\n        \"budget\": 300000\n      },\n      {\n        \"name\": \"Marketing\",\n        \"employees\": 20,\n        \"budget\": 200000\n      }\n    ]\n  }\n}\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "Engineering\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts:738:it:should find highest budget department from nested.json",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_an_max",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_an_max",
+      "runnerProof": {
+        "source": "JBC-yq",
         "engine": "rust-just-bash",
         "assertion": "stdout-stderr-exit-code-exact"
       }

@@ -840,6 +840,24 @@ const jbc09CaseGroups = [
     notes:
       'JBC-09 verifies portable awk error handling: integer/float division by zero (inf), modulo by zero (nan), fail-closed invalid-regex diagnostics for match/gsub/sub, unset scalar/array coercion, string-to-number arithmetic, mixed-type and numeric-string comparison, $0/out-of-bounds/non-integer/extended field access, substr with one argument, sprintf with no/extra/missing format args, sqrt/log/exp math edges (nan/-inf/inf), unmatched-brace and unmatched-paren syntax errors, and the missing-input-file error.',
   },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.edge-cases.test.ts',
+    lines: [202, 213, 220, 229, 258, 265, 274, 294, 303, 312],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc09_edge_case_control_array_and_special_var_rows',
+    notes:
+      'JBC-09 verifies portable awk edge cases: case-sensitive regex non-match, empty action block, nested if without else, multiple semicolons, uninitialized variable as number/string, NF reassignment, empty associative-array iteration, numeric-string vs numeric subscript collapse, and delete on an absent key. C-style for/while loops in BEGIN/END remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.errors.test.ts',
+    lines: [288, 295],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc09_edge_case_control_array_and_special_var_rows',
+    notes:
+      'JBC-09 verifies portable awk special-variable edges: NF is 0 for an empty record and NR is 0 inside BEGIN before any record is read.',
+  },
 ];
 
 const jbc10CaseGroups = [
@@ -980,6 +998,24 @@ const jbc10CaseGroups = [
     rustTest: 'rg_imported_misc_search_modes_counts_and_context_rows_are_portable',
     notes:
       'JBC-10 verifies imported rg misc rows: -v/-n inverted, -i case-insensitive, -w word, -x whole-line, -F literal, -q quiet, -t/-T file-type filter, -g/--glob filters, --count/--count-matches/--include-zero counts, --files-with-matches/--files-without-match, -A/-B/-C context with line numbers, --files listing, and --sort path over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/rg.no-filename.test.ts',
+    lines: [222, 234, 246, 258, 276, 289, 304, 316, 328, 340, 353, 367, 379, 393],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_upstream_no_filename_context_filter_and_regex_rows_are_portable',
+    notes:
+      'JBC-10 verifies rg -I (no-filename) with -A/-B/-C context (keeping line numbers and context separators, no per-file separator across files), -t/-g filters, --hidden, combined short flags (-Iin/-In), regex alternation and character classes, and -I -N -o piping output over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [22, 39, 73, 88, 104, 120, 155, 188, 324, 376, 390, 438, 453, 509, 538, 550],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_regression_gitignore_regex_and_flag_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported ripgrep regression rows: rooted/unanchored/nested/trailing-slash/double-star/dot-star gitignore patterns, --files with a path argument, IP-style repeated-group and cyrillic case-folding regex, smart-case bracket sensitivity, -e dash patterns, -q quiet exit, --only-matching, and --quiet --files glob exit codes over the virtual filesystem.',
   },
 ];
 
@@ -1343,6 +1379,51 @@ const jbc15CaseGroups = [
     rustTest: 'upstream_arithmetic_binary_comparison_logical_unary_and_variable_rows',
     notes:
       'JBC-15 verifies portable arithmetic expansion and command rows for binary, comparison, logical, unary, variable, grouping, precedence, and zero/nonzero status behavior.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/arithmetic.test.ts',
+    lines: [90, 157, 164, 231, 238, 245],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::arithmetic',
+    rustTest: 'upstream_arithmetic_comma_short_circuit_ternary_rows',
+    notes:
+      'JBC-15 verifies portable arithmetic comma sequencing, short-circuit && / || that suppresses right-hand side assignment side effects, and true/false/nested ternary evaluation.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/arithmetic.test.ts',
+    lines: [201, 208, 215, 222],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::arithmetic',
+    rustTest: 'upstream_arithmetic_increment_decrement_rows',
+    notes:
+      'JBC-15 verifies portable arithmetic pre/post increment and decrement returning the correct expression value and mutating the underlying variable.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/arithmetic.test.ts',
+    lines: [254, 261, 268, 275, 282, 289, 296, 303, 310, 317, 324],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::arithmetic',
+    rustTest: 'upstream_arithmetic_assignment_operator_rows',
+    notes:
+      'JBC-15 verifies portable arithmetic = and compound += -= *= /= %= <<= >>= &= |= ^= assignment operators returning and persisting the assigned value.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/arithmetic.test.ts',
+    lines: [377, 384, 443, 450, 457, 464],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::arithmetic',
+    rustTest: 'upstream_arithmetic_variable_resolution_and_base_rows',
+    notes:
+      'JBC-15 verifies portable recursive variable-name resolution, re-evaluation of expressions stored in variables, and octal / hex / base#number / hex-with-letters literal parsing.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/arithmetic.test.ts',
+    lines: [416, 423, 432],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::arithmetic',
+    rustTest: 'upstream_arithmetic_array_element_rows',
+    notes:
+      'JBC-15 verifies portable arithmetic array-element access, assignment, and post-increment over indexed arrays.',
   },
   {
     file: 'packages/just-bash/src/interpreter/control-flow.test.ts',

@@ -3261,6 +3261,77 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn awk_jbc09_edge_case_control_array_and_special_var_rows() {
+        // Maps the portable rows of awk.edge-cases.test.ts and awk.errors.test.ts
+        // that the Rust awk subset already implements 1:1. Each assertion mirrors
+        // the upstream vitest expectation exactly (strict stdout + exit code).
+        let env = Bash::default();
+
+        // case-sensitive regex (awk.edge-cases.test.ts:202).
+        let case_sensitive = env.exec(r#"echo "TEST" | awk '/test/ { print "matched" }'"#);
+        assert_eq!(case_sensitive.exit_code, 0);
+        assert_eq!(case_sensitive.stdout, "");
+
+        // empty action block (awk.edge-cases.test.ts:213).
+        let empty_block = env.exec(r#"echo "test" | awk '{ }'"#);
+        assert_eq!(empty_block.exit_code, 0);
+        assert_eq!(empty_block.stdout, "");
+
+        // nested if without else (awk.edge-cases.test.ts:220).
+        let nested_if = env.exec(r#"echo "5" | awk '{ if ($1 > 3) if ($1 < 10) print "yes" }'"#);
+        assert_eq!(nested_if.exit_code, 0);
+        assert_eq!(nested_if.stdout, "yes\n");
+
+        // multiple semicolons (awk.edge-cases.test.ts:229).
+        let semis = env.exec(r#"echo "" | awk 'BEGIN { x=1;; y=2;;; print x+y }'"#);
+        assert_eq!(semis.exit_code, 0);
+        assert_eq!(semis.stdout, "3\n");
+
+        // uninitialized variable as number (awk.edge-cases.test.ts:258).
+        let uninit_num = env.exec(r#"echo "" | awk 'BEGIN { print x + 0 }'"#);
+        assert_eq!(uninit_num.exit_code, 0);
+        assert_eq!(uninit_num.stdout, "0\n");
+
+        // uninitialized variable as string (awk.edge-cases.test.ts:265).
+        let uninit_str = env.exec(r#"echo "" | awk 'BEGIN { print "[" x "]" }'"#);
+        assert_eq!(uninit_str.exit_code, 0);
+        assert_eq!(uninit_str.stdout, "[]\n");
+
+        // variable shadowing built-in NF (awk.edge-cases.test.ts:274).
+        let shadow_nf = env.exec(r#"echo "a b c" | awk '{ NF = 100; print NF }'"#);
+        assert_eq!(shadow_nf.exit_code, 0);
+        assert_eq!(shadow_nf.stdout, "100\n");
+
+        // empty array iteration (awk.edge-cases.test.ts:294).
+        let empty_iter =
+            env.exec(r#"echo "" | awk 'BEGIN { for (k in arr) print k; print "done" }'"#);
+        assert_eq!(empty_iter.exit_code, 0);
+        assert_eq!(empty_iter.stdout, "done\n");
+
+        // numeric string subscript collapses with numeric subscript
+        // (awk.edge-cases.test.ts:303).
+        let numeric_key =
+            env.exec(r#"echo "" | awk 'BEGIN { a["1"] = "one"; a[1] = "ONE"; print a[1] }'"#);
+        assert_eq!(numeric_key.exit_code, 0);
+        assert_eq!(numeric_key.stdout, "ONE\n");
+
+        // delete on empty array is a no-op (awk.edge-cases.test.ts:312).
+        let delete_empty = env.exec(r#"echo "" | awk 'BEGIN { delete arr["x"]; print "ok" }'"#);
+        assert_eq!(delete_empty.exit_code, 0);
+        assert_eq!(delete_empty.stdout, "ok\n");
+
+        // NF = 0 for an empty record (awk.errors.test.ts:288).
+        let nf_zero = env.exec(r#"echo '' | awk '{ print NF }'"#);
+        assert_eq!(nf_zero.exit_code, 0);
+        assert_eq!(nf_zero.stdout, "0\n");
+
+        // NR is 0 inside BEGIN before any record (awk.errors.test.ts:295).
+        let nr_start = env.exec(r#"echo '1' | awk 'BEGIN { print NR }'"#);
+        assert_eq!(nr_start.exit_code, 0);
+        assert_eq!(nr_start.stdout, "0\n");
+    }
+
+    #[test]
     fn awk_jbc09_error_handling_and_type_coercion_rows() {
         // Maps the portable rows of awk.errors.test.ts. Each assertion mirrors
         // the upstream vitest expectation exactly (strict outputs where the
@@ -4270,6 +4341,235 @@ and exhibited clearly, with a label attached.\n",
             0,
             "no.txt\n",
         );
+    }
+
+    #[test]
+    fn rg_upstream_no_filename_context_filter_and_regex_rows_are_portable() {
+        // Maps packages/just-bash/src/commands/rg/rg.no-filename.test.ts
+        // lines 222, 234, 246, 258, 276, 289, 304, 316, 328, 340, 353, 367, 379, 393.
+
+        // -I with context lines (-A/-B/-C) hides the filename but keeps line
+        // numbers and the `-` separator for context rows.
+        assert_home_exec(
+            &[("file.txt", "before\nmatch\nafter\nmore\n")],
+            "rg -I -A1 match",
+            0,
+            "2:match\n3-after\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "before\nmatch\nafter\n")],
+            "rg -I -B1 match",
+            0,
+            "1-before\n2:match\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "a\nb\nmatch\nc\nd\n")],
+            "rg -I -C1 match",
+            0,
+            "2-b\n3:match\n4-c\n",
+        );
+        // Multiple files in context mode: no separator because -I removes the
+        // filename prefix entirely.
+        assert_home_exec(
+            &[
+                ("a.txt", "ctx\nmatch\nctx\n"),
+                ("b.txt", "ctx\nmatch\nctx\n"),
+            ],
+            "rg -I -C1 --sort path match",
+            0,
+            "1-ctx\n2:match\n3-ctx\n1-ctx\n2:match\n3-ctx\n",
+        );
+
+        // -I combined with file filters (-t type, -g glob).
+        assert_home_exec(
+            &[("code.js", "const x = 1;\n"), ("code.py", "x = 1\n")],
+            "rg -I -t js const",
+            0,
+            "1:const x = 1;\n",
+        );
+        assert_home_exec(
+            &[
+                ("test.log", "error occurred\n"),
+                ("test.txt", "error here too\n"),
+            ],
+            "rg -I -g '*.log' error",
+            0,
+            "1:error occurred\n",
+        );
+
+        // -I edge cases.
+        assert_home_exec(&[("file.txt", "no match here\n")], "rg -I notfound", 1, "");
+        assert_home_exec(
+            &[("file.txt", "path/to/file:line:content\n")],
+            "rg -I path",
+            0,
+            "1:path/to/file:line:content\n",
+        );
+        assert_home_exec(
+            &[(".hidden", "secret\n")],
+            "rg -I --hidden secret",
+            0,
+            "1:secret\n",
+        );
+        // Combined short flags -Iin (no-filename + ignore-case + line numbers).
+        assert_home_exec(
+            &[("file.txt", "Test\ntest\nTEST\n")],
+            "rg -Iin test",
+            0,
+            "1:Test\n2:test\n3:TEST\n",
+        );
+        assert_home_exec(&[("file.txt", "match\n")], "rg -In match", 0, "1:match\n");
+
+        // -I with regex patterns (alternation, character classes).
+        assert_home_exec(
+            &[("file.txt", "apple\norange\nbanana\n")],
+            "rg -I 'apple|banana'",
+            0,
+            "1:apple\n3:banana\n",
+        );
+        assert_home_exec(
+            &[("file.txt", "abc123\ndef456\n")],
+            "rg -I '[0-9]+'",
+            0,
+            "1:abc123\n2:def456\n",
+        );
+
+        // -I -N -o produces just the matched text, ideal for piping.
+        assert_home_exec(
+            &[("data.txt", "value: 100\nvalue: 200\nvalue: 300\n")],
+            "rg -I -N -o '[0-9]+'",
+            0,
+            "100\n200\n300\n",
+        );
+    }
+
+    #[test]
+    fn rg_imported_regression_gitignore_regex_and_flag_rows_are_portable() {
+        // Maps imported ripgrep regression cases in
+        // packages/just-bash/src/commands/rg/imported-tests/regression.test.ts
+        // (line numbers in comments). Each row exercises real portable rg
+        // behavior over the virtual filesystem.
+
+        // r24: directory trailing-slash gitignore pattern excludes the tree.
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "ghi/\n"),
+                ("ghi/toplevel.txt", "xyz\n"),
+                ("def/ghi/subdir.txt", "xyz\n"),
+            ],
+            "rg xyz",
+            1,
+            "",
+        ); // :22
+        // r25: rooted gitignore pattern only ignores at the repo root.
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "/llvm/\n"),
+                ("src/llvm/foo", "test\n"),
+            ],
+            "rg test",
+            0,
+            "src/llvm/foo:1:test\n",
+        ); // :39
+        // r49: unanchored directory pattern.
+        assert_home_exec(
+            &[(".gitignore", "foo/bar\n"), ("test/foo/bar/baz", "test\n")],
+            "rg xyz",
+            1,
+            "",
+        ); // :73
+        // r50: nested directory pattern excludes every matching subtree.
+        assert_home_exec(
+            &[
+                (".gitignore", "XXX/YYY/\n"),
+                ("abc/def/XXX/YYY/bar", "test\n"),
+                ("ghi/XXX/YYY/bar", "test\n"),
+            ],
+            "rg xyz",
+            1,
+            "",
+        ); // :88
+        // r64: --files with a path argument lists only that directory.
+        assert_home_exec(
+            &[("dir/abc", ""), ("foo/abc", "")],
+            "rg --files foo",
+            0,
+            "foo/abc\n",
+        ); // :104
+        // r65: simple directory ignore pattern.
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "a/\n"),
+                ("a/foo", "xyz\n"),
+                ("a/bar", "xyz\n"),
+            ],
+            "rg xyz",
+            1,
+            "",
+        ); // :120
+        // r87: double-star gitignore pattern still ignores the literal file.
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "foo\n**no-vcs**\n"),
+                ("foo", "test\n"),
+            ],
+            "rg test",
+            1,
+            "",
+        ); // :155
+        // r93: IP-address-style regex with repeated groups.
+        assert_home_exec(
+            &[("foo", "192.168.1.1\n")],
+            "rg '(\\d{1,3}\\.){3}\\d{1,3}'",
+            0,
+            "foo:1:192.168.1.1\n",
+        ); // :188
+        // r184: dot-star gitignore ignores hidden entries but keeps the tree.
+        assert_home_exec(
+            &[(".gitignore", ".*\n"), ("foo/bar/baz", "test\n")],
+            "rg test",
+            0,
+            "foo/bar/baz:1:test\n",
+        ); // :324
+        // r229: smart-case stays case-sensitive when the bracket class has an
+        // uppercase letter, so a lowercase line does not match.
+        assert_home_exec(&[("foo", "economie\n")], "rg -S '[E]conomie'", 1, ""); // :376
+        // r251: unicode (cyrillic) case folding under -i.
+        assert_home_exec(
+            &[("foo", "привет\nПривет\nПрИвЕт\n")],
+            "rg -i привет",
+            0,
+            "foo:1:привет\nfoo:2:Привет\nfoo:3:ПрИвЕт\n",
+        ); // :390
+        // r270: -e pattern that begins with a dash is treated as the pattern.
+        assert_home_exec(&[("foo", "-test\n")], "rg -e '-test'", 0, "foo:1:-test\n"); // :438
+        // r279: quiet mode emits no stdout but exits 0 on a match.
+        assert_home_exec(&[("foo", "test\n")], "rg -q test", 0, ""); // :453
+        // r451: --only-matching prints just the matched substrings.
+        assert_home_exec(
+            &[("digits.txt", "1 2 3\n")],
+            "rg --only-matching '[0-9]+' digits.txt",
+            0,
+            "1\n2\n3\n",
+        ); // :509
+        // r483: --quiet --files is silent and exits 0 when a glob matches a file.
+        assert_home_exec(
+            &[("file.py", "")],
+            "rg --quiet --files --glob '*.py'",
+            0,
+            "",
+        ); // :538
+        // r483: --quiet --files exits 1 when the glob matches nothing.
+        assert_home_exec(
+            &[("file.rs", "")],
+            "rg --quiet --files --glob '*.py'",
+            1,
+            "",
+        ); // :550
     }
 
     #[test]
