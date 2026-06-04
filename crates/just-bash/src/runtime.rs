@@ -2181,6 +2181,217 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn sed_cycle_engine_advanced_and_command_rows() {
+        // Cycle-engine coverage for the GNU sed commands that require a real
+        // execution loop with pattern/hold space, multi-command `;`-separated
+        // scripts, `{ }` blocks, `:label` branch targets, and N/n/D/P/=/l/a/i/c.
+        // Each assertion mirrors an upstream just-bash test by file:line.
+        let five = || {
+            Bash::with_options(BashOptions {
+                files: BTreeMap::from([
+                    (
+                        "/test/file.txt".to_string(),
+                        "line 1\nline 2\nline 3\nline 4\nline 5\n".to_string(),
+                    ),
+                    (
+                        "/test/alpha.txt".to_string(),
+                        "alpha\nbeta\ngamma\ndelta\n".to_string(),
+                    ),
+                ]),
+                cwd: Some("/test".to_string()),
+                ..BashOptions::default()
+            })
+        };
+        let file = |content: &str| {
+            Bash::with_options(BashOptions {
+                files: BTreeMap::from([("/test.txt".to_string(), content.to_string())]),
+                cwd: Some("/".to_string()),
+                ..BashOptions::default()
+            })
+        };
+
+        // ---- sed.advanced.test.ts ----
+        // :6 N appends next line to pattern space (even line count).
+        assert_eq!(
+            file("line1\nline2\nline3\nline4\n")
+                .exec("sed 'N;s/\\n/ /' /test.txt")
+                .stdout,
+            "line1 line2\nline3 line4\n"
+        );
+        // :15 N auto-prints when there is no next line (odd line count).
+        assert_eq!(
+            file("line1\nline2\nline3\n")
+                .exec("sed 'N;s/\\n/ /' /test.txt")
+                .stdout,
+            "line1 line2\nline3\n"
+        );
+        // :25 N joins pairs of lines.
+        assert_eq!(
+            file("a\nb\nc\nd\n")
+                .exec("sed 'N;s/\\n/,/' /test.txt")
+                .stdout,
+            "a,b\nc,d\n"
+        );
+        // :53 y handles escape sequences (`\t` -> space).
+        assert_eq!(
+            file("a\tb\n").exec("sed 'y/\\t/ /' /test.txt").stdout,
+            "a b\n"
+        );
+        // :63 `=` prints line numbers interleaved with the pattern space.
+        assert_eq!(
+            file("a\nb\nc\n").exec("sed '=' /test.txt").stdout,
+            "1\na\n2\nb\n3\nc\n"
+        );
+        // :71 `2=` prints the line number only for the addressed line.
+        assert_eq!(
+            file("a\nb\nc\n").exec("sed '2=' /test.txt").stdout,
+            "a\n2\nb\nc\n"
+        );
+        // :81 `b;d` branches unconditionally to end of script, skipping `d`.
+        assert_eq!(
+            file("hello\nworld\n").exec("sed 'b;d' /test.txt").stdout,
+            "hello\nworld\n"
+        );
+        // :90 `b skip;d;:skip` branches to a label, skipping `d`.
+        assert_eq!(
+            file("hello\nworld\n")
+                .exec("sed 'b skip;d;:skip' /test.txt")
+                .stdout,
+            "hello\nworld\n"
+        );
+        // :99 `t;d` conditional branch on a successful substitution.
+        assert_eq!(
+            file("hello\nworld\n")
+                .exec("sed 's/hello/HELLO/;t;d' /test.txt")
+                .stdout,
+            "HELLO\n"
+        );
+        // :108 `t done` conditional branch to a label.
+        assert_eq!(
+            file("hello\nworld\n")
+                .exec("sed 's/hello/HELLO/;t done;s/world/WORLD/;:done' /test.txt")
+                .stdout,
+            "HELLO\nWORLD\n"
+        );
+
+        // ---- sed.commands.test.ts ----
+        // :50 `l` lists special characters with escapes and a trailing `$`.
+        let l1 = file("a\tb\nc\n").exec("sed -n 'l' /test.txt");
+        assert!(
+            l1.stdout.contains("\\t"),
+            "l: tab escape, got {:?}",
+            l1.stdout
+        );
+        assert!(
+            l1.stdout.contains('$'),
+            "l: end marker, got {:?}",
+            l1.stdout
+        );
+        // :61 `l` renders non-printable bytes as octal `\001`.
+        let l2 = file("a\u{1}b\n").exec("sed -n 'l' /test.txt");
+        assert!(
+            l2.stdout.contains("\\001"),
+            "l: octal escape, got {:?}",
+            l2.stdout
+        );
+        // :73 `-n '='` prints line numbers only.
+        assert_eq!(
+            five().exec("sed -n '=' /test/file.txt").stdout,
+            "1\n2\n3\n4\n5\n"
+        );
+        // :79 `2{=;p}` prints the line number before the pattern space.
+        assert_eq!(
+            five().exec("sed -n '2{=;p}' /test/file.txt").stdout,
+            "2\nline 2\n"
+        );
+        // :87 `2a added` appends text after the addressed line.
+        assert_eq!(
+            five().exec("sed '2a added' /test/alpha.txt").stdout,
+            "alpha\nbeta\nadded\ngamma\ndelta\n"
+        );
+        // :93 `2i inserted` inserts text before the addressed line.
+        assert_eq!(
+            five().exec("sed '2i inserted' /test/alpha.txt").stdout,
+            "alpha\ninserted\nbeta\ngamma\ndelta\n"
+        );
+        // :99 `2c replaced` changes the addressed line.
+        assert_eq!(
+            five().exec("sed '2c replaced' /test/alpha.txt").stdout,
+            "alpha\nreplaced\ngamma\ndelta\n"
+        );
+        // :105 `2,3c replaced` changes a range, emitting the text once.
+        assert_eq!(
+            five().exec("sed '2,3c replaced' /test/alpha.txt").stdout,
+            "alpha\nreplaced\ndelta\n"
+        );
+        // :114 `n;p` reads the next line, then prints (every other line).
+        assert_eq!(
+            five().exec("sed -n 'n;p' /test/file.txt").stdout,
+            "line 2\nline 4\n"
+        );
+        // :121 `N;s/\n/ + /` appends the next line and joins pairs.
+        assert_eq!(
+            five().exec("sed 'N;s/\\n/ + /' /test/alpha.txt").stdout,
+            "alpha + beta\ngamma + delta\n"
+        );
+        // :130 `h` copies pattern space to hold space.
+        assert_eq!(
+            five().exec("sed -n '1h;3{g;p}' /test/alpha.txt").stdout,
+            "alpha\n"
+        );
+        // :137 `H` appends pattern space to hold space.
+        assert_eq!(
+            five().exec("sed -n '1h;2H;2{g;p}' /test/alpha.txt").stdout,
+            "alpha\nbeta\n"
+        );
+        // :144 `G` appends hold space to pattern space.
+        assert_eq!(
+            five().exec("sed -n '1h;3{G;p}' /test/alpha.txt").stdout,
+            "gamma\nalpha\n"
+        );
+        // :150 `x` exchanges pattern and hold spaces.
+        assert_eq!(
+            five().exec("sed -n '1h;2x;2p' /test/alpha.txt").stdout,
+            "alpha\n"
+        );
+        // :159 `N;D` deletes up to the first newline and restarts the cycle.
+        assert_eq!(five().exec("sed 'N;D' /test/file.txt").stdout, "line 5\n");
+        // :169 `N;P` prints only the first line of each joined pair.
+        assert_eq!(
+            five().exec("sed -n 'N;P' /test/alpha.txt").stdout,
+            "alpha\ngamma\n"
+        );
+        // :178 `:start;s/a/A/;t start;...` loops with `b`/`t` and a label.
+        assert_eq!(
+            five()
+                .exec("sed -e ':start;s/a/A/;t start;s/A/X/g' /test/alpha.txt")
+                .stdout,
+            "XlphX\nbetX\ngXmmX\ndeltX\n"
+        );
+        // :188 `t end` branches on a successful substitution.
+        assert_eq!(
+            five()
+                .exec("sed -e 's/alpha/FOUND/;t end;s/./X/g;:end' /test/alpha.txt")
+                .stdout,
+            "FOUND\nXXXX\nXXXXX\nXXXXX\n"
+        );
+        // :197 `T skip` branches when no substitution was made.
+        assert_eq!(
+            five()
+                .exec("sed -e 's/alpha/FOUND/;T skip;s/FOUND/REPLACED/;:skip' /test/alpha.txt")
+                .stdout,
+            "REPLACED\nbeta\ngamma\ndelta\n"
+        );
+        // :208 nested `{ }` block applies multiple commands to a range.
+        assert_eq!(
+            five()
+                .exec("sed '2,3{s/e/E/g;s/a/A/g}' /test/alpha.txt")
+                .stdout,
+            "alpha\nbEtA\ngAmmA\ndelta\n"
+        );
+    }
+
+    #[test]
     fn awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors() {
         let env = Bash::with_options(BashOptions {
             files: BTreeMap::from([
