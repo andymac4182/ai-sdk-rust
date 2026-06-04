@@ -4946,6 +4946,15 @@ const jbR5ParserInterpreterCaseGroups = [
       'R10JB verifies the portable `return` builtin 1:1 with return.test.ts through the Rust parser/interpreter: default/explicit/last-command/zero exit codes, modulo-256 wrapping (256->0, 257->1, -1->255), the not-in-a-function error (exit 1) and non-numeric-argument error (exit 2), innermost-only return in nested functions, propagation through control flow inside the function body, and stdout preservation before return.',
   },
   {
+    file: 'packages/just-bash/src/interpreter/builtins/shift.test.ts',
+    lines: [6, 19, 32, 47, 60, 72, 87, 99, 111, 125, 140, 156, 174, 186],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::builtins::shift',
+    rustTest: 'jbpi_interpreter_builtin_shift_matches_upstream',
+    notes:
+      'R10JB verifies the portable `shift` builtin 1:1 with shift.test.ts through the Rust parser/interpreter: shift by 1 with the resulting $1/$2/$3, $#, and $@ updates, shift by an explicit count, shift-all, the `shift 0` no-op, the shift-count-out-of-range and numeric-argument-required (negative and non-numeric) errors at exit 1, consecutive shifts, the `while [ $# -gt 0 ]` drain loop, function-scope isolation in nested functions, and the no-parameter and single-parameter edge rows. The POSIX-mode fatal variant is not modeled because Just Bash does not track `set -o posix` here.',
+  },
+  {
     file: 'packages/just-bash/src/interpreter/builtins/exit.test.ts',
     lines: [72, 85, 101, 110],
     status: 'portable-verified',
