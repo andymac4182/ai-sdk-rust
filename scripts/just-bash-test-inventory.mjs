@@ -3552,6 +3552,45 @@ const jbr1CaseGroups = [
   },
 ];
 
+const jbR3SyntaxCaseGroups = [
+  {
+    file: 'packages/just-bash/src/syntax/subshell-args.test.ts',
+    lines: [80, 88, 96, 105, 113, 122, 130, 137, 144, 151, 158],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jb_subshell_args_operator_precedence_rows_match_upstream',
+    notes:
+      'JBR-3 verifies portable operator-precedence rows — `!` binding tighter than `&&`/`||`, `!` negating whole pipelines, `&&`/`||` left-associativity, `;` lowest precedence, and stacked `!` toggling exit status — through the Rust shell. The positional-argument (`bash -c`, `sh -c`, script-file) and `xargs` rows require subshell-arg and command-family behavior and stay pending with command owners.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/variables.test.ts',
+    lines: [131],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jb_syntax_variables_quoted_newline_row_matches_upstream',
+    notes:
+      'JBR-3 verifies a literal newline inside double quotes is preserved verbatim through the Rust shell quoting pipeline. The byte-level backslash escape row (L157) stays pending as a documented `echo -e` collapse divergence.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/loops.test.ts',
+    lines: [69, 86, 97, 171, 190],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jb_syntax_loops_while_guard_rows_match_upstream',
+    notes:
+      'JBR-3 verifies portable `while grep -q` guard loops that flip a virtual-filesystem file and last-command exit-status propagation through the Rust shell. Infinite-loop protection (L135/L145/L153), `until grep -q` re-evaluation timing rows, and loop-variable cleanup (L60) stay pending; the no-op `while false`/`until true` rows (L79/L117) are verified separately by JBC-13.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/operators.test.ts',
+    lines: [43, 91, 102, 147, 185, 191, 197, 205, 339],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jb_syntax_operators_logical_and_redirection_rows_match_upstream',
+    notes:
+      'JBR-3 verifies portable operator rows — `&&` short-circuit protecting the filesystem, all-failing `||` chains, `;` exit-status propagation, mixed `&&`/`||`/`;` precedence chains, and cross-`exec` `>>` appends — through the Rust shell. Rows needing head/tail/wc command families stay pending with command owners; L154/L275 are verified separately by JBC-33.',
+  },
+];
+
 const jbR2CaseGroups = [
   {
     file: 'packages/just-bash/src/interpreter/control-flow.test.ts',
@@ -4466,6 +4505,7 @@ function caseOverrideFor(testCase) {
     ...jbc30AgentExampleCaseGroups,
     ...jbc33CaseGroups,
     ...jbr1CaseGroups,
+    ...jbR3SyntaxCaseGroups,
     ...jbR2CaseGroups,
     ...jbc37CaseGroups,
     ...jbc44CaseGroups,

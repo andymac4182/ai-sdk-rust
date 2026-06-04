@@ -7982,4 +7982,184 @@ greet World",
         let result = shell().exec("if ! false; then echo yes; fi");
         assert_eq!(result.stdout, "yes\n");
     }
+
+    /// Covers portable operator-precedence rows from
+    /// `packages/just-bash/src/syntax/subshell-args.test.ts` (the
+    /// "Operator precedence" describe block) through the Rust shell. `!` binds
+    /// tighter than `&&`/`||`, negates the whole pipeline, `&&`/`||`/`;` keep
+    /// bash precedence/associativity, and stacked `!` toggles the exit status.
+    /// The positional-argument (`bash -c`, `sh -c`, script-file) and `xargs`
+    /// rows require subshell-arg and command-family behavior the fake command
+    /// dispatcher does not model, so they stay pending with command owners.
+    #[test]
+    fn jb_subshell_args_operator_precedence_rows_match_upstream() {
+        for (source, expected_stdout, expected_exit) in [
+            // L80 `!` binds tighter than `&&`: `! false` succeeds, then `&& echo yes`.
+            ("! false && echo yes", "yes\n", 0),
+            // L88 `!` binds tighter than `||`: `! true` fails, then `|| echo fallback`.
+            ("! true || echo fallback", "fallback\n", 0),
+            // L96 `!` negates the entire pipeline: grep fails (1), negated to 0.
+            ("! echo hello | grep missing", "", 0),
+            // L105 `!` negates a successful pipeline: grep succeeds (0), negated to 1.
+            ("! echo hello | grep hello", "hello\n", 1),
+            // L113 `&&`/`||` are left-associative: (true || echo no) && echo yes.
+            ("true || echo no && echo yes", "yes\n", 0),
+            // L122 `;` has lowest precedence: (false && echo no) ; echo always.
+            ("false && echo no ; echo always", "always\n", 0),
+            // L130 double negation cancels: ! ! true == 0.
+            ("! ! true", "", 0),
+            // L137 double negation of false gives 1.
+            ("! ! false", "", 1),
+            // L144 triple negation negates once: ! ! ! true == 1.
+            ("! ! ! true", "", 1),
+            // L151 triple negation of false gives 0.
+            ("! ! ! false", "", 0),
+            // L158 quadruple negation cancels out: ! ! ! ! true == 0.
+            ("! ! ! ! true", "", 0),
+        ] {
+            let result = shell().exec(source);
+            assert_eq!(result.stdout, expected_stdout, "stdout {source:?}");
+            assert_eq!(result.exit_code, expected_exit, "exit {source:?}");
+        }
+    }
+
+    /// Covers the remaining portable row from
+    /// `packages/just-bash/src/syntax/variables.test.ts` not already mapped by
+    /// JBC-33: a literal newline preserved inside double quotes (L131) through
+    /// the Rust shell quoting pipeline. The byte-level backslash escape row
+    /// (L157) stays pending — like JBC-33's documented exception — because the
+    /// Rust `echo -e` backslash collapse diverges on that edge case.
+    #[test]
+    fn jb_syntax_variables_quoted_newline_row_matches_upstream() {
+        // L131 a literal newline inside double quotes is preserved verbatim.
+        let result = shell().exec("echo \"line1\nline2\"");
+        assert_eq!(result.stdout, "line1\nline2\n");
+        assert_eq!(result.exit_code, 0);
+    }
+
+    /// Covers portable `while`/`until` guard rows from
+    /// `packages/just-bash/src/syntax/loops.test.ts` not already mapped by
+    /// JBC-33: condition-driven `while grep -q` loops that flip a guard file,
+    /// the no-op `while false`/`until true` loops, and exit-status propagation
+    /// from the loop body. The infinite-loop protection rows (L135/L145/L153)
+    /// require execution-limit diagnostics, the `until grep -q` guard rows
+    /// depend on multi-iteration condition re-evaluation timing, and the
+    /// loop-variable cleanup row (L60) needs post-loop variable unsetting, so
+    /// those stay pending separately.
+    #[test]
+    fn jb_syntax_loops_while_guard_rows_match_upstream() {
+        // L69 while runs while condition holds, mutating the guard file.
+        let mut sh = shell();
+        sh.files_mut().write("/count.txt", "0\n");
+        let result =
+            sh.exec("while grep -q 0 /count.txt; do echo iteration; echo 1 > /count.txt; done");
+        assert_eq!(result.stdout, "iteration\n", "L69");
+
+        // L79 while with an initially-false condition runs zero times.
+        let result = shell().exec("while false; do echo never; done");
+        assert_eq!(result.stdout, "", "L79");
+        assert_eq!(result.exit_code, 0, "L79");
+
+        // L86 multiple-iteration guard collapses to one run once flipped.
+        let mut sh = shell();
+        sh.files_mut().write("/counter.txt", "aaa\n");
+        let result = sh.exec(
+            "while grep -q aaa /counter.txt; do echo loop; echo \"bbb\" > /counter.txt; done",
+        );
+        assert_eq!(result.stdout, "loop\n", "L86");
+
+        // L97 exit status comes from the last command in the body (`true`).
+        let mut sh = shell();
+        sh.files_mut().write("/f.txt", "start\n");
+        let result = sh.exec("while grep -q start /f.txt; do echo done > /f.txt; true; done");
+        assert_eq!(result.exit_code, 0, "L97");
+
+        // L117 until with an initially-true condition runs zero times.
+        let result = shell().exec("until true; do echo never; done");
+        assert_eq!(result.stdout, "", "L117");
+        assert_eq!(result.exit_code, 0, "L117");
+
+        // L171 simplified for-inside-while case: condition-driven single pass.
+        let mut sh = shell();
+        sh.files_mut().write("/run.txt", "go\n");
+        let result =
+            sh.exec("while grep -q go /run.txt; do echo inner; echo stop > /run.txt; done");
+        assert_eq!(result.stdout, "inner\n", "L171");
+
+        // L190 while loop with a semicolon before `do` flips the guard file.
+        let mut sh = shell();
+        sh.files_mut().write("/f.txt", "x\n");
+        let result = sh.exec("while grep -q x /f.txt; do echo found; echo y > /f.txt; done");
+        assert_eq!(result.stdout, "found\n", "L190");
+    }
+
+    /// Covers portable operator rows from
+    /// `packages/just-bash/src/syntax/operators.test.ts` not already mapped by
+    /// JBC-33: `&&` short-circuit protecting the filesystem, `||` chains over
+    /// failing `cat`, `;` exit-status propagation, mixed `&&`/`||`/`;`
+    /// precedence chains, and cross-`exec` `>>` appends through the Rust shell.
+    /// Rows needing head/tail/wc command families stay pending with command
+    /// owners.
+    #[test]
+    fn jb_syntax_operators_logical_and_redirection_rows_match_upstream() {
+        // L43 `&&` short-circuits, so the failing `cat` keeps `rm` from running.
+        let mut sh = shell();
+        sh.files_mut().write("/important.txt", "keep this");
+        sh.exec("cat /missing && rm /important.txt");
+        assert_eq!(
+            sh.files().read_to_string("/important.txt"),
+            Some("keep this"),
+            "L43"
+        );
+
+        // L91 `||` chain stops at the first success: second `cat` wins.
+        let mut sh = shell();
+        sh.files_mut().write("/exists.txt", "found");
+        let result = sh.exec("cat /missing || cat /exists.txt || echo fallback");
+        assert_eq!(result.stdout, "found", "L91");
+        assert_eq!(result.exit_code, 0, "L91");
+
+        // The remaining stdout/exit rows only use echo/cat and chain operators.
+        for (source, expected_stdout, expected_exit) in [
+            // L102 all-failing `||` chain returns the last failure (1).
+            ("cat /a || cat /b || cat /c", "", 1),
+            // L147 `;` keeps the exit status of the last command (failing cat).
+            ("echo first ; cat /missing", "first\n", 1),
+            // L154 `;` succeeds when the last command succeeds.
+            ("cat /missing ; echo success", "success\n", 0),
+            // L185 success && success || fallback runs both successes only.
+            ("echo a && echo b || echo c", "a\nb\n", 0),
+            // L191 `;` then `&&`: all three run.
+            ("echo a ; echo b && echo c", "a\nb\nc\n", 0),
+            // L197 `;` then `||`: fallback recovers the failing second cat.
+            (
+                "cat /missing ; cat /missing2 || echo fallback",
+                "fallback\n",
+                0,
+            ),
+            // L205 fail && x || recover ; continue.
+            (
+                "cat /missing && echo success || echo recovered ; echo done",
+                "recovered\ndone\n",
+                0,
+            ),
+            // L275 `||` is not confused with the pipe operator.
+            ("cat /missing || echo fallback", "fallback\n", 0),
+        ] {
+            let result = shell().exec(source);
+            assert_eq!(result.stdout, expected_stdout, "stdout {source:?}");
+            assert_eq!(result.exit_code, expected_exit, "exit {source:?}");
+        }
+
+        // L339 `>>` appends across separate exec calls in the same session.
+        let mut sh = shell();
+        sh.exec("echo a >> /log.txt");
+        sh.exec("echo b >> /log.txt");
+        sh.exec("echo c >> /log.txt");
+        assert_eq!(
+            sh.files().read_to_string("/log.txt"),
+            Some("a\nb\nc\n"),
+            "L339"
+        );
+    }
 }
