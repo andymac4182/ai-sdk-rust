@@ -15,12 +15,12 @@
     "expectedFailures": 0
   },
   "summary": {
-    "totalCases": 444,
+    "totalCases": 474,
     "byKind": {
-      "comparison-fixture": 444
+      "comparison-fixture": 474
     },
     "byDomain": {
-      "awk": 12,
+      "awk": 42,
       "basename-dirname": 15,
       "cat": 7,
       "column-join": 9,
@@ -45,7 +45,7 @@
       "yq": 12
     },
     "byStatus": {
-      "portable-verified": 444
+      "portable-verified": 474
     }
   },
   "cases": [
@@ -23473,6 +23473,1300 @@
       "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_an_max",
       "runnerProof": {
         "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l100",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 100,
+        "suite": "awk complex expressions",
+        "testName": "should handle nested for loops",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { for (i=1; i<=3; i++) for (j=1; j<=3; j++) printf \"%d\", i*j; print \"\" }'",
+      "script": "echo \"\" | awk 'BEGIN { for (i=1; i<=3; i++) for (j=1; j<=3; j++) printf \"%d\", i*j; print \"\" }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "123246369\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:100:it:should handle nested for loops",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l100",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l100",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l168",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 168,
+        "suite": "awk complex expressions",
+        "testName": "should handle chained && operators",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { print (1 && 2 && 3 && 4) }'",
+      "script": "echo \"\" | awk 'BEGIN { print (1 && 2 && 3 && 4) }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "1\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:168:it:should handle chained && operators",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l168",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l168",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l177",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 177,
+        "suite": "awk complex expressions",
+        "testName": "should handle chained || operators",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { print (0 || 0 || 0 || 5) }'",
+      "script": "echo \"\" | awk 'BEGIN { print (0 || 0 || 0 || 5) }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "1\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:177:it:should handle chained || operators",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l177",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l177",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l186",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 186,
+        "suite": "awk complex expressions",
+        "testName": "should handle mixed && and ||",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { print (1 && 0 || 1) }'",
+      "script": "echo \"\" | awk 'BEGIN { print (1 && 0 || 1) }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "1\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:186:it:should handle mixed && and ||",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l186",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l186",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l196",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 196,
+        "suite": "awk complex expressions",
+        "testName": "should handle complex boolean expression",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { a=1; b=0; c=1; d=0; print ((a && b) || (c && !d)) }'",
+      "script": "echo \"\" | awk 'BEGIN { a=1; b=0; c=1; d=0; print ((a && b) || (c && !d)) }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "1\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:196:it:should handle complex boolean expression",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l196",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l196",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l211",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 211,
+        "suite": "awk complex expressions",
+        "testName": "should use function result in arithmetic",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { print length(\"hello\") * 2 }'",
+      "script": "echo \"\" | awk 'BEGIN { print length(\"hello\") * 2 }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "10\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:211:it:should use function result in arithmetic",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l211",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l211",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l220",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 220,
+        "suite": "awk complex expressions",
+        "testName": "should chain function calls",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { print substr(toupper(\"hello world\"), 1, 5) }'",
+      "script": "echo \"\" | awk 'BEGIN { print substr(toupper(\"hello world\"), 1, 5) }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "HELLO\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:220:it:should chain function calls",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l220",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l220",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l229",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 229,
+        "suite": "awk complex expressions",
+        "testName": "should use function in condition",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { if (length(\"test\") > 3) print \"long\" }'",
+      "script": "echo \"\" | awk 'BEGIN { if (length(\"test\") > 3) print \"long\" }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "long\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:229:it:should use function in condition",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l229",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l229",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l238",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 238,
+        "suite": "awk complex expressions",
+        "testName": "should use function result as array index",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { a[3] = \"three\"; print a[int(3.7)] }'",
+      "script": "echo \"\" | awk 'BEGIN { a[3] = \"three\"; print a[int(3.7)] }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "three\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:238:it:should use function result as array index",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l238",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l238",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l250",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 250,
+        "suite": "awk complex expressions",
+        "testName": "should nest function calls",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { print sqrt(sqrt(16)) }'",
+      "script": "echo \"\" | awk 'BEGIN { print sqrt(sqrt(16)) }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "2\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:250:it:should nest function calls",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l250",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l250",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l261",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 261,
+        "suite": "awk complex expressions",
+        "testName": "should use computed field index",
+        "declaration": "it"
+      },
+      "command": "echo \"a b c d e\" | awk '{ i=2; print $(i+1) }'",
+      "script": "echo \"a b c d e\" | awk '{ i=2; print $(i+1) }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "c\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:261:it:should use computed field index",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l261",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l261",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l270",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 270,
+        "suite": "awk complex expressions",
+        "testName": "should use field in arithmetic expression",
+        "declaration": "it"
+      },
+      "command": "echo \"10 20 30\" | awk '{ print ($1 + $2) * $3 / 100 }'",
+      "script": "echo \"10 20 30\" | awk '{ print ($1 + $2) * $3 / 100 }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "9\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:270:it:should use field in arithmetic expression",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l270",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l270",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l279",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 279,
+        "suite": "awk complex expressions",
+        "testName": "should use field value as index",
+        "declaration": "it"
+      },
+      "command": "echo \"2 a b c d\" | awk '{ print $($1+1) }'",
+      "script": "echo \"2 a b c d\" | awk '{ print $($1+1) }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "b\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:279:it:should use field value as index",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l279",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l279",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l289",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 289,
+        "suite": "awk complex expressions",
+        "testName": "should handle NF in expressions",
+        "declaration": "it"
+      },
+      "command": "echo \"a b c d\" | awk '{ print $(NF-1), $(NF/2) }'",
+      "script": "echo \"a b c d\" | awk '{ print $(NF-1), $(NF/2) }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "c b\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:289:it:should handle NF in expressions",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l289",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l289",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l301",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 301,
+        "suite": "awk complex expressions",
+        "testName": "should concatenate multiple expressions",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { print \"a\" \"b\" 1+1 \"c\" length(\"dd\") }'",
+      "script": "echo \"\" | awk 'BEGIN { print \"a\" \"b\" 1+1 \"c\" length(\"dd\") }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "ab2c2\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:301:it:should concatenate multiple expressions",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l301",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l301",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l310",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 310,
+        "suite": "awk complex expressions",
+        "testName": "should use sprintf result in expressions",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { s = sprintf(\"%03d\", 42); print length(s), s }'",
+      "script": "echo \"\" | awk 'BEGIN { s = sprintf(\"%03d\", 42); print length(s), s }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "3 042\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:310:it:should use sprintf result in expressions",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l310",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l310",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l322",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 322,
+        "suite": "awk complex expressions",
+        "testName": "should build string with loop",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { s = \"\"; for (i=1; i<=5; i++) s = s i; print s }'",
+      "script": "echo \"\" | awk 'BEGIN { s = \"\"; for (i=1; i<=5; i++) s = s i; print s }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "12345\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:322:it:should build string with loop",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l322",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l322",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l337",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 337,
+        "suite": "awk complex expressions",
+        "testName": "should use expression as array key",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { a[\"key1\"] = \"v1\"; a[\"key2\"] = \"v2\"; i = 1; print a[\"key\" i], a[\"key\" (i+1)] }'",
+      "script": "echo \"\" | awk 'BEGIN { a[\"key1\"] = \"v1\"; a[\"key2\"] = \"v2\"; i = 1; print a[\"key\" i], a[\"key\" (i+1)] }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "v1 v2\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:337:it:should use expression as array key",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l337",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l337",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l351",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 351,
+        "suite": "awk complex expressions",
+        "testName": "should compute with array values",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { a[1]=10; a[2]=20; a[3]=30; print a[1] + a[2] + a[3] }'",
+      "script": "echo \"\" | awk 'BEGIN { a[1]=10; a[2]=20; a[3]=30; print a[1] + a[2] + a[3] }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "60\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:351:it:should compute with array values",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l351",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l351",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l363",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 363,
+        "suite": "awk complex expressions",
+        "testName": "should use nested array access",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { a[1] = 2; a[2] = 3; print a[a[1]] }'",
+      "script": "echo \"\" | awk 'BEGIN { a[1] = 2; a[2] = 3; print a[a[1]] }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "3\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:363:it:should use nested array access",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l363",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l363",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l378",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 378,
+        "suite": "awk complex expressions",
+        "testName": "should use assignment result",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { print (x = 5) + (y = 3) }'",
+      "script": "echo \"\" | awk 'BEGIN { print (x = 5) + (y = 3) }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "8\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:378:it:should use assignment result",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l378",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l378",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l387",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 387,
+        "suite": "awk complex expressions",
+        "testName": "should chain assignments",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { a = b = c = 10; print a, b, c }'",
+      "script": "echo \"\" | awk 'BEGIN { a = b = c = 10; print a, b, c }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "10 10 10\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:387:it:should chain assignments",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l387",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l387",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l396",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 396,
+        "suite": "awk complex expressions",
+        "testName": "should use increment result in expression",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { x = 5; print x++ * 2, x }'",
+      "script": "echo \"\" | awk 'BEGIN { x = 5; print x++ * 2, x }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "10 6\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:396:it:should use increment result in expression",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l396",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l396",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l406",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 406,
+        "suite": "awk complex expressions",
+        "testName": "should use pre-increment in expression",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { x = 5; print ++x * 2, x }'",
+      "script": "echo \"\" | awk 'BEGIN { x = 5; print ++x * 2, x }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "12 6\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:406:it:should use pre-increment in expression",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l406",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l406",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l418",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 418,
+        "suite": "awk complex expressions",
+        "testName": "should use regex match result in arithmetic",
+        "declaration": "it"
+      },
+      "command": "echo \"hello\" | awk '{ print ($0 ~ /hello/) * 100 }'",
+      "script": "echo \"hello\" | awk '{ print ($0 ~ /hello/) * 100 }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "100\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:418:it:should use regex match result in arithmetic",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l418",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l418",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l427",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 427,
+        "suite": "awk complex expressions",
+        "testName": "should use match() result in expression",
+        "declaration": "it"
+      },
+      "command": "echo \"hello world\" | awk '{ pos = match($0, /world/); print pos > 0 ? \"found at \" pos : \"not found\" }'",
+      "script": "echo \"hello world\" | awk '{ pos = match($0, /world/); print pos > 0 ? \"found at \" pos : \"not found\" }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "found at 7\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:427:it:should use match() result in expression",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l427",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l427",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l436",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 436,
+        "suite": "awk complex expressions",
+        "testName": "should combine regex matches with logic",
+        "declaration": "it"
+      },
+      "command": "echo \"hello world\" | awk '{ print ($0 ~ /hello/ && $0 ~ /world/) }'",
+      "script": "echo \"hello world\" | awk '{ print ($0 ~ /hello/ && $0 ~ /world/) }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "1\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:436:it:should combine regex matches with logic",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l436",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l436",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l447",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 447,
+        "suite": "awk complex expressions",
+        "testName": "should compute factorial iteratively",
+        "declaration": "it"
+      },
+      "command": "echo \"\" | awk 'BEGIN { n = 5; fact = 1; for (i = 2; i <= n; i++) fact *= i; print fact }'",
+      "script": "echo \"\" | awk 'BEGIN { n = 5; fact = 1; for (i = 2; i <= n; i++) fact *= i; print fact }'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "120\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:447:it:should compute factorial iteratively",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l447",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l447",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l476",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 476,
+        "suite": "awk complex expressions",
+        "testName": "should find max in data",
+        "declaration": "it"
+      },
+      "command": "awk 'NR==1 || $1 > max { max = $1 } END { print max }' /data.txt",
+      "script": "awk 'NR==1 || $1 > max { max = $1 } END { print max }' /data.txt",
+      "initialFiles": {
+        "/data.txt": "5\n12\n3\n9\n7\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "12\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:476:it:should find max in data",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l476",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l476",
+      "runnerProof": {
+        "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:awk:expr-l487",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "awk",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/awk/awk.expressions.test.ts",
+        "line": 487,
+        "suite": "awk complex expressions",
+        "testName": "should compute average",
+        "declaration": "it"
+      },
+      "command": "awk '{ sum += $1; count++ } END { print sum / count }' /data.txt",
+      "script": "awk '{ sum += $1; count++ } END { print sum / count }' /data.txt",
+      "initialFiles": {
+        "/data.txt": "10\n20\n30\n40\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "25\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/awk/awk.expressions.test.ts:487:it:should compute average",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::expr_awk_l487",
+        "notes": "JBC-35 Rust corpus runner exact match for the hand-authored awk expression fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l487",
+      "runnerProof": {
+        "source": "JBC-35",
         "engine": "rust-just-bash",
         "assertion": "stdout-stderr-exit-code-exact"
       }

@@ -5406,6 +5406,182 @@ mod tests {
         Interpreter::new(FakeCommands::default())
     }
 
+    /// Covers portable `packages/just-bash/src/interpreter/control-flow.test.ts`
+    /// rows through the Rust shell interpreter. Each block mirrors one upstream
+    /// `it(...)` assertion on `Bash().exec(...)` stdout/exit code. IFS-splitting,
+    /// positional-parameter, invalid-identifier-error, and C-style `for (( ))`
+    /// rows are intentionally excluded and stay pending until those behaviors are
+    /// implemented.
+    #[test]
+    fn r2_interpreter_control_flow_rows_match_upstream() {
+        for (source, expected_stdout) in [
+            // L42 elif chain selects the matching branch.
+            (
+                "x=2\nif [ $x -eq 1 ]; then\n  echo \"one\"\nelif [ $x -eq 2 ]; then\n  echo \"two\"\nelif [ $x -eq 3 ]; then\n  echo \"three\"\nelse\n  echo \"other\"\nfi",
+                "two\n",
+            ),
+            // L60 complex && condition between two test commands.
+            (
+                "a=5\nb=10\nif [ $a -lt $b ] && [ $b -gt 5 ]; then echo \"both true\"; fi",
+                "both true\n",
+            ),
+            // L73 nested if statements.
+            (
+                "a=1\nb=2\nif [ $a -eq 1 ]; then if [ $b -eq 2 ]; then echo \"nested\"; fi; fi",
+                "nested\n",
+            ),
+            // L247 while body runs while condition true.
+            (
+                "x=0\nwhile [ $x -lt 3 ]; do echo $x; x=$((x + 1)); done",
+                "0\n1\n2\n",
+            ),
+            // L260 while body skipped when condition initially false.
+            (
+                "while false; do echo \"inside\"; done\necho \"done\"",
+                "done\n",
+            ),
+            // L272 nested while loops.
+            (
+                "i=0\nwhile [ $i -lt 2 ]; do j=0; while [ $j -lt 2 ]; do echo \"$i,$j\"; j=$((j + 1)); done; i=$((i + 1)); done",
+                "0,0\n0,1\n1,0\n1,1\n",
+            ),
+            // L291 until body runs until condition true.
+            (
+                "x=0\nuntil [ $x -ge 3 ]; do echo $x; x=$((x + 1)); done",
+                "0\n1\n2\n",
+            ),
+            // L304 until body skipped when condition initially true.
+            (
+                "until true; do echo \"inside\"; done\necho \"done\"",
+                "done\n",
+            ),
+            // L318 break exits the for loop early.
+            (
+                "for i in 1 2 3 4 5; do if [ $i -eq 3 ]; then break; fi; echo $i; done\necho done",
+                "1\n2\ndone\n",
+            ),
+            // L331 continue skips one iteration.
+            (
+                "for i in 1 2 3 4 5; do if [ $i -eq 3 ]; then continue; fi; echo $i; done",
+                "1\n2\n4\n5\n",
+            ),
+            // L343 break N exits multiple loop levels.
+            (
+                "for i in 1 2; do for j in a b c; do if [ $j = b ]; then break 2; fi; echo \"$i$j\"; done; done\necho done",
+                "1a\ndone\n",
+            ),
+            // L358 continue N continues an outer loop level.
+            (
+                "for i in 1 2; do for j in a b; do if [ $j = a ]; then continue 2; fi; echo \"$i$j\"; done; done\necho done",
+                "done\n",
+            ),
+        ] {
+            let mut sh = shell();
+            let result = sh.exec(source);
+            assert_eq!(result.stderr, "", "stderr {source:?}");
+            assert_eq!(result.stdout, expected_stdout, "stdout {source:?}");
+            assert_eq!(result.exit_code, 0, "exit {source:?}");
+        }
+    }
+
+    /// Covers additional portable `packages/just-bash/src/syntax/parser-edge-cases.test.ts`
+    /// rows (quoting, operator parsing, edge cases, and `2>` / `2>&1` redirection)
+    /// plus the operators.test.ts `||`-not-pipe row through the Rust shell. Rows
+    /// requiring filesystem command families (mkdir/wc/head/tail) stay pending.
+    #[test]
+    fn r2_syntax_parser_edge_cases_and_redirection_rows_match_upstream() {
+        for (source, expected_stdout, expected_code) in [
+            // L30 adjacent quoted strings concatenate.
+            ("echo 'hello'\"world\"", "helloworld\n", 0),
+            // L68 escaped space outside quotes is a literal space.
+            ("echo hello\\ world", "hello world\n", 0),
+            // operators.test.ts L275 `||` is not confused with a pipe.
+            ("cat /missing || echo fallback", "fallback\n", 0),
+            // L247 mixed && and || left-to-right.
+            ("false || echo A && echo B", "A\nB\n", 0),
+            // L254 semicolon with && and ||.
+            ("echo a; false || echo b; echo c", "a\nb\nc\n", 0),
+            // L260 pipes with semicolons.
+            ("echo hello | cat; echo world | cat", "hello\nworld\n", 0),
+            // L266 assignment followed by command.
+            ("x=hello; echo $x", "hello\n", 0),
+            // L272 `a=b` as an argument, not an assignment.
+            ("echo a=b", "a=b\n", 0),
+            // L281 empty command line.
+            ("", "", 0),
+            // L288 command with only spaces.
+            ("   ", "", 0),
+            // L318 unicode in arguments.
+            (
+                "echo \"Hello \u{4e16}\u{754c} \u{1f30d}\"",
+                "Hello \u{4e16}\u{754c} \u{1f30d}\n",
+                0,
+            ),
+            // L324 literal newline preserved in double quotes.
+            ("echo \"line1\nline2\"", "line1\nline2\n", 0),
+        ] {
+            let mut sh = shell();
+            let result = sh.exec(source);
+            assert_eq!(result.stdout, expected_stdout, "stdout {source:?}");
+            assert_eq!(result.exit_code, expected_code, "exit {source:?}");
+        }
+
+        // L295 bare semicolon is a syntax error.
+        let mut sh = shell();
+        let result = sh.exec(";");
+        assert_eq!(result.exit_code, 2, "bare semicolon exit");
+        assert!(
+            result.stderr.contains("syntax error"),
+            "bare semicolon stderr {}",
+            result.stderr
+        );
+
+        // L303 `;;` outside case is a syntax error.
+        let mut sh = shell();
+        let result = sh.exec("echo a;;;echo b");
+        assert_eq!(result.exit_code, 2, "double semicolon exit");
+        assert!(
+            result.stderr.contains("syntax error"),
+            "double semicolon stderr {}",
+            result.stderr
+        );
+
+        // L311 very long argument round-trips intact.
+        let long_str = "a".repeat(10000);
+        let mut sh = shell();
+        let result = sh.exec(&format!("echo {long_str}"));
+        assert_eq!(result.stdout, format!("{long_str}\n"));
+
+        // L186 `2>/dev/null` discards stderr, command still fails.
+        let mut sh = shell();
+        let result = sh.exec("cat /nonexistent 2>/dev/null");
+        assert_eq!(result.stderr, "", "2>/dev/null stderr");
+        assert_eq!(result.exit_code, 1, "2>/dev/null exit");
+
+        // L193 `2>&1` routes stderr into stdout.
+        let mut sh = shell();
+        let result = sh.exec("cat /nonexistent 2>&1");
+        assert!(
+            result.stdout.contains("No such file"),
+            "2>&1 stdout {}",
+            result.stdout
+        );
+        assert_eq!(result.stderr, "", "2>&1 stderr");
+    }
+
+    /// Covers the portable `packages/just-bash/src/interpreter/arithmetic.test.ts`
+    /// L487 arithmetic-command assignment row (`(( x = ... ))`) through the Rust
+    /// shell. The division/modulo-by-zero and negative-exponent error rows stay
+    /// pending until arithmetic error reporting is implemented.
+    #[test]
+    fn r2_interpreter_arithmetic_command_assignment_row_matches_upstream() {
+        let mut sh = shell();
+        let result = sh.exec("(( x = 5 + 3 )); echo $x");
+        assert_eq!(result.stderr, "", "stderr");
+        assert_eq!(result.stdout, "8\n", "stdout");
+        assert_eq!(result.exit_code, 0, "exit");
+    }
+
     /// Covers `packages/just-bash/src/syntax/parser-edge-cases.test.ts` quoting,
     /// escape-sequence, variable-expansion, whitespace, and operator-parsing rows
     /// through the Rust shell interpreter. Each tuple mirrors an upstream `it(...)`

@@ -1080,6 +1080,42 @@ const jbc10CaseGroups = [
     notes:
       'JBC-10 classifies the upstream `it.skip` regression rg rows that require unimplemented features: PCRE2 look-ahead/look-behind (r1401_x2, r1412, r1573, r3139), --crlf (r1765), --no-unicode (r2574), and --null-data (r2658). The Rust rg port rejects PCRE2/look-around regex and these flags as unrecognized options, asserted by the named Rust test.',
   },
+  {
+    file: 'packages/just-bash/src/commands/rg/rg-parser-threads.test.ts',
+    lines: [30, 35, 40, 45, 50, 57],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_parser_threads_compat_flag_never_clobbers_max_depth',
+    notes:
+      'JBC-10 verifies the `-j`/`--threads` ripgrep compatibility flag is a value-consuming no-op that never clobbers max-depth: the Rust port preserves the default depth and any explicit --max-depth set before or after -j, accepts the long --threads form (including --threads=N), and handles the combined short form -Iij <n>. The named Rust test exercises deep virtual-filesystem traversal so it fails if -j ever mutates depth.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/binary.test.ts',
+    lines: [292, 293, 294, 295, 296, 297, 298, 299],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_unsupported_upstream_skip_features_are_rejected_or_classified',
+    notes:
+      'JBC-10 classifies the upstream `it.skip` rg binary mmap rows (memory map not supported). The virtual-filesystem Rust port has no memory-mapped search path and rejects --mmap/--no-mmap as unrecognized options, asserted by the named Rust test so it fails if mmap support is ever added.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
+    lines: [1124, 1125, 1128, 1131],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_unsupported_upstream_skip_features_are_rejected_or_classified',
+    notes:
+      'JBC-10 classifies the upstream `it.skip` misc binary rows: binary_convert_mmap, binary_search_mmap, binary_quit_mmap (mmap not relevant) and binary_quit (binary-quit behavior not implemented). The Rust port rejects --mmap/--no-mmap and --binary as unrecognized options, asserted by the named Rust test.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [504, 505, 639, 880, 988, 1220, 1239, 1293, 1309],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_unsupported_upstream_skip_features_are_rejected_or_classified',
+    notes:
+      'JBC-10 classifies the upstream `it.skip` regression rg rows for unimplemented features: color output (r428 color context path / unrecognized style, r599 color with empty matches via --color/--colors), case-insensitive ignore-file matching (r1164 via --ignore-file-case-insensitive), and multiline/vimgrep/passthru/replacement rows (--multiline/-U, --vimgrep, --passthru, --replace/-r). The Rust port rejects each of these flags as unrecognized options, asserted by the named Rust test so it fails if support is ever added.',
+  },
 ];
 
 const jbc12SourceGroups = [
@@ -3120,6 +3156,15 @@ const jbc36CaseGroups = [
   },
   {
     file: 'packages/just-bash/src/encoding-pipeline.test.ts',
+    lines: [55, 71, 108, 136, 142, 165],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::jbc45-encoding-pipeline',
+    rustTest: 'jbc45_encoding_pipeline_byte_text_contract_rows_are_byte_safe',
+    notes:
+      'JBC-45 verifies additional byte/text pipeline contract rows through the Rust virtual session: rev|base64 of reversed UTF-8 bytes, utf8 redirect of unmarked text stdout past the sampling window, tee byte-identical capture, bash -c piped-stdin forwarding, function-call piped stdin, and text-emitting custom-command UTF-8 byte counts. The sed-byte-count, binary cat|cat|cat round-trip, heredoc/here-string, group/subshell stdin, byte-emitting custom command, and byte-stdin-kind rows remain pending where the byte-tagged pipeline/compound-command support is not yet ported.',
+  },
+  {
+    file: 'packages/just-bash/src/encoding-pipeline.test.ts',
     lines: [213],
     status: 'js-only-documented',
     owner: 'js-only:just-bash-encoding-helper-package-exports',
@@ -3465,6 +3510,45 @@ const jbr1CaseGroups = [
     rustTest: 'jbr1_syntax_parser_edge_cases_match_upstream',
     notes:
       'JBR-1 verifies portable parser edge cases — nested/empty/adjacent quoting, escape sequences, ${VAR:-default} expansion, $? and undefined-variable expansion, multi-space/tab/leading/trailing whitespace normalization, and operator parsing without spaces — through the Rust shell interpreter.',
+  },
+];
+
+const jbR2CaseGroups = [
+  {
+    file: 'packages/just-bash/src/interpreter/control-flow.test.ts',
+    lines: [42, 60, 73, 247, 260, 272, 291, 304, 318, 331, 343, 358],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r2_interpreter_control_flow_rows_match_upstream',
+    notes:
+      'JBR-2 verifies portable interpreter control-flow rows — elif chains, &&-conditioned and nested if, while/until execution and skip, nested while, break/continue, and break/continue N — through the Rust shell. IFS-splitting, positional-parameter, invalid-identifier-error, and C-style for (( )) rows stay pending.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/parser-edge-cases.test.ts',
+    lines: [30, 68, 186, 193, 247, 254, 260, 266, 272, 281, 288, 295, 303, 311, 318, 324],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r2_syntax_parser_edge_cases_and_redirection_rows_match_upstream',
+    notes:
+      'JBR-2 verifies additional portable parser-edge-cases rows — adjacent quoting, escaped space, && / || precedence and semicolons, pipes with semicolons, assignment-vs-argument, empty/whitespace input, bare/double semicolon syntax errors, long argument, unicode, double-quoted newline, and 2>/dev/null / 2>&1 redirection — through the Rust shell.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/operators.test.ts',
+    lines: [275],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r2_syntax_parser_edge_cases_and_redirection_rows_match_upstream',
+    notes:
+      'JBR-2 verifies that the operators.test.ts `||`-is-not-a-pipe row falls back to the right-hand command when the left command fails, through the Rust shell.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/arithmetic.test.ts',
+    lines: [487],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r2_interpreter_arithmetic_command_assignment_row_matches_upstream',
+    notes:
+      'JBR-2 verifies the portable arithmetic-command assignment row `(( x = 5 + 3 )); echo $x` through the Rust shell. Division/modulo-by-zero and negative-exponent error rows stay pending until arithmetic error reporting lands.',
   },
 ];
 
@@ -4343,6 +4427,7 @@ function caseOverrideFor(testCase) {
     ...jbc30AgentExampleCaseGroups,
     ...jbc33CaseGroups,
     ...jbr1CaseGroups,
+    ...jbR2CaseGroups,
     ...jbc37CaseGroups,
     ...jbc44CaseGroups,
   ].find(

@@ -3525,6 +3525,36 @@ and exhibited clearly, with a label attached.\n";
         // up and --sort accessed cannot order by access time deterministically.
         unrecognized("rg --sortr accessed hello", "--sortr");
 
+        // Memory-mapped file search (--mmap / --no-mmap) has no analogue in the
+        // virtual-filesystem port; upstream `it.skip`s the whole mmap family.
+        unrecognized("rg --mmap hello f.txt", "--mmap");
+        unrecognized("rg --no-mmap hello f.txt", "--no-mmap");
+
+        // Binary-quit/conversion control (--binary) is not implemented; upstream
+        // skips the binary_quit rows.
+        unrecognized("rg --binary hello f.txt", "--binary");
+
+        // Color output (--color / --colors) is unimplemented; upstream skips the
+        // r428/r599 color regression rows.
+        unrecognized("rg --color always hello f.txt", "--color");
+        unrecognized("rg --colors 'path:fg:blue' hello f.txt", "--colors");
+
+        // Case-insensitive ignore-file matching (--ignore-file-case-insensitive)
+        // is unimplemented; upstream skips r1164.
+        unrecognized(
+            "rg --ignore-file-case-insensitive hello f.txt",
+            "--ignore-file-case-insensitive",
+        );
+
+        // Multiline matching (--multiline / -U), vimgrep output (--vimgrep),
+        // passthru (--passthru), and replacement (--replace / -r) are unimplemented;
+        // upstream skips the multiline/vimgrep/passthru/replacement regression rows.
+        unrecognized("rg --multiline 'a\\nb' f.txt", "--multiline");
+        unrecognized("rg -U 'a\\nb' f.txt", "-U");
+        unrecognized("rg --vimgrep hello f.txt", "--vimgrep");
+        unrecognized("rg --passthru hello f.txt", "--passthru");
+        unrecognized("rg --replace X hello f.txt", "--replace");
+
         // PCRE2 / look-around (-P, raw look-ahead/look-behind) is rejected by the
         // standard regex engine rather than silently matching.
         let pcre = home_bash(&[("f.txt", "ab\nhello\n")]).exec("rg -P '(?<=a)b' f.txt");
@@ -3553,6 +3583,78 @@ and exhibited clearly, with a label attached.\n";
             look_ahead.stderr.contains("look-around") || look_ahead.stderr.contains("look-ahead"),
             "look-ahead stderr: {:?}",
             look_ahead.stderr
+        );
+    }
+
+    #[test]
+    fn rg_parser_threads_compat_flag_never_clobbers_max_depth() {
+        // JBC-10: ports packages/just-bash/src/commands/rg/rg-parser-threads.test.ts.
+        // `-j`/`--threads` is a ripgrep compatibility flag that consumes its value
+        // but must be a NO-OP. The upstream regression: a buggy wiring overwrote
+        // maxDepth to Infinity on every `-j`, disabling the depth guard. These
+        // assertions fail if `-j` ever starts mutating depth behavior.
+        let deep = &[
+            ("level0.txt", "hello\n"),
+            ("dir1/level1.txt", "hello\n"),
+            ("dir1/dir2/level2.txt", "hello\n"),
+        ];
+
+        // Default depth survives `-j 4` (no explicit --max-depth): all levels match.
+        let default_threads = home_bash(deep).exec("rg -j 4 hello");
+        assert_eq!(default_threads.exit_code, 0, "rg -j 4");
+        assert_eq!(default_threads.stderr, "", "rg -j 4");
+        assert!(
+            default_threads
+                .stdout
+                .contains("dir1/dir2/level2.txt:1:hello"),
+            "rg -j 4 should keep the default (unbounded) depth: {:?}",
+            default_threads.stdout
+        );
+
+        // Explicit --max-depth set BEFORE -j is preserved (not clobbered).
+        let before = home_bash(deep).exec("rg --max-depth 1 -j 4 hello");
+        assert_eq!(before.exit_code, 0, "--max-depth 1 -j 4");
+        assert_eq!(before.stderr, "", "--max-depth 1 -j 4");
+        assert_eq!(
+            before.stdout, "level0.txt:1:hello\n",
+            "--max-depth 1 must survive a following -j 4"
+        );
+
+        // Explicit --max-depth set AFTER -j is preserved.
+        let after = home_bash(deep).exec("rg -j 4 --max-depth 1 hello");
+        assert_eq!(after.exit_code, 0, "-j 4 --max-depth 1");
+        assert_eq!(after.stderr, "", "-j 4 --max-depth 1");
+        assert_eq!(
+            after.stdout, "level0.txt:1:hello\n",
+            "--max-depth 1 must survive a preceding -j 4"
+        );
+
+        // Long form `--threads` behaves identically to `-j`.
+        let long = home_bash(deep).exec("rg --threads 8 --max-depth 1 hello");
+        assert_eq!(long.exit_code, 0, "--threads 8 --max-depth 1");
+        assert_eq!(long.stderr, "", "--threads 8 --max-depth 1");
+        assert_eq!(
+            long.stdout, "level0.txt:1:hello\n",
+            "--max-depth 1 must survive --threads 8"
+        );
+        // `--threads=N` attached form is also accepted as a no-op.
+        let long_eq = home_bash(deep).exec("rg --threads=8 --max-depth 1 hello");
+        assert_eq!(long_eq.exit_code, 0, "--threads=8");
+        assert_eq!(long_eq.stderr, "", "--threads=8");
+        assert_eq!(long_eq.stdout, "level0.txt:1:hello\n", "--threads=8");
+
+        // Combined short form `-Iij <n>`: -I (no filename), -i (ignore case),
+        // -j 4 (ignored). maxDepth must remain the default; -I suppresses the
+        // filename prefix so each match line is just the matched text.
+        let combined = home_bash(deep).exec("rg -Iij 4 HELLO");
+        assert_eq!(combined.exit_code, 0, "rg -Iij 4");
+        assert_eq!(combined.stderr, "", "rg -Iij 4");
+        // -I drops the filename prefix (line numbers remain); -i makes HELLO
+        // match hello; default depth means all three levels match.
+        assert_eq!(
+            combined.stdout, "1:hello\n1:hello\n1:hello\n",
+            "rg -Iij 4 should ignore -j and keep default depth: {:?}",
+            combined.stdout
         );
     }
 
