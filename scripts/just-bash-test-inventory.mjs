@@ -3204,6 +3204,39 @@ const r11jbR2RgCaseGroups = [
   },
 ];
 
+const r12jbR3RgCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/rg/rg.ripgrep-compat.test.ts',
+    lines: [691, 726, 742, 817, 858],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest:
+      'rg_column_shows_match_column_with_line_number; rg_replace_substitutes_each_match_in_line; rg_vimgrep_emits_one_line_per_match_with_column; rg_byte_offset_with_only_matching_reports_file_byte_position; rg_passthru_prints_all_lines_with_match_markers',
+    notes:
+      'r12jb-r3 implements rg --column (1-based match column, implies -n), -r/--replace ($0/$&/$1/$<name> templates), --vimgrep (one line per match with column), -b/--byte-offset (cumulative file offset), and --passthru (all lines printed, : for matches and - for non-matches).',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
+    lines: [72, 261, 278, 297, 316, 519, 554, 575, 637, 803, 817, 829, 1038, 1055],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest:
+      'rg_column_shows_match_column_with_line_number; rg_replace_substitutes_each_match_in_line; rg_replace_with_numbered_capture_groups; rg_replace_with_named_capture_groups; rg_replace_with_only_matching_outputs_replaced_groups; rg_iglob_matches_case_insensitively; rg_glob_case_insensitive_flag_makes_globs_case_insensitive; rg_byte_offset_with_only_matching_reports_file_byte_position; rg_count_with_only_matching_counts_individual_matches; rg_max_filesize_skips_files_over_the_limit; rg_max_filesize_accepts_kilobyte_suffix; rg_max_filesize_accepts_megabyte_suffix; rg_vimgrep_directory_search_prefixes_filename; rg_vimgrep_without_line_numbers_drops_line_column_only',
+    notes:
+      'r12jb-r3 closes imported rg misc rows for --column, -r/--replace with numbered/named capture groups and -o replacement, --iglob and --glob-case-insensitive case-insensitive glob filtering, -b -o byte offsets, --count --only-matching individual-match counting, --max-filesize with K/M suffixes, and --vimgrep (directory prefix and -N no-line forms) over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [220, 232, 521, 1144, 1159],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest:
+      'rg_vimgrep_directory_search_prefixes_filename; rg_column_directory_search_prefixes_filename_and_column; rg_only_matching_with_column_reports_each_match_position; rg_column_after_bom_is_one_based_from_content_start; rg_replace_full_match_reference_with_braces',
+    notes:
+      'r12jb-r3 closes ripgrep regression rows: r105 (--vimgrep and --column show the match column), r451 (--only-matching --column reports each match position), r1638 (column index is 1-based after the stripped UTF-8 BOM), and r1739 (${0} replacement references the full match).',
+  },
+];
+
 const jbc24CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/jq/jq.functions.test.ts',
@@ -5568,6 +5601,7 @@ function caseOverrideFor(testCase) {
     ...jbc34CaseGroups,
     ...jbR11JbGrepGlobBinaryCaseGroups,
     ...r11jbR2RgCaseGroups,
+    ...r12jbR3RgCaseGroups,
     ...jbc36CaseGroups,
     ...jbc24CaseGroups,
     ...r11jbSqlite3CaseGroups,

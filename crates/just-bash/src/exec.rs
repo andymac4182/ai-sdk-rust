@@ -2742,6 +2742,41 @@ impl LineMatcher {
             } => fixed_line_match_ranges(line, pattern, *ignore_case, *word_regexp, *line_regexp),
         }
     }
+
+    /// Capture-group values for each non-overlapping match on `line`, keyed by
+    /// the match's `(char_start, char_end)` span. Only the `Regex` variant
+    /// exposes groups; `Fixed`/`PerlRegex` matches carry no positional or named
+    /// captures, so they map to empty group sets. Used to resolve `-r`
+    /// replacement references (`$1`, `$<name>`).
+    fn match_captures(&self, line: &str) -> Vec<((usize, usize), RgGroupValues)> {
+        let byte_to_char = |byte: usize| line[..byte].chars().count();
+        match self {
+            Self::Regex(regex) => regex
+                .captures_iter(line)
+                .filter_map(|caps| {
+                    let whole = caps.get(0)?;
+                    let span = (byte_to_char(whole.start()), byte_to_char(whole.end()));
+                    let numbered = (0..caps.len())
+                        .map(|i| {
+                            caps.get(i)
+                                .map(|m| m.as_str().to_string())
+                                .unwrap_or_default()
+                        })
+                        .collect();
+                    let named = regex
+                        .capture_names()
+                        .flatten()
+                        .filter_map(|name| {
+                            caps.name(name)
+                                .map(|m| (name.to_string(), m.as_str().to_string()))
+                        })
+                        .collect();
+                    Some((span, RgGroupValues { numbered, named }))
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// Translate a Perl-mode (`-P`) grep pattern into a pattern the Rust `regex`
@@ -6738,6 +6773,14 @@ struct RgOptions {
     ignore_files: Vec<String>,
     stats: bool,
     json: bool,
+    column: bool,
+    vimgrep: bool,
+    byte_offset: bool,
+    replace: Option<String>,
+    passthru: bool,
+    iglobs: Vec<String>,
+    glob_case_insensitive: bool,
+    max_filesize: Option<usize>,
     explicit_after: Option<usize>,
     explicit_before: Option<usize>,
     explicit_context: Option<usize>,
@@ -6781,6 +6824,14 @@ impl Default for RgOptions {
             ignore_files: Vec::new(),
             stats: false,
             json: false,
+            column: false,
+            vimgrep: false,
+            byte_offset: false,
+            replace: None,
+            passthru: false,
+            iglobs: Vec::new(),
+            glob_case_insensitive: false,
+            max_filesize: None,
             explicit_after: None,
             explicit_before: None,
             explicit_context: None,
@@ -6905,6 +6956,35 @@ fn parse_rg_option(
         "--heading" => options.heading = true,
         "--json" => options.json = true,
         "--stats" => options.stats = true,
+        "--byte-offset" => options.byte_offset = true,
+        "--column" => {
+            options.column = true;
+            options.line_number = Some(true);
+        }
+        "--no-column" => options.column = false,
+        "--vimgrep" => {
+            options.vimgrep = true;
+            options.column = true;
+            options.line_number = Some(true);
+        }
+        "--passthru" | "--passthrough" => options.passthru = true,
+        "--glob-case-insensitive" => options.glob_case_insensitive = true,
+        "--replace" => options.replace = Some(rg_option_value(args, index, "--replace")?),
+        "--iglob" => options
+            .iglobs
+            .push(rg_option_value(args, index, "--iglob")?),
+        "--max-filesize" => {
+            let value = rg_option_value(args, index, "--max-filesize")?;
+            match rg_parse_filesize(&value) {
+                Some(size) => options.max_filesize = Some(size),
+                None => {
+                    return Err(stderr_result(
+                        1,
+                        format!("rg: invalid --max-filesize value: {value}\n"),
+                    ));
+                }
+            }
+        }
         "--ignore-file" => {
             options
                 .ignore_files
@@ -6989,7 +7069,9 @@ fn parse_rg_option(
         "-I" => options.no_filename = true,
         "-a" => options.text = true,
         "-0" => options.null_separator = true,
+        "-b" => options.byte_offset = true,
         "-L" => options.follow_symlinks = true,
+        "-r" => options.replace = Some(rg_option_value(args, index, "-r")?),
         "-e" => patterns.push(rg_option_value(args, index, "-e")?),
         "-f" => pattern_files.push(rg_option_value(args, index, "-f")?),
         "-g" => options.globs.push(rg_option_value(args, index, "-g")?),
@@ -7061,6 +7143,24 @@ fn parse_rg_option(
         _ if arg.starts_with("--context-separator=") => {
             options.context_separator = arg["--context-separator=".len()..].to_string();
         }
+        _ if arg.starts_with("--replace=") => {
+            options.replace = Some(arg["--replace=".len()..].to_string());
+        }
+        _ if arg.starts_with("--iglob=") => {
+            options.iglobs.push(arg["--iglob=".len()..].to_string());
+        }
+        _ if arg.starts_with("--max-filesize=") => {
+            let value = &arg["--max-filesize=".len()..];
+            match rg_parse_filesize(value) {
+                Some(size) => options.max_filesize = Some(size),
+                None => {
+                    return Err(stderr_result(
+                        1,
+                        format!("rg: invalid --max-filesize value: {value}\n"),
+                    ));
+                }
+            }
+        }
         _ if arg.starts_with("--") => {
             return Err(stderr_result(
                 1,
@@ -7081,6 +7181,9 @@ fn parse_rg_option(
         }
         _ if arg.starts_with("-C") && arg.len() > 2 => {
             options.explicit_context = Some(rg_parse_usize(&arg[2..]));
+        }
+        _ if arg.starts_with("-r") && arg.len() > 2 => {
+            options.replace = Some(arg[2..].to_string());
         }
         _ if arg.starts_with("-e") && arg.len() > 2 => patterns.push(arg[2..].to_string()),
         _ if arg.starts_with("-f") && arg.len() > 2 => pattern_files.push(arg[2..].to_string()),
@@ -7115,7 +7218,7 @@ fn parse_rg_short_flags(
         // `-Ne pat`, `-ng glob`). ripgrep treats the remaining characters as the
         // attached value, or consumes the next positional argument when the flag
         // is the last char of the group.
-        if matches!(flag, 'f' | 'e' | 'g') {
+        if matches!(flag, 'f' | 'e' | 'g' | 'r') {
             let value: String = if chars.peek().is_some() {
                 chars.collect()
             } else {
@@ -7125,6 +7228,7 @@ fn parse_rg_short_flags(
                 'f' => pattern_files.push(value),
                 'e' => patterns.push(value),
                 'g' => options.globs.push(value),
+                'r' => options.replace = Some(value),
                 _ => unreachable!(),
             }
             break;
@@ -7161,6 +7265,7 @@ fn parse_rg_short_flags(
             'H' => options.with_filename = true,
             'a' => options.text = true,
             '0' => options.null_separator = true,
+            'b' => options.byte_offset = true,
             'L' => options.follow_symlinks = true,
             'u' => unrestricted += 1,
             _ => {
@@ -7197,6 +7302,26 @@ fn rg_option_value(
 
 fn rg_parse_usize(value: &str) -> usize {
     value.parse().unwrap_or(0)
+}
+
+/// Parse a `--max-filesize` value of the form `<digits>[KMG]` (case-insensitive
+/// suffix), mirroring upstream rg-parser parseFilesize: K=1024, M=1024^2,
+/// G=1024^3. Returns `None` when the value is not a non-negative integer with an
+/// optional single K/M/G suffix.
+fn rg_parse_filesize(value: &str) -> Option<usize> {
+    if value.is_empty() {
+        return None;
+    }
+    let (number_part, multiplier) = match value.chars().last() {
+        Some('K' | 'k') => (&value[..value.len() - 1], 1024usize),
+        Some('M' | 'm') => (&value[..value.len() - 1], 1024 * 1024),
+        Some('G' | 'g') => (&value[..value.len() - 1], 1024 * 1024 * 1024),
+        _ => (value, 1usize),
+    };
+    if number_part.is_empty() || !number_part.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    number_part.parse::<usize>().ok().map(|n| n * multiplier)
 }
 
 fn rg_type_list() -> String {
@@ -7472,6 +7597,14 @@ fn rg_push_input(
     let Ok(text) = fs.read_file(candidate.path) else {
         return;
     };
+    // `--max-filesize` skips files whose byte size exceeds the limit
+    // (rg-search.ts: `stat.size > options.maxFilesize`). The virtual filesystem
+    // stores UTF-8 text, so the byte length is the file size.
+    if let Some(limit) = request.options.max_filesize {
+        if text.len() > limit {
+            return;
+        }
+    }
     // ripgrep transparently strips a leading UTF-8 BOM before searching, so an
     // anchored pattern (`^test`) still matches the first line and column indexes
     // start after the BOM (regression r1163/r1638). Upstream just-bash relies on
@@ -7521,7 +7654,16 @@ fn rg_file_passes_filters(
     if !rg_type_filters_match(path, &request.options) {
         return false;
     }
-    rg_globs_match(label, &request.options.globs)
+    if !rg_globs_match(
+        label,
+        &request.options.globs,
+        request.options.glob_case_insensitive,
+    ) {
+        return false;
+    }
+    // `--iglob` globs filter exactly like `--glob` but are always matched
+    // case-insensitively (rg-search.ts shouldIncludeFile iglobs branch).
+    rg_globs_match(label, &request.options.iglobs, true)
 }
 
 fn rg_depth(root: &str, path: &str) -> usize {
@@ -7664,12 +7806,14 @@ fn rg_validate_globs(globs: &[String]) -> Option<String> {
     None
 }
 
-fn rg_globs_match(label: &str, globs: &[String]) -> bool {
+fn rg_globs_match(label: &str, globs: &[String], ignore_case: bool) -> bool {
     // Mirror upstream rg-search.ts shouldIncludeFile glob handling: a glob is
     // tested against both the file basename and the root-relative path. A
     // negated glob with a leading `/` is anchored to the search root, so the `/`
     // is stripped and the remainder is matched against the relative path only
     // (regression r405: `-g '!/foo/**'` excludes only the top-level `foo/`).
+    // `ignore_case` makes the glob match case-insensitively (`--iglob` and
+    // `--glob-case-insensitive`).
     let basename = label.rsplit('/').next().unwrap_or(label);
     let mut saw_positive = false;
     let mut positive_match = false;
@@ -7679,17 +7823,18 @@ fn rg_globs_match(label: &str, globs: &[String]) -> bool {
             .map_or((false, glob.as_str()), |pattern| (true, pattern));
         if negated {
             let excluded = if let Some(rooted) = pattern.strip_prefix('/') {
-                rg_glob_matches_path(rooted, label)
+                rg_glob_matches_path_ci(rooted, label, ignore_case)
             } else {
-                rg_glob_match(pattern, basename) || rg_glob_matches_path(pattern, label)
+                rg_glob_match_ci(pattern, basename, ignore_case)
+                    || rg_glob_matches_path_ci(pattern, label, ignore_case)
             };
             if excluded {
                 return false;
             }
         } else {
             saw_positive = true;
-            positive_match |=
-                rg_glob_match(pattern, basename) || rg_glob_matches_path(pattern, label);
+            positive_match |= rg_glob_match_ci(pattern, basename, ignore_case)
+                || rg_glob_matches_path_ci(pattern, label, ignore_case);
         }
     }
     !saw_positive || positive_match
@@ -7858,6 +8003,38 @@ fn rg_glob_match(pattern: &str, text: &str) -> bool {
         .unwrap_or_else(|_| wildcard_match(pattern, text))
 }
 
+/// Case-aware variant of [`rg_glob_match`]. When `ignore_case` is false this is
+/// identical to `rg_glob_match`; otherwise the compiled glob regex matches
+/// case-insensitively (`--iglob` / `--glob-case-insensitive`).
+fn rg_glob_match_ci(pattern: &str, text: &str, ignore_case: bool) -> bool {
+    if !ignore_case {
+        return rg_glob_match(pattern, text);
+    }
+    RegexBuilder::new(&rg_glob_regex(pattern))
+        .case_insensitive(true)
+        .build()
+        .map(|regex| regex.is_match(text))
+        .unwrap_or_else(|_| wildcard_match(&pattern.to_lowercase(), &text.to_lowercase()))
+}
+
+/// Case-aware variant of [`rg_glob_matches_path`].
+fn rg_glob_matches_path_ci(pattern: &str, path: &str, ignore_case: bool) -> bool {
+    if !ignore_case {
+        return rg_glob_matches_path(pattern, path);
+    }
+    if let Some(unrooted) = pattern.strip_prefix("**/")
+        && rg_glob_matches_path_ci(unrooted, path, true)
+    {
+        return true;
+    }
+    if pattern.contains('/') {
+        rg_glob_match_ci(pattern, path, true)
+    } else {
+        let basename = path.rsplit('/').next().unwrap_or(path);
+        rg_glob_match_ci(pattern, basename, true)
+    }
+}
+
 fn rg_glob_regex(pattern: &str) -> String {
     let mut regex = String::from("^");
     let mut chars = pattern.chars().peekable();
@@ -7898,6 +8075,26 @@ struct RgLineMatch {
     index: usize,
     line: String,
     only_matches: Vec<String>,
+    /// Match spans within the line as `(char_start, char_end, text)`. Used for
+    /// `--column`, `--vimgrep`, `-b`/byte-offset, and `-r`/replace output.
+    ranges: Vec<(usize, usize, String)>,
+    /// Capture-group values keyed by the `(char_start, char_end)` span of the
+    /// match they belong to. Populated for `-r`/replace so `$1`/`$<name>`
+    /// references can be resolved.
+    group_values: BTreeMap<(usize, usize), RgGroupValues>,
+    /// Cumulative character offset of this line's first character from the start
+    /// of the file (mirrors upstream rg-search byteOffset accumulation, which
+    /// uses JS string-index units — equal to bytes for ASCII).
+    line_offset: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RgGroupValues {
+    /// Positional capture groups by index (`numbered[1]` is group 1; index 0 is
+    /// the whole match).
+    numbered: Vec<String>,
+    /// Named capture groups.
+    named: BTreeMap<String, String>,
 }
 
 fn rg_render_search(
@@ -7917,7 +8114,15 @@ fn rg_render_search(
             files_with_match += 1;
             stats_matched_lines += line_matches.len();
         }
-        let file_match_count = if request.options.count_matches {
+        // Upstream rg counts individual matches when `--count-matches` is set, or
+        // when `--count --only-matching` is combined, but only while NOT inverting
+        // (rg-search matcher: `shouldCountMatches = (countMatches || onlyMatching)
+        // && !invertMatch`). Inverted counts always tally matching (i.e.
+        // non-matching) lines.
+        let count_individual_matches = (request.options.count_matches
+            || request.options.only_matching)
+            && !request.options.invert;
+        let file_match_count = if count_individual_matches {
             line_matches
                 .iter()
                 .map(|line_match| line_match.only_matches.len().max(1))
@@ -7954,6 +8159,10 @@ fn rg_render_search(
             if file_match_count > 0 || request.options.include_zero {
                 rg_push_count(&mut stdout, request, input, file_match_count);
             }
+            continue;
+        }
+        if request.options.passthru {
+            rg_push_passthru(&mut stdout, request, input, &line_matches);
             continue;
         }
         rg_push_matches(&mut stdout, request, input, &line_matches);
@@ -8107,22 +8316,42 @@ fn rg_line_matches(
 ) -> Vec<RgLineMatch> {
     let max_count = options.max_count.filter(|count| *count > 0);
     let mut matches = Vec::new();
+    let mut line_offset = 0usize;
     for (index, line) in input.text.lines().enumerate() {
-        let only_matches = matchers
+        let mut ranges = matchers
             .iter()
-            .flat_map(|matcher| matcher.match_texts(line))
+            .flat_map(|matcher| matcher.match_ranges(line))
             .collect::<Vec<_>>();
+        // Sort match spans by start so `--column`/`--vimgrep`/`-o` emit them in
+        // left-to-right order even when several `-e` patterns contribute.
+        ranges.sort_by_key(|(start, _, _)| *start);
+        let only_matches = ranges
+            .iter()
+            .map(|(_, _, text)| text.clone())
+            .collect::<Vec<_>>();
+        let group_values: BTreeMap<(usize, usize), RgGroupValues> = if options.replace.is_some() {
+            matchers
+                .iter()
+                .flat_map(|matcher| matcher.match_captures(line))
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
         let matched = !only_matches.is_empty();
         if matched ^ options.invert {
             matches.push(RgLineMatch {
                 index,
                 line: line.to_string(),
                 only_matches,
+                ranges,
+                group_values,
+                line_offset,
             });
             if max_count.is_some_and(|limit| matches.len() >= limit) {
                 break;
             }
         }
+        line_offset += line.chars().count() + 1;
     }
     matches
 }
@@ -8157,8 +8386,45 @@ fn rg_push_matches(
         rg_push_only_matches(stdout, request, input, line_matches);
         return;
     }
+    if request.options.vimgrep && !request.options.invert {
+        rg_push_vimgrep(stdout, request, input, line_matches);
+        return;
+    }
     if request.options.before_context == 0 && request.options.after_context == 0 {
         for line_match in line_matches {
+            // Column/byte-offset of the whole matched line use the FIRST match.
+            let (col, byte) = line_match
+                .ranges
+                .first()
+                .map(|(start, _, _)| (start + 1, line_match.line_offset + start))
+                .unwrap_or((1, line_match.line_offset));
+            let rendered = rg_replace_line(request, line_match);
+            rg_push_line(
+                stdout,
+                request,
+                input,
+                line_match.index,
+                &rendered,
+                true,
+                Some(col),
+                Some(byte),
+            );
+        }
+        return;
+    }
+    rg_push_context_matches(stdout, request, input, line_matches);
+}
+
+/// `--vimgrep`: emit one output line per individual match, each carrying the
+/// match's column (and byte offset under `-b`) followed by the full source line.
+fn rg_push_vimgrep(
+    stdout: &mut String,
+    request: &RgRequest,
+    input: &RgInput,
+    line_matches: &[RgLineMatch],
+) {
+    for line_match in line_matches {
+        for (start, _, _) in &line_match.ranges {
             rg_push_line(
                 stdout,
                 request,
@@ -8166,11 +8432,11 @@ fn rg_push_matches(
                 line_match.index,
                 &line_match.line,
                 true,
+                Some(start + 1),
+                Some(line_match.line_offset + start),
             );
         }
-        return;
     }
-    rg_push_context_matches(stdout, request, input, line_matches);
 }
 
 fn rg_push_only_matches(
@@ -8180,8 +8446,23 @@ fn rg_push_only_matches(
     line_matches: &[RgLineMatch],
 ) {
     for line_match in line_matches {
-        for only_match in &line_match.only_matches {
-            rg_push_line(stdout, request, input, line_match.index, only_match, true);
+        for (start, end, text) in &line_match.ranges {
+            // `-o -r REPL` replaces just the matched span; otherwise the raw
+            // match text is printed.
+            let rendered = match &request.options.replace {
+                Some(replace) => rg_apply_replacement(replace, line_match, *start, *end),
+                None => text.clone(),
+            };
+            rg_push_line(
+                stdout,
+                request,
+                input,
+                line_match.index,
+                &rendered,
+                true,
+                Some(start + 1),
+                Some(line_match.line_offset + start),
+            );
         }
     }
 }
@@ -8214,12 +8495,168 @@ fn rg_push_context_matches(
                 index,
                 line,
                 index == line_match.index,
+                None,
+                None,
             );
         }
         previous_end = Some(end);
     }
 }
 
+/// `--passthru`: print every line of the file. Matching lines use `:` as the
+/// separator and non-matching lines use `-`, with optional filename/line-number
+/// prefixes (rg-search matcher passthru branch).
+fn rg_push_passthru(
+    stdout: &mut String,
+    request: &RgRequest,
+    input: &RgInput,
+    line_matches: &[RgLineMatch],
+) {
+    let matched_indices: std::collections::HashSet<usize> = line_matches
+        .iter()
+        .map(|line_match| line_match.index)
+        .collect();
+    let show_filename = rg_show_filename(request, input);
+    let show_line_number = rg_show_line_number(request, input);
+    for (index, line) in input.text.lines().enumerate() {
+        let separator = if matched_indices.contains(&index) {
+            ':'
+        } else {
+            '-'
+        };
+        if show_filename {
+            stdout.push_str(&input.label);
+            stdout.push(separator);
+        }
+        if show_line_number {
+            stdout.push_str(&(index + 1).to_string());
+            stdout.push(separator);
+        }
+        stdout.push_str(line);
+        stdout.push('\n');
+    }
+}
+
+/// Apply a `-r`/`--replace` template to every match on a matched line, mirroring
+/// the upstream non-`-o` replace path (regex.replace over the full line).
+fn rg_replace_line(request: &RgRequest, line_match: &RgLineMatch) -> String {
+    let Some(replace) = &request.options.replace else {
+        return line_match.line.clone();
+    };
+    let chars: Vec<char> = line_match.line.chars().collect();
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    for (start, end, _) in &line_match.ranges {
+        // Skip empty matches to avoid double replacement (ripgrep behavior).
+        if end == start {
+            continue;
+        }
+        for &c in &chars[cursor..*start] {
+            out.push(c);
+        }
+        out.push_str(&rg_apply_replacement(replace, line_match, *start, *end));
+        cursor = *end;
+    }
+    for &c in &chars[cursor..] {
+        out.push(c);
+    }
+    out
+}
+
+/// Resolve a single `-r` replacement template against the match span
+/// `[start, end)` (character indices into the line). Supports `$0`/`${0}`/`$&`
+/// (full match), `$1`..`$9`/`${1}` (numbered groups), and `$name`/`${name}`/
+/// `$<name>` (named groups), mirroring upstream convertReplacement +
+/// applyReplacement.
+fn rg_apply_replacement(
+    replace: &str,
+    line_match: &RgLineMatch,
+    start: usize,
+    end: usize,
+) -> String {
+    let chars: Vec<char> = line_match.line.chars().collect();
+    let whole: String = chars[start..end].iter().collect();
+    // Recompute capture groups for this span by re-running each matcher; the
+    // first matcher that produces a capture covering this span supplies the
+    // group values. For the supported tests the single active matcher is a
+    // regex, so we resolve groups via that matcher's captures on the line.
+    let groups = line_match
+        .group_values
+        .get(&(start, end))
+        .cloned()
+        .unwrap_or_default();
+    let template: Vec<char> = replace.chars().collect();
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < template.len() {
+        if template[i] == '$' && i + 1 < template.len() {
+            // ${...}
+            if template[i + 1] == '{' {
+                if let Some(close) = template[i + 2..].iter().position(|&c| c == '}') {
+                    let name: String = template[i + 2..i + 2 + close].iter().collect();
+                    out.push_str(&rg_resolve_group(&name, &whole, &groups));
+                    i += 2 + close + 1;
+                    continue;
+                }
+            }
+            // $<name>
+            if template[i + 1] == '<' {
+                if let Some(close) = template[i + 2..].iter().position(|&c| c == '>') {
+                    let name: String = template[i + 2..i + 2 + close].iter().collect();
+                    out.push_str(&rg_resolve_group(&name, &whole, &groups));
+                    i += 2 + close + 1;
+                    continue;
+                }
+            }
+            // $& full match
+            if template[i + 1] == '&' {
+                out.push_str(&whole);
+                i += 2;
+                continue;
+            }
+            // $digits or $name (letters/underscore + word chars)
+            if template[i + 1].is_ascii_digit() {
+                let mut j = i + 1;
+                while j < template.len() && template[j].is_ascii_digit() {
+                    j += 1;
+                }
+                let name: String = template[i + 1..j].iter().collect();
+                out.push_str(&rg_resolve_group(&name, &whole, &groups));
+                i = j;
+                continue;
+            }
+            if template[i + 1].is_ascii_alphabetic() || template[i + 1] == '_' {
+                let mut j = i + 1;
+                while j < template.len()
+                    && (template[j].is_ascii_alphanumeric() || template[j] == '_')
+                {
+                    j += 1;
+                }
+                let name: String = template[i + 1..j].iter().collect();
+                out.push_str(&rg_resolve_group(&name, &whole, &groups));
+                i = j;
+                continue;
+            }
+        }
+        out.push(template[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Resolve one replacement reference: `0` (or `&`) is the whole match, a numeric
+/// name selects a positional group, and a textual name selects a named group.
+fn rg_resolve_group(name: &str, whole: &str, groups: &RgGroupValues) -> String {
+    if name == "0" || name == "&" {
+        return whole.to_string();
+    }
+    if let Ok(index) = name.parse::<usize>() {
+        return groups.numbered.get(index).cloned().unwrap_or_default();
+    }
+    groups.named.get(name).cloned().unwrap_or_default()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn rg_push_line(
     stdout: &mut String,
     request: &RgRequest,
@@ -8227,18 +8664,34 @@ fn rg_push_line(
     line_index: usize,
     text: &str,
     matched: bool,
+    column: Option<usize>,
+    byte_offset: Option<usize>,
 ) {
-    let show_filename = (request.options.only_matching || !request.options.heading)
-        && rg_show_filename(request, input);
+    let show_filename =
+        (request.options.only_matching || request.options.vimgrep || !request.options.heading)
+            && rg_show_filename(request, input);
     let show_line_number = rg_show_line_number(request, input);
     let separator = if matched { ':' } else { '-' };
     if show_filename {
         stdout.push_str(&input.label);
         stdout.push(separator);
     }
+    // Upstream prefix order: filename, byteOffset, lineNumber, column, text.
+    if request.options.byte_offset {
+        if let Some(byte) = byte_offset {
+            stdout.push_str(&byte.to_string());
+            stdout.push(separator);
+        }
+    }
     if show_line_number {
         stdout.push_str(&(line_index + 1).to_string());
         stdout.push(separator);
+    }
+    if request.options.column {
+        if let Some(col) = column {
+            stdout.push_str(&col.to_string());
+            stdout.push(separator);
+        }
     }
     stdout.push_str(text);
     stdout.push('\n');
