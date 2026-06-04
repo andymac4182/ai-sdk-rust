@@ -8476,6 +8476,131 @@ esac"#,
         }
     }
 
+    /// Closes the remaining just-bash-core `serialize.test.ts` "string escaping
+    /// edge cases" execution-equivalence rows (the `execEquiv` describe block).
+    /// Upstream runs `parse -> serialize` and asserts the serialized program
+    /// executes with byte-identical stdout/stderr/exitCode to the original; this
+    /// catches escaping bugs (single-quote metacharacter literals, escaped
+    /// special chars, `${...}` parameter ops inside the serializer, mixed
+    /// quoting, command substitution with embedded pipes/quotes, brace/tilde/
+    /// arithmetic expansions, compound `if`/`for`/`while` bodies, escaped
+    /// backslash-before-dollar sequences, dollar in single-then-double quotes,
+    /// empty/nested command substitution, and escaped-newline continuations)
+    /// that a pure AST round-trip cannot. The Rust equivalent runs each source
+    /// through the interpreter, serializes the parsed AST, and re-runs the
+    /// serialized form; the two executions must match exactly. It fails on any
+    /// serializer escaping regression, since a mis-serialized word would change
+    /// the re-executed output.
+    #[test]
+    fn just_bash_core_serialize_string_escaping_execution_equivalence_rows() {
+        let cases = [
+            // serialize.test.ts:309 all metacharacters in single quotes
+            "echo '|&;<>()$`\\\"!#~*?[]{}'",
+            // serialize.test.ts:314 escaped special chars
+            "echo a\\&b\\|c\\;d",
+            // serialize.test.ts:319 default with special chars
+            "echo ${x:-\"hello world\"}",
+            // serialize.test.ts:321 nested expansion in default
+            "x=greeting; echo ${x:-$(echo fallback)}",
+            // serialize.test.ts:323 substring of variable
+            "x=hello; echo \"${x:1:3}\"",
+            // serialize.test.ts:324 length of variable
+            "x=hello; echo ${#x}",
+            // serialize.test.ts:325 pattern replacement
+            "x=\"hello world\"; echo ${x/world/earth}",
+            // serialize.test.ts:327 case modification
+            "x=hello; echo ${x^}; echo ${x^^}",
+            // serialize.test.ts:353 mixed quoting in arguments
+            "echo 'single' \"double\" plain",
+            // serialize.test.ts:355 variable assignment then use in quotes
+            "x=\"hello world\"; echo \"value: $x\"",
+            // serialize.test.ts:357 command sub with pipe in double quotes
+            "echo \"lines: $(echo -e \"a\\nb\" | wc -l)\"",
+            // serialize.test.ts:359 brace expansion (unquoted)
+            "echo {a,b,c}",
+            // serialize.test.ts:360 tilde expansion
+            "echo ~",
+            // serialize.test.ts:361 arithmetic expansion
+            "echo $((3 * 7 + 1))",
+            // serialize.test.ts:364 if statement
+            "if [ 1 -eq 1 ]; then echo \"equal\"; fi",
+            // serialize.test.ts:366 for loop
+            "for i in a b c; do echo \"item: $i\"; done",
+            // serialize.test.ts:380 escaped backslash before dollar
+            "x=val; echo \"\\\\$x\"",
+            // serialize.test.ts:382 escaped backslash before escaped dollar
+            "echo \"\\\\\\$x\"",
+            // serialize.test.ts:384 dollar in single quotes then double quotes
+            "echo '$literal' \"$HOME\"",
+            // serialize.test.ts:386 empty command substitution
+            "echo \"$(true)\"",
+            // serialize.test.ts:390 nested subshell in double quotes
+            "echo \"$(echo \"$(echo deep)\")\"",
+            // serialize.test.ts:392 escaped newline continues line
+            "echo hello\\\nworld",
+            // serialize.test.ts:394 while loop with read
+            "echo \"a b c\" | while read x y z; do echo \"$x:$y:$z\"; done",
+        ];
+
+        for source in cases {
+            let plain = shell().exec(source);
+            let script = parse(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            let serialized = serialize(&script);
+            let round = shell().exec(&serialized);
+            assert_eq!(
+                round.stdout, plain.stdout,
+                "round stdout: {source} -> {serialized}"
+            );
+            assert_eq!(
+                round.stderr, plain.stderr,
+                "round stderr: {source} -> {serialized}"
+            );
+            assert_eq!(
+                round.exit_code, plain.exit_code,
+                "round exit: {source} -> {serialized}"
+            );
+        }
+
+        // Anchor a few cases to their exact upstream-correct output so the row
+        // also fails if the interpreter's escaping/expansion regresses, not only
+        // the serializer.
+        assert_eq!(
+            shell().exec("echo a\\&b\\|c\\;d").stdout,
+            "a&b|c;d\n",
+            "escaped special chars produce literal metacharacters"
+        );
+        assert_eq!(
+            shell().exec("echo '|&;<>()$`\\\"!#~*?[]{}'").stdout,
+            "|&;<>()$`\\\"!#~*?[]{}\n",
+            "single-quoted metacharacters stay literal"
+        );
+        assert_eq!(
+            shell().exec("x=hello; echo ${#x}").stdout,
+            "5\n",
+            "length expansion counts characters"
+        );
+        assert_eq!(
+            shell().exec("x=val; echo \"\\\\$x\"").stdout,
+            "\\val\n",
+            "escaped backslash before dollar keeps the backslash literal"
+        );
+        assert_eq!(
+            shell().exec("echo \"\\\\\\$x\"").stdout,
+            "\\$x\n",
+            "escaped backslash before escaped dollar yields literal backslash-dollar"
+        );
+        assert_eq!(
+            shell().exec("echo hello\\\nworld").stdout,
+            "hello\nworld\n",
+            "escaped newline continues the line and splits words"
+        );
+        assert_eq!(
+            shell().exec("echo \"$(echo \"$(echo deep)\")\"").stdout,
+            "deep\n",
+            "nested command substitution with inner quotes"
+        );
+    }
+
     #[test]
     fn jbc12_transform_command_collector_walks_upstream_ast_shapes() {
         let cases = [
