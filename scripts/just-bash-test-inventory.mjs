@@ -885,6 +885,45 @@ const jbc09CaseGroups = [
     notes:
       'just-bash-command-awk verifies portable awk error/edge handling: negative field index, split() with the array argument omitted, an undefined function call returning empty, NF growing when a high field is set, assigning to NF, and graceful printf handling of an unknown specifier and width/precision with no conversion.',
   },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.functions.test.ts',
+    lines: [142, 153, 162, 171, 184, 210],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_multiple_rules_and_next_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk multiple pattern/action rules executing in order, next skipping the remaining rules for a record, the default print action for a pattern-only rule, mixed pattern and action-only rules, and BEGIN/main/END ordering.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.functions.test.ts',
+    lines: [
+      307, 316, 325, 343, 352, 365, 374, 383, 394, 403, 421, 434, 441, 448, 459,
+      468, 479, 490,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_special_vars_string_fns_and_printf_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk FILENAME (file and empty-for-stdin), FNR resetting per file, match() setting RSTART/RLENGTH and returning position/0, gensub() first/global/Nth replacement, the ^ and ** power operators with a fractional exponent, and printf %x/%X/%o/%c formatting.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.functions.test.ts',
+    lines: [523, 534, 545],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_field_iteration_and_fs_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk -F regex field separators: a bracket character class on digits, a multi-character literal separator, and a punctuation character class.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.fields.test.ts',
+    lines: [317, 326, 335],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_field_iteration_and_fs_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk field iteration with C-style for loops: iterating $i forward over NF, iterating in reverse, and summing all fields.',
+  },
 ];
 
 const jbc10CaseGroups = [
@@ -1115,6 +1154,33 @@ const jbc10CaseGroups = [
     rustTest: 'rg_unsupported_upstream_skip_features_are_rejected_or_classified',
     notes:
       'JBC-10 classifies the upstream `it.skip` regression rg rows for unimplemented features: color output (r428 color context path / unrecognized style, r599 color with empty matches via --color/--colors), case-insensitive ignore-file matching (r1164 via --ignore-file-case-insensitive), and multiline/vimgrep/passthru/replacement rows (--multiline/-U, --vimgrep, --passthru, --replace/-r). The Rust port rejects each of these flags as unrecognized options, asserted by the named Rust test so it fails if support is ever added.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
+    lines: [38, 55, 844, 858, 875, 921, 986],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_misc_filename_ignore_and_hidden_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported rg misc rows: directory search with filename prefix, -n line numbers, hidden-file exclusion by default and inclusion with --hidden, .gitignore exclusion, and --no-ignore / -u unrestricted overrides over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [56, 303, 340, 564, 579, 625, 643, 772, 945, 1056, 1102, 1117],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_regression_regex_word_and_flag_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported ripgrep regression rows for regex and flag behavior: gitignore negation after double-star, complex parse/include regex (-N), smart-case word boundaries, word-boundary with spaces, -w -o alternation, -e leading-hyphen patterns, -c ignoring -C context, capture groups, repeated-zero patterns, -A -m context-with-max-count, semicolon/comma regex, and multi-space field matching over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [689, 787, 803, 815, 830, 839, 884, 900, 967, 1413, 1490],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_regression_gitignore_files_and_exit_code_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported ripgrep regression rows for gitignore, file-listing, and exit codes: build-directory negation with -l, a**b non-match, --files-with-matches / --files-without-match listings, invalid-flag and match/no-match/quiet exit codes, ** and **/**/* gitignore non-matches, pattern files without trailing newline, **/bar/* -l non-match, and unclosed character class allowed in gitignore over the virtual filesystem.',
   },
 ];
 
@@ -3513,6 +3579,45 @@ const jbr1CaseGroups = [
   },
 ];
 
+const jbR3SyntaxCaseGroups = [
+  {
+    file: 'packages/just-bash/src/syntax/subshell-args.test.ts',
+    lines: [80, 88, 96, 105, 113, 122, 130, 137, 144, 151, 158],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jb_subshell_args_operator_precedence_rows_match_upstream',
+    notes:
+      'JBR-3 verifies portable operator-precedence rows — `!` binding tighter than `&&`/`||`, `!` negating whole pipelines, `&&`/`||` left-associativity, `;` lowest precedence, and stacked `!` toggling exit status — through the Rust shell. The positional-argument (`bash -c`, `sh -c`, script-file) and `xargs` rows require subshell-arg and command-family behavior and stay pending with command owners.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/variables.test.ts',
+    lines: [131],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jb_syntax_variables_quoted_newline_row_matches_upstream',
+    notes:
+      'JBR-3 verifies a literal newline inside double quotes is preserved verbatim through the Rust shell quoting pipeline. The byte-level backslash escape row (L157) stays pending as a documented `echo -e` collapse divergence.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/loops.test.ts',
+    lines: [69, 86, 97, 171, 190],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jb_syntax_loops_while_guard_rows_match_upstream',
+    notes:
+      'JBR-3 verifies portable `while grep -q` guard loops that flip a virtual-filesystem file and last-command exit-status propagation through the Rust shell. Infinite-loop protection (L135/L145/L153), `until grep -q` re-evaluation timing rows, and loop-variable cleanup (L60) stay pending; the no-op `while false`/`until true` rows (L79/L117) are verified separately by JBC-13.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/operators.test.ts',
+    lines: [43, 91, 102, 147, 185, 191, 197, 205, 339],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jb_syntax_operators_logical_and_redirection_rows_match_upstream',
+    notes:
+      'JBR-3 verifies portable operator rows — `&&` short-circuit protecting the filesystem, all-failing `||` chains, `;` exit-status propagation, mixed `&&`/`||`/`;` precedence chains, and cross-`exec` `>>` appends — through the Rust shell. Rows needing head/tail/wc command families stay pending with command owners; L154/L275 are verified separately by JBC-33.',
+  },
+];
+
 const jbR2CaseGroups = [
   {
     file: 'packages/just-bash/src/interpreter/control-flow.test.ts',
@@ -4284,6 +4389,35 @@ const jbInterpreterBuiltinsCaseGroups = [
     notes:
       'JB export builtin: portable export of a value then a [ ... ] && conditional use over the virtual session.',
   },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/export.test.ts',
+    lines: [40],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::builtins::export',
+    rustTest:
+      'just_bash_bash_general_export_does_not_persist_functions_reset_and_filesystem_persists',
+    notes:
+      'JB export builtin: a variable exported in one exec call is not visible to a later exec on the same session, matching the upstream fresh-shell-per-exec contract.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/export.test.ts',
+    lines: [116],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::builtins::export',
+    rustTest: 'builtins_export_initial_env_vars_available_in_every_exec',
+    notes:
+      'JB export builtin: env vars supplied via the Bash constructor options remain available in every subsequent exec call on the same session.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/set.test.ts',
+    lines: [228, 240, 251, 263, 276, 288, 303, 314],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::builtins::set',
+    rustTest:
+      'builtins_set_e_exits_immediately_when_command_fails; builtins_set_e_continues_execution_without_set_e; builtins_set_e_does_not_exit_if_command_succeeds; builtins_set_e_disabled_with_set_plus_e; builtins_set_e_enabled_with_set_o_errexit; builtins_set_e_disabled_with_set_plus_o_errexit; builtins_set_e_does_not_exit_on_failed_command_in_and_short_circuit; builtins_set_e_does_not_exit_on_failed_command_in_or_short_circuit',
+    notes:
+      'JB set builtin errexit (set -e / set -o errexit and their +e / +o disablement): a failing simple command aborts the script with exit code 1, a succeeding command does not, +e/+o re-disables errexit, and AND-OR list members that fail on the left of && or || do not trigger errexit.',
+  },
 ];
 
 const jbExecOptionsLoggingCaseGroups = [
@@ -4427,6 +4561,7 @@ function caseOverrideFor(testCase) {
     ...jbc30AgentExampleCaseGroups,
     ...jbc33CaseGroups,
     ...jbr1CaseGroups,
+    ...jbR3SyntaxCaseGroups,
     ...jbR2CaseGroups,
     ...jbc37CaseGroups,
     ...jbc44CaseGroups,

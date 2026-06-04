@@ -5749,6 +5749,275 @@ be, to a very large extent, the result of luck. Sherlock Holmes\n",
     }
 
     #[test]
+    fn rg_imported_misc_filename_ignore_and_hidden_rows_are_portable() {
+        // packages/just-bash/src/commands/rg/imported-tests/misc.test.ts
+        // 38 - dir: should search directory with filename prefix
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg Sherlock",
+            0,
+            "sherlock:1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+sherlock:3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 55 - line_numbers: should show line numbers with -n
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -n Sherlock sherlock",
+            0,
+            "1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 844 - ignore_hidden: should ignore hidden files by default
+        assert_home_exec(&[(".sherlock", SHERLOCK)], "rg Sherlock", 1, "");
+        // 858 - no_ignore_hidden: should include hidden files with --hidden
+        assert_home_exec(
+            &[(".sherlock", SHERLOCK)],
+            "rg --hidden Sherlock",
+            0,
+            ".sherlock:1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+.sherlock:3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 875 - ignore_git: should respect .gitignore
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                ("sherlock", SHERLOCK),
+                (".gitignore", "sherlock\n"),
+            ],
+            "rg Sherlock",
+            1,
+            "",
+        );
+        // 921 - no_ignore: should ignore .gitignore with --no-ignore
+        assert_home_exec(
+            &[("sherlock", SHERLOCK), (".gitignore", "sherlock\n")],
+            "rg --no-ignore Sherlock",
+            0,
+            "sherlock:1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+sherlock:3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 986 - unrestricted1: should ignore .gitignore with -u
+        assert_home_exec(
+            &[("sherlock", SHERLOCK), (".gitignore", "sherlock\n")],
+            "rg -u Sherlock",
+            0,
+            "sherlock:1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+sherlock:3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+    }
+
+    #[test]
+    fn rg_imported_regression_regex_word_and_flag_rows_are_portable() {
+        // packages/just-bash/src/commands/rg/imported-tests/regression.test.ts
+        // 56 - r41: negation after double-star in gitignore
+        assert_home_exec(
+            &[
+                (".gitignore", "vendor/**\n!vendor/manifest\n"),
+                ("vendor/manifest", "test\n"),
+                ("vendor/other", "test\n"),
+            ],
+            "rg test",
+            0,
+            "vendor/manifest:1:test\n",
+        );
+        // 303 - r156: should match complex regex pattern (-N, output spans multiple lines)
+        let cx = home_bash(&[(
+            "testcase.txt",
+            "#parse('widgets/foo_bar_macros.vm')\n\
+#parse ( 'widgets/mobile/foo_bar_macros.vm' )\n\
+#parse (\"widgets/foobarhiddenformfields.vm\")\n",
+        )]);
+        let r303 = cx.exec(
+            "rg -N '#(?:parse|include)\\s*\\(\\s*(?:\"|'\"'\"')[./A-Za-z_-]+(?:\"|'\"'\"')' testcase.txt",
+        );
+        assert_eq!(r303.exit_code, 0);
+        assert!(r303.stdout.split('\n').count() > 1, "{:?}", r303.stdout);
+        // 340 - r196: smart case with word boundary regex
+        assert_home_exec(
+            &[("foo", "tEsT\n")],
+            "rg --smart-case '\\btest\\b'",
+            0,
+            "foo:1:tEsT\n",
+        );
+        // 564 - r488: word boundary with leading/trailing spaces
+        assert_home_exec(
+            &[("input.txt", "peshwaship 're seminomata\n")],
+            "rg -o \"\\b 're \\b\" input.txt",
+            0,
+            " 're \n",
+        );
+        // 579 - r506: -w -o with alternation
+        assert_home_exec(
+            &[("wb.txt", "min minimum amin\nmax maximum amax\n")],
+            "rg -w -o 'min|max' wb.txt",
+            0,
+            "min\nmax\n",
+        );
+        // 625 - r568: -e leading hyphen pattern
+        assert_home_exec(
+            &[("file", "foo bar -baz\n")],
+            "rg -e '-baz' file",
+            0,
+            "foo bar -baz\n",
+        );
+        // 643 - r693: should ignore context with -c
+        assert_home_exec(
+            &[("bar", "xyz\n"), ("foo", "xyz\n")],
+            "rg -C1 -c --sort path xyz",
+            0,
+            "bar:1\nfoo:1\n",
+        );
+        // 772 - r1064: should match with capture group
+        assert_home_exec(&[("input", "abc\n")], "rg 'a(.*c)'", 0, "input:1:abc\n");
+        // 945 - r1322: should match patterns ending with repeated zeros
+        let z = home_bash(&[("test", "153.230000\n")]);
+        let z1 = z.exec("rg '\\d\\d\\d00' test");
+        assert_eq!(z1.exit_code, 0);
+        assert_eq!(z1.stdout, "153.230000\n");
+        let z2 = z.exec("rg '\\d\\d\\d000' test");
+        assert_eq!(z2.exit_code, 0);
+        assert_eq!(z2.stdout, "153.230000\n");
+        // 1056 - r1389(prev): should limit matches with -m and show context
+        assert_home_exec(
+            &[("foo", "a\nb\nc\nd\ne\nd\ne\nd\ne\nd\ne\n")],
+            "rg -A2 -m1 d foo",
+            0,
+            "d\ne\nd\n",
+        );
+        // 1102 - r1559: should match semicolon comma pattern
+        assert_home_exec(
+            &[("foo", "abc;de,fg\n")],
+            "rg ';(.*,){1}'",
+            0,
+            "foo:1:abc;de,fg\n",
+        );
+        // 1117 - r1559: should match pattern with multiple spaces between fields
+        let spaced = home_bash(&[(
+            "foo",
+            "type A struct {\n\tTaskID int `json:\"taskID\"`\n}\n\n\
+type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:\"taskID\"`\n}\n",
+        )]);
+        let spaced_result = spaced.exec("rg 'TaskID +int'");
+        assert_eq!(spaced_result.exit_code, 0);
+        assert_eq!(spaced_result.stderr, "");
+        assert!(
+            spaced_result.stdout.contains("TaskID int"),
+            "{:?}",
+            spaced_result.stdout
+        );
+        assert!(
+            spaced_result.stdout.contains("TaskID   int"),
+            "{:?}",
+            spaced_result.stdout
+        );
+    }
+
+    #[test]
+    fn rg_imported_regression_gitignore_files_and_exit_code_rows_are_portable() {
+        // packages/just-bash/src/commands/rg/imported-tests/regression.test.ts
+        // 689 - r829_2731: negation of build directory with -l
+        assert_home_exec(
+            &[
+                (".ignore", "build/\n!/some_dir/build/\n"),
+                ("some_dir/build/foo", "string\n"),
+            ],
+            "rg -l string",
+            0,
+            "some_dir/build/foo\n",
+        );
+        // 787 - r1098: a**b pattern in gitignore (no match)
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "a**b\n"),
+                ("afoob", "test\n"),
+            ],
+            "rg test",
+            1,
+            "",
+        );
+        // 803 - r1130: should list files with matches
+        assert_home_exec(
+            &[("foo", "test\n")],
+            "rg --files-with-matches test foo",
+            0,
+            "foo\n",
+        );
+        // 815 - r1130: should list files without matches
+        assert_home_exec(
+            &[("foo", "test\n")],
+            "rg --files-without-match nada foo",
+            0,
+            "foo\n",
+        );
+        // 830 - r1159_invalid_flag: should return nonzero exit code for invalid flag
+        let invalid = home_bash(&[]).exec("rg --wat test");
+        assert_ne!(invalid.exit_code, 0);
+        // 839 - r1159_exit_status: should return correct exit codes
+        let codes = home_bash(&[("foo", "test\n")]);
+        assert_eq!(codes.exec("rg test").exit_code, 0);
+        assert_eq!(codes.exec("rg nada").exit_code, 1);
+        assert_eq!(codes.exec("rg -q test").exit_code, 0);
+        assert_eq!(codes.exec("rg -q nada").exit_code, 1);
+        // 884 - r1174(prev): should handle ** in gitignore (no match)
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "**\n"),
+                ("foo", "test\n"),
+            ],
+            "rg test",
+            1,
+            "",
+        );
+        // 900 - r1174: should handle **/**/* in gitignore (no match)
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "**/**/*\n"),
+                ("a/foo", "test\n"),
+            ],
+            "rg test",
+            1,
+            "",
+        );
+        // 967 - r1330: pattern file without trailing newline
+        assert_home_exec(
+            &[
+                ("patterns-nonl", "[foo]"),
+                ("patterns-nl", "[foo]\n"),
+                ("test", "fz\n"),
+            ],
+            "rg -f patterns-nonl test",
+            0,
+            "fz\n",
+        );
+        // 1413 - r2901: **/bar/* pattern with -l (no match)
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "**/bar/*\n"),
+                ("foo/bar/baz", "quux\n"),
+            ],
+            "rg -l quux",
+            1,
+            "",
+        );
+        // 1490 - r3127_gitignore_allow_unclosed_class: unclosed class allowed in gitignore
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "[abc\n"),
+                ("[abc", ""),
+                ("test", ""),
+            ],
+            "rg --files",
+            0,
+            "test\n",
+        );
+    }
+
+    #[test]
     fn text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows() {
         let env = Bash::with_options(BashOptions {
             files: BTreeMap::from([
@@ -10547,5 +10816,252 @@ be, to a very large extent, the result of luck. Sherlock Holmes\n",
         // width/precision with no specifier handled gracefully (:329): exit 0
         let bad_prec = env.exec("echo '1' | awk '{ printf \"%10.5\", $1 }'");
         assert_eq!(bad_prec.exit_code, 0);
+    }
+
+    // JBC-awk: multiple pattern/action rules, default print action, next, and
+    // BEGIN/main/END ordering across multiple rules.
+    // Upstream: packages/just-bash/src/commands/awk/awk.functions.test.ts
+    //   :142 multiple rules in order, :153 next skips remaining rules,
+    //   :162 default action for pattern-only rule, :171 mixed pattern/action,
+    //   :184 BEGIN/main/END ordering, :210 next skips remaining rules.
+    #[test]
+    fn awk_jbc_command_awk_multiple_rules_and_next_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/data.txt".to_string(),
+                    "apple\nbanana\ncherry\n".to_string(),
+                ),
+                ("/ab.txt".to_string(), "a\nb\nc\n".to_string()),
+                (
+                    "/hw.txt".to_string(),
+                    "hello\nworld\nhello world\n".to_string(),
+                ),
+                ("/num123.txt".to_string(), "1\n2\n3\n".to_string()),
+                ("/skipkeep.txt".to_string(), "skip\nkeep\n".to_string()),
+                ("/abonly.txt".to_string(), "a\nb\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // :142 should execute multiple rules in order
+        assert_eq!(
+            env.exec(r#"awk '/apple/{print "FRUIT"} /banana/{print "YELLOW"}' /data.txt"#)
+                .stdout,
+            "FRUIT\nYELLOW\n"
+        );
+        // :153 should handle pattern with next to skip rules
+        assert_eq!(
+            env.exec(r#"awk '/b/{next}{print}' /ab.txt"#).stdout,
+            "a\nc\n"
+        );
+        // :162 should execute default action (print) for pattern-only rules
+        assert_eq!(
+            env.exec(r#"awk '/hello/' /hw.txt"#).stdout,
+            "hello\nhello world\n"
+        );
+        // :171 should handle mixed pattern and action-only rules
+        assert_eq!(
+            env.exec(r#"awk '/2/{print "TWO"} {print "line:" $0}' /num123.txt"#)
+                .stdout,
+            "line:1\nTWO\nline:2\nline:3\n"
+        );
+        // :184 should execute BEGIN, main rules, and END in order
+        let begin_end =
+            env.exec(r#"awk 'BEGIN{print "START"} {print $0} END{print "END"}' /abonly.txt"#);
+        assert_eq!(begin_end.stdout, "START\na\nb\nEND\n");
+        assert_eq!(begin_end.exit_code, 0);
+        // :210 should skip remaining rules for current line
+        assert_eq!(
+            env.exec(r#"awk '/skip/{next}{print "processed:", $0}' /skipkeep.txt"#)
+                .stdout,
+            "processed: keep\n"
+        );
+    }
+
+    // JBC-awk: special variables FILENAME/FNR and string functions
+    // match()/RSTART/RLENGTH/gensub(), printf %x/%X/%o/%c, and the ^/** power
+    // operators with a fractional exponent.
+    // Upstream: packages/just-bash/src/commands/awk/awk.functions.test.ts
+    //   :307 FILENAME contains filename,
+    //   :316 FILENAME empty for stdin, :325 FNR resets per file,
+    //   :343 RSTART/RLENGTH set by match, :352 RSTART/RLENGTH no match,
+    //   :365 match position, :374 match returns 0, :383 match regex,
+    //   :394 gensub first, :403 gensub g, :421 gensub Nth,
+    //   :434 power ^, :441 power **, :448 fractional exponent,
+    //   :459 %x lower, :468 %X upper, :479 %o octal, :490 %c char.
+    #[test]
+    fn awk_jbc_command_awk_special_vars_string_fns_and_printf_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/test.txt".to_string(), "line1\n".to_string()),
+                ("/a.txt".to_string(), "a1\na2\n".to_string()),
+                ("/b.txt".to_string(), "b1\nb2\nb3\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // :307 FILENAME should contain current filename
+        assert_eq!(
+            env.exec(r#"awk '{print FILENAME}' /test.txt"#).stdout,
+            "/test.txt\n"
+        );
+        // :316 FILENAME should be empty for stdin
+        assert_eq!(
+            env.exec(r#"echo "test" | awk '{print FILENAME}'"#).stdout,
+            "\n"
+        );
+        // :325 FNR should reset for each file
+        assert_eq!(
+            env.exec(r#"awk '{print FILENAME, FNR, NR}' /a.txt /b.txt"#)
+                .stdout,
+            "/a.txt 1 1\n/a.txt 2 2\n/b.txt 1 3\n/b.txt 2 4\n/b.txt 3 5\n"
+        );
+        // :343 RSTART/RLENGTH should be set by match()
+        assert_eq!(
+            env.exec(r#"echo "hello world" | awk '{ match($0, /wor/); print RSTART, RLENGTH }'"#)
+                .stdout,
+            "7 3\n"
+        );
+        // :352 RSTART/RLENGTH should be 0 and -1 when no match
+        assert_eq!(
+            env.exec(r#"echo "hello" | awk '{ match($0, /xyz/); print RSTART, RLENGTH }'"#)
+                .stdout,
+            "0 -1\n"
+        );
+        // :365 match() should return position of match
+        assert_eq!(
+            env.exec(r#"echo "hello world" | awk '{ print match($0, /world/) }'"#)
+                .stdout,
+            "7\n"
+        );
+        // :374 match() should return 0 for no match
+        assert_eq!(
+            env.exec(r#"echo "hello" | awk '{ print match($0, /xyz/) }'"#)
+                .stdout,
+            "0\n"
+        );
+        // :383 match() should work with regex patterns
+        assert_eq!(
+            env.exec(r#"echo "test123abc" | awk '{ match($0, /[0-9]+/); print RSTART, RLENGTH }'"#)
+                .stdout,
+            "5 3\n"
+        );
+        // :394 gensub() should replace first occurrence
+        assert_eq!(
+            env.exec(r#"echo "hello hello" | awk '{ print gensub(/hello/, "hi", 1) }'"#)
+                .stdout,
+            "hi hello\n"
+        );
+        // :403 gensub() should replace all occurrences with g
+        assert_eq!(
+            env.exec(r#"echo "hello hello" | awk '{ print gensub(/hello/, "hi", "g") }'"#)
+                .stdout,
+            "hi hi\n"
+        );
+        // :421 gensub() should replace Nth occurrence
+        assert_eq!(
+            env.exec(r#"echo "a b a b a" | awk '{ print gensub(/a/, "X", 2) }'"#)
+                .stdout,
+            "a b X b a\n"
+        );
+        // :434 power operator with ^
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 2^10 }'"#).stdout,
+            "1024\n"
+        );
+        // :441 power operator with **
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 3**4 }'"#).stdout,
+            "81\n"
+        );
+        // :448 fractional exponent
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 9^0.5 }'"#).stdout,
+            "3\n"
+        );
+        // :459 printf %x hex lowercase
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { printf "%x\n", 255 }'"#)
+                .stdout,
+            "ff\n"
+        );
+        // :468 printf %X hex uppercase
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { printf "%X\n", 255 }'"#)
+                .stdout,
+            "FF\n"
+        );
+        // :479 printf %o octal
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { printf "%o\n", 64 }'"#)
+                .stdout,
+            "100\n"
+        );
+        // :490 printf %c numeric -> character
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { printf "%c\n", 65 }'"#)
+                .stdout,
+            "A\n"
+        );
+    }
+
+    // JBC-awk: field iteration with C-style for loops over $i / NF, string
+    // reversal via length()/substr(), and regex/multichar/character-class -F
+    // field separators.
+    // Upstream files:
+    //   awk.fields.test.ts :317 iterate over all fields, :326 iterate reverse,
+    //     :335 sum all fields.
+    //   awk.functions.test.ts :523 regex FS split, :534 multichar FS,
+    //     :545 character-class FS.
+    #[test]
+    fn awk_jbc_command_awk_field_iteration_and_fs_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/a1b.txt".to_string(), "a1b2c3d\n".to_string()),
+                ("/colons.txt".to_string(), "a::b::c\n".to_string()),
+                ("/seps.txt".to_string(), "a,b;c:d\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // fields :317 should iterate over all fields
+        assert_eq!(
+            env.exec(r#"echo "a b c" | awk '{ for(i=1; i<=NF; i++) print i, $i }'"#)
+                .stdout,
+            "1 a\n2 b\n3 c\n"
+        );
+        // fields :326 should iterate in reverse
+        assert_eq!(
+            env.exec(r#"echo "a b c" | awk '{ for(i=NF; i>=1; i--) printf $i " "; print "" }'"#)
+                .stdout,
+            "c b a \n"
+        );
+        // fields :335 should sum all fields
+        assert_eq!(
+            env.exec(
+                r#"echo "1 2 3 4 5" | awk '{ sum=0; for(i=1; i<=NF; i++) sum+=$i; print sum }'"#
+            )
+            .stdout,
+            "15\n"
+        );
+        // functions :523 should split on regex pattern (-F)
+        assert_eq!(
+            env.exec(r#"awk -F'[0-9]' '{print $1, $2, $3, $4}' /a1b.txt"#)
+                .stdout,
+            "a b c d\n"
+        );
+        // functions :534 should split on multiple characters (-F'::')
+        assert_eq!(
+            env.exec(r#"awk -F'::' '{print $1, $2, $3}' /colons.txt"#)
+                .stdout,
+            "a b c\n"
+        );
+        // functions :545 should handle character class (-F'[,;:]')
+        assert_eq!(
+            env.exec(r#"awk -F'[,;:]' '{print $1, $2, $3, $4}' /seps.txt"#)
+                .stdout,
+            "a b c d\n"
+        );
     }
 }

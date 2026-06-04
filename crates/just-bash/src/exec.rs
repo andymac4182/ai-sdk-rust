@@ -23680,4 +23680,105 @@ mod tests {
         assert_eq!(r.stdout, "done\n");
         assert_eq!(r.exit_code, 0);
     }
+
+    // export.test.ts: initial env vars are available in every exec.
+    #[test]
+    fn builtins_export_initial_env_vars_available_in_every_exec() {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("SHARED".to_string(), "value".to_string());
+        let bash = crate::runtime::Bash::with_options(crate::runtime::BashOptions {
+            env,
+            ..Default::default()
+        });
+        let r1 = bash.exec("echo $SHARED");
+        let r2 = bash.exec("echo $SHARED");
+        assert_eq!(r1.stdout, "value\n");
+        assert_eq!(r2.stdout, "value\n");
+    }
+
+    // set.test.ts: set -e and set -u combined / set -e (errexit) suites.
+    #[test]
+    fn builtins_set_e_exits_immediately_when_command_fails() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "set -e\necho before\nfalse\necho after",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "before\n");
+        assert_eq!(r.exit_code, 1);
+    }
+
+    #[test]
+    fn builtins_set_e_continues_execution_without_set_e() {
+        let bash = JustBashSession::new();
+        let r = bash.exec("echo before\nfalse\necho after", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "before\nafter\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn builtins_set_e_does_not_exit_if_command_succeeds() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "set -e\necho one\ntrue\necho two",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "one\ntwo\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn builtins_set_e_disabled_with_set_plus_e() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "set -e\nset +e\necho before\nfalse\necho after",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "before\nafter\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn builtins_set_e_enabled_with_set_o_errexit() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "set -o errexit\necho before\nfalse\necho after",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "before\n");
+        assert_eq!(r.exit_code, 1);
+    }
+
+    #[test]
+    fn builtins_set_e_disabled_with_set_plus_o_errexit() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "set -o errexit\nset +o errexit\necho before\nfalse\necho after",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "before\nafter\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn builtins_set_e_does_not_exit_on_failed_command_in_and_short_circuit() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "set -e\nfalse && echo \"not reached\"\necho after",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "after\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn builtins_set_e_does_not_exit_on_failed_command_in_or_short_circuit() {
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "set -e\nfalse || echo \"fallback\"\necho after",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "fallback\nafter\n");
+        assert_eq!(r.exit_code, 0);
+    }
 }
