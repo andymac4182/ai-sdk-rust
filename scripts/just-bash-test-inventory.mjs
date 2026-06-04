@@ -1786,6 +1786,41 @@ const jbc15CaseGroups = [
   },
 ];
 
+const r10jbInterpreterCoreCaseGroups = [
+  {
+    file: 'packages/just-bash/src/interpreter/arithmetic.test.ts',
+    lines: [333, 340, 347],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::arithmetic',
+    rustTest: 'r10jb_interpreter_arithmetic_error_rows_match_upstream',
+    notes:
+      'R10JB verifies portable arithmetic error reporting: division by zero, modulo by zero, and negative exponent each abort the expansion with a diagnostic on stderr and exit status 1.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/control-flow.test.ts',
+    lines: [113, 150, 174, 187, 198, 209, 221, 233, 428, 442],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::control-flow',
+    rustTest:
+      'r10jb_interpreter_control_flow_loops_and_case_modifier_rows_match_upstream',
+    notes:
+      'R10JB verifies portable IFS field-splitting in for-in, positional-parameter iteration for `for i; do`, the invalid-identifier runtime error, the five C-style `for (( init; cond; update ))` rows, and the `;&` fall-through and `;;&` continue-matching case terminators.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/prototype-pollution.test.ts',
+    lines: [
+      135, 228, 349, 362, 375, 388, 451, 459, 466, 655, 665, 678, 688, 868,
+      892, 903, 916,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::prototype-pollution',
+    rustTest:
+      'r10jb_interpreter_prototype_pollution_identifier_rows_match_upstream',
+    notes:
+      'R10JB verifies JavaScript prototype keywords (constructor, __proto__, prototype, hasOwnProperty, ...) are treated as ordinary bash identifiers as array values/elements, parameter expansions, comparisons, function/alias/local names, while-loop conditions, subshells, and command substitutions.',
+  },
+];
+
 const jbc16CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/jq/jq.test.ts',
@@ -3956,6 +3991,36 @@ const jbpiParserInterpreterCaseGroups = [
     notes:
       'JB-PI verifies portable set -e (errexit) rows through the Rust parser/interpreter: `set -e` exits on the first failure, execution continues without it, success does not exit, `set +e` disables and `set -e` re-enables, and `set -o errexit` enables it. The same test also exercises the &&/||, if/elif-condition, while/until-condition and -body, negated-command, and preserve-exit-code exemptions; the unimplemented combined-flag (`-ee`/`-ze`/`-ez`) and `set` help/list/invalid-option rows stay pending.',
   },
+  {
+    file: 'packages/just-bash/src/syntax/composition.test.ts',
+    lines: [
+      6, 27, 53, 65, 75, 84, 92, 114, 125, 136, 148, 162, 178, 222, 244,
+      258, 270, 282, 294, 305, 339, 353, 367, 381, 455, 479, 490, 497,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r10jb_syntax_composition_operator_and_loop_rows_match_upstream',
+    notes:
+      'R10JB verifies portable syntax-feature composition rows through the Rust shell: command substitution in if/case words and for lists, here documents inside if/case/loop blocks and with command/arithmetic expansion, pipes inside if/case branches, here-doc-through-pipe counting, case-in-function and case-in-loop, command substitution and arithmetic in functions, nested command substitution, the failed-command-in-substitution / empty-here-doc / no-matching-case edge rows. Rows requiring mkdir/uniq/head/tail command families or `[[ ]]` arithmetic comparison stay pending with their command owners.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/operators.test.ts',
+    lines: [241],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r10jb_syntax_composition_operator_and_loop_rows_match_upstream',
+    notes:
+      'R10JB verifies the portable `echo -e | wc -l` line-count pipe row through the Rust shell. The head/tail/mkdir mixed-operator rows stay pending with their command owners.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/loops.test.ts',
+    lines: [124],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r10jb_syntax_composition_operator_and_loop_rows_match_upstream',
+    notes:
+      'R10JB verifies the portable until-loop row that executes once when its condition is initially false (a grep -q over a virtual file) through the Rust shell.',
+  },
 ];
 
 const jbc35CaseGroups = [
@@ -4862,6 +4927,33 @@ const jbR5ParserInterpreterCaseGroups = [
     notes:
       'R5 verifies the portable `continue` builtin 1:1 with continue.test.ts: skipping to the next iteration of for/while/until loops, `continue n` multi-level and single-level continues, level exceeding loop depth, silent no-op outside a loop, fatal numeric-argument-required errors (non-numeric/zero/negative) with exit 1, fatal too-many-arguments error with exit 1, and continue inside case/if/function nested in a loop. The two C-style `for (( ))` rows (L197, L208) stay pending until C-style for loops are implemented.',
   },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/eval.test.ts',
+    lines: [6, 13, 19, 26, 35, 44, 54, 66, 81, 89, 95, 101, 112, 122, 131, 142, 148],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::builtins::eval',
+    rustTest: 'jbpi_interpreter_builtin_eval_matches_upstream',
+    notes:
+      'R10JB verifies the portable `eval` builtin 1:1 with eval.test.ts through the Rust parser/interpreter: simple/multi-word commands, empty/no-argument no-ops, variable expansion before execution (including dynamic names and dynamic assignment), command construction over expanded word lists, command substitution, exit-code propagation of the executed/last command, the parse-error row (exit 1 with "Parse error"), current-environment execution, function visibility and persistent definition, and single/double quote handling. The piped row (L75) stays pending because `tr` is not provided by the parser/interpreter command seam.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/return.test.ts',
+    lines: [6, 21, 33, 46, 60, 72, 84, 98, 107],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::builtins::return',
+    rustTest: 'jbpi_interpreter_builtin_return_matches_upstream',
+    notes:
+      'R10JB verifies the portable `return` builtin 1:1 with return.test.ts through the Rust parser/interpreter: default/explicit/last-command/zero exit codes, modulo-256 wrapping (256->0, 257->1, -1->255), the not-in-a-function error (exit 1) and non-numeric-argument error (exit 2), innermost-only return in nested functions, propagation through control flow inside the function body, and stdout preservation before return.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/exit.test.ts',
+    lines: [72, 85, 101, 110],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::builtins::exit',
+    rustTest: 'jbpi_interpreter_builtin_exit_context_and_last_status_rows',
+    notes:
+      'R10JB verifies the previously-pending exit.test.ts rows through the Rust parser/interpreter: exit from inside a for loop and from inside an if block both stop the script with the requested code, and no-argument `exit` resolves to the last command status (1 after `false`, 0 after `true`).',
+  },
 ];
 
 const jbExecOptionsLoggingCaseGroups = [
@@ -4982,6 +5074,22 @@ const justBashCoreSerializeCaseGroups = [
   },
 ];
 
+const justBashTransformPluginsTeeCaseGroups = [
+  {
+    file: 'packages/just-bash/src/transform/plugins/tee-plugin.test.ts',
+    lines: [
+      329, 333, 343, 347, 351, 355, 359, 363, 367, 371, 375, 379, 389, 393,
+      397, 427, 431, 445, 463, 467, 503, 541, 557, 563, 618, 637, 645, 685,
+      689, 703,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell',
+    rustTest: 'just_bash_transform_plugins_tee_semantics_match_upstream',
+    notes:
+      'just-bash-transform-plugins verifies that the Rust interpreter produces the exact stdout/stderr/exit code the TeePlugin exec/semantics-preservation rows assert for plain runs: simple success/failure, pipelines, &&/||/; chains, $? propagation, subshell/group output and exit-code isolation, for/if/elif/case control flow, arithmetic conditionals, and negated pipelines.',
+  },
+];
+
 function caseOverrideFor(testCase) {
   const group = [
     ...jbSedTestTsCaseGroups,
@@ -4999,6 +5107,7 @@ function caseOverrideFor(testCase) {
     ...jbc13CaseGroups,
     ...jbc26CaseGroups,
     ...jbc15CaseGroups,
+    ...r10jbInterpreterCoreCaseGroups,
     ...jbc16CaseGroups,
     ...jbc17CaseGroups,
     ...jbc18CaseGroups,
@@ -5032,6 +5141,7 @@ function caseOverrideFor(testCase) {
     ...jbcXanGroupbyTransformCaseGroups,
     ...jbcYqFixturesCaseGroups,
     ...justBashCoreSerializeCaseGroups,
+    ...justBashTransformPluginsTeeCaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&
