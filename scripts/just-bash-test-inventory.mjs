@@ -840,6 +840,24 @@ const jbc09CaseGroups = [
     notes:
       'JBC-09 verifies portable awk error handling: integer/float division by zero (inf), modulo by zero (nan), fail-closed invalid-regex diagnostics for match/gsub/sub, unset scalar/array coercion, string-to-number arithmetic, mixed-type and numeric-string comparison, $0/out-of-bounds/non-integer/extended field access, substr with one argument, sprintf with no/extra/missing format args, sqrt/log/exp math edges (nan/-inf/inf), unmatched-brace and unmatched-paren syntax errors, and the missing-input-file error.',
   },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.edge-cases.test.ts',
+    lines: [202, 213, 220, 229, 258, 265, 274, 294, 303, 312],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc09_edge_case_control_array_and_special_var_rows',
+    notes:
+      'JBC-09 verifies portable awk edge cases: case-sensitive regex non-match, empty action block, nested if without else, multiple semicolons, uninitialized variable as number/string, NF reassignment, empty associative-array iteration, numeric-string vs numeric subscript collapse, and delete on an absent key. C-style for/while loops in BEGIN/END remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.errors.test.ts',
+    lines: [288, 295],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc09_edge_case_control_array_and_special_var_rows',
+    notes:
+      'JBC-09 verifies portable awk special-variable edges: NF is 0 for an empty record and NR is 0 inside BEGIN before any record is read.',
+  },
 ];
 
 const jbc10CaseGroups = [
