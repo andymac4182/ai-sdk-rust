@@ -4329,6 +4329,20 @@ const jbpiParserInterpreterCaseGroups = [
     notes:
       'JB-PI verifies portable parser-protection rows through the Rust parser/interpreter: oversized input above MAX_INPUT_SIZE is rejected before tokenizing, every pathological shape (long names/strings, deeply nested parens/braces/command-substitutions/arithmetic, many tokens/semicolons/pipes/redirections, repeated brace patterns, alternating quotes) parses in bounded time without hanging, and brace/range expansion during execution stays bounded (clean exit, output length bound).',
   },
+  {
+    file: 'packages/just-bash/src/syntax/execution-protection.test.ts',
+    lines: [
+      35, 44, 52, 60, 72, 84, 94, 104, 118, 131, 139, 147, 157, 171, 180,
+      188, 196, 209, 216, 228, 243, 252, 264, 287, 296, 308, 319, 327, 337,
+      349, 385, 396, 408, 418, 431, 441, 453, 465, 479, 488, 497, 505, 515,
+      529, 536, 548, 562, 577, 589, 598, 607, 616,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_syntax_execution_protection_rows_match_upstream',
+    notes:
+      'JB-PI verifies portable execution-protection rows through the Rust interpreter: recursion depth (maxCallDepth), command count (maxCommandCount), and loop iterations (maxLoopIterations) are bounded with the upstream ExecutionLimitError exit code (126) and a non-stack-overflow diagnostic whether the runaway is reached via plain/mutual recursion, eval-in-loop, function-with-loop, command substitution, arithmetic, subshells (incl. subshell-in-loop), pipelines, case, local, simulated-select, trap-guarded, empty-body or comment-only loops; bounded brace/range/char-range expansion, deep finite command substitution, many tokens/args, long finite pipelines, PROMPT_COMMAND assignment and self-referential variables exit 0 with the documented output; oversized input is rejected with a "too large" parser error. The recursive-eval (L275) and large-arithmetic-overflow (L359) rows stay pending pending an eval-recursion guard and double-precision arithmetic, and the upstream-skipped recursive-arith-in-param-expansion row (L373) stays pending.',
+  },
 ];
 
 const jbc35CaseGroups = [
