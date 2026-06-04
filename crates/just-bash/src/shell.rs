@@ -8145,6 +8145,57 @@ esac"#,
         }
     }
 
+    /// Closes the just-bash-core `serialize.test.ts` round-trip rows for
+    /// c-style/fallthrough/empty compound commands, compound-with-redirection
+    /// forms, arithmetic commands, and nested-substitution / group-in-pipeline
+    /// complex scripts. Each source is parsed, serialized, and reparsed; the
+    /// reparsed AST must equal the original, so a serializer regression on any
+    /// of these node shapes fails the assertion.
+    #[test]
+    fn just_bash_core_serialize_round_trips_arithmetic_and_compound_redirection_rows() {
+        fn assert_round_trip(source: &str) {
+            let script = parse(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            let serialized = serialize(&script);
+            let reparsed = parse(&serialized)
+                .unwrap_or_else(|error| panic!("{source} -> {serialized}: {error}"));
+            assert_eq!(reparsed, script, "{source} -> {serialized}");
+        }
+
+        for source in [
+            // compound commands: c-style for, fallthrough/empty case
+            // (serialize.test.ts:151,159,161)
+            "for ((i=0; i<10; i++)); do echo $i; done",
+            "case $x in a) echo a;& b) echo b;; esac",
+            "case $x in a) ;; esac",
+            // compound commands with redirections
+            // (serialize.test.ts:168,170,172,174)
+            "if true; then echo yes; fi > out.txt",
+            "for i in 1 2 3; do echo $i; done > out.txt",
+            "while true; do echo loop; done > out.txt",
+            "case $x in a) echo a;; esac > out.txt",
+            // arithmetic command (serialize.test.ts:181..190,192,194,195)
+            "((x = 1 + 2))",
+            "((x > 5))",
+            "((x = a > b ? a : b))",
+            "((x++))",
+            "((--x))",
+            "(((x + y) * z))",
+            "((arr[0] + arr[1]))",
+            "((arr[0] = 5))",
+            "((assoc[key] + 1))",
+            "echo $((1 + $((2 + 3))))",
+            "echo $((1 + $(echo 2)))",
+            "echo $(( ${base}#ff ))",
+            "echo $(( ${zero}11 ))",
+            // complex scripts: nested command sub, group in pipeline
+            // (serialize.test.ts:424,427)
+            "echo $(echo $(echo hi))",
+            "{ echo a; echo b; } | cat",
+        ] {
+            assert_round_trip(source);
+        }
+    }
+
     #[test]
     fn just_bash_core_serialize_round_trips_param_op_and_compound_rows() {
         fn assert_round_trip(source: &str) {

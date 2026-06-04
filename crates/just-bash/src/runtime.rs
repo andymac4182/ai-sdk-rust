@@ -142,6 +142,95 @@ mod tests {
         Bash::new()
     }
 
+    /// Closes the just-bash-core `tee-plugin.test.ts` "TeePlugin semantics
+    /// preservation" rows that the portable Rust interpreter reproduces
+    /// verbatim. Upstream registers a `TeePlugin` and asserts the wrapped run's
+    /// stdout/stderr/exitCode equal the plain run — i.e. the transform never
+    /// perturbs observable shell semantics. The Rust port carries no tee
+    /// transform layer, so the equivalent proof is that `Bash::exec` produces
+    /// the exact bash-correct output for each script. Each assertion fails if
+    /// the pipeline, redirection, command-substitution, or chain semantics
+    /// regress.
+    #[test]
+    fn just_bash_core_tee_semantics_preservation_pipeline_rows_match_plain_exec() {
+        struct Case {
+            script: &'static str,
+            stdout: &'static str,
+            stderr: &'static str,
+            exit_code: i32,
+        }
+
+        let cases = [
+            // tee-plugin.test.ts:337 pipeline success: cat file | grep match | sort
+            Case {
+                script: "cat /data/input.txt | grep hello | sort",
+                stdout: "hello\nhello world\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:405 stderr preserved for unwrapped commands (|| chain)
+            Case {
+                script: "ls /no_such_path_xyz 2>&1 || echo fallback",
+                stdout: "ls: /no_such_path_xyz: No such file or directory\nfallback\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:423 command substitution in variable, then use in pipeline
+            Case {
+                script: "X=$(echo hello); echo \"$X world\" | cat",
+                stdout: "hello world\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:533 complex redirect: stderr to stdout into pipeline
+            Case {
+                script: "ls /no_such_xyz 2>&1 | cat",
+                stdout: "ls: /no_such_xyz: No such file or directory\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:551 complex pipeline: generate, filter, transform, count
+            Case {
+                script: "printf '%s\\n' apple banana avocado blueberry apricot | grep ^a | sort | wc -l",
+                stdout: "3\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:608 mixed && || ; chains with pipelines between
+            Case {
+                script: "echo start && echo hello | cat && echo end || echo fail",
+                stdout: "start\nhello\nend\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:622 string manipulation pipeline: tr | sed | cat
+            Case {
+                script: "echo \"Hello World FOO\" | tr A-Z a-z | sed \"s/foo/bar/\" | cat",
+                stdout: "hello world bar\n",
+                stderr: "",
+                exit_code: 0,
+            },
+        ];
+
+        for case in cases {
+            let b = Bash::with_options(BashOptions {
+                files: BTreeMap::from([(
+                    "/data/input.txt".to_string(),
+                    "hello\nworld\nhello world\n".to_string(),
+                )]),
+                ..Default::default()
+            });
+            let r = b.exec(case.script);
+            assert_eq!(r.stdout, case.stdout, "stdout for: {}", case.script);
+            assert_eq!(r.stderr, case.stderr, "stderr for: {}", case.script);
+            assert_eq!(
+                r.exit_code, case.exit_code,
+                "exit code for: {}",
+                case.script
+            );
+        }
+    }
+
     const SHERLOCK: &str = "For the Doctor Watsons of this world, as opposed to the Sherlock\n\
 Holmeses, success in the province of detective work must always\n\
 be, to a very large extent, the result of luck. Sherlock Holmes\n\

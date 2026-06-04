@@ -26097,6 +26097,27 @@ mod tests {
                 .trim(),
             "7"
         );
+
+        // L178: a byte-emitting custom command pipes downstream without double
+        // encoding. Upstream constructs the emitter via `bytesOutput(
+        // encodeUtf8ToBytes("안녕\n"))`; the Rust custom-command surface already
+        // carries the stdout as the UTF-8/latin1 byte string, so the same
+        // "안녕\n" payload reaches `wc -c` as exactly 7 bytes — never 11 (which a
+        // second UTF-8 round-trip of the three multibyte codepoints would
+        // produce).
+        let emit_bytes = JustBashCustomCommand::new("emit-bytes", |_context| {
+            JustBashCustomCommandResult::stdout("안녕\n")
+        });
+        let custom_bytes = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_custom_command(emit_bytes),
+        );
+        assert_eq!(
+            custom_bytes
+                .exec("emit-bytes | wc -c", JustBashExecOptions::new())
+                .stdout
+                .trim(),
+            "7"
+        );
     }
 
     #[test]
