@@ -858,6 +858,33 @@ const jbc09CaseGroups = [
     notes:
       'JBC-09 verifies portable awk special-variable edges: NF is 0 for an empty record and NR is 0 inside BEGIN before any record is read.',
   },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.expressions.test.ts',
+    lines: [6, 15, 24, 34, 46, 60, 74, 86],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_expression_edge_and_error_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk complex expressions: deeply nested parentheses, compound formulae, quadratic/power arithmetic, if/else-if/else chains, nested bodyless if statements, and nested/complex ternary conditions.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.edge-cases.test.ts',
+    lines: [150, 238, 247, 283],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_expression_edge_and_error_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk control-flow/variable edges: building a long string in a C-style for loop, a for loop with zero iterations, a while with a false condition, and assignment used as an if condition.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.errors.test.ts',
+    lines: [143, 179, 258, 302, 311, 322, 329],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_expression_edge_and_error_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk error/edge handling: negative field index, split() with the array argument omitted, an undefined function call returning empty, NF growing when a high field is set, assigning to NF, and graceful printf handling of an unknown specifier and width/precision with no conversion.',
+  },
 ];
 
 const jbc10CaseGroups = [
