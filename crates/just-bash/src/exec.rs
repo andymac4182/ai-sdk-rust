@@ -18397,6 +18397,11 @@ fn command_xan(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
         "shuffle" => xan_shuffle(state, &args[1..], stdin),
         "partition" => xan_partition(state, &args[1..], stdin),
         "transform" => xan_transform(state, &args[1..], stdin),
+        "map" => xan_map(state, &args[1..], stdin),
+        "explode" => xan_explode(state, &args[1..], stdin),
+        "implode" => xan_implode(state, &args[1..], stdin),
+        "pivot" => xan_pivot(state, &args[1..], stdin),
+        "merge" => xan_merge(state, &args[1..]),
         "parallel" => stderr_result(1, "xan parallel: not yet implemented\n"),
         other => stderr_result(1, format!("xan: unknown command: {other}\n")),
     }
@@ -19678,6 +19683,948 @@ fn xan_transform(state: &ExecState<'_>, args: &[String], stdin: &str) -> Command
         headers: new_headers,
         rows: new_rows,
     }))
+}
+
+/// A moonblade runtime value: either a number or a string. `xan map`
+/// produces these per computed column.
+#[derive(Clone, Debug, PartialEq)]
+enum XanValue {
+    Number(f64),
+    Str(String),
+    Null,
+}
+
+impl XanValue {
+    /// Render the value as a CSV cell, matching upstream `formatCsv`
+    /// (numbers via JS `String(number)`, null/undefined as empty string).
+    fn render(&self) -> String {
+        match self {
+            XanValue::Number(n) => json_scalar_string(&json_number(*n)),
+            XanValue::Str(s) => s.clone(),
+            XanValue::Null => String::new(),
+        }
+    }
+
+    fn as_number(&self) -> Option<f64> {
+        match self {
+            XanValue::Number(n) => Some(*n),
+            XanValue::Str(s) => s.parse::<f64>().ok(),
+            XanValue::Null => None,
+        }
+    }
+
+    fn as_string(&self) -> String {
+        match self {
+            XanValue::Number(n) => json_scalar_string(&json_number(*n)),
+            XanValue::Str(s) => s.clone(),
+            XanValue::Null => String::new(),
+        }
+    }
+
+    fn is_nullish(&self) -> bool {
+        matches!(self, XanValue::Null) || matches!(self, XanValue::Str(s) if s.is_empty())
+    }
+}
+
+/// One `expr as alias` map specification.
+struct XanMapSpec {
+    expr: String,
+    alias: String,
+}
+
+/// Parse comma-separated `expr as alias` specifications, respecting nested
+/// parentheses, brackets, and single-quoted string literals. Mirrors upstream
+/// `parseNamedExpressions` for the `xan map` subset.
+fn parse_xan_map_specs(input: &str) -> Vec<XanMapSpec> {
+    let mut specs = Vec::new();
+    for segment in split_top_level_commas(input) {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+        // Find a top-level ` as ` separator.
+        if let Some((expr, alias)) = split_top_level_as(segment) {
+            specs.push(XanMapSpec {
+                expr: expr.trim().to_string(),
+                alias: alias.trim().to_string(),
+            });
+        } else {
+            specs.push(XanMapSpec {
+                expr: segment.to_string(),
+                alias: segment.to_string(),
+            });
+        }
+    }
+    specs
+}
+
+/// Split a string on top-level commas (ignoring commas inside parens,
+/// brackets, or single-quoted strings).
+fn split_top_level_commas(input: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut current = String::new();
+    for ch in input.chars() {
+        match ch {
+            '\'' => {
+                in_string = !in_string;
+                current.push(ch);
+            }
+            '(' | '[' if !in_string => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' | ']' if !in_string => {
+                depth -= 1;
+                current.push(ch);
+            }
+            ',' if !in_string && depth == 0 => {
+                parts.push(std::mem::take(&mut current));
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
+/// Split `expr as alias` at the top-level ` as ` keyword.
+fn split_top_level_as(segment: &str) -> Option<(String, String)> {
+    let chars: Vec<char> = segment.chars().collect();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        match ch {
+            '\'' => in_string = !in_string,
+            '(' | '[' if !in_string => depth += 1,
+            ')' | ']' if !in_string => depth -= 1,
+            'a' | 'A' if !in_string && depth == 0 => {
+                // Match a standalone ` as ` keyword.
+                let prev_space = i > 0 && chars[i - 1].is_whitespace();
+                let matches_as = chars.get(i + 1).is_some_and(|c| matches!(c, 's' | 'S'));
+                let next_space = chars.get(i + 2).is_some_and(|c| c.is_whitespace());
+                if prev_space && matches_as && next_space {
+                    let expr: String = chars[..i - 1].iter().collect();
+                    let alias: String = chars[i + 3..].iter().collect();
+                    return Some((expr, alias));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Evaluate a moonblade map expression for a single CSV row, with `row_index`
+/// available to the `index()` function. Covers the function/operator subset
+/// exercised by `xan map` (xan.map.test.ts): arithmetic infix (`+ - * /`),
+/// `add/sub/mul/div`, `upper/lower/trim/len`, `abs/round`, `split(...)[i]`,
+/// `index()`, `if(cond, a, b)`, `coalesce(...)`, `startswith`, comparisons,
+/// numeric and single-quoted string literals.
+fn xan_eval_map_expr(headers: &[String], row: &[String], row_index: usize, expr: &str) -> XanValue {
+    let expr = expr.trim();
+
+    // Bracket index access: `expr[index]` (used for split(...)[0]).
+    if let Some((base, index_expr)) = xan_split_index(expr) {
+        let base_value = xan_eval_map_list(headers, row, row_index, &base);
+        let idx = xan_eval_map_expr(headers, row, row_index, &index_expr)
+            .as_number()
+            .map(|n| n as usize);
+        if let (Some(list), Some(idx)) = (base_value, idx) {
+            return list
+                .get(idx)
+                .cloned()
+                .map(XanValue::Str)
+                .unwrap_or(XanValue::Null);
+        }
+        return XanValue::Null;
+    }
+
+    // Top-level comparison operators yield booleans for `if`.
+    for op in [">=", "<=", "==", "!=", ">", "<"] {
+        if let Some((lhs, rhs)) = xan_split_binop(expr, op) {
+            let l = xan_eval_map_expr(headers, row, row_index, &lhs);
+            let r = xan_eval_map_expr(headers, row, row_index, &rhs);
+            let result = match (l.as_number(), r.as_number()) {
+                (Some(a), Some(b)) => match op {
+                    ">=" => a >= b,
+                    "<=" => a <= b,
+                    ">" => a > b,
+                    "<" => a < b,
+                    "==" => (a - b).abs() < f64::EPSILON,
+                    _ => (a - b).abs() >= f64::EPSILON,
+                },
+                _ => {
+                    let a = l.as_string();
+                    let b = r.as_string();
+                    match op {
+                        "==" => a == b,
+                        "!=" => a != b,
+                        _ => false,
+                    }
+                }
+            };
+            return XanValue::Str(if result { "true" } else { "false" }.to_string());
+        }
+    }
+
+    // Top-level additive / multiplicative arithmetic.
+    for ops in [["+", "-"], ["*", "/"]] {
+        if let Some((lhs, op, rhs)) = xan_split_arith(expr, &ops) {
+            let l = xan_eval_map_expr(headers, row, row_index, &lhs);
+            let r = xan_eval_map_expr(headers, row, row_index, &rhs);
+            if let (Some(a), Some(b)) = (l.as_number(), r.as_number()) {
+                let v = match op.as_str() {
+                    "+" => a + b,
+                    "-" => a - b,
+                    "*" => a * b,
+                    _ => a / b,
+                };
+                return XanValue::Number(v);
+            }
+            return XanValue::Null;
+        }
+    }
+
+    // Function calls.
+    if let Some((func, raw_args)) = xan_parse_call(expr) {
+        let args = split_top_level_commas(&raw_args);
+        match func.as_str() {
+            "index" => return XanValue::Number(row_index as f64),
+            "add" | "sub" | "mul" | "div" if args.len() == 2 => {
+                let a = xan_eval_map_expr(headers, row, row_index, &args[0]).as_number();
+                let b = xan_eval_map_expr(headers, row, row_index, &args[1]).as_number();
+                if let (Some(a), Some(b)) = (a, b) {
+                    let v = match func.as_str() {
+                        "add" => a + b,
+                        "sub" => a - b,
+                        "mul" => a * b,
+                        _ => a / b,
+                    };
+                    return XanValue::Number(v);
+                }
+                return XanValue::Null;
+            }
+            "upper" | "lower" | "trim" | "len" if args.len() == 1 => {
+                let value = xan_eval_map_expr(headers, row, row_index, &args[0]).as_string();
+                return match func.as_str() {
+                    "upper" => XanValue::Str(value.to_uppercase()),
+                    "lower" => XanValue::Str(value.to_lowercase()),
+                    "trim" => XanValue::Str(value.trim().to_string()),
+                    _ => XanValue::Number(value.chars().count() as f64),
+                };
+            }
+            "abs" if args.len() == 1 => {
+                return xan_eval_map_expr(headers, row, row_index, &args[0])
+                    .as_number()
+                    .map(|n| XanValue::Number(n.abs()))
+                    .unwrap_or(XanValue::Null);
+            }
+            "round" if args.len() == 1 => {
+                // JS Math.round: round half up toward +Infinity.
+                return xan_eval_map_expr(headers, row, row_index, &args[0])
+                    .as_number()
+                    .map(|n| XanValue::Number((n + 0.5).floor()))
+                    .unwrap_or(XanValue::Null);
+            }
+            "startswith" if args.len() == 2 => {
+                let value = xan_eval_map_expr(headers, row, row_index, &args[0]).as_string();
+                let prefix = xan_eval_map_expr(headers, row, row_index, &args[1]).as_string();
+                return XanValue::Str(
+                    if value.starts_with(&prefix) {
+                        "true"
+                    } else {
+                        "false"
+                    }
+                    .to_string(),
+                );
+            }
+            "if" if args.len() == 2 || args.len() == 3 => {
+                let cond = xan_eval_map_expr(headers, row, row_index, &args[0]);
+                let truthy = match &cond {
+                    XanValue::Str(s) => s == "true",
+                    XanValue::Number(n) => *n != 0.0,
+                    XanValue::Null => false,
+                };
+                if truthy {
+                    return xan_eval_map_expr(headers, row, row_index, &args[1]);
+                }
+                if args.len() == 3 {
+                    return xan_eval_map_expr(headers, row, row_index, &args[2]);
+                }
+                return XanValue::Null;
+            }
+            "coalesce" => {
+                for arg in &args {
+                    let value = xan_eval_map_expr(headers, row, row_index, arg);
+                    if !value.is_nullish() {
+                        return value;
+                    }
+                }
+                return XanValue::Null;
+            }
+            "split" if args.len() == 2 => {
+                // Bare split() outside index access: return first element.
+                let list = xan_eval_map_list(headers, row, row_index, expr);
+                return list
+                    .and_then(|values| values.first().cloned())
+                    .map(XanValue::Str)
+                    .unwrap_or(XanValue::Null);
+            }
+            _ => {}
+        }
+    }
+
+    // String literal.
+    if let Some(literal) = xan_string_literal(expr) {
+        return XanValue::Str(literal);
+    }
+    // Numeric literal.
+    if let Ok(number) = expr.parse::<f64>() {
+        return XanValue::Number(number);
+    }
+    // Column reference.
+    if let Some(index) = headers.iter().position(|h| h == expr) {
+        return row
+            .get(index)
+            .cloned()
+            .map(XanValue::Str)
+            .unwrap_or(XanValue::Null);
+    }
+    XanValue::Null
+}
+
+/// Evaluate an expression that should produce a list (currently only
+/// `split(value, sep)`), returning the parts.
+fn xan_eval_map_list(
+    headers: &[String],
+    row: &[String],
+    row_index: usize,
+    expr: &str,
+) -> Option<Vec<String>> {
+    let expr = expr.trim();
+    if let Some((func, raw_args)) = xan_parse_call(expr) {
+        if func == "split" {
+            let args = split_top_level_commas(&raw_args);
+            if args.len() == 2 {
+                let value = xan_eval_map_expr(headers, row, row_index, &args[0]).as_string();
+                let sep = xan_eval_map_expr(headers, row, row_index, &args[1]).as_string();
+                if sep.is_empty() {
+                    return Some(value.chars().map(|c| c.to_string()).collect());
+                }
+                return Some(value.split(&sep).map(str::to_string).collect());
+            }
+        }
+    }
+    None
+}
+
+/// Parse `func(args)` returning the function name and the raw argument string.
+fn xan_parse_call(expr: &str) -> Option<(String, String)> {
+    let open = expr.find('(')?;
+    if !expr.ends_with(')') {
+        return None;
+    }
+    let name = expr[..open].trim();
+    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    let inner = &expr[open + 1..expr.len() - 1];
+    Some((name.to_string(), inner.to_string()))
+}
+
+/// Split `base[index]` into (base, index) at the trailing top-level bracket.
+fn xan_split_index(expr: &str) -> Option<(String, String)> {
+    if !expr.ends_with(']') {
+        return None;
+    }
+    let chars: Vec<char> = expr.chars().collect();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    // Find the matching `[` for the final `]`.
+    for i in (0..chars.len()).rev() {
+        match chars[i] {
+            '\'' => in_string = !in_string,
+            ']' if !in_string => depth += 1,
+            '[' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    if i == 0 {
+                        return None;
+                    }
+                    let base: String = chars[..i].iter().collect();
+                    let index: String = chars[i + 1..chars.len() - 1].iter().collect();
+                    return Some((base, index));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Split on a top-level binary operator (rightmost), respecting parens,
+/// brackets, and strings. Returns (lhs, rhs).
+fn xan_split_binop(expr: &str, op: &str) -> Option<(String, String)> {
+    let op_chars: Vec<char> = op.chars().collect();
+    let chars: Vec<char> = expr.chars().collect();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\'' => in_string = !in_string,
+            '(' | '[' if !in_string => depth += 1,
+            ')' | ']' if !in_string => depth -= 1,
+            _ if !in_string && depth == 0 && chars[i..].starts_with(op_chars.as_slice()) => {
+                // Avoid matching `>` inside `>=` etc.
+                let after = chars.get(i + op_chars.len());
+                let is_compound_start = matches!(chars[i], '>' | '<' | '!' | '=')
+                    && after == Some(&'=')
+                    && op.len() == 1;
+                if !is_compound_start {
+                    let lhs: String = chars[..i].iter().collect();
+                    let rhs: String = chars[i + op_chars.len()..].iter().collect();
+                    if !lhs.trim().is_empty() && !rhs.trim().is_empty() {
+                        return Some((lhs, rhs));
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Split on a top-level additive or multiplicative operator (leftmost wins
+/// for left-associativity via recursion on lhs). Returns (lhs, op, rhs).
+fn xan_split_arith(expr: &str, ops: &[&str; 2]) -> Option<(String, String, String)> {
+    let chars: Vec<char> = expr.chars().collect();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut last: Option<usize> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\'' => in_string = !in_string,
+            '(' | '[' if !in_string => depth += 1,
+            ')' | ']' if !in_string => depth -= 1,
+            c if !in_string
+                && depth == 0
+                && (c.to_string() == ops[0] || c.to_string() == ops[1]) =>
+            {
+                // Skip a unary minus/plus (start of expr or after another operator).
+                let prev_non_ws = chars[..i].iter().rev().find(|c| !c.is_whitespace());
+                let is_unary = prev_non_ws.is_none()
+                    || matches!(prev_non_ws, Some('+' | '-' | '*' | '/' | '(' | ','));
+                if !is_unary {
+                    last = Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let pos = last?;
+    let lhs: String = chars[..pos].iter().collect();
+    let op = chars[pos].to_string();
+    let rhs: String = chars[pos + 1..].iter().collect();
+    Some((lhs, op, rhs))
+}
+
+/// Extract a single-quoted string literal's contents, or None.
+fn xan_string_literal(expr: &str) -> Option<String> {
+    let expr = expr.trim();
+    if expr.len() >= 2 && expr.starts_with('\'') && expr.ends_with('\'') {
+        return Some(expr[1..expr.len() - 1].to_string());
+    }
+    None
+}
+
+/// Port of upstream `cmdMap` (xan-map.ts): append computed columns from
+/// moonblade `expr as alias` specifications, with `-O` overwrite and
+/// `--filter` row-dropping semantics.
+fn xan_map(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut map_expr: Option<String> = None;
+    let mut overwrite = false;
+    let mut filter = false;
+    let mut files: Vec<String> = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-O" | "--overwrite" => overwrite = true,
+            "--filter" => filter = true,
+            other if !other.starts_with('-') => {
+                if map_expr.is_none() {
+                    map_expr = Some(other.to_string());
+                } else {
+                    files.push(other.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(map_expr) = map_expr else {
+        return stderr_result(1, "xan map: no expression specified\n");
+    };
+    let csv = match read_csv_arg(state, files.first().map(String::as_str), stdin, "xan map") {
+        Ok(csv) => csv,
+        Err(result) => return result,
+    };
+    let specs = parse_xan_map_specs(&map_expr);
+
+    let mut new_headers = csv.headers.clone();
+    for spec in &specs {
+        if overwrite {
+            if !new_headers.contains(&spec.alias) {
+                new_headers.push(spec.alias.clone());
+            }
+        } else {
+            new_headers.push(spec.alias.clone());
+        }
+    }
+
+    let mut new_rows: Vec<Vec<String>> = Vec::new();
+    for (row_index, row) in csv.rows.iter().enumerate() {
+        // Build a per-row value map keyed by the new header layout.
+        let mut values: Vec<(String, String)> = csv
+            .headers
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (h.clone(), row.get(i).cloned().unwrap_or_default()))
+            .collect();
+        let mut skip = false;
+        for spec in &specs {
+            let value = xan_eval_map_expr(&csv.headers, row, row_index, &spec.expr);
+            if filter && value.is_nullish() {
+                skip = true;
+                break;
+            }
+            // Overwrite existing or append.
+            if let Some(entry) = values.iter_mut().find(|(name, _)| name == &spec.alias) {
+                entry.1 = value.render();
+            } else {
+                values.push((spec.alias.clone(), value.render()));
+            }
+        }
+        if skip {
+            continue;
+        }
+        let new_row = new_headers
+            .iter()
+            .map(|header| {
+                values
+                    .iter()
+                    .find(|(name, _)| name == header)
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        new_rows.push(new_row);
+    }
+    stdout_result(render_csv(&CsvData {
+        headers: new_headers,
+        rows: new_rows,
+    }))
+}
+
+/// Port of upstream `cmdExplode` (xan-reshape.ts): split a delimited column
+/// into multiple rows. Supports `-s/--separator`, `--drop-empty`, `-r/--rename`.
+fn xan_explode(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut column: Option<String> = None;
+    let mut separator = "|".to_string();
+    let mut drop_empty = false;
+    let mut rename = String::new();
+    let mut files: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--separator" if i + 1 < args.len() => {
+                separator = args[i + 1].clone();
+                i += 1;
+            }
+            "--drop-empty" => drop_empty = true,
+            "-r" | "--rename" if i + 1 < args.len() => {
+                rename = args[i + 1].clone();
+                i += 1;
+            }
+            other if !other.starts_with('-') => {
+                if column.is_none() {
+                    column = Some(other.to_string());
+                } else {
+                    files.push(other.to_string());
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let Some(column) = column else {
+        return stderr_result(1, "xan explode: usage: xan explode COLUMN [FILE]\n");
+    };
+    let csv = match read_csv_arg(
+        state,
+        files.first().map(String::as_str),
+        stdin,
+        "xan explode",
+    ) {
+        Ok(csv) => csv,
+        Err(result) => return result,
+    };
+    let Some(col_index) = csv.headers.iter().position(|h| h == &column) else {
+        return stderr_result(1, format!("xan explode: column '{column}' not found\n"));
+    };
+    let mut new_headers = csv.headers.clone();
+    if !rename.is_empty() {
+        new_headers[col_index] = rename.clone();
+    }
+    let mut new_rows: Vec<Vec<String>> = Vec::new();
+    for row in &csv.rows {
+        let value = row.get(col_index).cloned().unwrap_or_default();
+        if value.is_empty() {
+            if !drop_empty {
+                new_rows.push(row.clone());
+            }
+        } else {
+            for part in value.split(&separator) {
+                let mut new_row = row.clone();
+                if new_row.len() <= col_index {
+                    new_row.resize(col_index + 1, String::new());
+                }
+                new_row[col_index] = part.to_string();
+                new_rows.push(new_row);
+            }
+        }
+    }
+    stdout_result(render_csv(&CsvData {
+        headers: new_headers,
+        rows: new_rows,
+    }))
+}
+
+/// Port of upstream `cmdImplode` (xan-reshape.ts): combine consecutive rows
+/// with the same key (all other columns), joining the target column values.
+fn xan_implode(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut column: Option<String> = None;
+    let mut separator = "|".to_string();
+    let mut rename = String::new();
+    let mut files: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--sep" if i + 1 < args.len() => {
+                separator = args[i + 1].clone();
+                i += 1;
+            }
+            "-r" | "--rename" if i + 1 < args.len() => {
+                rename = args[i + 1].clone();
+                i += 1;
+            }
+            other if !other.starts_with('-') => {
+                if column.is_none() {
+                    column = Some(other.to_string());
+                } else {
+                    files.push(other.to_string());
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let Some(column) = column else {
+        return stderr_result(1, "xan implode: usage: xan implode COLUMN [FILE]\n");
+    };
+    let csv = match read_csv_arg(
+        state,
+        files.first().map(String::as_str),
+        stdin,
+        "xan implode",
+    ) {
+        Ok(csv) => csv,
+        Err(result) => return result,
+    };
+    let Some(col_index) = csv.headers.iter().position(|h| h == &column) else {
+        return stderr_result(1, format!("xan implode: column '{column}' not found\n"));
+    };
+    let key_indices: Vec<usize> = (0..csv.headers.len()).filter(|i| *i != col_index).collect();
+    let mut new_headers = csv.headers.clone();
+    if !rename.is_empty() {
+        new_headers[col_index] = rename.clone();
+    }
+    let key_of = |row: &[String]| -> String {
+        key_indices
+            .iter()
+            .map(|&i| row.get(i).cloned().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\0")
+    };
+    let mut new_rows: Vec<Vec<String>> = Vec::new();
+    let mut current_key: Option<String> = None;
+    let mut current_values: Vec<String> = Vec::new();
+    let mut current_row: Option<Vec<String>> = None;
+    for row in &csv.rows {
+        let key = key_of(row);
+        let value = row.get(col_index).cloned().unwrap_or_default();
+        if Some(&key) != current_key.as_ref() {
+            if let Some(mut prev) = current_row.take() {
+                prev[col_index] = current_values.join(&separator);
+                new_rows.push(prev);
+            }
+            current_key = Some(key);
+            current_values = vec![value];
+            current_row = Some(row.clone());
+        } else {
+            current_values.push(value);
+        }
+    }
+    if let Some(mut prev) = current_row.take() {
+        prev[col_index] = current_values.join(&separator);
+        new_rows.push(prev);
+    }
+    stdout_result(render_csv(&CsvData {
+        headers: new_headers,
+        rows: new_rows,
+    }))
+}
+
+/// Port of upstream `cmdMerge` (xan-reshape.ts): concatenate multiple files
+/// that share identical headers, optionally sorting by `-s/--sort`.
+fn xan_merge(state: &ExecState<'_>, args: &[String]) -> CommandResult {
+    let mut sort_col = String::new();
+    let mut files: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-s" | "--sort" if i + 1 < args.len() => {
+                sort_col = args[i + 1].clone();
+                i += 1;
+            }
+            other if !other.starts_with('-') => files.push(other.to_string()),
+            _ => {}
+        }
+        i += 1;
+    }
+    if files.len() < 2 {
+        return stderr_result(1, "xan merge: usage: xan merge [OPTIONS] FILE1 FILE2 ...\n");
+    }
+    let mut common_headers: Option<Vec<String>> = None;
+    let mut merged: Vec<Vec<String>> = Vec::new();
+    for file in &files {
+        let csv = match read_csv_arg(state, Some(file), "", "xan merge") {
+            Ok(csv) => csv,
+            Err(result) => return result,
+        };
+        match &common_headers {
+            None => common_headers = Some(csv.headers.clone()),
+            Some(headers) if headers != &csv.headers => {
+                return stderr_result(1, "xan merge: all files must have the same headers\n");
+            }
+            _ => {}
+        }
+        merged.extend(csv.rows);
+    }
+    let Some(headers) = common_headers else {
+        return stdout_result("");
+    };
+    if !sort_col.is_empty() {
+        let Some(index) = headers.iter().position(|h| h == &sort_col) else {
+            return stderr_result(1, format!("xan merge: column '{sort_col}' not found\n"));
+        };
+        merged.sort_by(|a, b| {
+            let av = a.get(index).cloned().unwrap_or_default();
+            let bv = b.get(index).cloned().unwrap_or_default();
+            match (av.parse::<f64>(), bv.parse::<f64>()) {
+                (Ok(x), Ok(y)) => x.partial_cmp(&y).unwrap_or(CmpOrdering::Equal),
+                _ => av.cmp(&bv),
+            }
+        });
+    }
+    stdout_result(render_csv(&CsvData {
+        headers,
+        rows: merged,
+    }))
+}
+
+/// Port of upstream `cmdPivot` (xan-reshape.ts): pivot a column into multiple
+/// columns aggregated by `func(col)`, grouped by `-g/--groupby` columns
+/// (auto-detected when omitted).
+fn xan_pivot(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut pivot_col: Option<String> = None;
+    let mut agg_expr: Option<String> = None;
+    let mut group_cols: Vec<String> = Vec::new();
+    let mut files: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-g" | "--groupby" if i + 1 < args.len() => {
+                group_cols = args[i + 1]
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
+                i += 1;
+            }
+            other if !other.starts_with('-') => {
+                if pivot_col.is_none() {
+                    pivot_col = Some(other.to_string());
+                } else if agg_expr.is_none() {
+                    agg_expr = Some(other.to_string());
+                } else {
+                    files.push(other.to_string());
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let (Some(pivot_col), Some(agg_expr)) = (pivot_col, agg_expr) else {
+        return stderr_result(
+            1,
+            "xan pivot: usage: xan pivot COLUMN AGG_EXPR [OPTIONS] [FILE]\n",
+        );
+    };
+    let csv = match read_csv_arg(state, files.first().map(String::as_str), stdin, "xan pivot") {
+        Ok(csv) => csv,
+        Err(result) => return result,
+    };
+    let Some(pivot_idx) = csv.headers.iter().position(|h| h == &pivot_col) else {
+        return stderr_result(1, format!("xan pivot: column '{pivot_col}' not found\n"));
+    };
+    // Parse `func(col)`.
+    let Some((agg_func, agg_col)) = xan_parse_simple_agg(&agg_expr) else {
+        return stderr_result(
+            1,
+            format!("xan pivot: invalid aggregation expression '{agg_expr}'\n"),
+        );
+    };
+    let Some(agg_idx) = csv.headers.iter().position(|h| h == &agg_col) else {
+        return stderr_result(1, format!("xan pivot: column '{agg_col}' not found\n"));
+    };
+    if group_cols.is_empty() {
+        group_cols = csv
+            .headers
+            .iter()
+            .filter(|h| **h != pivot_col && **h != agg_col)
+            .cloned()
+            .collect();
+    }
+    let group_indices: Vec<usize> = group_cols
+        .iter()
+        .filter_map(|c| csv.headers.iter().position(|h| h == c))
+        .collect();
+
+    // Unique pivot values (insertion order).
+    let mut pivot_values: Vec<String> = Vec::new();
+    for row in &csv.rows {
+        let val = row.get(pivot_idx).cloned().unwrap_or_default();
+        if !pivot_values.contains(&val) {
+            pivot_values.push(val);
+        }
+    }
+    // Group order + grouped values.
+    let mut group_order: Vec<String> = Vec::new();
+    #[allow(clippy::type_complexity)]
+    let mut groups: Vec<(String, Vec<String>, Vec<(String, Vec<String>)>)> = Vec::new();
+    for row in &csv.rows {
+        let key_parts: Vec<String> = group_indices
+            .iter()
+            .map(|&i| row.get(i).cloned().unwrap_or_default())
+            .collect();
+        let key = key_parts.join("\0");
+        let pivot_val = row.get(pivot_idx).cloned().unwrap_or_default();
+        let agg_val = row.get(agg_idx).cloned().unwrap_or_default();
+        if !group_order.contains(&key) {
+            group_order.push(key.clone());
+            groups.push((key.clone(), key_parts, Vec::new()));
+        }
+        let group = groups
+            .iter_mut()
+            .find(|(k, _, _)| *k == key)
+            .expect("present");
+        if let Some(entry) = group.2.iter_mut().find(|(pv, _)| *pv == pivot_val) {
+            entry.1.push(agg_val);
+        } else {
+            group.2.push((pivot_val, vec![agg_val]));
+        }
+    }
+    let mut new_headers = group_cols.clone();
+    new_headers.extend(pivot_values.clone());
+    let mut new_rows: Vec<Vec<String>> = Vec::new();
+    for (_, key_parts, pivots) in &groups {
+        let mut row: Vec<String> = key_parts.clone();
+        for pivot_val in &pivot_values {
+            let values = pivots
+                .iter()
+                .find(|(pv, _)| pv == pivot_val)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default();
+            row.push(xan_compute_simple_agg(&agg_func, &values));
+        }
+        new_rows.push(row);
+    }
+    stdout_result(render_csv(&CsvData {
+        headers: new_headers,
+        rows: new_rows,
+    }))
+}
+
+/// Parse a `func(col)` aggregation expression for `xan pivot`.
+fn xan_parse_simple_agg(expr: &str) -> Option<(String, String)> {
+    let expr = expr.trim();
+    let open = expr.find('(')?;
+    if !expr.ends_with(')') {
+        return None;
+    }
+    let func = expr[..open].trim();
+    let col = expr[open + 1..expr.len() - 1].trim();
+    if func.is_empty()
+        || col.is_empty()
+        || !func.chars().all(|c| c.is_alphanumeric() || c == '_')
+        || !col.chars().all(|c| c.is_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    Some((func.to_string(), col.to_string()))
+}
+
+/// Port of upstream `computeSimpleAgg`: compute count/sum/mean/min/max/first/last
+/// over the collected pivot-cell values.
+fn xan_compute_simple_agg(func: &str, values: &[String]) -> String {
+    let nums: Vec<f64> = values
+        .iter()
+        .filter_map(|v| v.parse::<f64>().ok())
+        .collect();
+    match func {
+        "count" => values.len().to_string(),
+        "sum" => json_scalar_string(&json_number(nums.iter().sum())),
+        "mean" | "avg" => {
+            if nums.is_empty() {
+                String::new()
+            } else {
+                json_scalar_string(&json_number(nums.iter().sum::<f64>() / nums.len() as f64))
+            }
+        }
+        "min" => nums
+            .iter()
+            .cloned()
+            .reduce(f64::min)
+            .map(|v| json_scalar_string(&json_number(v)))
+            .unwrap_or_default(),
+        "max" => nums
+            .iter()
+            .cloned()
+            .reduce(f64::max)
+            .map(|v| json_scalar_string(&json_number(v)))
+            .unwrap_or_default(),
+        "first" => values.first().cloned().unwrap_or_default(),
+        "last" => values.last().cloned().unwrap_or_default(),
+        _ => String::new(),
+    }
 }
 
 /// One parsed `func(inner) as alias` aggregation specification.
