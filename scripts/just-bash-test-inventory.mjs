@@ -4817,6 +4817,36 @@ const jbc46CaseGroups = [
   },
 ];
 
+const r10jbTarCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/tar/tar.bundle.test.ts',
+    lines: [26, 33, 50, 67, 84, 101, 110, 119, 136, 156, 176, 192],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'r10jb_tar_bundle_create_list_extract_codecs_and_option_rows',
+    notes:
+      'R10JB mirrors the bundled tar binary behavior on the in-process Rust session: help banner, create/list, create/extract, gzip and bzip2 virtual codec round trips, xz and zstd fail-closed rejection, -a auto-compress by filename, -T files-from, -X exclude-from, -tvf permission column, and -v verbose stderr listing.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tar/tar.security.test.ts',
+    lines: [12, 30, 44, 58, 73],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'r10jb_tar_security_traversal_leading_slash_symlink_and_codec_gates',
+    notes:
+      "R10JB verifies tar security hardening on extract: a `../` parent-traversal entry is blocked with exit 2 and \"Path contains '..'\", a leading slash is stripped under -C by default, -P/--absolute-names restores absolute extraction, an unsafe `..` symlink target is rejected, and xz encode is fail-closed with the native-codec-risk message.",
+  },
+  {
+    file: 'packages/just-bash/src/commands/tar/tar.binary.test.ts',
+    lines: [24, 38, 59, 73, 87, 101, 115, 129, 145, 159, 173],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'r10jb_tar_binary_null_all_bytes_pipe_and_special_filename_rows',
+    notes:
+      'R10JB verifies binary-faithful tar round trips for files with embedded null bytes and all 256 byte values, listing and extraction of an archive piped through cat (binary stdin), gzip and bzip2 archives piped through cat, xz and zstd fail-closed rejection, UTF-8 text round trip, gzip UTF-8 round trip, and special-character filename listing.',
+  },
+];
+
 const jbc47CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/sed/sed.errors.test.ts',
@@ -5321,6 +5351,7 @@ function caseOverrideFor(testCase) {
     ...jbc43CaseGroups,
     ...jbc45CaseGroups,
     ...jbc46CaseGroups,
+    ...r10jbTarCaseGroups,
     ...jbc47CaseGroups,
     ...jbc27CaseGroups,
     ...jbc30AgentExampleCaseGroups,
