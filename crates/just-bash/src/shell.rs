@@ -65,6 +65,7 @@ pub enum Command {
     Simple(SimpleCommand),
     If(IfCommand),
     For(ForCommand),
+    ForArith(ForArithCommand),
     While(LoopCommand),
     Until(LoopCommand),
     Case(CaseCommand),
@@ -141,6 +142,19 @@ pub struct IfClause {
 pub struct ForCommand {
     pub variable: String,
     pub words: Vec<Word>,
+    /// Whether the loop had an explicit `in <list>` clause. When false
+    /// (`for i; do ... done`) the loop iterates over the positional
+    /// parameters instead of `words`.
+    pub has_in_clause: bool,
+    pub body: Vec<Statement>,
+    pub redirections: Vec<Redirection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForArithCommand {
+    pub init: String,
+    pub condition: String,
+    pub update: String,
     pub body: Vec<Statement>,
     pub redirections: Vec<Redirection>,
 }
@@ -159,10 +173,22 @@ pub struct CaseCommand {
     pub redirections: Vec<Redirection>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaseTerminator {
+    /// `;;` — stop after running this clause (default).
+    #[default]
+    Break,
+    /// `;&` — fall through and run the next clause's body unconditionally.
+    FallThrough,
+    /// `;;&` — continue testing subsequent clause patterns.
+    ContinueMatching,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaseItem {
     pub patterns: Vec<Word>,
     pub body: Vec<Statement>,
+    pub terminator: CaseTerminator,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -297,10 +323,17 @@ struct Token {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TokenKind {
     Word(Word),
-    HereDocTarget { target: Word, here_doc: HereDoc },
+    HereDocTarget {
+        target: Word,
+        here_doc: HereDoc,
+    },
     Semicolon,
     Newline,
     DoubleSemicolon,
+    /// `;&` — fall through to the next case clause's body unconditionally.
+    SemicolonAmp,
+    /// `;;&` — continue matching subsequent case patterns.
+    DoubleSemicolonAmp,
     AndIf,
     OrIf,
     Pipe,
@@ -888,6 +921,8 @@ impl Lexer {
             ("&&", TokenKind::AndIf),
             ("||", TokenKind::OrIf),
             ("|&", TokenKind::PipeStderr),
+            (";;&", TokenKind::DoubleSemicolonAmp),
+            (";&", TokenKind::SemicolonAmp),
             (";;", TokenKind::DoubleSemicolon),
             ("<<", TokenKind::Redirection(RedirectionOperator::HereDoc)),
             (">>", TokenKind::Redirection(RedirectionOperator::Append)),
@@ -1527,6 +1562,7 @@ fn serialize_command(command: &Command, here_docs: &mut Vec<String>) -> String {
         Command::Simple(command) => serialize_simple_command(command, here_docs),
         Command::If(command) => serialize_if(command),
         Command::For(command) => serialize_for(command),
+        Command::ForArith(command) => serialize_for_arith(command),
         Command::While(command) => serialize_loop("while", command),
         Command::Until(command) => serialize_loop("until", command),
         Command::Case(command) => serialize_case(command),
@@ -1636,6 +1672,17 @@ fn serialize_for(command: &ForCommand) -> String {
     output
 }
 
+fn serialize_for_arith(command: &ForArithCommand) -> String {
+    let mut output = format!(
+        "for (( {}; {}; {} )); do ",
+        command.init, command.condition, command.update
+    );
+    output.push_str(&serialize_inline_statements(&command.body));
+    output.push_str("; done");
+    output.push_str(&serialize_redirections(&command.redirections));
+    output
+}
+
 fn serialize_loop(keyword: &str, command: &LoopCommand) -> String {
     let mut output = format!(
         "{} {}; do {}; done",
@@ -1661,7 +1708,11 @@ fn serialize_case(command: &CaseCommand) -> String {
         );
         output.push_str(") ");
         output.push_str(&serialize_inline_statements(&item.body));
-        output.push_str(" ;;");
+        output.push_str(match item.terminator {
+            CaseTerminator::Break => " ;;",
+            CaseTerminator::FallThrough => " ;&",
+            CaseTerminator::ContinueMatching => " ;;&",
+        });
     }
     output.push_str(" esac");
     output.push_str(&serialize_redirections(&command.redirections));
@@ -1946,6 +1997,9 @@ fn collect_command(command: &Command, names: &mut std::collections::BTreeSet<Str
             }
             collect_statements(&command.body, names);
         }
+        Command::ForArith(command) => {
+            collect_statements(&command.body, names);
+        }
         Command::While(command) | Command::Until(command) => {
             collect_statements(&command.condition, names);
             collect_statements(&command.body, names);
@@ -2102,7 +2156,9 @@ impl Parser {
             TokenKind::Eof => true,
             TokenKind::RightParen => stop_right_paren,
             TokenKind::RightBrace => stop_right_brace,
-            TokenKind::DoubleSemicolon => stop_case_end,
+            TokenKind::DoubleSemicolon
+            | TokenKind::SemicolonAmp
+            | TokenKind::DoubleSemicolonAmp => stop_case_end,
             TokenKind::Word(word) => word
                 .plain_text()
                 .is_some_and(|text| stop_words.contains(&text.as_str())),
@@ -2381,16 +2437,38 @@ impl Parser {
 
     fn parse_for(&mut self) -> ShellResult<Command> {
         self.expect_word("for")?;
+
+        // C-style `for (( init; cond; update )); do ... done`. The tokenizer
+        // collapses the `(( ... ))` header into a single arithmetic-command
+        // token whose source is the three semicolon-separated clauses.
+        if let TokenKind::ArithmeticCommand(expression) = &self.current().kind {
+            let source = expression.source.clone();
+            self.advance();
+            let (init, condition, update) = split_for_arith_clauses(&source);
+            self.skip_separators();
+            self.expect_word("do")?;
+            let body = self.parse_statements_until(&["done"], false, false, false)?;
+            self.expect_word("done")?;
+            return Ok(Command::ForArith(ForArithCommand {
+                init,
+                condition,
+                update,
+                body,
+                redirections: Vec::new(),
+            }));
+        }
+
         let variable = self
             .take_word_text()
             .ok_or_else(|| self.error_here("expected for variable"))?;
-        if !is_valid_name(&variable) {
-            return Err(self.error_previous("invalid for variable"));
-        }
+        // An invalid identifier (e.g. `for 123 in ...`) parses fine but is
+        // rejected at execution time with a runtime error, mirroring bash.
 
         self.skip_separators();
         let mut words = Vec::new();
+        let mut has_in_clause = false;
         if self.current_word_is("in") {
+            has_in_clause = true;
             self.advance();
             loop {
                 self.skip_separators();
@@ -2415,6 +2493,7 @@ impl Parser {
         Ok(Command::For(ForCommand {
             variable,
             words,
+            has_in_clause,
             body,
             redirections: Vec::new(),
         }))
@@ -2469,10 +2548,26 @@ impl Parser {
             }
             self.expect_token(TokenKindName::RightParen)?;
             let body = self.parse_statements_until(&["esac"], false, false, true)?;
-            if matches!(self.current().kind, TokenKind::DoubleSemicolon) {
-                self.advance();
-            }
-            items.push(CaseItem { patterns, body });
+            let terminator = match self.current().kind {
+                TokenKind::DoubleSemicolonAmp => {
+                    self.advance();
+                    CaseTerminator::ContinueMatching
+                }
+                TokenKind::SemicolonAmp => {
+                    self.advance();
+                    CaseTerminator::FallThrough
+                }
+                TokenKind::DoubleSemicolon => {
+                    self.advance();
+                    CaseTerminator::Break
+                }
+                _ => CaseTerminator::Break,
+            };
+            items.push(CaseItem {
+                patterns,
+                body,
+                terminator,
+            });
             self.skip_separators();
         }
         self.expect_word("esac")?;
@@ -2879,6 +2974,10 @@ pub struct ShellState {
     /// enclosing loop *inside* a subshell, bash terminates that subshell (the
     /// builtin behaves like a local `exit`) without disturbing the parent loop.
     subshell_depth: u32,
+    /// Pending arithmetic-evaluation error (division/modulo by zero, negative
+    /// exponent). Set by the arithmetic evaluator and drained by the enclosing
+    /// command so the error is reported on stderr with a non-zero exit code.
+    arith_error: Option<String>,
 }
 
 /// Active `break`/`continue` signal propagating up through nested compound
@@ -3175,6 +3274,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
             Command::Simple(command) => self.execute_simple_command(command, stdin),
             Command::If(command) => self.execute_if(command),
             Command::For(command) => self.execute_for(command),
+            Command::ForArith(command) => self.execute_for_arith(command),
             Command::While(command) => self.execute_loop(command, true),
             Command::Until(command) => self.execute_loop(command, false),
             Command::Case(command) => self.execute_case(command),
@@ -3224,6 +3324,9 @@ impl<D: CommandDispatcher> Interpreter<D> {
 
     fn execute_simple_command(&mut self, command: &SimpleCommand, stdin: String) -> ExecOutput {
         let assignments = self.expand_assignments(&command.assignments);
+        if let Some(output) = self.take_arith_error() {
+            return output;
+        }
         let Some(name_word) = &command.name else {
             let trace = self.trace_simple_command(&assignments, None);
             for assignment in assignments {
@@ -3240,6 +3343,9 @@ impl<D: CommandDispatcher> Interpreter<D> {
             .iter()
             .flat_map(|word| self.expand_word(word, true))
             .collect::<Vec<_>>();
+        if let Some(output) = self.take_arith_error() {
+            return output;
+        }
         let redirections = command
             .redirections
             .iter()
@@ -3806,12 +3912,25 @@ impl<D: CommandDispatcher> Interpreter<D> {
 
     fn execute_for(&mut self, command: &ForCommand) -> ExecOutput {
         let mut output = ExecOutput::default();
+        if !is_valid_name(&command.variable) {
+            output.stderr.push_str(&format!(
+                "bash: `{}': not a valid identifier\n",
+                command.variable
+            ));
+            output.exit_code = 1;
+            return output;
+        }
         let mut iterations = 0usize;
-        let words = command
-            .words
-            .iter()
-            .flat_map(|word| self.expand_word(word, true))
-            .collect::<Vec<_>>();
+        let words = if command.has_in_clause {
+            command
+                .words
+                .iter()
+                .flat_map(|word| self.expand_word(word, true))
+                .collect::<Vec<_>>()
+        } else {
+            // `for i; do ... done` iterates over positional parameters ($@).
+            self.positional_parameters()
+        };
         self.state.loop_depth += 1;
         for value in words {
             iterations += 1;
@@ -3828,6 +3947,63 @@ impl<D: CommandDispatcher> Interpreter<D> {
             match self.consume_loop_control() {
                 LoopFlow::Continue => {}
                 LoopFlow::BreakLoop => break,
+            }
+        }
+        self.state.loop_depth -= 1;
+        output
+    }
+
+    /// Positional parameters for `for i; do ... done`. Mirrors upstream
+    /// `control-flow.ts`: the `@` environment variable is split on spaces with
+    /// empty fields dropped.
+    fn positional_parameters(&self) -> Vec<String> {
+        if !self.state.positionals.is_empty() {
+            return self.state.positionals.clone();
+        }
+        self.state
+            .get_var("@")
+            .unwrap_or("")
+            .split(' ')
+            .filter(|field| !field.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Execute a C-style `for (( init; cond; update ))` loop.
+    fn execute_for_arith(&mut self, command: &ForArithCommand) -> ExecOutput {
+        let mut output = ExecOutput::default();
+        if !command.init.trim().is_empty() {
+            self.eval_arithmetic(&command.init);
+        }
+        let mut iterations = 0usize;
+        self.state.loop_depth += 1;
+        loop {
+            // An empty condition is treated as always true (infinite loop).
+            let keep_going = if command.condition.trim().is_empty() {
+                true
+            } else {
+                self.eval_arithmetic(&command.condition) != 0
+            };
+            if !keep_going {
+                output.exit_code = 0;
+                break;
+            }
+            iterations += 1;
+            if iterations > self.limits.max_loop_iterations {
+                output.stderr.push_str("too many iterations\n");
+                output.exit_code = 125;
+                break;
+            }
+            output.append(self.execute_statements(&command.body));
+            if self.state.exited.is_some() {
+                break;
+            }
+            match self.consume_loop_control() {
+                LoopFlow::Continue => {}
+                LoopFlow::BreakLoop => break,
+            }
+            if !command.update.trim().is_empty() {
+                self.eval_arithmetic(&command.update);
             }
         }
         self.state.loop_depth -= 1;
@@ -3902,15 +4078,45 @@ impl<D: CommandDispatcher> Interpreter<D> {
 
     fn execute_case(&mut self, command: &CaseCommand) -> ExecOutput {
         let value = self.expand_word_to_string(&command.word);
-        for item in &command.items {
-            for pattern in &item.patterns {
+        let mut output = ExecOutput::default();
+        let mut index = 0;
+        while index < command.items.len() {
+            let item = &command.items[index];
+            let matched = item.patterns.iter().any(|pattern| {
                 let pattern = self.expand_word_to_string(pattern);
-                if pattern_matches(&pattern, &value) {
-                    return self.execute_statements(&item.body);
+                pattern_matches(&pattern, &value)
+            });
+            if !matched {
+                index += 1;
+                continue;
+            }
+            output.append(self.execute_statements(&item.body));
+            match item.terminator {
+                CaseTerminator::Break => return output,
+                CaseTerminator::ContinueMatching => {
+                    // Resume testing patterns from the next clause.
+                    index += 1;
+                }
+                CaseTerminator::FallThrough => {
+                    // Run subsequent clause bodies unconditionally until a
+                    // non-fall-through terminator is reached.
+                    index += 1;
+                    while index < command.items.len() {
+                        let next = &command.items[index];
+                        output.append(self.execute_statements(&next.body));
+                        match next.terminator {
+                            CaseTerminator::FallThrough => index += 1,
+                            CaseTerminator::ContinueMatching => {
+                                index += 1;
+                                break;
+                            }
+                            CaseTerminator::Break => return output,
+                        }
+                    }
                 }
             }
         }
-        ExecOutput::default()
+        output
     }
 
     fn execute_conditional(&mut self, expression: &str) -> ExecOutput {
@@ -4164,14 +4370,10 @@ impl<D: CommandDispatcher> Interpreter<D> {
         }
 
         if split && !preserve_whitespace {
+            let ifs = self.state.get_var("IFS").map(str::to_string);
             values
                 .into_iter()
-                .flat_map(|value| {
-                    value
-                        .split_whitespace()
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                })
+                .flat_map(|value| split_on_ifs(&value, ifs.as_deref()))
                 .collect()
         } else {
             values
@@ -4339,6 +4541,17 @@ impl<D: CommandDispatcher> Interpreter<D> {
 
     fn eval_arithmetic(&mut self, source: &str) -> i64 {
         ArithmeticEvaluator::new(source, &mut self.state).parse()
+    }
+
+    /// Drain any pending arithmetic error raised during expansion (e.g. division
+    /// by zero) into a failing command result, matching bash which prints the
+    /// diagnostic on stderr and returns exit status 1.
+    fn take_arith_error(&mut self) -> Option<ExecOutput> {
+        self.state.arith_error.take().map(|stderr| ExecOutput {
+            stdout: String::new(),
+            stderr,
+            exit_code: 1,
+        })
     }
 }
 
@@ -4903,7 +5116,7 @@ impl<'a> ArithmeticEvaluator<'a> {
                     let result = if operator == "=" {
                         rhs
                     } else {
-                        eval_arith_binary(&operator[..operator.len() - 1], current, rhs)
+                        self.apply_binary(&operator[..operator.len() - 1], current, rhs)
                     };
                     self.write_lvalue(&lvalue, result);
                     return result;
@@ -4968,10 +5181,33 @@ impl<'a> ArithmeticEvaluator<'a> {
             left = match operator.as_str() {
                 "&&" => i64::from(left != 0 && right != 0),
                 "||" => i64::from(left != 0 || right != 0),
-                _ => eval_arith_binary(&operator, left, right),
+                _ => self.apply_binary(&operator, left, right),
             };
         }
         left
+    }
+
+    /// Apply a binary arithmetic operator, recording an arithmetic error on the
+    /// shell state for division/modulo by zero and negative exponents. Mirrors
+    /// bash, which aborts the expression and prints a diagnostic in these cases.
+    fn apply_binary(&mut self, operator: &str, left: i64, right: i64) -> i64 {
+        match operator {
+            "/" | "%" if right == 0 => {
+                self.set_arith_error("division by 0");
+                0
+            }
+            "**" if right < 0 => {
+                self.set_arith_error("exponent less than 0");
+                0
+            }
+            _ => eval_arith_binary(operator, left, right),
+        }
+    }
+
+    fn set_arith_error(&mut self, message: &str) {
+        if self.state.arith_error.is_none() {
+            self.state.arith_error = Some(format!("bash: {message}\n"));
+        }
     }
 
     /// Consume (without producing observable side effects) the right operand of
@@ -5271,6 +5507,114 @@ fn arith_precedence(operator: &str) -> Option<(u8, bool)> {
         _ => return None,
     };
     Some(value)
+}
+
+/// Split the source of a C-style `for (( init; cond; update ))` header into its
+/// three semicolon-separated clauses. Splitting is done at depth-0 semicolons so
+/// nested parentheses (e.g. function-call-like grouping) are preserved.
+fn split_for_arith_clauses(source: &str) -> (String, String, String) {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0i32;
+    for ch in source.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(ch);
+            }
+            ';' if depth == 0 => {
+                clauses.push(current.trim().to_string());
+                current = String::new();
+            }
+            _ => current.push(ch),
+        }
+    }
+    clauses.push(current.trim().to_string());
+    let init = clauses.first().cloned().unwrap_or_default();
+    let condition = clauses.get(1).cloned().unwrap_or_default();
+    let update = clauses.get(2).cloned().unwrap_or_default();
+    (init, condition, update)
+}
+
+/// Word-split a value into fields using the current `IFS`. When `IFS` is unset
+/// the default is space/tab/newline. IFS whitespace runs collapse and are
+/// trimmed from the ends; each non-whitespace IFS character delimits one field.
+/// Mirrors bash field splitting for the behaviors exercised by the interpreter
+/// conformance suite.
+fn split_on_ifs(value: &str, ifs: Option<&str>) -> Vec<String> {
+    let ifs = ifs.unwrap_or(" \t\n");
+    if ifs.is_empty() {
+        // An empty IFS performs no splitting.
+        return if value.is_empty() {
+            Vec::new()
+        } else {
+            vec![value.to_string()]
+        };
+    }
+    let ws: Vec<char> = ifs
+        .chars()
+        .filter(|c| matches!(c, ' ' | '\t' | '\n'))
+        .collect();
+    let non_ws: Vec<char> = ifs
+        .chars()
+        .filter(|c| !matches!(c, ' ' | '\t' | '\n'))
+        .collect();
+    let is_ws = |c: char| ws.contains(&c);
+    let is_sep = |c: char| non_ws.contains(&c);
+
+    let mut fields: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut have_field = false;
+    let mut chars = value.chars().peekable();
+    // Skip leading IFS whitespace.
+    while let Some(&c) = chars.peek() {
+        if is_ws(c) {
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    while let Some(c) = chars.next() {
+        if is_ws(c) {
+            // Collapse a run of IFS whitespace; it terminates the current field.
+            fields.push(std::mem::take(&mut current));
+            have_field = false;
+            while let Some(&n) = chars.peek() {
+                if is_ws(n) {
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            // Trailing whitespace at end of input produces no extra field.
+            if chars.peek().is_none() {
+                return fields;
+            }
+        } else if is_sep(c) {
+            // A non-whitespace IFS delimiter always closes a field, even empty.
+            fields.push(std::mem::take(&mut current));
+            have_field = false;
+            // Absorb surrounding IFS whitespace around the delimiter.
+            while let Some(&n) = chars.peek() {
+                if is_ws(n) {
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+        } else {
+            current.push(c);
+            have_field = true;
+        }
+    }
+    if have_field || !current.is_empty() {
+        fields.push(current);
+    }
+    fields
 }
 
 fn eval_arith_binary(operator: &str, left: i64, right: i64) -> i64 {
@@ -9618,5 +9962,224 @@ greet World",
             Some("a\nb\nc\n"),
             "L339"
         );
+    }
+
+    /// Covers portable `packages/just-bash/src/interpreter/control-flow.test.ts`
+    /// rows that the original `r2_interpreter_control_flow_rows_match_upstream`
+    /// intentionally deferred: IFS field-splitting in `for ... in`, positional-
+    /// parameter iteration (`for i; do`), the invalid-identifier runtime error,
+    /// the five C-style `for (( ))` rows, and the `;&` / `;;&` case terminators.
+    /// Each block mirrors one upstream `it(...)` assertion on `Bash().exec(...)`.
+    #[test]
+    fn r10jb_interpreter_control_flow_loops_and_case_modifier_rows_match_upstream() {
+        // L113 IFS splitting: IFS=":" splits "a:b:c" into three fields.
+        let mut ifs = shell();
+        let r = ifs.exec("IFS=:\nitems=\"a:b:c\"\nfor i in $items; do\n  echo $i\ndone");
+        assert_eq!(r.stdout, "a\nb\nc\n", "L113 stdout");
+        assert_eq!(r.exit_code, 0, "L113 exit");
+
+        // L150 `for i; do` with no list iterates the positional parameters,
+        // which upstream seeds via the `@` environment variable.
+        let mut pos = shell().with_env([("@", "arg1 arg2 arg3")]);
+        let r = pos.exec("for i; do\n  echo $i\ndone");
+        assert_eq!(r.stdout, "arg1\narg2\narg3\n", "L150 stdout");
+        assert_eq!(r.exit_code, 0, "L150 exit");
+
+        // L174 `for 123 in ...` is a runtime "not a valid identifier" error.
+        let mut bad = shell();
+        let r = bad.exec("for 123 in a b c; do\n  echo $i\ndone");
+        assert!(
+            r.stderr.contains("not a valid identifier"),
+            "L174 stderr {:?}",
+            r.stderr
+        );
+        assert_eq!(r.exit_code, 1, "L174 exit");
+
+        // C-style `for (( ))` rows L187, L198, L209, L221, L233.
+        for (source, expected_stdout) in [
+            // L187 basic counting loop.
+            ("for ((i=0; i<3; i++)); do\n  echo $i\ndone", "0\n1\n2\n"),
+            // L198 complex expressions (descending with compound assignment).
+            (
+                "for ((i=10; i>=0; i-=3)); do\n  echo $i\ndone",
+                "10\n7\n4\n1\n",
+            ),
+            // L209 empty init reuses the pre-existing variable.
+            ("i=0\nfor ((; i<3; i++)); do\n  echo $i\ndone", "0\n1\n2\n"),
+            // L221 empty condition is an infinite loop terminated by break.
+            (
+                "for ((i=0; ; i++)); do\n  echo $i\n  if [ $i -ge 2 ]; then break; fi\ndone",
+                "0\n1\n2\n",
+            ),
+            // L233 `continue` still runs the update clause.
+            (
+                "for ((i=0; i<5; i++)); do\n  if [ $i -eq 2 ]; then continue; fi\n  echo $i\ndone",
+                "0\n1\n3\n4\n",
+            ),
+        ] {
+            let mut sh = shell();
+            let result = sh.exec(source);
+            assert_eq!(result.stderr, "", "cstyle stderr {source:?}");
+            assert_eq!(result.stdout, expected_stdout, "cstyle stdout {source:?}");
+            assert_eq!(result.exit_code, 0, "cstyle exit {source:?}");
+        }
+
+        // L428 `;&` falls through to the next clause's body unconditionally.
+        let mut fall = shell();
+        let r = fall.exec(
+            "x=a\ncase $x in\n  a) echo \"a\" ;&\n  b) echo \"b\" ;;\n  c) echo \"c\" ;;\nesac",
+        );
+        assert_eq!(r.stdout, "a\nb\n", "L428 stdout");
+        assert_eq!(r.exit_code, 0, "L428 exit");
+
+        // L442 `;;&` continues testing the remaining clause patterns.
+        let mut cont = shell();
+        let r = cont.exec(
+            "x=abc\ncase $x in\n  *a*) echo \"has a\" ;;&\n  *b*) echo \"has b\" ;;&\n  *c*) echo \"has c\" ;;\nesac",
+        );
+        assert_eq!(r.stdout, "has a\nhas b\nhas c\n", "L442 stdout");
+        assert_eq!(r.exit_code, 0, "L442 exit");
+    }
+
+    /// Covers the portable arithmetic error rows in
+    /// `packages/just-bash/src/interpreter/arithmetic.test.ts` (L333 division by
+    /// zero, L340 modulo by zero, L347 negative exponent). Each upstream `it`
+    /// asserts the failing expansion reports a diagnostic on stderr and exits 1.
+    #[test]
+    fn r10jb_interpreter_arithmetic_error_rows_match_upstream() {
+        // L333 division by zero.
+        let mut sh = shell();
+        let r = sh.exec("echo $((5 / 0))");
+        assert!(
+            r.stderr.contains("division by 0"),
+            "L333 stderr {:?}",
+            r.stderr
+        );
+        assert_eq!(r.exit_code, 1, "L333 exit");
+
+        // L340 modulo by zero shares the "division by 0" diagnostic.
+        let mut sh = shell();
+        let r = sh.exec("echo $((5 % 0))");
+        assert!(
+            r.stderr.contains("division by 0"),
+            "L340 stderr {:?}",
+            r.stderr
+        );
+        assert_eq!(r.exit_code, 1, "L340 exit");
+
+        // L347 negative exponent.
+        let mut sh = shell();
+        let r = sh.exec("echo $((2 ** -1))");
+        assert!(
+            r.stderr.contains("exponent less than 0"),
+            "L347 stderr {:?}",
+            r.stderr
+        );
+        assert_eq!(r.exit_code, 1, "L347 exit");
+    }
+
+    /// Covers portable rows in
+    /// `packages/just-bash/src/interpreter/prototype-pollution.test.ts` that the
+    /// in-process interpreter handles without external commands: JavaScript
+    /// prototype keywords (`constructor`, `__proto__`, `prototype`, ...) are
+    /// treated as ordinary bash identifiers, array values/elements, parameter
+    /// expansions, comparisons, function/alias/local names, loop conditions,
+    /// subshells, and command substitutions. Each tuple mirrors one upstream
+    /// `it(...)` stdout/exit-code assertion on `Bash().exec(...)`.
+    #[test]
+    fn r10jb_interpreter_prototype_pollution_identifier_rows_match_upstream() {
+        for (line, source, expected_stdout) in [
+            // L135 prototype keywords stored as array values round-trip.
+            (
+                "L135",
+                "arr=(constructor __proto__ prototype); echo ${arr[@]}",
+                "constructor __proto__ prototype\n",
+            ),
+            // L228 `[[ ... == ... ]]` compares keyword strings literally.
+            (
+                "L228",
+                "if [[ \"constructor\" == \"constructor\" ]]; then echo yes; else echo no; fi",
+                "yes\n",
+            ),
+            // L349 a variable named like a prototype keyword assigns/reads.
+            (
+                "L349",
+                "constructor=test_value; echo $constructor",
+                "test_value\n",
+            ),
+            // L362 a function named `constructor` defines and runs.
+            (
+                "L362",
+                "constructor() { echo 'called constructor'; }; constructor",
+                "called constructor\n",
+            ),
+            // L375 an alias named `constructor` expands and runs.
+            (
+                "L375",
+                "shopt -s expand_aliases; alias constructor='echo aliased'; constructor",
+                "aliased\n",
+            ),
+            // L388 a local variable named `constructor` is scoped correctly.
+            (
+                "L388",
+                "testfunc() {\n  local constructor=local_value\n  echo $constructor\n}\ntestfunc",
+                "local_value\n",
+            ),
+            // L451 an array of all dangerous keywords round-trips.
+            (
+                "L451",
+                "arr=(constructor __proto__ prototype hasOwnProperty isPrototypeOf); echo ${arr[@]}",
+                "constructor __proto__ prototype hasOwnProperty isPrototypeOf\n",
+            ),
+            // L459 an indexed array named `__proto__` expands with `[@]`.
+            ("L459", "__proto__=(a b c); echo ${__proto__[@]}", "a b c\n"),
+            // L466 an indexed array named `constructor` reads element `[1]`.
+            ("L466", "constructor=(1 2 3); echo ${constructor[1]}", "2\n"),
+            // L655 a keyword-named scalar expands inside a double-quoted string.
+            (
+                "L655",
+                "__proto__=value\necho \"before: $__proto__\"",
+                "before: value\n",
+            ),
+            // L665 a keyword-named scalar expands unquoted.
+            ("L665", "__proto__=test\necho $__proto__", "test\n"),
+            // L678 `REPLY` may hold a keyword value.
+            (
+                "L678",
+                "REPLY=__proto__\necho \"REPLY: $REPLY\"",
+                "REPLY: __proto__\n",
+            ),
+            // L688 `PS3` may contain keyword text.
+            (
+                "L688",
+                "PS3=\"__proto__> \"\necho \"PS3: $PS3\"",
+                "PS3: __proto__> \n",
+            ),
+            // L868 `${#var}` length works on a keyword-named variable.
+            ("L868", "__proto__=12345\necho ${#__proto__}", "5\n"),
+            // L892 a keyword-named variable drives a `(( ))` while condition.
+            (
+                "L892",
+                "__proto__=3\nwhile (( __proto__ > 0 )); do\n  echo $__proto__\n  ((__proto__--))\ndone",
+                "3\n2\n1\n",
+            ),
+            // L903 a keyword-named variable set inside a subshell.
+            (
+                "L903",
+                "( __proto__=subshell; echo $__proto__ )",
+                "subshell\n",
+            ),
+            // L916 command substitution yielding keyword text.
+            (
+                "L916",
+                "result=$(echo __proto__)\necho \"got: $result\"",
+                "got: __proto__\n",
+            ),
+        ] {
+            let mut sh = shell();
+            let result = sh.exec(source);
+            assert_eq!(result.stdout, expected_stdout, "{line} stdout {source:?}");
+            assert_eq!(result.exit_code, 0, "{line} exit {source:?}");
+        }
     }
 }

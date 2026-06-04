@@ -1786,6 +1786,41 @@ const jbc15CaseGroups = [
   },
 ];
 
+const r10jbInterpreterCoreCaseGroups = [
+  {
+    file: 'packages/just-bash/src/interpreter/arithmetic.test.ts',
+    lines: [333, 340, 347],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::arithmetic',
+    rustTest: 'r10jb_interpreter_arithmetic_error_rows_match_upstream',
+    notes:
+      'R10JB verifies portable arithmetic error reporting: division by zero, modulo by zero, and negative exponent each abort the expansion with a diagnostic on stderr and exit status 1.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/control-flow.test.ts',
+    lines: [113, 150, 174, 187, 198, 209, 221, 233, 428, 442],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::control-flow',
+    rustTest:
+      'r10jb_interpreter_control_flow_loops_and_case_modifier_rows_match_upstream',
+    notes:
+      'R10JB verifies portable IFS field-splitting in for-in, positional-parameter iteration for `for i; do`, the invalid-identifier runtime error, the five C-style `for (( init; cond; update ))` rows, and the `;&` fall-through and `;;&` continue-matching case terminators.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/prototype-pollution.test.ts',
+    lines: [
+      135, 228, 349, 362, 375, 388, 451, 459, 466, 655, 665, 678, 688, 868,
+      892, 903, 916,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::prototype-pollution',
+    rustTest:
+      'r10jb_interpreter_prototype_pollution_identifier_rows_match_upstream',
+    notes:
+      'R10JB verifies JavaScript prototype keywords (constructor, __proto__, prototype, hasOwnProperty, ...) are treated as ordinary bash identifiers as array values/elements, parameter expansions, comparisons, function/alias/local names, while-loop conditions, subshells, and command substitutions.',
+  },
+];
+
 const jbc16CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/jq/jq.test.ts',
@@ -5056,6 +5091,7 @@ function caseOverrideFor(testCase) {
     ...jbc13CaseGroups,
     ...jbc26CaseGroups,
     ...jbc15CaseGroups,
+    ...r10jbInterpreterCoreCaseGroups,
     ...jbc16CaseGroups,
     ...jbc17CaseGroups,
     ...jbc18CaseGroups,
