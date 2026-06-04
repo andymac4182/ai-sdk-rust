@@ -3261,6 +3261,77 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn awk_jbc09_edge_case_control_array_and_special_var_rows() {
+        // Maps the portable rows of awk.edge-cases.test.ts and awk.errors.test.ts
+        // that the Rust awk subset already implements 1:1. Each assertion mirrors
+        // the upstream vitest expectation exactly (strict stdout + exit code).
+        let env = Bash::default();
+
+        // case-sensitive regex (awk.edge-cases.test.ts:202).
+        let case_sensitive = env.exec(r#"echo "TEST" | awk '/test/ { print "matched" }'"#);
+        assert_eq!(case_sensitive.exit_code, 0);
+        assert_eq!(case_sensitive.stdout, "");
+
+        // empty action block (awk.edge-cases.test.ts:213).
+        let empty_block = env.exec(r#"echo "test" | awk '{ }'"#);
+        assert_eq!(empty_block.exit_code, 0);
+        assert_eq!(empty_block.stdout, "");
+
+        // nested if without else (awk.edge-cases.test.ts:220).
+        let nested_if = env.exec(r#"echo "5" | awk '{ if ($1 > 3) if ($1 < 10) print "yes" }'"#);
+        assert_eq!(nested_if.exit_code, 0);
+        assert_eq!(nested_if.stdout, "yes\n");
+
+        // multiple semicolons (awk.edge-cases.test.ts:229).
+        let semis = env.exec(r#"echo "" | awk 'BEGIN { x=1;; y=2;;; print x+y }'"#);
+        assert_eq!(semis.exit_code, 0);
+        assert_eq!(semis.stdout, "3\n");
+
+        // uninitialized variable as number (awk.edge-cases.test.ts:258).
+        let uninit_num = env.exec(r#"echo "" | awk 'BEGIN { print x + 0 }'"#);
+        assert_eq!(uninit_num.exit_code, 0);
+        assert_eq!(uninit_num.stdout, "0\n");
+
+        // uninitialized variable as string (awk.edge-cases.test.ts:265).
+        let uninit_str = env.exec(r#"echo "" | awk 'BEGIN { print "[" x "]" }'"#);
+        assert_eq!(uninit_str.exit_code, 0);
+        assert_eq!(uninit_str.stdout, "[]\n");
+
+        // variable shadowing built-in NF (awk.edge-cases.test.ts:274).
+        let shadow_nf = env.exec(r#"echo "a b c" | awk '{ NF = 100; print NF }'"#);
+        assert_eq!(shadow_nf.exit_code, 0);
+        assert_eq!(shadow_nf.stdout, "100\n");
+
+        // empty array iteration (awk.edge-cases.test.ts:294).
+        let empty_iter =
+            env.exec(r#"echo "" | awk 'BEGIN { for (k in arr) print k; print "done" }'"#);
+        assert_eq!(empty_iter.exit_code, 0);
+        assert_eq!(empty_iter.stdout, "done\n");
+
+        // numeric string subscript collapses with numeric subscript
+        // (awk.edge-cases.test.ts:303).
+        let numeric_key =
+            env.exec(r#"echo "" | awk 'BEGIN { a["1"] = "one"; a[1] = "ONE"; print a[1] }'"#);
+        assert_eq!(numeric_key.exit_code, 0);
+        assert_eq!(numeric_key.stdout, "ONE\n");
+
+        // delete on empty array is a no-op (awk.edge-cases.test.ts:312).
+        let delete_empty = env.exec(r#"echo "" | awk 'BEGIN { delete arr["x"]; print "ok" }'"#);
+        assert_eq!(delete_empty.exit_code, 0);
+        assert_eq!(delete_empty.stdout, "ok\n");
+
+        // NF = 0 for an empty record (awk.errors.test.ts:288).
+        let nf_zero = env.exec(r#"echo '' | awk '{ print NF }'"#);
+        assert_eq!(nf_zero.exit_code, 0);
+        assert_eq!(nf_zero.stdout, "0\n");
+
+        // NR is 0 inside BEGIN before any record (awk.errors.test.ts:295).
+        let nr_start = env.exec(r#"echo '1' | awk 'BEGIN { print NR }'"#);
+        assert_eq!(nr_start.exit_code, 0);
+        assert_eq!(nr_start.stdout, "0\n");
+    }
+
+    #[test]
     fn awk_jbc09_error_handling_and_type_coercion_rows() {
         // Maps the portable rows of awk.errors.test.ts. Each assertion mirrors
         // the upstream vitest expectation exactly (strict outputs where the
