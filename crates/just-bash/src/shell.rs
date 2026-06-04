@@ -7098,6 +7098,61 @@ esac"#,
     }
 
     #[test]
+    fn just_bash_core_serialize_round_trips_param_op_and_compound_rows() {
+        fn assert_round_trip(source: &str) {
+            let script = parse(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            let serialized = serialize(&script);
+            let reparsed = parse(&serialized)
+                .unwrap_or_else(|error| panic!("{source} -> {serialized}: {error}"));
+            assert_eq!(reparsed, script, "{source} -> {serialized}");
+        }
+
+        for source in [
+            // pipelines: timed pipelines (serialize.test.ts:53,54)
+            "time sleep 1",
+            "time -p sleep 1",
+            // parameter operations: error-if-unset variants (serialize.test.ts:103,105,106)
+            "echo ${var:?error msg}",
+            "echo ${var:?}",
+            "echo ${var?error}",
+            // substring (serialize.test.ts:109,110)
+            "echo ${var:2}",
+            "echo ${var:0:5}",
+            // prefix/suffix removal (serialize.test.ts:111,112,113,114)
+            "echo ${var#pattern}",
+            "echo ${var##pattern}",
+            "echo ${var%pattern}",
+            "echo ${var%%pattern}",
+            // pattern replacement (serialize.test.ts:115,116,117,119,121)
+            "echo ${var/old/new}",
+            "echo ${var//old/new}",
+            "echo ${var/#old/new}",
+            "echo ${var/%old/new}",
+            "echo ${var/old}",
+            // case modification (serialize.test.ts:123,124,125,126,127)
+            "echo ${var^}",
+            "echo ${var^^}",
+            "echo ${var,}",
+            "echo ${var,,}",
+            "echo ${var^^[a-z]}",
+            // indirection and prefix listing (serialize.test.ts:128,129,130,131,132,133)
+            "echo ${!ref}",
+            "echo ${!var##pattern}",
+            "echo ${!arr[@]}",
+            "echo ${!arr[*]}",
+            "echo ${!MY@}",
+            "echo ${!MY*}",
+            // transform op (serialize.test.ts:134)
+            "echo ${var@Q}",
+            // compound: subshell/group with redirections (serialize.test.ts:176,177)
+            "(echo sub) > out.txt",
+            "{ echo group; } > out.txt",
+        ] {
+            assert_round_trip(source);
+        }
+    }
+
+    #[test]
     fn jbc12_transform_command_collector_walks_upstream_ast_shapes() {
         let cases = [
             ("echo hello | cat | wc -l", vec!["cat", "echo", "wc"]),

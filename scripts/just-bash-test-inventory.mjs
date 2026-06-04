@@ -4957,6 +4957,22 @@ const jbExecOptionsLoggingCaseGroups = [
   },
 ];
 
+const justBashCoreSerializeCaseGroups = [
+  {
+    file: 'packages/just-bash/src/transform/serialize.test.ts',
+    lines: [
+      53, 54, 103, 105, 106, 109, 110, 111, 112, 113, 114, 115, 116, 117,
+      119, 121, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134,
+      176, 177,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::transform::serialize',
+    rustTest: 'just_bash_core_serialize_round_trips_param_op_and_compound_rows',
+    notes:
+      'just-bash-core verifies Rust AST parse/serialize/parse equivalence for the timed-pipeline, parameter-operation (error-if-unset, substring, prefix/suffix removal, pattern replacement, case modification, indirection, prefix listing, transform @Q), and subshell/group-with-redirection serialize rows.',
+  },
+];
+
 function caseOverrideFor(testCase) {
   const group = [
     ...jbSedTestTsCaseGroups,
@@ -5006,6 +5022,7 @@ function caseOverrideFor(testCase) {
     ...jbc44CaseGroups,
     ...jbcXanGroupbyTransformCaseGroups,
     ...jbcYqFixturesCaseGroups,
+    ...justBashCoreSerializeCaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&
