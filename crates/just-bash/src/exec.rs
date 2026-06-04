@@ -7419,17 +7419,36 @@ fn rg_inputs(state: &ExecState<'_>, request: &RgRequest) -> Result<Vec<RgInput>,
         };
         rg_parse_ignore_content(&content, &state.cwd, &mut ignore_rules);
     }
-    let roots = if request.roots.is_empty() {
-        vec![state.cwd.clone()]
+    let roots: Vec<(String, Option<String>)> = if request.roots.is_empty() {
+        vec![(state.cwd.clone(), None)]
     } else {
         request
             .roots
             .iter()
-            .map(|root| resolve_path(&state.cwd, root))
+            .map(|root| {
+                // ripgrep preserves a literal `./` prefix supplied on the command
+                // line: `rg ./sub` labels hits as `./sub/file`, and `rg ./` labels
+                // them `./file` (regression "should preserve ./ prefix",
+                // feature "should preserve ./ prefix when given"). A bare `.` is
+                // NOT prefixed. We carry the literal arg as the display base.
+                let dot_base = if root == "./" {
+                    Some(String::new())
+                } else {
+                    root.strip_prefix("./").map(|rest| {
+                        let rest = rest.trim_end_matches('/');
+                        if rest.is_empty() {
+                            String::new()
+                        } else {
+                            rest.to_string()
+                        }
+                    })
+                };
+                (resolve_path(&state.cwd, root), dot_base)
+            })
             .collect()
     };
     let mut inputs = Vec::new();
-    for root in roots {
+    for (root, dot_base) in roots {
         let root_stat = fs
             .stat(&root)
             .map_err(|_| format!("{root}: No such file or directory"))?;
@@ -7444,7 +7463,14 @@ fn rg_inputs(state: &ExecState<'_>, request: &RgRequest) -> Result<Vec<RgInput>,
                     root: &root,
                     path: &root,
                     explicit_file: true,
-                    display_override: None,
+                    display_override: dot_base.as_ref().map(|base| {
+                        if base.is_empty() {
+                            // `./` resolving to a file is unusual; fall back to base name.
+                            format!("./{}", root.rsplit('/').next().unwrap_or(&root))
+                        } else {
+                            format!("./{base}")
+                        }
+                    }),
                 },
             );
             continue;
@@ -7474,6 +7500,16 @@ fn rg_inputs(state: &ExecState<'_>, request: &RgRequest) -> Result<Vec<RgInput>,
             let display_override = if real_root != root {
                 path.strip_prefix(&real_root)
                     .map(|rest| relative_display_path(&state.cwd, &format!("{root}{rest}")))
+            } else if let Some(base) = &dot_base {
+                // Preserve the literal `./` prefix: label as `./` + base + suffix,
+                // where suffix is the path relative to the resolved root.
+                path.strip_prefix(&format!("{root}/")).map(|suffix| {
+                    if base.is_empty() {
+                        format!("./{suffix}")
+                    } else {
+                        format!("./{base}/{suffix}")
+                    }
+                })
             } else {
                 None
             };
@@ -7675,6 +7711,9 @@ fn rg_depth(root: &str, path: &str) -> usize {
 }
 
 fn rg_path_is_hidden(path: &str) -> bool {
+    // A leading `./` is a literal display prefix preserved from the command line
+    // (`rg ./sub`), not a hidden path component, so strip it before checking.
+    let path = path.strip_prefix("./").unwrap_or(path);
     path.split('/')
         .filter(|part| !part.is_empty())
         .any(|part| part.starts_with('.'))
@@ -8235,11 +8274,19 @@ fn rg_render_json(
             let mut submatches: Vec<JsonValue> = Vec::new();
             for matcher in matchers {
                 for (start, end, text) in matcher.match_ranges(line) {
-                    submatches.push(json!({
+                    // Upstream attaches the raw `-r/--replace` string verbatim as
+                    // the submatch `replacement` field in JSON mode (rg-search.ts:
+                    // `submatch.replacement = { text: options.replace }`), without
+                    // expanding capture references.
+                    let mut submatch = json!({
                         "match": { "text": text },
                         "start": start,
                         "end": end,
-                    }));
+                    });
+                    if let Some(replace) = &request.options.replace {
+                        submatch["replacement"] = json!({ "text": replace });
+                    }
+                    submatches.push(submatch);
                 }
             }
             if !submatches.is_empty() {
