@@ -1046,6 +1046,45 @@ const jbc09CaseGroups = [
   },
 ];
 
+const r12jbAwkCommandCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.modulo.test.ts',
+    lines: [113],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_modulo_negative_divisor_row',
+    notes:
+      'just-bash-command-awk verifies `%` modulo with a negative divisor truncates toward zero so the result keeps the dividend sign: `7 % -3` is `1`. Also proves the multiplicative right operand parses a leading unary minus.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.math.test.ts',
+    lines: [69, 77],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_rand_and_srand_rows',
+    notes:
+      'just-bash-command-awk verifies `rand()` returns a value in `[0, 1)` and `srand(seed)` reseeds the deterministic generator without error, with the subsequent `rand()` still in `[0, 1)`.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.nextfile.test.ts',
+    lines: [6, 20, 34, 50, 66, 80, 96],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_nextfile_rows',
+    notes:
+      'just-bash-command-awk verifies the `nextfile` statement skips the rest of the current input file and resumes with the next file, driven by FNR/FILENAME and field conditions, so skipped records never reach later rules; FNR resets per file while NR keeps counting, and nextfile on a single file ends processing at that record.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.limits.test.ts',
+    lines: [16, 27, 37, 47, 59, 70, 83, 94, 107, 119],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_execution_limit_rows',
+    notes:
+      'just-bash-command-awk verifies awk execution limits: infinite `while(1)`/`for(;1;)`/`for(;;)`/`do-while(1)` loops fail with a non-empty error and non-zero exit; direct and mutual recursion hit the recursion-depth limit (exit 126, "recursion depth exceeded"); runaway print loops and exponential string concatenation hit output/string-length limits (exit 126, "exceeded"); a large finite array and a missing-file getline loop both terminate with a defined exit code rather than hanging.',
+  },
+];
+
 const jbc10CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/rg/rg.basic.test.ts',
@@ -3201,6 +3240,39 @@ const r11jbR2RgCaseGroups = [
     rustTest: 'rg_follow_symlinked_subdirectory_surfaces_content_through_both_paths',
     notes:
       'r11jb-r2 verifies that with -L a symlinked subdirectory discovered while walking the cwd is searched and its content surfaced through both the real and symlinked paths (`linkdir/file.txt` and `subdir/file.txt`), while without -L only the real directory is searched.',
+  },
+];
+
+const r12jbR3RgCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/rg/rg.ripgrep-compat.test.ts',
+    lines: [691, 726, 742, 817, 858],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest:
+      'rg_column_shows_match_column_with_line_number; rg_replace_substitutes_each_match_in_line; rg_vimgrep_emits_one_line_per_match_with_column; rg_byte_offset_with_only_matching_reports_file_byte_position; rg_passthru_prints_all_lines_with_match_markers',
+    notes:
+      'r12jb-r3 implements rg --column (1-based match column, implies -n), -r/--replace ($0/$&/$1/$<name> templates), --vimgrep (one line per match with column), -b/--byte-offset (cumulative file offset), and --passthru (all lines printed, : for matches and - for non-matches).',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
+    lines: [72, 261, 278, 297, 316, 519, 554, 575, 637, 803, 817, 829, 1038, 1055],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest:
+      'rg_column_shows_match_column_with_line_number; rg_replace_substitutes_each_match_in_line; rg_replace_with_numbered_capture_groups; rg_replace_with_named_capture_groups; rg_replace_with_only_matching_outputs_replaced_groups; rg_iglob_matches_case_insensitively; rg_glob_case_insensitive_flag_makes_globs_case_insensitive; rg_byte_offset_with_only_matching_reports_file_byte_position; rg_count_with_only_matching_counts_individual_matches; rg_max_filesize_skips_files_over_the_limit; rg_max_filesize_accepts_kilobyte_suffix; rg_max_filesize_accepts_megabyte_suffix; rg_vimgrep_directory_search_prefixes_filename; rg_vimgrep_without_line_numbers_drops_line_column_only',
+    notes:
+      'r12jb-r3 closes imported rg misc rows for --column, -r/--replace with numbered/named capture groups and -o replacement, --iglob and --glob-case-insensitive case-insensitive glob filtering, -b -o byte offsets, --count --only-matching individual-match counting, --max-filesize with K/M suffixes, and --vimgrep (directory prefix and -N no-line forms) over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [220, 232, 521, 1144, 1159],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest:
+      'rg_vimgrep_directory_search_prefixes_filename; rg_column_directory_search_prefixes_filename_and_column; rg_only_matching_with_column_reports_each_match_position; rg_column_after_bom_is_one_based_from_content_start; rg_replace_full_match_reference_with_braces',
+    notes:
+      'r12jb-r3 closes ripgrep regression rows: r105 (--vimgrep and --column show the match column), r451 (--only-matching --column reports each match position), r1638 (column index is 1-based after the stripped UTF-8 BOM), and r1739 (${0} replacement references the full match).',
   },
 ];
 
@@ -5551,6 +5623,7 @@ function caseOverrideFor(testCase) {
     ...jb06CaseGroups,
     ...jbc07CaseGroups,
     ...jbc09CaseGroups,
+    ...r12jbAwkCommandCaseGroups,
     ...jbc10CaseGroups,
     ...jbc12CaseGroups,
     ...jbc13CaseGroups,
@@ -5568,6 +5641,7 @@ function caseOverrideFor(testCase) {
     ...jbc34CaseGroups,
     ...jbR11JbGrepGlobBinaryCaseGroups,
     ...r11jbR2RgCaseGroups,
+    ...r12jbR3RgCaseGroups,
     ...jbc36CaseGroups,
     ...jbc24CaseGroups,
     ...r11jbSqlite3CaseGroups,

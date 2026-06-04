@@ -5019,7 +5019,7 @@ and exhibited clearly, with a label attached.\n";
         // JBC-10: the upstream rg suite explicitly `it.skip`s a family of features
         // that ripgrep itself or the just-bash JS port does not implement (alternate
         // text encodings, PCRE2 look-around, max-columns, file preprocessing,
-        // non-gzip compression, the --no-include-zero/--no-column/--crlf/--no-unicode/
+        // non-gzip compression, the --no-include-zero/--crlf/--no-unicode/
         // --null-data flags, and timestamp-based sorting). The Rust rg port matches
         // that contract by rejecting these features rather than silently mis-handling
         // them. Each assertion fails if the Rust port ever started accepting the flag,
@@ -5055,7 +5055,6 @@ and exhibited clearly, with a label attached.\n";
         unrecognized("rg --search-zip hello f.txt", "--search-zip");
 
         // Output/format flags the upstream skip-suite documents as unimplemented.
-        unrecognized("rg --no-column --vimgrep hello f.txt", "--no-column");
         unrecognized("rg --crlf hello f.txt", "--crlf");
         unrecognized("rg --no-unicode hello f.txt", "--no-unicode");
         unrecognized("rg --null-data hello f.txt", "--null-data");
@@ -5085,14 +5084,11 @@ and exhibited clearly, with a label attached.\n";
             "--ignore-file-case-insensitive",
         );
 
-        // Multiline matching (--multiline / -U), vimgrep output (--vimgrep),
-        // passthru (--passthru), and replacement (--replace / -r) are unimplemented;
-        // upstream skips the multiline/vimgrep/passthru/replacement regression rows.
+        // Multiline matching (--multiline / -U) is unimplemented; upstream skips the
+        // multiline regression rows. (vimgrep/passthru/replacement ARE now
+        // implemented and verified by their own dedicated tests.)
         unrecognized("rg --multiline 'a\\nb' f.txt", "--multiline");
         unrecognized("rg -U 'a\\nb' f.txt", "-U");
-        unrecognized("rg --vimgrep hello f.txt", "--vimgrep");
-        unrecognized("rg --passthru hello f.txt", "--passthru");
-        unrecognized("rg --replace X hello f.txt", "--replace");
 
         // PCRE2 / look-around (-P, raw look-ahead/look-behind) is rejected by the
         // standard regex engine rather than silently matching.
@@ -14744,6 +14740,245 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         assert_eq!(env.read_file("/test/out.txt").unwrap(), "001\n002\n003\n");
     }
 
+    // JBC-awk: `%` modulo with a negative divisor truncates toward zero, so the
+    // result keeps the sign of the dividend: `7 % -3` is `1` (not `-2`). This
+    // also proves the multiplicative right operand now parses a leading unary
+    // minus (`% -3`).
+    //
+    // Upstream: packages/just-bash/src/commands/awk/awk.modulo.test.ts
+    //   :113 should handle negative divisor.
+    #[test]
+    fn awk_jbc_command_awk_modulo_negative_divisor_row() {
+        let env = Bash::new();
+        let result = env.exec(r#"echo "" | awk 'BEGIN { print 7 % -3 }'"#);
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "1\n");
+    }
+
+    // JBC-awk: `rand()` returns a value in `[0, 1)` and `srand(seed)` reseeds the
+    // generator without error, with `rand()` after it still in `[0, 1)`. The
+    // generator is deterministic, so the exact value is asserted to be in range.
+    //
+    // Upstream: packages/just-bash/src/commands/awk/awk.math.test.ts
+    //   :69 rand() returns a value between 0 and 1,
+    //   :77 srand() can be called with a seed.
+    #[test]
+    fn awk_jbc_command_awk_rand_and_srand_rows() {
+        let env = Bash::new();
+
+        // :69 rand() returns a value between 0 and 1.
+        let rand = env.exec(r#"echo '' | awk '{ print rand() }'"#);
+        assert_eq!(rand.exit_code, 0);
+        let value: f64 = rand.stdout.trim().parse().expect("rand() must be numeric");
+        assert!(
+            (0.0..1.0).contains(&value),
+            "rand() must be in [0, 1), got {value}"
+        );
+
+        // :77 srand() can be called with a seed; rand() after it stays in range.
+        let seeded = env.exec(r#"echo '' | awk '{ srand(42); print rand() }'"#);
+        assert_eq!(seeded.exit_code, 0);
+        let seeded_value: f64 = seeded
+            .stdout
+            .trim()
+            .parse()
+            .expect("rand() after srand must be numeric");
+        assert!(
+            (0.0..1.0).contains(&seeded_value),
+            "rand() after srand must be in [0, 1), got {seeded_value}"
+        );
+    }
+
+    // JBC-awk: the `nextfile` statement stops processing the current input file
+    // and resumes with the first record of the next file. FNR/FILENAME drive the
+    // decision, and records skipped by nextfile never reach later rules.
+    //
+    // Upstream: packages/just-bash/src/commands/awk/awk.nextfile.test.ts
+    //   :6 should skip to next file,
+    //   :20 should skip rest of first file,
+    //   :34 should continue with next file content,
+    //   :50 should reset FNR for each file,
+    //   :66 should maintain NR across files,
+    //   :80 should skip file on condition,
+    //   :96 should end processing when nextfile on single file.
+    #[test]
+    fn awk_jbc_command_awk_nextfile_rows() {
+        // :6 nextfile after FNR == 2 prints the first two records of each file
+        // and skips the third of every file.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/a.txt".to_string(), "a1\na2\na3\n".to_string()),
+                ("/b.txt".to_string(), "b1\nb2\nb3\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let skip_to_next = env.exec(r#"awk '{ print; if (FNR == 2) nextfile }' /a.txt /b.txt"#);
+        assert_eq!(skip_to_next.exit_code, 0);
+        assert_eq!(skip_to_next.stdout, "a1\na2\nb1\nb2\n");
+
+        // :20 nextfile on the first record of /a.txt skips the rest of that
+        // file, so only /b.txt's records print.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/a.txt".to_string(), "skip1\nskip2\nskip3\n".to_string()),
+                ("/b.txt".to_string(), "keep1\nkeep2\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let skip_first = env
+            .exec(r#"awk 'FNR == 1 && FILENAME == "/a.txt" { nextfile } { print }' /a.txt /b.txt"#);
+        assert_eq!(skip_first.exit_code, 0);
+        assert_eq!(skip_first.stdout, "keep1\nkeep2\n");
+
+        // :34 nextfile when $1 == "2" skips the rest of /first.txt then processes
+        // /second.txt in full.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/first.txt".to_string(), "1\n2\n3\n".to_string()),
+                ("/second.txt".to_string(), "a\nb\nc\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let continue_next =
+            env.exec(r#"awk '{ if ($1 == "2") nextfile; print }' /first.txt /second.txt"#);
+        assert_eq!(continue_next.exit_code, 0);
+        assert_eq!(continue_next.stdout, "1\na\nb\nc\n");
+
+        // :50 FNR resets to 1 at each new file while iterating all records.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/a.txt".to_string(), "a1\na2\n".to_string()),
+                ("/b.txt".to_string(), "b1\nb2\nb3\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let fnr_reset = env.exec(r#"awk '{ print FILENAME, FNR }' /a.txt /b.txt"#);
+        assert_eq!(fnr_reset.exit_code, 0);
+        assert_eq!(
+            fnr_reset.stdout,
+            "/a.txt 1\n/a.txt 2\n/b.txt 1\n/b.txt 2\n/b.txt 3\n"
+        );
+
+        // :66 NR keeps counting across files while FNR resets per file.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/a.txt".to_string(), "a1\na2\n".to_string()),
+                ("/b.txt".to_string(), "b1\nb2\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let nr_across = env.exec(r#"awk '{ print NR, FNR }' /a.txt /b.txt"#);
+        assert_eq!(nr_across.exit_code, 0);
+        assert_eq!(nr_across.stdout, "1 1\n2 2\n3 1\n4 2\n");
+
+        // :80 nextfile on a regex+FNR condition skips the rest of /skip.txt.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/skip.txt".to_string(), "SKIP\ndata1\ndata2\n".to_string()),
+                ("/keep.txt".to_string(), "KEEP\ndata3\ndata4\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let skip_cond =
+            env.exec(r#"awk 'FNR == 1 && /SKIP/ { nextfile } { print }' /skip.txt /keep.txt"#);
+        assert_eq!(skip_cond.exit_code, 0);
+        assert_eq!(skip_cond.stdout, "KEEP\ndata3\ndata4\n");
+
+        // :96 nextfile on the only file ends processing at that record.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "1\n2\n3\n4\n5\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let single = env.exec(r#"awk '{ print; if ($1 == 3) nextfile }' /data.txt"#);
+        assert_eq!(single.exit_code, 0);
+        assert_eq!(single.stdout, "1\n2\n3\n");
+    }
+
+    // JBC-awk: execution limits keep awk programs bounded. Infinite loops, runaway
+    // print/concat growth, and unbounded recursion all fail with a controlled
+    // execution-limit error (exit code 126) instead of hanging or aborting; large
+    // but finite work still completes.
+    //
+    // Upstream: packages/just-bash/src/commands/awk/awk.limits.test.ts
+    //   :16 while(1), :27 for(;1;), :37 for(;;), :47 do-while(1),
+    //   :59 recursive function, :70 mutual recursion,
+    //   :83 print in loop, :94 string concat growth,
+    //   :107 large array creation, :119 getline in loop.
+    #[test]
+    fn awk_jbc_command_awk_execution_limit_rows() {
+        let env = Bash::new();
+
+        // :16/:27/:37/:47 infinite loops must error with a non-empty stderr and a
+        // non-zero exit code rather than hanging.
+        for program in [
+            r#"echo "test" | awk 'BEGIN { while(1) print "x" }'"#,
+            r#"echo "test" | awk 'BEGIN { for(i=0; 1; i++) print "x" }'"#,
+            r#"echo "test" | awk 'BEGIN { for(;;) print "x" }'"#,
+            r#"echo "test" | awk 'BEGIN { do { print "x" } while(1) }'"#,
+        ] {
+            let result = env.exec(program);
+            assert_ne!(result.exit_code, 0, "infinite loop must fail: {program}");
+            assert!(
+                !result.stderr.is_empty(),
+                "infinite loop must report an error: {program}"
+            );
+        }
+
+        // :59 direct recursion hits the recursion-depth limit (exit 126).
+        let recursion = env.exec(r#"echo "test" | awk 'function f() { f() } BEGIN { f() }'"#);
+        assert_eq!(recursion.exit_code, 126);
+        assert!(
+            recursion.stderr.contains("recursion depth exceeded"),
+            "recursion error text, got {:?}",
+            recursion.stderr
+        );
+
+        // :70 mutual recursion hits the same recursion-depth limit.
+        let mutual = env
+            .exec(r#"echo "test" | awk 'function a() { b() } function b() { a() } BEGIN { a() }'"#);
+        assert_eq!(mutual.exit_code, 126);
+        assert!(
+            mutual.stderr.contains("recursion depth exceeded"),
+            "mutual recursion error text, got {:?}",
+            mutual.stderr
+        );
+
+        // :83 a tight print loop hits the output-size limit (exit 126, "exceeded").
+        let print_loop =
+            env.exec(r#"echo "test" | awk 'BEGIN { for(i=0; i<1000000; i++) print "x" }'"#);
+        assert_eq!(print_loop.exit_code, 126);
+        assert!(
+            print_loop.stderr.contains("exceeded"),
+            "print loop error text, got {:?}",
+            print_loop.stderr
+        );
+
+        // :94 exponential string concatenation hits the string-length limit.
+        let concat = env.exec(
+            r#"echo "test" | awk 'BEGIN { s="x"; for(i=0; i<30; i++) s=s s; print length(s) }'"#,
+        );
+        assert_eq!(concat.exit_code, 126);
+        assert!(
+            concat.stderr.contains("exceeded"),
+            "concat error text, got {:?}",
+            concat.stderr
+        );
+
+        // :107 a large but finite array still completes (upstream only requires
+        // the run to terminate with a defined exit code rather than hang).
+        let big_array = env.exec(
+            r#"echo "test" | awk 'BEGIN { for(i=0; i<100000; i++) a[i]=i; print length(a) }'"#,
+        );
+        assert_eq!(big_array.exit_code, 0);
+
+        // :119 getline against a missing /dev/zero returns -1 so the while loop
+        // never runs: the program completes without hanging.
+        let getline_loop = env
+            .exec(r#"echo "test" | awk '{ while((getline line < "/dev/zero") > 0) print line }'"#);
+        assert_eq!(getline_loop.exit_code, 0);
+        assert_eq!(getline_loop.stdout, "");
+    }
+
     // JBC-awk: special variables FILENAME/FNR and string functions
     // match()/RSTART/RLENGTH/gensub(), printf %x/%X/%o/%c, and the ^/** power
     // operators with a fractional exponent.
@@ -16279,6 +16514,226 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         // Heading mode prints the file label on its own line above the matches.
         assert!(result.stdout.contains("bar\n"));
         assert!(result.stdout.contains("foo1\n"));
+    }
+
+    #[test]
+    fn rg_column_shows_match_column_with_line_number() {
+        // maps rg.ripgrep-compat.test.ts:691 "should show column with --column"
+        // and imported-tests/misc.test.ts:72 "should show column numbers with --column".
+        // `--column` implies `-n`; the column is the 1-based char index of the match.
+        let result = home_bash(&[("sherlock", SHERLOCK)]).exec("rg -n --column Sherlock sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout,
+            "1:57:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+3:49:be, to a very large extent, the result of luck. Sherlock Holmes\n"
+        );
+    }
+
+    #[test]
+    fn rg_column_directory_search_prefixes_filename_and_column() {
+        // maps imported-tests/regression.test.ts:232 "r105_part2: should show column with --column".
+        let result = home_bash(&[("foo", "zztest\n")]).exec("rg --column test");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "foo:1:3:zztest\n");
+    }
+
+    #[test]
+    fn rg_column_after_bom_is_one_based_from_content_start() {
+        // maps imported-tests/regression.test.ts:1144 "r1638: should have correct column with BOM".
+        // The leading UTF-8 BOM is stripped before searching, so `x` is at column 1.
+        let result = home_bash(&[("foo", "\u{FEFF}x\n")]).exec("rg --column x");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "foo:1:1:x\n");
+    }
+
+    #[test]
+    fn rg_only_matching_with_column_reports_each_match_position() {
+        // maps imported-tests/regression.test.ts:521
+        // "r451_only_matching: should show column with only matching".
+        let result = home_bash(&[("digits.txt", "1 2 3\n123\n")])
+            .exec("rg --only-matching --column '[0-9]' digits.txt");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "1:1:1\n1:3:2\n1:5:3\n2:1:1\n2:2:2\n2:3:3\n");
+    }
+
+    #[test]
+    fn rg_vimgrep_emits_one_line_per_match_with_column() {
+        // maps rg.ripgrep-compat.test.ts:742 "should output vimgrep format with --vimgrep"
+        // and imported-tests/misc.test.ts:1038 "should show vimgrep format".
+        let result =
+            home_bash(&[("sherlock", SHERLOCK)]).exec("rg --vimgrep 'Sherlock|Watson' sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout,
+            "1:16:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+1:57:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+3:49:be, to a very large extent, the result of luck. Sherlock Holmes\n\
+5:12:but Doctor Watson has to have it taken out for him and dusted,\n"
+        );
+    }
+
+    #[test]
+    fn rg_vimgrep_directory_search_prefixes_filename() {
+        // maps imported-tests/misc.test.ts:1038 "should show vimgrep format" (directory form)
+        // and imported-tests/regression.test.ts:220 "r105_part1: should show column with --vimgrep".
+        let result = home_bash(&[("foo", "zztest\n")]).exec("rg --vimgrep test");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "foo:1:3:zztest\n");
+    }
+
+    #[test]
+    fn rg_vimgrep_without_line_numbers_drops_line_column_only() {
+        // maps imported-tests/misc.test.ts:1055 "should show vimgrep format without line numbers".
+        let result = home_bash(&[("sherlock", SHERLOCK)]).exec("rg --vimgrep -N 'Sherlock|Watson'");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout,
+            "sherlock:16:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+sherlock:57:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+sherlock:49:be, to a very large extent, the result of luck. Sherlock Holmes\n\
+sherlock:12:but Doctor Watson has to have it taken out for him and dusted,\n"
+        );
+    }
+
+    #[test]
+    fn rg_byte_offset_with_only_matching_reports_file_byte_position() {
+        // maps rg.ripgrep-compat.test.ts:817 "should show byte offset with -b"
+        // and imported-tests/misc.test.ts:575 "should show byte offset with -b -o".
+        let result = home_bash(&[("sherlock", SHERLOCK)]).exec("rg -b -o Sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout,
+            "sherlock:56:Sherlock\nsherlock:177:Sherlock\n"
+        );
+    }
+
+    #[test]
+    fn rg_replace_substitutes_each_match_in_line() {
+        // maps rg.ripgrep-compat.test.ts:726 "should replace matches with -r"
+        // and imported-tests/misc.test.ts:261 "should replace matches with -r".
+        let result = home_bash(&[("sherlock", SHERLOCK)]).exec("rg -r FooBar Sherlock sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout,
+            "For the Doctor Watsons of this world, as opposed to the FooBar\n\
+be, to a very large extent, the result of luck. FooBar Holmes\n"
+        );
+    }
+
+    #[test]
+    fn rg_replace_with_numbered_capture_groups() {
+        // maps imported-tests/misc.test.ts:278 "should replace with capture groups".
+        let result = home_bash(&[("sherlock", SHERLOCK)])
+            .exec("rg -r '$2, $1' '([A-Z][a-z]+) ([A-Z][a-z]+)' sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout,
+            "For the Watsons, Doctor of this world, as opposed to the Sherlock\n\
+be, to a very large extent, the result of luck. Holmes, Sherlock\n\
+but Watson, Doctor has to have it taken out for him and dusted,\n"
+        );
+    }
+
+    #[test]
+    fn rg_replace_with_named_capture_groups() {
+        // maps imported-tests/misc.test.ts:297 "should replace with named capture groups".
+        let result = home_bash(&[("sherlock", SHERLOCK)])
+            .exec("rg -r '$last, $first' '(?P<first>[A-Z][a-z]+) (?P<last>[A-Z][a-z]+)' sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout,
+            "For the Watsons, Doctor of this world, as opposed to the Sherlock\n\
+be, to a very large extent, the result of luck. Holmes, Sherlock\n\
+but Watson, Doctor has to have it taken out for him and dusted,\n"
+        );
+    }
+
+    #[test]
+    fn rg_replace_with_only_matching_outputs_replaced_groups() {
+        // maps imported-tests/misc.test.ts:316 "should replace only matching parts".
+        let result =
+            home_bash(&[("sherlock", SHERLOCK)]).exec("rg -o -r '$1' 'of (\\w+)' sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "this\ndetective\nluck\nstraw\ncigar\n");
+    }
+
+    #[test]
+    fn rg_replace_full_match_reference_with_braces() {
+        // maps imported-tests/regression.test.ts:1159
+        // "r1739: should replace with reference to full match".
+        let result = home_bash(&[("test", "a\n")]).exec("rg -r '${0}f' '.*' test");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "af\n");
+    }
+
+    #[test]
+    fn rg_passthru_prints_all_lines_with_match_markers() {
+        // maps rg.ripgrep-compat.test.ts:858 "should print all lines with --passthru".
+        let result =
+            home_bash(&[("file", "\nfoo\nbar\nfoobar\n\nbaz\n")]).exec("rg -n --passthru foo file");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "1-\n2:foo\n3-bar\n4:foobar\n5-\n6-baz\n");
+    }
+
+    #[test]
+    fn rg_count_with_only_matching_counts_individual_matches() {
+        // maps imported-tests/misc.test.ts:637 "should count via --count --only-matching".
+        let result = home_bash(&[("sherlock", SHERLOCK)]).exec("rg --count --only-matching the");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "sherlock:4\n");
+    }
+
+    #[test]
+    fn rg_iglob_matches_case_insensitively() {
+        // maps imported-tests/misc.test.ts:519
+        // "should use case-insensitive glob matching with --iglob".
+        let result = home_bash(&[("file1.HTML", "Sherlock\n"), ("file2.html", "Sherlock\n")])
+            .exec("rg --iglob '*.html' Sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout,
+            "file1.HTML:1:Sherlock\nfile2.html:1:Sherlock\n"
+        );
+    }
+
+    #[test]
+    fn rg_glob_case_insensitive_flag_makes_globs_case_insensitive() {
+        // maps imported-tests/misc.test.ts:554
+        // "should make all globs case-insensitive with --glob-case-insensitive".
+        let result = home_bash(&[("file1.HTML", "Sherlock\n"), ("file2.html", "Sherlock\n")])
+            .exec("rg --glob-case-insensitive --glob '*.html' Sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout,
+            "file1.HTML:1:Sherlock\nfile2.html:1:Sherlock\n"
+        );
+    }
+
+    #[test]
+    fn rg_max_filesize_skips_files_over_the_limit() {
+        // maps imported-tests/misc.test.ts:803 "should filter files by size with --max-filesize".
+        let large = format!("Sherlock {}\n", "x".repeat(100));
+        let result = home_bash(&[("small.txt", "Sherlock\n"), ("large.txt", large.as_str())])
+            .exec("rg --max-filesize 50 Sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "small.txt:1:Sherlock\n");
+    }
+
+    #[test]
+    fn rg_max_filesize_accepts_kilobyte_suffix() {
+        // maps imported-tests/misc.test.ts:817 "should accept K suffix for kilobytes".
+        let result = home_bash(&[("test.txt", "Sherlock\n")]).exec("rg --max-filesize 1K Sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "test.txt:1:Sherlock\n");
+    }
+
+    #[test]
+    fn rg_max_filesize_accepts_megabyte_suffix() {
+        // maps imported-tests/misc.test.ts:829 "should accept M suffix for megabytes".
+        let result = home_bash(&[("test.txt", "Sherlock\n")]).exec("rg --max-filesize 1M Sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "test.txt:1:Sherlock\n");
     }
 
     #[test]
