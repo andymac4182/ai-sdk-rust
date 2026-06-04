@@ -4146,6 +4146,62 @@ const jbpiParserInterpreterCaseGroups = [
     notes:
       'R10JB verifies the portable until-loop row that executes once when its condition is initially false (a grep -q over a virtual file) through the Rust shell.',
   },
+  {
+    file: 'packages/just-bash/src/syntax/operators.test.ts',
+    lines: [36, 108, 247, 253, 259, 267],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_real_bash_operator_pipeline_and_errexit_rows_match_upstream',
+    notes:
+      'JB-PI verifies portable registry-backed operator rows through the Rust `Bash` runtime: `&&` filesystem effect (mkdir then write), the `||` mkdir error-handler pattern, and head/tail/grep filter pipes. The remaining operators rows stay pending with their command owners.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/control-flow.test.ts',
+    lines: [335],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_real_bash_operator_pipeline_and_errexit_rows_match_upstream',
+    notes:
+      'JB-PI verifies the portable `! ` passthrough to `find -not` row through the Rust `Bash` runtime: app.ts is kept and utils*.ts excluded.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/variables.test.ts',
+    lines: [157],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_real_bash_operator_pipeline_and_errexit_rows_match_upstream',
+    notes:
+      'JB-PI verifies the portable `echo -e` literal-backslash row (`\\\\\\\\` -> `\\`) through the Rust `Bash` runtime.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/set-errexit.test.ts',
+    lines: [85, 100, 111, 134],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_real_bash_operator_pipeline_and_errexit_rows_match_upstream',
+    notes:
+      'JB-PI verifies portable errexit short-circuit/disable rows through the Rust `Bash` runtime: `set +o errexit` re-enables continuation, a failed left operand of `&&`/`||` does not trip errexit, and a `&& ... ||` list that ends by succeeding does not trip errexit. The `true && false` final-failure, negated-command, and combined/help/list `set` option rows stay pending.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/loops.test.ts',
+    lines: [135, 145, 153],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_syntax_loops_protection_rows_match_upstream',
+    notes:
+      'JB-PI verifies portable loop-protection rows through the Rust interpreter: an infinite for/while/until loop is bounded by the execution iteration/command cap and surfaces a "too many iterations/commands" diagnostic with a non-zero exit instead of hanging.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/parser-protection.test.ts',
+    lines: [
+      17, 24, 39, 55, 71, 87, 103, 122, 137, 150, 165, 179, 193, 209, 220,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_syntax_parser_protection_rows_match_upstream',
+    notes:
+      'JB-PI verifies portable parser-protection rows through the Rust parser/interpreter: oversized input above MAX_INPUT_SIZE is rejected before tokenizing, every pathological shape (long names/strings, deeply nested parens/braces/command-substitutions/arithmetic, many tokens/semicolons/pipes/redirections, repeated brace patterns, alternating quotes) parses in bounded time without hanging, and brace/range expansion during execution stays bounded (clean exit, output length bound).',
+  },
 ];
 
 const jbc35CaseGroups = [
