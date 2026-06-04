@@ -3261,6 +3261,150 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn awk_jbc09_error_handling_and_type_coercion_rows() {
+        // Maps the portable rows of awk.errors.test.ts. Each assertion mirrors
+        // the upstream vitest expectation exactly (strict outputs where the
+        // upstream test pins them, exit-code-only where the upstream only
+        // asserts `toBeDefined()`/`exitCode`).
+        let env = Bash::default();
+
+        // division by zero (awk.errors.test.ts:6,14,20).
+        // Upstream only requires exit 0 / a defined result; Rust prints
+        // IEEE inf/nan deterministically.
+        let div_int = env.exec(r#"echo '1' | awk '{ print 1/0 }'"#);
+        assert_eq!(div_int.exit_code, 0);
+        assert_eq!(div_int.stdout, "inf\n");
+        let div_float = env.exec(r#"echo '1' | awk '{ print 1.0/0.0 }'"#);
+        assert_eq!(div_float.exit_code, 0);
+        assert_eq!(div_float.stdout, "inf\n");
+        let mod_zero = env.exec(r#"echo '1' | awk '{ print 5 % 0 }'"#);
+        assert_eq!(mod_zero.exit_code, 0);
+        assert_eq!(mod_zero.stdout, "nan\n");
+
+        // invalid regex patterns (awk.errors.test.ts:29,38,47). Upstream only
+        // requires the result to be defined; Rust fails closed with a regex
+        // parse diagnostic and a non-zero exit (no crash, no host leak).
+        for prog in [
+            r#"echo 'test' | awk '{ print match($0, "[") }'"#,
+            r#"echo 'test' | awk '{ gsub(/[/, "x"); print }'"#,
+            r#"echo 'test' | awk '{ sub(/[/, "x"); print }'"#,
+        ] {
+            let r = env.exec(prog);
+            assert_ne!(r.exit_code, 0, "{prog}");
+            assert!(
+                r.stderr.contains("regex parse error"),
+                "{prog}: {:?}",
+                r.stderr
+            );
+        }
+
+        // undefined variable access (awk.errors.test.ts:57,64,71,80).
+        assert_eq!(env.exec(r#"echo '1' | awk '{ print x }'"#).stdout, "\n");
+        assert_eq!(
+            env.exec(r#"echo '1' | awk '{ print x + 5 }'"#).stdout,
+            "5\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo '1' | awk '{ arr[1] = "x"; print arr[1] }'"#)
+                .stdout,
+            "x\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo '1' | awk '{ print arr[999] }'"#).stdout,
+            "\n"
+        );
+
+        // type coercion (awk.errors.test.ts:89,96,103,110,119).
+        assert_eq!(
+            env.exec(r#"echo '10abc' | awk '{ print $1 + 5 }'"#).stdout,
+            "15\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo 'abc' | awk '{ print $1 + 5 }'"#).stdout,
+            "5\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo '' | awk '{ print $1 + 10 }'"#).stdout,
+            "10\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo '10' | awk '{ print ($1 == "10") }'"#)
+                .stdout,
+            "1\n"
+        );
+        // Both operands look numeric, so numeric comparison applies: 2 < 10.
+        let numcmp = env.exec(r#"echo '2' | awk '{ print ($1 < "10") }'"#);
+        assert_eq!(numcmp.exit_code, 0);
+        assert_eq!(numcmp.stdout, "1\n");
+
+        // field access edge cases (awk.errors.test.ts:129,136,150,158,170).
+        assert_eq!(
+            env.exec(r#"echo 'hello world' | awk '{ print $0 }'"#)
+                .stdout,
+            "hello world\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo 'a b' | awk '{ print $100 }'"#).stdout,
+            "\n"
+        );
+        // Non-integer field index truncates to $1.
+        assert_eq!(
+            env.exec(r#"echo 'a b c' | awk '{ print $1.5 }'"#).stdout,
+            "a\n"
+        );
+        // Field assignment beyond NF extends the record with empty fields.
+        let extend = env.exec(r#"echo 'a b' | awk '{ $5 = "x"; print $0 }'"#);
+        assert_eq!(extend.exit_code, 0);
+        assert!(extend.stdout.contains('x'), "{:?}", extend.stdout);
+        // substr with only the string argument returns the whole string.
+        assert_eq!(
+            env.exec(r#"echo 'hello' | awk '{ print substr($1) }'"#)
+                .stdout,
+            "hello\n"
+        );
+
+        // sprintf format handling (awk.errors.test.ts:186,195,205).
+        assert_eq!(
+            env.exec(r#"echo '1' | awk '{ print sprintf("hello") }'"#)
+                .stdout,
+            "hello\n"
+        );
+        // Extra args ignored.
+        assert_eq!(
+            env.exec(r#"echo '1' | awk '{ print sprintf("%d", 1, 2, 3) }'"#)
+                .stdout,
+            "1\n"
+        );
+        // Missing arg treated as 0; upstream only pins exit 0.
+        let sprintf_missing = env.exec(r#"echo '1' | awk '{ print sprintf("%d %d", 1) }'"#);
+        assert_eq!(sprintf_missing.exit_code, 0);
+        assert_eq!(sprintf_missing.stdout, "1 0\n");
+
+        // math function edge cases (awk.errors.test.ts:216,223,230,237).
+        for (prog, want) in [
+            (r#"echo '1' | awk '{ print sqrt(-1) }'"#, "nan\n"),
+            (r#"echo '1' | awk '{ print log(0) }'"#, "-inf\n"),
+            (r#"echo '1' | awk '{ print log(-1) }'"#, "nan\n"),
+            (r#"echo '1' | awk '{ print exp(1000) }'"#, "inf\n"),
+        ] {
+            let r = env.exec(prog);
+            assert_eq!(r.exit_code, 0, "{prog}");
+            assert_eq!(r.stdout, want, "{prog}");
+        }
+
+        // syntax + file errors (awk.errors.test.ts:246,252,270).
+        assert_ne!(env.exec(r#"echo '1' | awk '{ print $1'"#).exit_code, 0);
+        assert_ne!(env.exec(r#"echo '1' | awk '{ print ($1 }'"#).exit_code, 0);
+        let missing_file = env.exec("awk '{ print }' /nonexistent/file.txt");
+        assert_ne!(missing_file.exit_code, 0);
+        assert!(
+            missing_file.stderr.contains("No such file"),
+            "{:?}",
+            missing_file.stderr
+        );
+    }
+
+    #[test]
     fn rg_upstream_basic_rows_are_portable() {
         assert_home_exec(
             &[("file.txt", "hello world\nfoo bar\n")],
