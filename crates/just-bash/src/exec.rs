@@ -6232,7 +6232,17 @@ fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
         return result;
     }
     if patterns.is_empty() {
-        return stderr_result(2, "rg: no pattern given\n");
+        // A `-f`/`--file` pattern source that yields zero patterns (e.g. an empty
+        // pattern file) is a valid invocation that simply matches nothing, so it
+        // exits 1 (no matches) rather than 2 (no pattern given). The hard error is
+        // reserved for the case where no pattern source was supplied at all.
+        if request.pattern_files.is_empty() {
+            return stderr_result(2, "rg: no pattern given\n");
+        }
+        return CommandResult {
+            exit_code: 1,
+            ..CommandResult::default()
+        };
     }
 
     let ignore_case = request.options.ignore_case.unwrap_or_else(|| {
@@ -6408,7 +6418,6 @@ fn parse_rg_args(args: &[String]) -> Result<RgParseResult, CommandResult> {
         } else {
             patterns.push(arg.clone());
         }
-        parsing_roots = true;
         index += 1;
     }
 
@@ -7220,15 +7229,41 @@ fn rg_ignore_rule_matches(rule: &RgIgnoreRule, path: &str) -> bool {
             || rg_glob_matches_path(&rule.pattern, directories);
     }
     if rule.rooted {
-        return rg_glob_match(&rule.pattern, relative);
+        // A rooted pattern (leading `/`) is anchored to the gitignore base.
+        // It matches the path itself or any descendant under that path, so
+        // `/a/b` excludes `a/b` and everything inside `a/b/`.
+        return rg_path_or_ancestor_match(&rule.pattern, relative);
     }
     if rule.pattern.contains('/') {
-        return rg_glob_matches_path(&rule.pattern, relative)
-            || relative.ends_with(&format!("/{}", rule.pattern));
+        // A non-rooted pattern that contains a slash (e.g. `foobar/debug`,
+        // `rust/target`, `.a/b`) is, per gitignore semantics, anchored to the
+        // gitignore base just like a rooted pattern: it matches the path or any
+        // descendant, but is NOT matched as a free-floating substring deeper in
+        // the tree. It may also still match when it appears as a trailing path
+        // segment sequence under a `**/`-style prefix via `rg_glob_matches_path`.
+        return rg_path_or_ancestor_match(&rule.pattern, relative)
+            || rg_glob_matches_path(&rule.pattern, relative);
     }
     relative
         .split('/')
         .any(|part| rg_glob_match(&rule.pattern, part))
+}
+
+/// True when `pattern` (a slash-containing, base-anchored gitignore glob)
+/// matches `relative` exactly or matches one of its ancestor directories, so a
+/// directory exclusion also excludes everything beneath it.
+fn rg_path_or_ancestor_match(pattern: &str, relative: &str) -> bool {
+    if rg_glob_match(pattern, relative) {
+        return true;
+    }
+    let mut prefix = relative;
+    while let Some((parent, _)) = prefix.rsplit_once('/') {
+        if rg_glob_match(pattern, parent) {
+            return true;
+        }
+        prefix = parent;
+    }
+    false
 }
 
 fn rg_glob_matches_path(pattern: &str, path: &str) -> bool {
@@ -7318,8 +7353,13 @@ fn rg_render_search(
         } else {
             line_matches.len()
         };
-        total_matches += file_match_count;
-        if request.options.quiet && file_match_count > 0 {
+        // In `--files-without-match` mode the exit status reflects whether any
+        // file *without* a match was listed, not the raw line-match count, so the
+        // per-line tally must not leak into `total_matches` here.
+        if !request.options.files_without_match {
+            total_matches += file_match_count;
+        }
+        if request.options.quiet && file_match_count > 0 && !request.options.files_without_match {
             return CommandResult {
                 exit_code: 0,
                 ..CommandResult::default()
@@ -7352,6 +7392,14 @@ fn rg_render_search(
 {files_with_match} files contained matches\n{} files searched\n{bytes_searched} bytes searched\n",
             inputs.len()
         ));
+    }
+    // Under `-q`/--quiet ripgrep suppresses all stdout and only signals success
+    // through the exit code. The match-found early-return above covers ordinary
+    // search; this keeps quiet output suppressed for the list-style modes
+    // (e.g. `--files-without-match -q`, which exits 0 when at least one file
+    // without a match is found but prints nothing).
+    if request.options.quiet {
+        stdout.clear();
     }
     CommandResult {
         exit_code: if total_matches == 0 { 1 } else { 0 },
