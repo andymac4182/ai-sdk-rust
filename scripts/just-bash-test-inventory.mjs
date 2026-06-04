@@ -4236,6 +4236,29 @@ const jbcYqFixturesCaseGroups = [
     notes:
       'JBC-yq verifies portable yq fixture queries over YAML and JSON input (postfix `[]` projection, select/add aggregation), plus the Rust INI and CSV input parsers (section nesting, true/false coercion, papaparse-style dynamic typing) exercised by the fixtures suite.',
   },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.test.ts',
+    lines: [
+      354, 365, 377, 395, 407, 424, 438, 449, 460, 506, 686, 712, 729,
+      743, 756, 770, 781, 808, 817, 839, 856, 873, 898, 909, 920,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest:
+      'structured_data_yq_format_conversion_frontmatter_and_autodetect_rows',
+    notes:
+      'JBC-yq verifies portable yq format validation, INI/CSV/TOML/TSV input and INI/CSV/TOML output conversion, --no-csv-header and --csv-delimiter handling, in-place error reporting, YAML/TOML front-matter extraction, and extension-based format auto-detection.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.fixtures.test.ts',
+    lines: [178, 189, 199, 211, 497],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest:
+      'structured_data_yq_format_conversion_frontmatter_and_autodetect_rows',
+    notes:
+      'JBC-yq verifies the portable yq XML input parser over fixture documents: element/array projection, attribute extraction with the +@ prefix, attribute-based select filtering, and XML-to-JSON scalar conversion.',
+  },
 ];
 
 const jbc44CaseGroups = [

@@ -12129,6 +12129,237 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn structured_data_yq_format_conversion_frontmatter_and_autodetect_rows() {
+        // packages/just-bash/src/commands/yq/yq.test.ts
+        //   :354 :365 (format validation), :377 :395 :407 :424 (INI),
+        //   :438 :449 :460 :474 :492 :506 (CSV), :686 (--no-csv-header),
+        //   :712 :729 :743 :756 (TOML), :770 :781 (TSV), :808 (inplace error),
+        //   :817 :839 :856 :873 (front-matter), :898 :909 :920 (auto-detect).
+        // packages/just-bash/src/commands/yq/yq.fixtures.test.ts
+        //   :211 (XML user names), :497 (XML -> JSON).
+        // Each assertion mirrors the upstream vitest expectation exactly.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/data.yaml".to_string(),
+                    "database:\n  host: localhost\n  port: 5432\n".to_string(),
+                ),
+                (
+                    "/kv.yaml".to_string(),
+                    "name: test\nversion: 1\n".to_string(),
+                ),
+                (
+                    "/config.ini".to_string(),
+                    "[database]\nhost=localhost\nport=5432\n\n[server]\ndebug=true\n".to_string(),
+                ),
+                (
+                    "/data.csv".to_string(),
+                    "name,age,city\nalice,30,NYC\nbob,25,LA\ncharlie,35,NYC\n".to_string(),
+                ),
+                (
+                    "/rows.yaml".to_string(),
+                    "- name: alice\n  age: 30\n- name: bob\n  age: 25\n".to_string(),
+                ),
+                (
+                    "/scores.json".to_string(),
+                    "[{\"name\":\"alice\",\"score\":95},{\"name\":\"bob\",\"score\":87}]".to_string(),
+                ),
+                (
+                    "/headerless.csv".to_string(),
+                    "alice,30\nbob,25\n".to_string(),
+                ),
+                (
+                    "/Cargo.toml".to_string(),
+                    "[package]\nname = \"my-app\"\nversion = \"1.0.0\"\n\n[dependencies]\nserde = \"1.0\"\n".to_string(),
+                ),
+                (
+                    "/config.toml".to_string(),
+                    "[server]\nhost = \"localhost\"\nport = 8080\n".to_string(),
+                ),
+                (
+                    "/server.yaml".to_string(),
+                    "server:\n  host: localhost\n  port: 8080\n".to_string(),
+                ),
+                (
+                    "/app.json".to_string(),
+                    "{\"app\": {\"name\": \"test\", \"version\": \"2.0\"}}".to_string(),
+                ),
+                (
+                    "/data.tsv".to_string(),
+                    "name\tage\tcity\nalice\t30\tNYC\nbob\t25\tLA\n".to_string(),
+                ),
+                (
+                    "/rows.tsv".to_string(),
+                    "name\tvalue\na\t1\nb\t2\n".to_string(),
+                ),
+                (
+                    "/post.md".to_string(),
+                    "---\ntitle: My Post\ndate: 2024-01-01\ntags:\n  - tech\n  - web\n---\n\n# Content here\n".to_string(),
+                ),
+                (
+                    "/tags.md".to_string(),
+                    "---\ntitle: Test\ntags:\n  - a\n  - b\n---\nContent".to_string(),
+                ),
+                (
+                    "/hugo.md".to_string(),
+                    "+++\ntitle = \"Hugo Post\"\ndate = \"2024-01-01\"\n+++\n\nContent here.\n".to_string(),
+                ),
+                (
+                    "/plain.md".to_string(),
+                    "# Just a heading\n\nNo front-matter here.".to_string(),
+                ),
+                (
+                    "/data.xml".to_string(),
+                    "<root><name>test</name></root>".to_string(),
+                ),
+                (
+                    "/auto.csv".to_string(),
+                    "name,age\nalice,30\nbob,25\n".to_string(),
+                ),
+                (
+                    "/auto.ini".to_string(),
+                    "[database]\nhost=localhost\n".to_string(),
+                ),
+                (
+                    "/users.xml".to_string(),
+                    "<root><users><user><name>alice</name></user><user><name>bob</name></user><user><name>charlie</name></user></users></root>".to_string(),
+                ),
+                (
+                    "/books.xml".to_string(),
+                    concat!(
+                        "<library>\n",
+                        "  <book id=\"1\" genre=\"fiction\">\n    <title>The Great Adventure</title>\n    <author>Jane Smith</author>\n  </book>\n",
+                        "  <book id=\"2\" genre=\"non-fiction\">\n    <title>Learning TypeScript</title>\n    <author>John Doe</author>\n  </book>\n",
+                        "  <book id=\"3\" genre=\"fiction\">\n    <title>Mystery Manor</title>\n    <author>Alice Johnson</author>\n  </book>\n",
+                        "</library>\n",
+                    )
+                    .to_string(),
+                ),
+                (
+                    "/conv.toml".to_string(),
+                    "[server]\nhost = \"localhost\"\nport = 8080\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // --- format validation (:354/:365) ---
+        for format in ["yaml", "json"] {
+            let result = env.exec(&format!(
+                "echo '{{}}' | yq --input-format={format} --output-format=json"
+            ));
+            assert_eq!(result.exit_code, 0, "input format {format}");
+        }
+        for format in ["yaml", "json", "xml", "ini", "csv", "toml"] {
+            let result = env.exec(&format!("echo '{{}}' | yq --output-format={format}"));
+            assert_eq!(result.exit_code, 0, "output format {format}");
+        }
+
+        // --- INI (:377/:395/:407/:424) ---
+        let ini_host = env.exec("yq -p ini '.database.host' /config.ini");
+        assert_eq!(ini_host.stdout, "localhost\n");
+        let ini_port = env.exec("yq -p ini '.database.port' /config.ini");
+        assert!(ini_port.stdout.trim().contains("5432"));
+        let ini_out = env.exec("yq -o ini '.' /data.yaml");
+        assert!(ini_out.stdout.contains("[database]"));
+        assert!(ini_out.stdout.contains("host=localhost"));
+        assert!(ini_out.stdout.contains("port=5432"));
+        let ini_conv = env.exec("yq -o ini '.' /kv.yaml");
+        assert!(ini_conv.stdout.contains("name=test"));
+        assert!(ini_conv.stdout.contains("version=1"));
+
+        // --- CSV (:438/:449/:460/:474/:492/:506) ---
+        assert_eq!(
+            env.exec("yq -p csv '.[0].name' /data.csv").stdout,
+            "alice\n"
+        );
+        assert_eq!(
+            env.exec("yq -p csv '.[].name' /data.csv").stdout,
+            "alice\nbob\ncharlie\n"
+        );
+        let filtered =
+            env.exec("yq -p csv '[.[] | select(.city == \"NYC\") | .name]' /data.csv -o json");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&filtered.stdout).unwrap(),
+            serde_json::json!(["alice", "charlie"])
+        );
+        let tsv_delim = env.exec("yq -p csv --csv-delimiter='\\t' '.[0].name' /data.tsv");
+        assert_eq!(tsv_delim.stdout, "alice\n");
+
+        // --- --no-csv-header (:686) ---
+        let no_header = env.exec("yq -p csv --no-csv-header '.[0][0]' /headerless.csv");
+        assert_eq!(no_header.stdout, "alice\n");
+
+        // --- TOML (:712/:729/:743/:756) ---
+        assert_eq!(
+            env.exec("yq '.package.name' /Cargo.toml").stdout,
+            "my-app\n"
+        );
+        assert_eq!(env.exec("yq '.server.port' /config.toml").stdout, "8080\n");
+        let toml_out = env.exec("yq -o toml '.' /server.yaml");
+        assert!(toml_out.stdout.contains("[server]"));
+        assert!(toml_out.stdout.contains("host = \"localhost\""));
+        assert!(toml_out.stdout.contains("port = 8080"));
+        let json_toml = env.exec("yq -p json -o toml '.' /app.json");
+        assert!(json_toml.stdout.contains("[app]"));
+        assert!(json_toml.stdout.contains("name = \"test\""));
+
+        // --- TSV (:770/:781) ---
+        assert_eq!(env.exec("yq '.[0].name' /data.tsv").stdout, "alice\n");
+        assert_eq!(env.exec("yq '.[].name' /rows.tsv").stdout, "a\nb\n");
+
+        // --- inplace error (:808) ---
+        let inplace_err = env.exec("echo 'x: 1' | yq -i '.x'");
+        assert_eq!(inplace_err.exit_code, 1);
+        assert!(inplace_err.stderr.contains("requires a file"));
+
+        // --- front-matter (:817/:839/:856/:873) ---
+        assert_eq!(
+            env.exec("yq --front-matter '.title' /post.md").stdout,
+            "My Post\n"
+        );
+        assert_eq!(
+            env.exec("yq --front-matter '.tags[]' /tags.md").stdout,
+            "a\nb\n"
+        );
+        assert_eq!(env.exec("yq -f '.title' /hugo.md").stdout, "Hugo Post\n");
+        let no_fm = env.exec("yq --front-matter '.title' /plain.md");
+        assert_eq!(no_fm.exit_code, 1);
+        assert!(no_fm.stderr.contains("no front-matter found"));
+
+        // --- auto-detect (:898/:909/:920) ---
+        assert_eq!(env.exec("yq '.root.name' /data.xml").stdout, "test\n");
+        assert_eq!(env.exec("yq '.[0].name' /auto.csv").stdout, "alice\n");
+        assert_eq!(
+            env.exec("yq '.database.host' /auto.ini").stdout,
+            "localhost\n"
+        );
+
+        // --- XML fixtures (:178 titles, :189 id attr, :199 filter fiction,
+        //     :211 user names, :497 XML -> JSON title) ---
+        let titles = env.exec("yq -p xml '.library.book[].title' /books.xml");
+        assert!(titles.stdout.contains("The Great Adventure"));
+        assert!(titles.stdout.contains("Learning TypeScript"));
+        assert!(titles.stdout.contains("Mystery Manor"));
+        let by_id = env.exec("yq -p xml '.library.book[0][\"+@id\"]' /books.xml -o json");
+        assert_eq!(by_id.stdout, "\"1\"\n");
+        let fiction = env.exec(
+            "yq -p xml '[.library.book[] | select(.[\"+@genre\"] == \"fiction\") | .title]' /books.xml -o json",
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&fiction.stdout).unwrap(),
+            serde_json::json!(["The Great Adventure", "Mystery Manor"])
+        );
+        assert_eq!(
+            env.exec("yq -p xml '.root.users.user[].name' /users.xml")
+                .stdout,
+            "alice\nbob\ncharlie\n"
+        );
+        let xml_to_json = env.exec("yq -p xml '.library.book[0].title' /books.xml -o json -r");
+        assert_eq!(xml_to_json.stdout, "The Great Adventure\n");
+    }
+
+    #[test]
     fn awk_jbc_command_awk_expression_edge_and_error_rows() {
         // Maps the portable pending rows of awk.expressions.test.ts,
         // awk.edge-cases.test.ts, and awk.errors.test.ts that the Rust awk
