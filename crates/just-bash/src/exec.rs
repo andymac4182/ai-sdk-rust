@@ -2056,6 +2056,7 @@ enum GrepMode {
     BasicRegex,
     ExtendedRegex,
     Fixed,
+    PerlRegex,
 }
 
 fn command_grep(
@@ -2102,6 +2103,7 @@ fn command_grep(
             "-q" | "--quiet" | "--silent" => quiet = true,
             "-E" | "--extended-regexp" => mode = GrepMode::ExtendedRegex,
             "-F" | "--fixed-strings" => mode = GrepMode::Fixed,
+            "-P" | "--perl-regexp" => mode = GrepMode::PerlRegex,
             "-e" => {
                 pattern = args.get(index + 1).cloned();
                 index += 2;
@@ -2196,6 +2198,7 @@ fn command_grep(
                         'q' => quiet = true,
                         'E' => mode = GrepMode::ExtendedRegex,
                         'F' => mode = GrepMode::Fixed,
+                        'P' => mode = GrepMode::PerlRegex,
                         'A' | 'B' | 'C' | 'm' => {
                             let tail = flags[flag_index + 1..].iter().collect::<String>();
                             let value = if tail.is_empty() {
@@ -2542,7 +2545,19 @@ enum LineMatcher {
         line_regexp: bool,
     },
     Regex(Regex),
+    /// Perl-mode (`-P`) matcher. When the pattern contains a `\K`
+    /// reset-match-start escape, the text after `\K` is captured in a named
+    /// group so `-o` (only-matching) output can keep just that suffix while the
+    /// full pattern still drives line matching.
+    PerlRegex {
+        regex: Regex,
+        has_k_capture: bool,
+    },
 }
+
+/// Named capture group used to model the `\K` reset-match-start escape so that
+/// `-oP` only-matching output can keep just the suffix after `\K`.
+const PERL_K_CAPTURE: &str = "jbkrest";
 
 impl LineMatcher {
     fn new_with_line_regexp(
@@ -2559,6 +2574,24 @@ impl LineMatcher {
                 word_regexp,
                 line_regexp,
             });
+        }
+        if mode == GrepMode::PerlRegex {
+            let (translated, has_k_capture) = translate_perl_grep_regex(pattern);
+            let translated = if line_regexp {
+                format!("^(?:{translated})$")
+            } else if word_regexp {
+                format!(r"\b(?:{translated})\b")
+            } else {
+                translated
+            };
+            return RegexBuilder::new(&translated)
+                .case_insensitive(ignore_case)
+                .build()
+                .map(|regex| Self::PerlRegex {
+                    regex,
+                    has_k_capture,
+                })
+                .map_err(|error| error.to_string());
         }
         let pattern = normalize_grep_regex(pattern, mode);
         let pattern = if line_regexp {
@@ -2578,6 +2611,7 @@ impl LineMatcher {
     fn is_match(&self, line: &str) -> bool {
         match self {
             Self::Regex(regex) => regex.is_match(line),
+            Self::PerlRegex { regex, .. } => regex.is_match(line),
             Self::Fixed {
                 pattern,
                 ignore_case,
@@ -2593,6 +2627,42 @@ impl LineMatcher {
                 .find_iter(line)
                 .map(|matched| matched.as_str().to_string())
                 .collect(),
+            Self::PerlRegex {
+                regex,
+                has_k_capture,
+            } => {
+                if *has_k_capture {
+                    // `\K` resets the match start: only the text captured after
+                    // `\K` is part of the `-o` output, while the prefix still
+                    // anchors the match. Iterate non-overlapping matches and emit
+                    // the named suffix group.
+                    let mut out = Vec::new();
+                    let mut start = 0usize;
+                    while start <= line.len() {
+                        let Some(caps) = regex.captures_at(line, start) else {
+                            break;
+                        };
+                        let whole = caps.get(0).expect("group 0 always present");
+                        let rest = caps
+                            .name(PERL_K_CAPTURE)
+                            .map(|m| m.as_str().to_string())
+                            .unwrap_or_default();
+                        out.push(rest);
+                        // Advance past this match; guard against zero-width loops.
+                        start = if whole.end() > whole.start() {
+                            whole.end()
+                        } else {
+                            whole.end() + 1
+                        };
+                    }
+                    out
+                } else {
+                    regex
+                        .find_iter(line)
+                        .map(|matched| matched.as_str().to_string())
+                        .collect()
+                }
+            }
             Self::Fixed {
                 pattern,
                 ignore_case,
@@ -2601,6 +2671,103 @@ impl LineMatcher {
             } => fixed_line_matches(line, pattern, *ignore_case, *word_regexp, *line_regexp),
         }
     }
+}
+
+/// Translate a Perl-mode (`-P`) grep pattern into a pattern the Rust `regex`
+/// crate accepts. The Rust engine already supports `\x{NNNN}`, `(?i:...)`,
+/// `(?P<name>...)`, and non-greedy quantifiers, so only two GNU/PCRE escapes
+/// need rewriting:
+///
+///   * `\Q...\E` quotes every metacharacter between the markers literally
+///     (an unterminated `\Q` quotes to the end of the pattern); and
+///   * `\K` resets the match start, which is modelled by wrapping the text that
+///     follows it in a named capture group so `-o` can emit just that suffix.
+///
+/// Returns the translated pattern and whether a `\K` suffix capture exists.
+fn translate_perl_grep_regex(pattern: &str) -> (String, bool) {
+    let chars = pattern.chars().collect::<Vec<_>>();
+    let mut output = String::new();
+    let mut k_split: Option<String> = None;
+    let mut quoting = false;
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if quoting {
+            if ch == '\\' && chars.get(index + 1) == Some(&'E') {
+                quoting = false;
+                index += 2;
+                continue;
+            }
+            push_regex_literal(&mut output, ch);
+            index += 1;
+            continue;
+        }
+        if ch == '\\' {
+            match chars.get(index + 1) {
+                Some('Q') => {
+                    quoting = true;
+                    index += 2;
+                    continue;
+                }
+                Some('E') => {
+                    // `\E` without a preceding `\Q` is ignored (matches GNU grep).
+                    index += 2;
+                    continue;
+                }
+                Some('K') => {
+                    // Everything emitted so far is the prefix; capture the rest.
+                    k_split = Some(std::mem::take(&mut output));
+                    index += 2;
+                    continue;
+                }
+                Some(next) => {
+                    output.push('\\');
+                    output.push(*next);
+                    index += 2;
+                    continue;
+                }
+                None => {
+                    output.push('\\');
+                    index += 1;
+                    continue;
+                }
+            }
+        }
+        output.push(ch);
+        index += 1;
+    }
+    match k_split {
+        Some(prefix) => (format!("{prefix}(?P<{PERL_K_CAPTURE}>{output})"), true),
+        None => (output, false),
+    }
+}
+
+/// Escape a single character so it is matched literally by the Rust regex
+/// engine (used for `\Q...\E` quoted spans).
+fn push_regex_literal(output: &mut String, ch: char) {
+    if matches!(
+        ch,
+        '\\' | '.'
+            | '+'
+            | '*'
+            | '?'
+            | '('
+            | ')'
+            | '|'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | '^'
+            | '$'
+            | '#'
+            | '&'
+            | '-'
+            | '~'
+    ) {
+        output.push('\\');
+    }
+    output.push(ch);
 }
 
 fn normalize_grep_regex(pattern: &str, mode: GrepMode) -> String {

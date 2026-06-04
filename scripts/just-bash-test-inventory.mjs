@@ -4689,6 +4689,21 @@ const jbc43CaseGroups = [
   },
 ];
 
+const jbc48CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/grep/grep.perl.test.ts',
+    lines: [
+      10, 19, 33, 49, 58, 68, 77, 86, 97, 130, 142, 154, 170, 179, 188, 197,
+      208, 217, 226, 237, 246, 255, 267, 276, 285, 294, 310, 319, 328, 337,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::grep',
+    rustTest: 'text_search_jbc48_grep_perl_mode_rows',
+    notes:
+      'JBC-48 verifies portable grep Perl mode (-P): \\K reset-match-start with -o (capturing groups, alternation, quantifiers, multi-file/-h/-n options), \\Q...\\E literal quoting (unterminated, empty, multiple pairs, combining with regex/\\K/character class), and \\x{NNNN} Unicode code points (ASCII/BMP/supplementary/math symbols) over the virtual filesystem without host grep.',
+  },
+];
+
 const jbc45CaseGroups = [
   {
     file: 'packages/just-bash/src/Bash.general.test.ts',
@@ -5405,6 +5420,7 @@ function caseOverrideFor(testCase) {
     ...jbc41CaseGroups,
     ...jbc43CaseGroups,
     ...jbc45CaseGroups,
+    ...jbc48CaseGroups,
     ...jbc46CaseGroups,
     ...r10jbTarCaseGroups,
     ...jbc47CaseGroups,
