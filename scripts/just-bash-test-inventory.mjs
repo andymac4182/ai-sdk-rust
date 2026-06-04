@@ -3120,6 +3120,15 @@ const jbc36CaseGroups = [
   },
   {
     file: 'packages/just-bash/src/encoding-pipeline.test.ts',
+    lines: [55, 71, 108, 136, 142, 165],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::jbc45-encoding-pipeline',
+    rustTest: 'jbc45_encoding_pipeline_byte_text_contract_rows_are_byte_safe',
+    notes:
+      'JBC-45 verifies additional byte/text pipeline contract rows through the Rust virtual session: rev|base64 of reversed UTF-8 bytes, utf8 redirect of unmarked text stdout past the sampling window, tee byte-identical capture, bash -c piped-stdin forwarding, function-call piped stdin, and text-emitting custom-command UTF-8 byte counts. The sed-byte-count, binary cat|cat|cat round-trip, heredoc/here-string, group/subshell stdin, byte-emitting custom command, and byte-stdin-kind rows remain pending where the byte-tagged pipeline/compound-command support is not yet ported.',
+  },
+  {
+    file: 'packages/just-bash/src/encoding-pipeline.test.ts',
     lines: [213],
     status: 'js-only-documented',
     owner: 'js-only:just-bash-encoding-helper-package-exports',

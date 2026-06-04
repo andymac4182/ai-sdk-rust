@@ -667,6 +667,10 @@ impl JustBashExecutor {
 pub struct JustBashSessionOptions {
     /// Initial virtual files.
     pub files: BTreeMap<String, String>,
+    /// Initial virtual files seeded from raw bytes. Mirrors upstream's
+    /// `files: { path: Uint8Array }` shape: the bytes are stored verbatim
+    /// without UTF-8 re-encoding so non-UTF-8 binaries round-trip exactly.
+    pub binary_files: BTreeMap<String, Vec<u8>>,
     /// Base environment available to every exec.
     pub env: BTreeMap<String, String>,
     /// Base working directory.
@@ -702,6 +706,7 @@ impl Default for JustBashSessionOptions {
     fn default() -> Self {
         Self {
             files: BTreeMap::new(),
+            binary_files: BTreeMap::new(),
             env: BTreeMap::new(),
             cwd: None,
             default_timeout_ms: None,
@@ -728,6 +733,15 @@ impl JustBashSessionOptions {
     /// Adds an initial file.
     pub fn with_file(mut self, path: impl Into<String>, content: impl Into<String>) -> Self {
         self.files.insert(path.into(), content.into());
+        self
+    }
+
+    /// Adds an initial file seeded from raw bytes. The bytes are written
+    /// verbatim — no UTF-8 re-encoding — so non-UTF-8 binary content (for
+    /// example arbitrary `Uint8Array` fixtures upstream) round-trips exactly
+    /// through byte consumers like `cat`, `tee`, and redirects.
+    pub fn with_binary_file(mut self, path: impl Into<String>, bytes: impl Into<Vec<u8>>) -> Self {
+        self.binary_files.insert(path.into(), bytes.into());
         self
     }
 
@@ -933,6 +947,10 @@ impl JustBashSession {
         for (path, content) in &options.files {
             fs.write_file(path, content.as_str())
                 .expect("initial Just Bash file path is valid");
+        }
+        for (path, bytes) in &options.binary_files {
+            fs.write_file(path, bytes.clone())
+                .expect("initial Just Bash binary file path is valid");
         }
         let mut base_env = default_env(&cwd);
         base_env.extend(options.env);
@@ -21920,6 +21938,103 @@ mod tests {
             JustBashExecOptions::new().with_stdin("café\n漢字\n"),
         );
         assert_eq!(stdin.stdout.trim(), "13");
+    }
+
+    #[test]
+    fn jbc45_encoding_pipeline_byte_text_contract_rows_are_byte_safe() {
+        // packages/just-bash/src/encoding-pipeline.test.ts byte/text pipeline
+        // contract rows that the virtual session reproduces verbatim. Each
+        // assertion mirrors one upstream `it(...)` and fails if the byte/text
+        // handoff regresses.
+
+        // L55: `cat /utf8 | rev | base64` encodes the reversed UTF-8 bytes.
+        // base64 of the UTF-8 bytes 0xED 0x95 0x9C ("한") is "7ZWc".
+        let rev =
+            JustBashSession::with_options(JustBashSessionOptions::new().with_file("/in.txt", "한"));
+        assert_eq!(
+            rev.exec("cat /in.txt | rev | base64", JustBashExecOptions::new())
+                .stdout
+                .trim(),
+            "7ZWc"
+        );
+
+        // L71: redirect encoding picks utf8 for unmarked text stdout even when
+        // the first non-ASCII byte lands past any content-sampling window.
+        let redirect = JustBashSession::new();
+        let long_ascii = "x".repeat(8200);
+        redirect.exec(
+            &format!("printf '%s\\n' '{long_ascii}Ü' | sed 's/^//' > /out.txt"),
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(
+            String::from_utf8(redirect.read_file_buffer("/out.txt").unwrap()).unwrap(),
+            format!("{long_ascii}Ü\n")
+        );
+
+        // L108: piped UTF-8 bytes survive `tee` verbatim — the captured copy is
+        // byte-identical to the source, not re-encoded.
+        let tee = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/in.txt", "한글 / café / 漢字"),
+        );
+        let tee_result = tee.exec(
+            "cat /in.txt | tee /out.txt > /dev/null",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(tee_result.exit_code, 0);
+        assert_eq!(
+            tee.read_file_buffer("/out.txt").unwrap(),
+            tee.read_file_buffer("/in.txt").unwrap()
+        );
+
+        // L136: `bash -c` inherits piped stdin and forwards it to byte
+        // consumers — `echo 한` (4 bytes incl. newline) reaches `wc -c`.
+        let bash_c = JustBashSession::new();
+        assert_eq!(
+            bash_c
+                .exec("echo 한 | bash -c 'wc -c'", JustBashExecOptions::new())
+                .stdout
+                .trim(),
+            "4"
+        );
+
+        // L142: a shell function called at the end of a pipeline sees the
+        // parent's stdin in byte form.
+        let function = JustBashSession::new();
+        assert_eq!(
+            function
+                .exec("f() { wc -c; }\necho 한 | f", JustBashExecOptions::new())
+                .stdout
+                .trim(),
+            "4"
+        );
+
+        // L165: a text-emitting custom command pipes correctly without setting
+        // byte flags — "안녕\n" is UTF-8 encoded once to 7 bytes for `wc -c`.
+        let greet = JustBashCustomCommand::new("greet", |_context| {
+            JustBashCustomCommandResult::stdout("안녕\n")
+        });
+        let custom =
+            JustBashSession::with_options(JustBashSessionOptions::new().with_custom_command(greet));
+        assert_eq!(
+            custom
+                .exec("greet | wc -c", JustBashExecOptions::new())
+                .stdout
+                .trim(),
+            "7"
+        );
+    }
+
+    #[test]
+    fn just_bash_session_with_binary_file_seeds_raw_bytes_verbatim() {
+        // `JustBashSessionOptions::with_binary_file` mirrors upstream's
+        // `files: { path: Uint8Array }` shape: the raw bytes land in the
+        // virtual filesystem without UTF-8 re-encoding, so a non-UTF-8 payload
+        // is byte-identical when read back through the buffer API.
+        let bytes = vec![0x80u8, 0xff, 0x00, 0x90];
+        let session = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_binary_file("/binary.bin", bytes.clone()),
+        );
+        assert_eq!(session.read_file_buffer("/binary.bin").unwrap(), bytes);
     }
 
     #[test]
