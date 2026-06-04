@@ -3377,6 +3377,21 @@ const jbc33CaseGroups = [
   },
 ];
 
+const jbr1CaseGroups = [
+  {
+    file: 'packages/just-bash/src/syntax/parser-edge-cases.test.ts',
+    lines: [
+      6, 12, 18, 24, 36, 42, 50, 56, 62, 74, 80, 88, 94, 100, 106, 112,
+      118, 124, 130, 139, 145, 151, 157, 163, 208, 214, 220, 226, 232, 238,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbr1_syntax_parser_edge_cases_match_upstream',
+    notes:
+      'JBR-1 verifies portable parser edge cases — nested/empty/adjacent quoting, escape sequences, ${VAR:-default} expansion, $? and undefined-variable expansion, multi-space/tab/leading/trailing whitespace normalization, and operator parsing without spaces — through the Rust shell interpreter.',
+  },
+];
+
 const jbc35CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/awk/awk.fields.test.ts',
@@ -4251,6 +4266,7 @@ function caseOverrideFor(testCase) {
     ...jbc27CaseGroups,
     ...jbc30AgentExampleCaseGroups,
     ...jbc33CaseGroups,
+    ...jbr1CaseGroups,
     ...jbc37CaseGroups,
     ...jbc44CaseGroups,
   ].find(
