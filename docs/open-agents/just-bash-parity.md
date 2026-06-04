@@ -19,11 +19,11 @@ Rows are intentionally fail-closed: no row is verified until a sibling implement
 | Non-test TS/TSX source files | 423 |
 | Test files | 485 |
 | Test cases | 9936 |
-| Portable pending cases | 2284 |
-| Portable verified cases | 6532 |
+| Portable pending cases | 2254 |
+| Portable verified cases | 6562 |
 | JS-only documented cases | 1120 |
 | Type-system impossible cases | 0 |
-| Strict gate gaps | 2284 |
+| Strict gate gaps | 2254 |
 | Inventory check command | node scripts/just-bash-test-inventory.mjs --check |
 | Strict gate command | node scripts/just-bash-test-inventory.mjs --strict |
 | Conformance plan | docs/open-agents/just-bash-conformance.md |
