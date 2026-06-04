@@ -1182,6 +1182,24 @@ const jbc10CaseGroups = [
     notes:
       'JBC-10 verifies imported ripgrep regression rows for gitignore, file-listing, and exit codes: build-directory negation with -l, a**b non-match, --files-with-matches / --files-without-match listings, invalid-flag and match/no-match/quiet exit codes, ** and **/**/* gitignore non-matches, pattern files without trailing newline, **/bar/* -l non-match, and unclosed character class allowed in gitignore over the virtual filesystem.',
   },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [247, 594, 606, 916, 929, 1003, 1364, 1429],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_regression_misc_pattern_file_context_and_filter_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported ripgrep regression rows: full-path gitignore pattern hiding foo/sherlock while keeping foo/watson (r105), repeated -i staying case-insensitive (r553_switch), a later -C 0 overriding an earlier -C 1 to drop the context separator (r553_flag), -F and -x with a pattern file (r1176 literal/line-regex), a bounded-repetition DNA sequence regex (r1319), multiple -e patterns with --only-matching listing each match (r2236), and --stats reporting the bytes-searched summary line (r2770) over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
+    lines: [1004, 1167],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_misc_type_list_and_unrestricted_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported rg misc rows: -uu (unrestricted2) including hidden dotfiles in the search results, and --type-list listing the known file types (rust, py) over the virtual filesystem.',
+  },
 ];
 
 const jbc12SourceGroups = [
@@ -3100,6 +3118,20 @@ const jbc25CaseGroups = [
       'JBC-25 verifies portable AWK length, substr, index, case conversion, sub/gsub including matched-text replacement and field targets, and bounded sprintf rows; wider formatting and remaining substitution variants stay pending.',
   },
   {
+    file: 'packages/just-bash/src/commands/awk/awk.strings.test.ts',
+    lines: [
+      80, 109, 118, 147, 165, 185, 194, 214, 223, 232, 271, 289, 327,
+      336, 345, 365, 374, 383, 390, 401, 410, 419, 428, 439, 446, 455,
+      464,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest:
+      'awk_jbc25_string_builtin_concat_compare_and_coercion_rows',
+    notes:
+      'JBC-25 verifies additional portable AWK string rows: substr middle slice, index single-char and first-occurrence, tolower/toupper across cases and symbols, sub match/no-match/explicit-target, gsub no-match and digit replacement, sprintf width/left-justify/zero-pad, variable and literal concatenation, numeric-literal concatenation, accumulating concat, string ==/!=/</> comparison, leading-numeric and non-numeric +0 coercion, and number-to-string via empty concatenation.',
+  },
+  {
     file: 'packages/just-bash/src/commands/awk/awk.modulo.test.ts',
     lines: [6, 36, 54, 74],
     status: 'portable-verified',
@@ -4304,6 +4336,29 @@ const jbc46CaseGroups = [
   },
 ];
 
+const jbc47CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/sed/sed.errors.test.ts',
+    lines: [37, 44, 59, 66, 75, 82, 89, 106, 113, 122, 129, 170, 177, 186, 193],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sed',
+    rustTest:
+      'sed_jbc47_argument_errors_transliteration_blocks_and_script_files',
+    notes:
+      'JBC-47 verifies portable sed error/diagnostic rows: missing -f script file (No such file or directory), lenient unterminated substitution / unknown command / unknown flag / line-0 address, missing context address (,3p), unterminated address regex (/foo d -> command expected), undefined branch labels (b/t), unknown short/long options, mismatched and unterminated y transliteration sets, and addressed single-command { } blocks. Multi-command blocks, a/i/c text, and step-address negative/zero rows remain pending the cycle engine.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sed/sed.advanced.test.ts',
+    lines: [35, 45, 122, 133, 144, 157],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sed',
+    rustTest:
+      'sed_jbc47_argument_errors_transliteration_blocks_and_script_files',
+    notes:
+      'JBC-47 verifies portable sed y transliteration (lowercase->uppercase and character rotation) and -f script-file handling: reading a multi-command script file, ignoring # comments, combining -f with -e, and the missing-script-file diagnostic (couldn\'t open file). N/=/branch-with-labels advanced rows remain pending the cycle engine.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -4557,6 +4612,7 @@ function caseOverrideFor(testCase) {
     ...jbc43CaseGroups,
     ...jbc45CaseGroups,
     ...jbc46CaseGroups,
+    ...jbc47CaseGroups,
     ...jbc27CaseGroups,
     ...jbc30AgentExampleCaseGroups,
     ...jbc33CaseGroups,

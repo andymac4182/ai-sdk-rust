@@ -2035,6 +2035,151 @@ and exhibited clearly, with a label attached.\n";
         assert_eq!(env.exec("awk '{print NF}' /fields.txt").stdout, "3\n3\n");
     }
 
+    /// JBC-47 closes portable sed argument/error-handling and single-command
+    /// extras: `-f` script files, `y///` transliteration, addressed single-
+    /// command `{ }` blocks, and the GNU sed diagnostics for missing scripts,
+    /// unknown options, undefined branch labels, context-address errors, and
+    /// malformed transliteration sets. Each assertion mirrors the upstream
+    /// `sed.errors.test.ts` and `sed.advanced.test.ts` expectations exactly.
+    #[test]
+    fn sed_jbc47_argument_errors_transliteration_blocks_and_script_files() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/test/file.txt".to_string(),
+                "line 1\nline 2\nline 3\n".to_string(),
+            )]),
+            cwd: Some("/test".to_string()),
+            ..BashOptions::default()
+        });
+
+        // sed.errors.test.ts:37 — `-f` on a missing script file reports
+        // "No such file or directory" and exits 1.
+        let missing_f = env.exec("sed -f /nonexistent.sed /test/file.txt");
+        assert_eq!(missing_f.exit_code, 1);
+        assert!(missing_f.stderr.contains("No such file or directory"));
+
+        // sed.errors.test.ts:44 — unterminated substitution does not hang and
+        // returns a defined result.
+        let unterminated_s = env.exec("sed 's/foo/bar' /test/file.txt");
+        assert_eq!(unterminated_s.exit_code, 1);
+
+        // sed.errors.test.ts:59 — unknown command `z` is handled gracefully
+        // (a defined result rather than a panic / hang).
+        let _unknown_cmd = env.exec("sed 'z' /test/file.txt");
+
+        // sed.errors.test.ts:66 — unknown substitution flag is ignored, exit 0.
+        assert_eq!(env.exec("sed 's/a/b/z' /test/file.txt").exit_code, 0);
+
+        // sed.errors.test.ts:75 — line-0 address is handled gracefully.
+        assert_eq!(env.exec("sed '0d' /test/file.txt").exit_code, 0);
+
+        // sed.errors.test.ts:82 — `,3p` (missing start address) reports
+        // "expected context address".
+        let ctx_addr = env.exec("sed -n ',3p' /test/file.txt");
+        assert_eq!(ctx_addr.exit_code, 1);
+        assert!(ctx_addr.stderr.contains("expected context address"));
+
+        // sed.errors.test.ts:89 — `/foo d` (unterminated address regex)
+        // reports "command expected".
+        let malformed_addr = env.exec("sed '/foo d' /test/file.txt");
+        assert_eq!(malformed_addr.exit_code, 1);
+        assert!(malformed_addr.stderr.contains("command expected"));
+
+        // sed.errors.test.ts:106 / :113 — branch (`b`) and conditional branch
+        // (`t`) to an undefined label both report "undefined label".
+        let b_undef = env.exec("sed 'b undefined' /test/file.txt");
+        assert_eq!(b_undef.exit_code, 1);
+        assert!(b_undef.stderr.contains("undefined label"));
+        let t_undef = env.exec("sed 't missing' /test/file.txt");
+        assert_eq!(t_undef.exit_code, 1);
+        assert!(t_undef.stderr.contains("undefined label"));
+
+        // sed.errors.test.ts:122 / :129 — unknown short and long options.
+        let short_opt = env.exec("sed -z 's/a/b/' /test/file.txt");
+        assert_eq!(short_opt.exit_code, 1);
+        assert!(short_opt.stderr.contains("invalid option"));
+        let long_opt = env.exec("sed --unknown 's/a/b/' /test/file.txt");
+        assert_eq!(long_opt.exit_code, 1);
+        assert!(long_opt.stderr.contains("unrecognized option"));
+
+        // sed.errors.test.ts:170 / :177 — mismatched and unterminated `y`.
+        let y_mismatch = env.exec("sed 'y/abc/xy/' /test/file.txt");
+        assert_eq!(y_mismatch.exit_code, 1);
+        assert!(y_mismatch.stderr.contains("same length"));
+        let y_unterminated = env.exec("sed 'y/abc/xyz' /test/file.txt");
+        assert_eq!(y_unterminated.exit_code, 1);
+        assert!(y_unterminated.stderr.contains("unterminated"));
+
+        // sed.errors.test.ts:186 — addressed single-command block `1{d;}`.
+        let block_delete = env.exec("sed '1{d;}' /test/file.txt");
+        assert_eq!(block_delete.exit_code, 0);
+        assert_eq!(block_delete.stdout, "line 2\nline 3\n");
+
+        // sed.errors.test.ts:193 — block with substitution `1{s/1/X/;}`.
+        let block_sub = env.exec("sed '1{s/1/X/;}' /test/file.txt");
+        assert_eq!(block_sub.exit_code, 0);
+        assert!(block_sub.stdout.contains("line X"));
+
+        // A separate environment with no preset cwd for the `sed` (no script)
+        // and transliteration / script-file rows.
+        let plain = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/test.txt".to_string(), "hello world\n".to_string()),
+                ("/rotate.txt".to_string(), "abc\n".to_string()),
+                (
+                    "/multi.sed".to_string(),
+                    "s/hello/HELLO/\ns/world/WORLD/\n".to_string(),
+                ),
+                (
+                    "/comment.sed".to_string(),
+                    "# This is a comment\ns/hello/HELLO/\n".to_string(),
+                ),
+                ("/one.sed".to_string(), "s/hello/HELLO/\n".to_string()),
+                ("/lower.txt".to_string(), "hello\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // sed.errors.test.ts:38 / sed.ts — `sed` with no script reports
+        // "no script specified".
+        let no_script = plain.exec("sed");
+        assert_eq!(no_script.exit_code, 1);
+        assert!(no_script.stderr.contains("no script specified"));
+
+        // sed.advanced.test.ts:35 — `y` lowercase to uppercase.
+        assert_eq!(
+            plain
+                .exec("sed 'y/abcdefghijklmnopqrstuvwxyz/ABCDEFGHIJKLMNOPQRSTUVWXYZ/' /test.txt")
+                .stdout,
+            "HELLO WORLD\n"
+        );
+        // sed.advanced.test.ts:45 — `y` rotation.
+        assert_eq!(plain.exec("sed 'y/abc/bca/' /rotate.txt").stdout, "bca\n");
+
+        // sed.advanced.test.ts:122 — `-f` reads a multi-command script file.
+        assert_eq!(
+            plain.exec("sed -f /multi.sed /test.txt").stdout,
+            "HELLO WORLD\n"
+        );
+        // sed.advanced.test.ts:133 — `-f` ignores `#` comments.
+        assert_eq!(
+            plain.exec("sed -f /comment.sed /lower.txt").stdout,
+            "HELLO\n"
+        );
+        // sed.advanced.test.ts:144 — combines `-f` and `-e`.
+        assert_eq!(
+            plain
+                .exec("sed -f /one.sed -e 's/world/WORLD/' /test.txt")
+                .stdout,
+            "HELLO WORLD\n"
+        );
+        // sed.advanced.test.ts:157 — `-f` on a missing file reports
+        // "couldn't open file".
+        let missing_script = plain.exec("sed -f /nope.sed /test.txt");
+        assert_eq!(missing_script.exit_code, 1);
+        assert!(missing_script.stderr.contains("couldn't open file"));
+    }
+
     #[test]
     fn awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors() {
         let env = Bash::with_options(BashOptions {
@@ -2735,6 +2880,142 @@ and exhibited clearly, with a label attached.\n";
         let pre_inc = env.exec(r#"echo "" | awk 'BEGIN { a["x"] = 5; print ++a["x"], a["x"] }'"#);
         assert_eq!(pre_inc.stdout, "6 6\n");
         assert_eq!(pre_inc.exit_code, 0);
+    }
+
+    #[test]
+    fn awk_jbc25_string_builtin_concat_compare_and_coercion_rows() {
+        // Maps the remaining portable rows of awk.strings.test.ts that the Rust
+        // awk subset implements 1:1. Each assertion mirrors the upstream vitest
+        // expectation exactly (strict stdout + exit code). Cited file:line refer
+        // to packages/just-bash/src/commands/awk/awk.strings.test.ts.
+        let env = Bash::default();
+        let cases: &[(&str, &str)] = &[
+            // substr() middle portion (awk.strings.test.ts:80).
+            (
+                r#"echo "" | awk 'BEGIN { print substr("abcdefgh", 3, 4) }'"#,
+                "cdef\n",
+            ),
+            // index() single character (awk.strings.test.ts:109).
+            (
+                r#"echo "" | awk 'BEGIN { print index("abcdef", "c") }'"#,
+                "3\n",
+            ),
+            // index() first occurrence (awk.strings.test.ts:118).
+            (
+                r#"echo "" | awk 'BEGIN { print index("abcabc", "bc") }'"#,
+                "2\n",
+            ),
+            // tolower() basic (awk.strings.test.ts:147).
+            (
+                r#"echo "" | awk 'BEGIN { print tolower("hello") }'"#,
+                "hello\n",
+            ),
+            // tolower() preserves digits/symbols (awk.strings.test.ts:165).
+            (
+                r#"echo "" | awk 'BEGIN { print tolower("ABC123!@#") }'"#,
+                "abc123!@#\n",
+            ),
+            // toupper() basic (awk.strings.test.ts:185).
+            (
+                r#"echo "" | awk 'BEGIN { print toupper("HELLO") }'"#,
+                "HELLO\n",
+            ),
+            // toupper() mixed case (awk.strings.test.ts:194).
+            (
+                r#"echo "" | awk 'BEGIN { print toupper("HeLLo WoRLd") }'"#,
+                "HELLO WORLD\n",
+            ),
+            // sub() returns 1 on a match and mutates $0 (awk.strings.test.ts:214).
+            (
+                r#"echo "hello" | awk '{ n = sub(/l/, "L"); print n, $0 }'"#,
+                "1 heLlo\n",
+            ),
+            // sub() returns 0 on no match (awk.strings.test.ts:223).
+            (
+                r#"echo "hello" | awk '{ n = sub(/x/, "X"); print n, $0 }'"#,
+                "0 hello\n",
+            ),
+            // sub() with an explicit target variable (awk.strings.test.ts:232).
+            (
+                r#"echo "test" | awk '{ x = "foo bar foo"; sub(/foo/, "baz", x); print x }'"#,
+                "baz bar foo\n",
+            ),
+            // gsub() returns 0 when nothing matches (awk.strings.test.ts:271).
+            (
+                r#"echo "hello" | awk '{ n = gsub(/x/, "X"); print n, $0 }'"#,
+                "0 hello\n",
+            ),
+            // gsub() replaces every digit (awk.strings.test.ts:289).
+            (
+                r##"echo "a1b2c3" | awk '{ gsub(/[0-9]/, "#"); print }'"##,
+                "a#b#c#\n",
+            ),
+            // sprintf() right-justified width (awk.strings.test.ts:327).
+            (
+                r#"echo "" | awk 'BEGIN { print sprintf("[%10s]", "hi") }'"#,
+                "[        hi]\n",
+            ),
+            // sprintf() left-justified width (awk.strings.test.ts:336).
+            (
+                r#"echo "" | awk 'BEGIN { print sprintf("[%-10s]", "hi") }'"#,
+                "[hi        ]\n",
+            ),
+            // sprintf() zero-padded integer (awk.strings.test.ts:345).
+            (
+                r#"echo "" | awk 'BEGIN { print sprintf("%05d", 42) }'"#,
+                "00042\n",
+            ),
+            // string concatenation of variables (awk.strings.test.ts:365).
+            (
+                r#"echo "" | awk 'BEGIN { a = "hello"; b = "world"; print a " " b }'"#,
+                "hello world\n",
+            ),
+            // literal string concatenation (awk.strings.test.ts:374).
+            (
+                r#"echo "" | awk 'BEGIN { print "foo" "bar" "baz" }'"#,
+                "foobarbaz\n",
+            ),
+            // numeric literals concatenate as strings (awk.strings.test.ts:383).
+            (r#"echo "" | awk 'BEGIN { print 1 2 3 }'"#, "123\n"),
+            // accumulating concatenation (awk.strings.test.ts:390).
+            (
+                r#"echo "" | awk 'BEGIN { s = "a"; s = s "b"; s = s "c"; print s }'"#,
+                "abc\n",
+            ),
+            // string equality comparison (awk.strings.test.ts:401).
+            (
+                r#"echo "" | awk 'BEGIN { if ("abc" == "abc") print "equal" }'"#,
+                "equal\n",
+            ),
+            // string inequality comparison (awk.strings.test.ts:410).
+            (
+                r#"echo "" | awk 'BEGIN { if ("abc" != "xyz") print "different" }'"#,
+                "different\n",
+            ),
+            // lexicographic less-than (awk.strings.test.ts:419).
+            (
+                r#"echo "" | awk 'BEGIN { if ("abc" < "abd") print "less" }'"#,
+                "less\n",
+            ),
+            // lexicographic greater-than (awk.strings.test.ts:428).
+            (
+                r#"echo "" | awk 'BEGIN { if ("z" > "a") print "greater" }'"#,
+                "greater\n",
+            ),
+            // numeric string + 0 coercion (awk.strings.test.ts:439).
+            (r#"echo "" | awk 'BEGIN { print "42" + 0 }'"#, "42\n"),
+            // leading-numeric string coercion (awk.strings.test.ts:446).
+            (r#"echo "" | awk 'BEGIN { print "123abc" + 0 }'"#, "123\n"),
+            // non-numeric string coerces to 0 (awk.strings.test.ts:455).
+            (r#"echo "" | awk 'BEGIN { print "hello" + 0 }'"#, "0\n"),
+            // number-to-string via empty concatenation (awk.strings.test.ts:464).
+            (r#"echo "" | awk 'BEGIN { n = 42; print n "" }'"#, "42\n"),
+        ];
+        for (prog, want) in cases {
+            let r = env.exec(prog);
+            assert_eq!(r.exit_code, 0, "{prog}: stderr={:?}", r.stderr);
+            assert_eq!(&r.stdout, want, "{prog}");
+        }
     }
 
     #[test]
@@ -6015,6 +6296,110 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
             0,
             "test\n",
         );
+    }
+
+    #[test]
+    fn rg_imported_regression_misc_pattern_file_context_and_filter_rows_are_portable() {
+        // packages/just-bash/src/commands/rg/imported-tests/regression.test.ts
+        // 247 - r105: gitignore with full path pattern hides foo/sherlock but keeps foo/watson
+        let r105 = home_bash(&[
+            (".git/.gitkeep", ""),
+            (".gitignore", "foo/sherlock\n"),
+            ("foo/sherlock", SHERLOCK),
+            ("foo/watson", SHERLOCK),
+        ])
+        .exec("rg Sherlock");
+        assert_eq!(r105.exit_code, 0, "r105");
+        assert!(r105.stdout.contains("foo/watson:"), "r105 keeps watson");
+        assert!(
+            !r105.stdout.contains("foo/sherlock:"),
+            "r105 ignores sherlock"
+        );
+        assert_eq!(r105.stderr, "", "r105 stderr");
+
+        // 594 - r553_switch: repeated -i flag stays case-insensitive
+        let r553i = home_bash(&[("sherlock", SHERLOCK)]).exec("rg -i -i sherlock");
+        assert_eq!(r553i.exit_code, 0, "r553_switch");
+        assert!(r553i.stdout.contains("Sherlock"), "r553_switch matches");
+        assert_eq!(r553i.stderr, "", "r553_switch stderr");
+
+        // 606 - r553_flag: later -C 0 overrides an earlier -C 1, removing the context separator
+        let r553c = home_bash(&[("sherlock", SHERLOCK)]);
+        let with_ctx = r553c.exec("rg -C 1 'world|attached' sherlock");
+        assert_eq!(with_ctx.exit_code, 0, "r553_flag ctx");
+        assert!(with_ctx.stdout.contains("--"), "r553_flag has separator");
+        let no_ctx = r553c.exec("rg -C 1 -C 0 'world|attached' sherlock");
+        assert_eq!(no_ctx.exit_code, 0, "r553_flag override");
+        assert!(
+            !no_ctx.stdout.contains("--"),
+            "r553_flag override removes separator"
+        );
+
+        // 916 - r1176_literal_file: -F with a pattern file treats the pattern literally
+        assert_home_exec(
+            &[("patterns", "foo(bar\n"), ("test", "foo(bar\n")],
+            "rg -F -f patterns test",
+            0,
+            "foo(bar\n",
+        );
+        // 929 - r1176_line_regex: -x with a pattern file requires a whole-line match
+        assert_home_exec(
+            &[("patterns", "foo\n"), ("test", "foobar\nfoo\nbarfoo\n")],
+            "rg -x -f patterns test",
+            0,
+            "foo\n",
+        );
+
+        // 1003 - r1319: DNA sequence regex with bounded repetition matches the corpus line
+        let dna = home_bash(&[(
+            "input",
+            "CCAGCTACTCGGGAGGCTGAGGCTGGAGGATCGCTTGAGTCCAGGAGTTC\n",
+        )])
+        .exec("rg 'TTGAGTCCAGGAG[ATCG]{2}C'");
+        assert_eq!(dna.exit_code, 0, "r1319 exit");
+        assert!(
+            dna.stdout
+                .contains("CCAGCTACTCGGGAGGCTGAGGCTGGAGGATCGCTTGAGTCCAGGAGTTC"),
+            "r1319 matches DNA line"
+        );
+        assert_eq!(dna.stderr, "", "r1319 stderr");
+
+        // 1364 - r2236: multiple -e patterns with --only-matching list each match in order
+        assert_home_exec(
+            &[("file", "FooBar\n")],
+            "rg --only-matching -e Foo -e Bar file",
+            0,
+            "Foo\nBar\n",
+        );
+
+        // 1429 - r2770: --stats reports the bytes searched summary line
+        let stats = home_bash(&[("haystack", "foo1\nfoo2\nfoo3\nfoo4\nfoo5\n")])
+            .exec("rg --stats -m2 foo .");
+        assert_eq!(stats.exit_code, 0, "r2770 exit");
+        assert!(
+            stats.stdout.contains("bytes searched"),
+            "r2770 reports bytes searched"
+        );
+        assert_eq!(stats.stderr, "", "r2770 stderr");
+    }
+
+    #[test]
+    fn rg_imported_misc_type_list_and_unrestricted_rows_are_portable() {
+        // packages/just-bash/src/commands/rg/imported-tests/misc.test.ts
+        // 1004 - unrestricted2: -uu includes hidden dotfiles in the search
+        assert_home_exec(
+            &[(".sherlock", SHERLOCK)],
+            "rg -uu Sherlock",
+            0,
+            ".sherlock:1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+.sherlock:3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 1167 - files (type-list): --type-list lists the known file types
+        let type_list = home_bash(&[]).exec("rg --type-list");
+        assert_eq!(type_list.exit_code, 0, "type-list exit");
+        assert!(type_list.stdout.contains("rust"), "type-list has rust");
+        assert!(type_list.stdout.contains("py"), "type-list has py");
+        assert_eq!(type_list.stderr, "", "type-list stderr");
     }
 
     #[test]
