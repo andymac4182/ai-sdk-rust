@@ -969,6 +969,42 @@ const jbc09CaseGroups = [
     notes:
       'just-bash-command-awk verifies portable awk gensub() backreferences (\\2 \\1 reorder captured groups), printf %c printing the first character of a string argument, and printf %.2e scientific notation matching JS toExponential (1.23e+3).',
   },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.ternary.test.ts',
+    lines: [6, 15, 24, 35, 44, 53, 66, 75, 86, 95, 106, 115, 150, 159, 168],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_ternary_operator_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk ternary ?: semantics: true/false branch selection, expressions evaluated in the chosen branch, numeric/string/equality comparison conditions, single- and multi-level nested ternary, assignment of the result, ternary inside a compound expression, function calls in the condition and branches, and truthiness of empty strings, non-empty strings, and non-zero numbers. The getline-backed async rows remain pending without getline support.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.modulo.test.ts',
+    lines: [13, 20, 27, 45, 65, 83, 94, 105],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_modulo_operator_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk modulo: exact-division zero result, floating-point modulo, zero dividend, the %= compound assignment between variables, even-number and every-Nth-record filters via $1 % 2 and NR % 3, modulo inside a for loop, and a negative dividend keeping the dividend sign. The negative-divisor row (7 % -3) remains pending unary-minus operand parsing.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.math.test.ts',
+    lines: [59, 97],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_atan2_math_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk atan2(): atan2(0, 1) is exactly 0 and atan2(1, 0) is pi/2. The non-deterministic rand()/srand() rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.patterns.test.ts',
+    lines: [6, 15, 24, 33, 42],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_regex_pattern_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk regex patterns: a literal /ana/ match, ^ and $ anchors, a [cd] character class, and a negated [^a-z] character class selecting digit records.',
+  },
 ];
 
 const jbc10CaseGroups = [
@@ -1136,6 +1172,26 @@ const jbc10CaseGroups = [
     rustTest: 'rg_imported_regression_gitignore_regex_and_flag_rows_are_portable',
     notes:
       'JBC-10 verifies imported ripgrep regression rows: rooted/unanchored/nested/trailing-slash/double-star/dot-star gitignore patterns, --files with a path argument, IP-style repeated-group and cyrillic case-folding regex, smart-case bracket sensitivity, -e dash patterns, -q quiet exit, --only-matching, and --quiet --files glob exit codes over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [285, 468, 716, 730, 742, 1071, 1313, 1385],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest:
+      'rg_imported_regression_negation_symlink_anchored_and_exit_code_rows_are_portable',
+    notes:
+      'JBC-10 verifies additional imported ripgrep regression rows: -L follows file symlinks and skips broken symlinks while searching targets, complex --files glob exclusion plus inclusion, anchored .ignore patterns (/parent/*.txt, trailing-slash /testdir/sub/sub2/) and files-with-matches honouring .ignore from a cwd subdirectory, --no-ignore-dot disabling .ignore/.rgignore filtering, and --hidden --files listing dotfiles while honouring .ignore over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
+    lines: [1135],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest:
+      'rg_imported_regression_negation_symlink_anchored_and_exit_code_rows_are_portable',
+    notes:
+      'JBC-10 verifies the imported rg misc -a (text) row searches binary (NUL-containing) file content literally and prints the matching lines over the virtual filesystem.',
   },
   {
     file: 'packages/just-bash/src/commands/rg/imported-tests/feature.test.ts',
@@ -2828,6 +2884,24 @@ const jbc34CaseGroups = [
     notes: 'JBC-34 verifies grep preserves multibyte stdin matches through the Rust pipe path.',
   },
   {
+    file: 'packages/just-bash/src/commands/grep/grep.exclude.test.ts',
+    lines: [6, 21, 36, 51, 68, 86, 104, 119, 131, 143, 160],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-search',
+    rustTest: 'text_search_jbc_grep_exclude_files_without_match_and_bracket_rows',
+    notes:
+      'JBC-34 verifies grep --exclude (single/multiple globs, non-recursive explicit paths), --exclude-dir (single/multiple plus combined with --exclude), and -L/--files-without-match (explicit list, exit-code 0/1, recursive -rL, and the long-form flag) over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/grep/grep.basic.test.ts',
+    lines: [636, 644],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-search',
+    rustTest: 'text_search_jbc_grep_exclude_files_without_match_and_bracket_rows',
+    notes:
+      'JBC-34 verifies POSIX bracket edge cases where a leading ] is a literal class member: a[][]b matches ] or [, and a[^]b]c negates ] and b.',
+  },
+  {
     file: 'packages/just-bash/src/commands/rg/rg.patterns.test.ts',
     lines: [
       5, 18, 31, 44, 57, 70, 85, 98, 113, 126, 139, 154, 167, 180, 193,
@@ -4515,6 +4589,30 @@ const jbc47CaseGroups = [
   },
 ];
 
+const jbSedTestTsCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/sed/sed.test.ts',
+    lines: [
+      267, 281, 294, 307, 320, 339, 354, 364, 378, 388, 398, 410, 426, 435,
+      444, 455, 464, 473, 484, 493, 609, 618, 627, 638, 647, 658, 670, 682,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sed',
+    rustTest: 'sed_test_ts_inplace_holdspace_text_and_cycle_rows',
+    notes:
+      'command-sed verifies the sed.test.ts cycle-engine rows over the virtual session: -i/--in-place editing (single/global/delete/match-delete/multi-file), the h/H/g/G/x hold space, the a/i/c text commands, relative-offset (+N) addresses with and without { } blocks, grouped { } commands, and the P/D first-line commands. Each assertion mirrors the upstream expectation verbatim.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sed/sed.commands.test.ts',
+    lines: [216, 249],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sed',
+    rustTest: 'sed_test_ts_inplace_holdspace_text_and_cycle_rows',
+    notes:
+      'command-sed verifies multiple -e scripts run in sequence and relative-offset (/alpha/,+2) address matching through the sed cycle engine.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -4756,6 +4854,7 @@ const jbExecOptionsLoggingCaseGroups = [
 
 function caseOverrideFor(testCase) {
   const group = [
+    ...jbSedTestTsCaseGroups,
     ...jbAliasCaseGroups,
     ...jbInterpreterBuiltinsCaseGroups,
     ...jbR5ParserInterpreterCaseGroups,

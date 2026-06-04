@@ -2391,6 +2391,261 @@ and exhibited clearly, with a label attached.\n";
         );
     }
 
+    /// Closes the `command-sed` strict gaps from `sed.test.ts` and
+    /// `sed.commands.test.ts` that exercise the GNU sed cycle engine through
+    /// the virtual session: `-i`/`--in-place` editing, the `h/H/g/G/x` hold
+    /// space, the `a/i/c` text commands, relative-offset (`+N`) addresses,
+    /// grouped `{ }` commands, and the `P`/`D` first-line commands. Each
+    /// assertion mirrors an upstream just-bash test verbatim by file:line and
+    /// fails if the behavior is wrong.
+    #[test]
+    fn sed_test_ts_inplace_holdspace_text_and_cycle_rows() {
+        // Helper: build a fresh root session with the supplied files.
+        let session = |files: &[(&str, &str)]| {
+            Bash::with_options(BashOptions {
+                files: files
+                    .iter()
+                    .map(|(p, c)| (p.to_string(), c.to_string()))
+                    .collect::<BTreeMap<_, _>>(),
+                cwd: Some("/".to_string()),
+                ..BashOptions::default()
+            })
+        };
+
+        // ---- in-place editing (-i) — sed.test.ts ----
+        // :267 `-i 's/hello/hi/'` modifies the file and prints nothing.
+        let env = session(&[("/test.txt", "hello world\n")]);
+        let r = env.exec("sed -i 's/hello/hi/' /test.txt");
+        assert_eq!(r.stdout, "");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(env.exec("cat /test.txt").stdout, "hi world\n");
+        // :281 `-i 's/foo/baz/g'` global in-place replacement.
+        let env = session(&[("/test.txt", "foo foo foo\nbar foo bar\n")]);
+        assert_eq!(env.exec("sed -i 's/foo/baz/g' /test.txt").stdout, "");
+        assert_eq!(
+            env.exec("cat /test.txt").stdout,
+            "baz baz baz\nbar baz bar\n"
+        );
+        // :294 `-i '2d'` deletes a line in place.
+        let env = session(&[("/test.txt", "line 1\nline 2\nline 3\n")]);
+        assert_eq!(env.exec("sed -i '2d' /test.txt").stdout, "");
+        assert_eq!(env.exec("cat /test.txt").stdout, "line 1\nline 3\n");
+        // :307 `-i '/remove/d'` deletes matching lines in place.
+        let env = session(&[("/test.txt", "keep this\nremove this\nkeep that\n")]);
+        assert_eq!(env.exec("sed -i '/remove/d' /test.txt").stdout, "");
+        assert_eq!(env.exec("cat /test.txt").stdout, "keep this\nkeep that\n");
+        // :320 `-i` edits multiple files in place.
+        let env = session(&[("/a.txt", "hello\n"), ("/b.txt", "hello\n")]);
+        assert_eq!(env.exec("sed -i 's/hello/hi/' /a.txt /b.txt").stdout, "");
+        assert_eq!(env.exec("cat /a.txt").stdout, "hi\n");
+        assert_eq!(env.exec("cat /b.txt").stdout, "hi\n");
+        // :339 `--in-place` is the long form of `-i`.
+        let env = session(&[("/test.txt", "old text\n")]);
+        assert_eq!(env.exec("sed --in-place 's/old/new/' /test.txt").stdout, "");
+        assert_eq!(env.exec("cat /test.txt").stdout, "new text\n");
+
+        // ---- hold space commands (h/H/g/G/x) — sed.test.ts ----
+        // :354 `1h;3G` copies line 1 to hold then appends hold at line 3.
+        assert_eq!(
+            session(&[("/test.txt", "first\nsecond\nthird\n")])
+                .exec("sed '1h;3G' /test.txt")
+                .stdout,
+            "first\nsecond\nthird\nfirst\n"
+        );
+        // :364 `H;$G` accumulates every line in hold then appends at EOF.
+        assert_eq!(
+            session(&[("/test.txt", "a\nb\nc\n")])
+                .exec("sed 'H;$G' /test.txt")
+                .stdout,
+            "a\nb\nc\na\nb\nc\n"
+        );
+        // :378 `1h;2g` copies hold to pattern space, replacing line 2.
+        assert_eq!(
+            session(&[("/test.txt", "first\nsecond\n")])
+                .exec("sed '1h;2g' /test.txt")
+                .stdout,
+            "first\nfirst\n"
+        );
+        // :388 `1h;2G` appends hold space to pattern space at line 2.
+        assert_eq!(
+            session(&[("/test.txt", "header\ndata\n")])
+                .exec("sed '1h;2G' /test.txt")
+                .stdout,
+            "header\ndata\nheader\n"
+        );
+        // :398 `x` exchanges pattern and hold spaces each cycle.
+        assert_eq!(
+            session(&[("/test.txt", "A\nB\n")])
+                .exec("sed 'x' /test.txt")
+                .stdout,
+            "\nA\n"
+        );
+        // :410 `-n '$g;$p'` copies the (empty) hold at EOF and prints it.
+        assert_eq!(
+            session(&[("/test.txt", "1\n2\n3\n")])
+                .exec("sed -n '$g;$p' /test.txt")
+                .stdout,
+            "\n"
+        );
+
+        // ---- append command (a) — sed.test.ts ----
+        // :426 `2a\ appended` appends text after the addressed line.
+        assert_eq!(
+            session(&[("/test.txt", "line 1\nline 2\nline 3\n")])
+                .exec("sed '2a\\ appended' /test.txt")
+                .stdout,
+            "line 1\nline 2\nappended\nline 3\n"
+        );
+        // :435 `a\ ---` appends after every line.
+        assert_eq!(
+            session(&[("/test.txt", "a\nb\n")])
+                .exec("sed 'a\\ ---' /test.txt")
+                .stdout,
+            "a\n---\nb\n---\n"
+        );
+        // :444 `$a\ footer` appends after the last line.
+        assert_eq!(
+            session(&[("/test.txt", "first\nlast\n")])
+                .exec("sed '$a\\ footer' /test.txt")
+                .stdout,
+            "first\nlast\nfooter\n"
+        );
+
+        // ---- insert command (i) — sed.test.ts ----
+        // :455 `2i\ inserted` inserts before the addressed line.
+        assert_eq!(
+            session(&[("/test.txt", "line 1\nline 2\nline 3\n")])
+                .exec("sed '2i\\ inserted' /test.txt")
+                .stdout,
+            "line 1\ninserted\nline 2\nline 3\n"
+        );
+        // :464 `1i\ header` inserts before the first line.
+        assert_eq!(
+            session(&[("/test.txt", "content\n")])
+                .exec("sed '1i\\ header' /test.txt")
+                .stdout,
+            "header\ncontent\n"
+        );
+        // :473 `i\ >` inserts before every line.
+        assert_eq!(
+            session(&[("/test.txt", "a\nb\n")])
+                .exec("sed 'i\\ >' /test.txt")
+                .stdout,
+            ">\na\n>\nb\n"
+        );
+
+        // ---- change command (c) — sed.test.ts ----
+        // :484 `1c\ new line` changes the matching line.
+        assert_eq!(
+            session(&[("/test.txt", "old line\n")])
+                .exec("sed '1c\\ new line' /test.txt")
+                .stdout,
+            "new line\n"
+        );
+        // :493 `2c\ replaced` changes a specific line number.
+        assert_eq!(
+            session(&[("/test.txt", "line 1\nline 2\nline 3\n")])
+                .exec("sed '2c\\ replaced' /test.txt")
+                .stdout,
+            "line 1\nreplaced\nline 3\n"
+        );
+
+        // ---- relative offset address (+N) — sed.test.ts ----
+        // :609 `/^2/,+2d` deletes the match and the next N lines.
+        assert_eq!(
+            session(&[("/test.txt", "1\n2\n3\n4\n5\n")])
+                .exec("sed '/^2/,+2d' /test.txt")
+                .stdout,
+            "1\n5\n"
+        );
+        // :618 `-n '/a/,+1p'` prints the match plus the next line, repeating.
+        assert_eq!(
+            session(&[("/test.txt", "a\n1\nc\nc\na\n2\na\n3\n")])
+                .exec("sed -n '/a/,+1p' /test.txt")
+                .stdout,
+            "a\n1\na\n2\na\n3\n"
+        );
+        // :627 `/^2/,+2{d}` combines a relative-offset range with a `{ }` block.
+        assert_eq!(
+            session(&[("/test.txt", "1\n2\n3\n4\n5\n")])
+                .exec("sed '/^2/,+2{d}' /test.txt")
+                .stdout,
+            "1\n5\n"
+        );
+
+        // ---- grouped commands — sed.test.ts ----
+        // :638 `2{s/b/B/}` runs a command in a group on the addressed line.
+        assert_eq!(
+            session(&[("/test.txt", "a\nb\nc\n")])
+                .exec("sed '2{s/b/B/}' /test.txt")
+                .stdout,
+            "a\nB\nc\n"
+        );
+        // :647 `-n '2{s/b/B/;p}'` runs multiple `;`-separated group commands.
+        assert_eq!(
+            session(&[("/test.txt", "a\nb\nc\n")])
+                .exec("sed -n '2{s/b/B/;p}' /test.txt")
+                .stdout,
+            "B\n"
+        );
+
+        // ---- P / D commands — sed.test.ts ----
+        // :658 `-n 'N;P'` prints up to the first newline of the joined pair.
+        assert_eq!(
+            session(&[("/test.txt", "line1\nline2\n")])
+                .exec("sed -n 'N;P' /test.txt")
+                .stdout,
+            "line1\n"
+        );
+        // :670 `-n 'N;P;D'` is the sliding window: every line except the last.
+        assert_eq!(
+            session(&[("/test.txt", "a\nb\nc\n")])
+                .exec("sed -n 'N;P;D' /test.txt")
+                .stdout,
+            "a\nb\n"
+        );
+        // :682 `N;D` auto-prints the remaining line when N has no more input.
+        assert_eq!(
+            session(&[("/test.txt", "a\nb\nc\n")])
+                .exec("sed 'N;D' /test.txt")
+                .stdout,
+            "c\n"
+        );
+
+        // ---- sed.commands.test.ts ----
+        // A session matching the upstream `createEnv` for sed.commands.test.ts.
+        let commands_env = || {
+            Bash::with_options(BashOptions {
+                files: BTreeMap::from([
+                    (
+                        "/test/file.txt".to_string(),
+                        "line 1\nline 2\nline 3\nline 4\nline 5\n".to_string(),
+                    ),
+                    (
+                        "/test/alpha.txt".to_string(),
+                        "alpha\nbeta\ngamma\ndelta\n".to_string(),
+                    ),
+                ]),
+                cwd: Some("/test".to_string()),
+                ..BashOptions::default()
+            })
+        };
+        // :216 multiple `-e` scripts run in sequence on each line.
+        assert_eq!(
+            commands_env()
+                .exec("sed -e 's/a/1/' -e 's/e/2/' -e 's/i/3/' /test/alpha.txt")
+                .stdout,
+            "1lpha\nb2t1\ng1mma\nd2lt1\n"
+        );
+        // :249 `-n '/alpha/,+2p'` prints the match and the next two lines.
+        assert_eq!(
+            commands_env()
+                .exec("sed -n '/alpha/,+2p' /test/alpha.txt")
+                .stdout,
+            "alpha\nbeta\ngamma\n"
+        );
+    }
+
     #[test]
     fn awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors() {
         let env = Bash::with_options(BashOptions {
@@ -5347,6 +5602,110 @@ searchdir/real.txt:1:test content\n",
     }
 
     #[test]
+    fn rg_imported_regression_negation_symlink_anchored_and_exit_code_rows_are_portable() {
+        // Maps additional imported ripgrep regression cases in
+        // packages/just-bash/src/commands/rg/imported-tests/regression.test.ts
+        // (line numbers in comments). Each row exercises real portable rg
+        // behavior over the virtual filesystem.
+
+        // r137 :285 -L follows a file symlink and searches its target content.
+        {
+            let result = home_bash(&[("real.txt", "test content\n")])
+                .exec("ln -s real.txt /home/user/link.txt; rg -L test");
+            assert_eq!(result.exit_code, 0, "r137 symlink follow");
+            assert!(
+                result.stdout.contains("test content"),
+                "r137 stdout: {}",
+                result.stdout
+            );
+        }
+        // r404 :468 complex glob exclusion plus inclusion with --files.
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                ("lock", ""),
+                ("bar.py", ""),
+                (".git/packed-refs", ""),
+                (".git/description", ""),
+            ],
+            "rg --no-ignore --hidden --follow --files --glob '!{.git,node_modules,plugged}/**' --glob '*.py'",
+            0,
+            "bar.py\n",
+        ); // :468
+        // r829_2778 :716 /parent/*.txt only ignores files directly in parent.
+        assert_home_exec(
+            &[
+                (".ignore", "/parent/*.txt\n"),
+                ("parent/ignore-me.txt", ""),
+                ("parent/subdir/dont-ignore-me.txt", ""),
+            ],
+            "rg --files",
+            0,
+            "parent/subdir/dont-ignore-me.txt\n",
+        ); // :716
+        // r829_2836 :730 trailing-slash anchored pattern ignores the whole dir.
+        assert_home_exec(
+            &[
+                (".ignore", "/testdir/sub/sub2/\n"),
+                ("testdir/sub/sub2/foo", ""),
+            ],
+            "rg --files",
+            1,
+            "",
+        ); // :730
+        // r829_2933 :742 files-with-matches honours .ignore from cwd subdir.
+        {
+            let result = home_bash(&[
+                (".ignore", "/testdir/sub/sub2/\n"),
+                ("testdir/sub/sub2/testfile", "needle\n"),
+            ])
+            .exec("cd testdir; rg --files-with-matches needle");
+            assert_eq!(result.exit_code, 1, "r829_2933 exit");
+            assert_eq!(result.stdout, "", "r829_2933 stdout");
+        }
+        // r1399 :1071 -L follows good symlinks and skips broken ones.
+        {
+            let result = home_bash(&[("real.txt", "test content\n")]).exec(
+                "ln -s real.txt /home/user/good_link.txt; ln -s nonexistent.txt /home/user/bad_link.txt; rg -L test",
+            );
+            assert_eq!(result.exit_code, 0, "r1399 exit");
+            assert!(
+                result.stdout.contains("test content"),
+                "r1399 stdout: {}",
+                result.stdout
+            );
+        }
+        // r2099 :1313 --no-ignore-dot disables .ignore/.rgignore filtering.
+        {
+            let env = home_bash(&[
+                (".ignore", "a\n"),
+                (".rgignore", "b\n"),
+                ("a", ""),
+                ("b", ""),
+                ("c", ""),
+            ]);
+            let r1 = env.exec("rg --files --sort path");
+            assert_eq!(r1.stdout, "c\n", "r2099 default ignore");
+            let r2 = env.exec("rg --files --sort path --no-ignore-dot");
+            assert_eq!(r2.stdout, "a\nb\nc\n", "r2099 no-ignore-dot");
+        }
+        // r2731 :1385 --hidden --files lists dotfiles honouring .ignore.
+        assert_home_exec(
+            &[("a/.ignore", ".foo\n"), ("a/b/.foo", "")],
+            "rg --hidden --files",
+            0,
+            "a/.ignore\n",
+        ); // :1385
+        // misc.test.ts :1135 -a (text) searches binary content literally.
+        assert_home_exec(
+            &[("file", "foo\u{0}bar\nfoo\u{0}baz\n")],
+            "rg -a foo file",
+            0,
+            "foo\u{0}bar\nfoo\u{0}baz\n",
+        ); // misc:1135
+    }
+
+    #[test]
     fn rg_upstream_ripgrep_compat_rows_are_portable() {
         assert_home_exec(
             &[("sherlock", SHERLOCK)],
@@ -7558,6 +7917,206 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         assert_eq!(
             env.exec("grep \"^class\" /code.ts").stdout,
             "class User {\nclass Admin extends User {\n"
+        );
+    }
+
+    #[test]
+    fn text_search_jbc_grep_exclude_files_without_match_and_bracket_rows() {
+        // grep --exclude: skip files whose basename matches the glob.
+        let exclude = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/dir/file.txt".to_string(), "hello world".to_string()),
+                ("/dir/file.log".to_string(), "hello world".to_string()),
+                ("/dir/other.txt".to_string(), "hello world".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let result = exclude.exec(r#"grep -r --exclude="*.log" hello /dir"#);
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("file.txt"));
+        assert!(result.stdout.contains("other.txt"));
+        assert!(!result.stdout.contains("file.log"));
+
+        // grep --exclude: multiple patterns are all applied.
+        let multi_exclude = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/dir/file.txt".to_string(), "hello".to_string()),
+                ("/dir/file.log".to_string(), "hello".to_string()),
+                ("/dir/file.bak".to_string(), "hello".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            multi_exclude
+                .exec(r#"grep -r --exclude="*.log" --exclude="*.bak" hello /dir"#)
+                .stdout,
+            "/dir/file.txt:hello\n"
+        );
+
+        // grep --exclude: also applies to explicit non-recursive file paths.
+        let non_recursive = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/a.txt".to_string(), "hello".to_string()),
+                ("/b.log".to_string(), "hello".to_string()),
+            ]),
+            cwd: Some("/".to_string()),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            non_recursive
+                .exec(r#"grep --exclude="*.log" hello a.txt b.log"#)
+                .stdout,
+            "a.txt:hello\n"
+        );
+
+        // grep --exclude-dir: skip files under matching directory components.
+        let exclude_dir = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/project/src/main.js".to_string(), "hello".to_string()),
+                (
+                    "/project/node_modules/pkg/index.js".to_string(),
+                    "hello".to_string(),
+                ),
+                ("/project/build/out.js".to_string(), "hello".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let result = exclude_dir.exec("grep -r --exclude-dir=node_modules hello /project");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("src/main.js"));
+        assert!(result.stdout.contains("build/out.js"));
+        assert!(!result.stdout.contains("node_modules"));
+
+        // grep --exclude-dir: multiple directory patterns are all applied.
+        let multi_exclude_dir = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/project/src/main.js".to_string(), "hello".to_string()),
+                (
+                    "/project/node_modules/pkg/index.js".to_string(),
+                    "hello".to_string(),
+                ),
+                ("/project/build/out.js".to_string(), "hello".to_string()),
+                ("/project/.git/objects/abc".to_string(), "hello".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let result = multi_exclude_dir
+            .exec("grep -r --exclude-dir=node_modules --exclude-dir=build hello /project");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("src/main.js"));
+        assert!(!result.stdout.contains("node_modules"));
+        assert!(!result.stdout.contains("build"));
+
+        // grep: --exclude-dir and --exclude combine.
+        let combined = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/project/src/main.js".to_string(), "hello".to_string()),
+                ("/project/src/test.spec.js".to_string(), "hello".to_string()),
+                (
+                    "/project/node_modules/pkg/index.js".to_string(),
+                    "hello".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            combined
+                .exec(r#"grep -r --exclude-dir=node_modules --exclude="*.spec.js" hello /project"#)
+                .stdout,
+            "/project/src/main.js:hello\n"
+        );
+
+        // grep -L: list files without any match.
+        let without = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/dir/has-match.txt".to_string(), "hello world".to_string()),
+                ("/dir/no-match.txt".to_string(), "goodbye world".to_string()),
+                (
+                    "/dir/also-no-match.txt".to_string(),
+                    "nothing here".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+        let result = without
+            .exec("grep -L hello /dir/has-match.txt /dir/no-match.txt /dir/also-no-match.txt");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "/dir/no-match.txt\n/dir/also-no-match.txt\n");
+
+        // grep -L: exit code 0 when at least one file lacks a match.
+        let without_two = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/file1.txt".to_string(), "hello".to_string()),
+                ("/file2.txt".to_string(), "goodbye".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let result = without_two.exec("grep -L hello /file1.txt /file2.txt");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "/file2.txt\n");
+
+        // grep -L: exit code 1 when every file has a match.
+        let all_match = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/file1.txt".to_string(), "hello".to_string()),
+                ("/file2.txt".to_string(), "hello".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let result = all_match.exec("grep -L hello /file1.txt /file2.txt");
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.stdout, "");
+
+        // grep -rL: recursive files-without-match traversal.
+        let recursive_without = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/dir/has-hello.txt".to_string(), "hello".to_string()),
+                ("/dir/no-hello.txt".to_string(), "goodbye".to_string()),
+                ("/dir/sub/has-hello2.txt".to_string(), "hello".to_string()),
+                ("/dir/sub/no-hello2.txt".to_string(), "goodbye".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let result = recursive_without.exec("grep -rL hello /dir");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("no-hello.txt"));
+        assert!(result.stdout.contains("no-hello2.txt"));
+        assert!(!result.stdout.contains("has-hello.txt"));
+        assert!(!result.stdout.contains("has-hello2.txt"));
+
+        // grep --files-without-match: long form of -L.
+        let long_form = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/a.txt".to_string(), "hello".to_string()),
+                ("/b.txt".to_string(), "goodbye".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            long_form
+                .exec("grep --files-without-match hello /a.txt /b.txt")
+                .stdout,
+            "/b.txt\n"
+        );
+
+        // grep -E bracket: a literal ] is matched when it leads the class.
+        let bracket = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/test.txt".to_string(), "a]b\na[b\nacb\n".to_string())]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            bracket.exec(r#"grep -E "a[][]b" /test.txt"#).stdout,
+            "a]b\na[b\n"
+        );
+
+        // grep -E negated bracket: a leading ] after ^ is matched literally.
+        let neg_bracket = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/test.txt".to_string(), "a]c\nabc\nadc\n".to_string())]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            neg_bracket.exec(r#"grep -E "a[^]b]c" /test.txt"#).stdout,
+            "adc\n"
         );
     }
 
@@ -12255,5 +12814,255 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         let scientific = env.exec(r#"echo "" | awk 'BEGIN { printf "%.2e\n", 1234.5 }'"#);
         assert_eq!(scientific.exit_code, 0);
         assert_eq!(scientific.stdout, "1.23e+3\n");
+    }
+
+    #[test]
+    fn awk_jbc_command_awk_ternary_operator_rows() {
+        // Mirrors packages/just-bash/src/commands/awk/awk.ternary.test.ts
+        // (basic, comparison, nested, assignment, function, and truthiness rows;
+        // the getline-backed async rows remain pending without getline support).
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "1\n2\n3\n".to_string())]),
+            ..BashOptions::default()
+        });
+
+        // :6 true condition selects the consequent branch.
+        let r = env.exec(r#"echo "" | awk 'BEGIN { print 1 ? "yes" : "no" }'"#);
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "yes\n");
+        // :15 false condition selects the alternate branch.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 0 ? "yes" : "no" }'"#)
+                .stdout,
+            "no\n"
+        );
+        // :24 expressions are evaluated inside the chosen branch (5*2 = 10).
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x = 5; print x > 3 ? x * 2 : x / 2 }'"#)
+                .stdout,
+            "10\n"
+        );
+        // :35 numeric comparison condition.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { n = 10; print n > 5 ? "big" : "small" }'"#)
+                .stdout,
+            "big\n"
+        );
+        // :44 string comparison condition.
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN { s = "hello"; print s == "hello" ? "match" : "no match" }'"#
+            )
+            .stdout,
+            "match\n"
+        );
+        // :53 equality check over each record's first field.
+        assert_eq!(
+            env.exec(r#"awk '{ print $1 == 2 ? "two" : "not two" }' /data.txt"#)
+                .stdout,
+            "not two\ntwo\nnot two\n"
+        );
+        // :66 nested ternary resolves to the final alternate ("zero").
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN { x = 0; print x > 0 ? "positive" : x < 0 ? "negative" : "zero" }'"#
+            )
+            .stdout,
+            "zero\n"
+        );
+        // :75 multiple nesting falls through to "other".
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN { x = 5; print x == 1 ? "one" : x == 2 ? "two" : x == 3 ? "three" : "other" }'"#
+            )
+            .stdout,
+            "other\n"
+        );
+        // :86 ternary result assigned to a variable.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { a = 10; b = a > 5 ? "high" : "low"; print b }'"#)
+                .stdout,
+            "high\n"
+        );
+        // :95 ternary inside a compound expression ((10)+5 = 15).
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x = 3; y = (x > 2 ? 10 : 1) + 5; print y }'"#)
+                .stdout,
+            "15\n"
+        );
+        // :106 function call in the condition (length("abc") > 2).
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print length("abc") > 2 ? "long" : "short" }'"#)
+                .stdout,
+            "long\n"
+        );
+        // :115 function calls in the branches.
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN { x = 1; print x ? toupper("yes") : tolower("NO") }'"#
+            )
+            .stdout,
+            "YES\n"
+        );
+        // :150 empty string is falsy.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x = ""; print x ? "truthy" : "falsy" }'"#)
+                .stdout,
+            "falsy\n"
+        );
+        // :159 non-empty string is truthy.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x = "hello"; print x ? "truthy" : "falsy" }'"#)
+                .stdout,
+            "truthy\n"
+        );
+        // :168 non-zero number (negative) is truthy.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print -5 ? "truthy" : "falsy" }'"#)
+                .stdout,
+            "truthy\n"
+        );
+    }
+
+    #[test]
+    fn awk_jbc_command_awk_modulo_operator_rows() {
+        // Mirrors packages/just-bash/src/commands/awk/awk.modulo.test.ts
+        // (basic %, %= with variables, modulo conditions, modulo in a for loop,
+        // and signed operands).
+        let evens = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "1\n2\n3\n4\n5\n6\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let lines = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "a\nb\nc\nd\ne\nf\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let env = Bash::default();
+
+        // :13 modulo of an exact division is 0.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 10 % 2 }'"#).stdout,
+            "0\n"
+        );
+        // :20 floating-point modulo.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 5.5 % 2 }'"#)
+                .stdout,
+            "1.5\n"
+        );
+        // :27 zero dividend.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 0 % 5 }'"#).stdout,
+            "0\n"
+        );
+        // :45 %= compound assignment between variables (25 % 7 = 4).
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { a = 25; b = 7; a %= b; print a }'"#)
+                .stdout,
+            "4\n"
+        );
+        // :65 even-number filter via $1 % 2 == 0.
+        assert_eq!(
+            evens
+                .exec(r#"awk '$1 % 2 == 0 { print }' /data.txt"#)
+                .stdout,
+            "2\n4\n6\n"
+        );
+        // :83 every Nth line via NR % 3 == 0.
+        assert_eq!(
+            lines
+                .exec(r#"awk 'NR % 3 == 0 { print }' /data.txt"#)
+                .stdout,
+            "c\nf\n"
+        );
+        // :94 modulo inside a for loop.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { for(i=1; i<=10; i++) if(i%3==0) print i }'"#)
+                .stdout,
+            "3\n6\n9\n"
+        );
+        // :105 negative dividend keeps the dividend's sign (-7 % 3 = -1).
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print -7 % 3 }'"#).stdout,
+            "-1\n"
+        );
+    }
+
+    #[test]
+    fn awk_jbc_command_awk_atan2_math_rows() {
+        // Mirrors the deterministic atan2 rows in
+        // packages/just-bash/src/commands/awk/awk.math.test.ts.
+        let env = Bash::default();
+
+        // :59 atan2(0, 1) is exactly 0.
+        assert_eq!(
+            env.exec(r#"echo '0 1' | awk '{ print atan2($1, $2) }'"#)
+                .stdout,
+            "0\n"
+        );
+        // :97 atan2(1, 0) is pi/2; assert it is close to the expected value.
+        let distance = env.exec(r#"echo '1 0' | awk '{ print atan2($1, $2) }'"#);
+        assert_eq!(distance.exit_code, 0);
+        let value: f64 = distance
+            .stdout
+            .trim()
+            .parse()
+            .expect("numeric atan2 output");
+        assert!(
+            (value - std::f64::consts::FRAC_PI_2).abs() < 1e-5,
+            "atan2(1, 0) should be ~pi/2, got {value}"
+        );
+    }
+
+    #[test]
+    fn awk_jbc_command_awk_regex_pattern_rows() {
+        // Mirrors the leading regex-pattern rows in
+        // packages/just-bash/src/commands/awk/awk.patterns.test.ts.
+        let fruits = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "apple\nbanana\ncherry\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        let anchored = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "apple\nbanana\napricot\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        let suffix = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "hello\nworld\nfellow\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        let animals = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "cat\ndog\ncow\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let mixed = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "abc\nxyz\n123\n".to_string())]),
+            ..BashOptions::default()
+        });
+
+        // :6 literal regex matches only the record containing "ana".
+        assert_eq!(fruits.exec(r#"awk '/ana/' /data.txt"#).stdout, "banana\n");
+        // :15 ^ anchors the match to the start of the record.
+        assert_eq!(
+            anchored.exec(r#"awk '/^a/' /data.txt"#).stdout,
+            "apple\napricot\n"
+        );
+        // :24 $ anchors the match to the end of the record.
+        assert_eq!(suffix.exec(r#"awk '/llo$/' /data.txt"#).stdout, "hello\n");
+        // :33 character class matches every record containing c or d.
+        assert_eq!(
+            animals.exec(r#"awk '/[cd]/' /data.txt"#).stdout,
+            "cat\ndog\ncow\n"
+        );
+        // :42 negated character class [^a-z] matches only the digit record.
+        assert_eq!(mixed.exec(r#"awk '/[^a-z]/' /data.txt"#).stdout, "123\n");
     }
 }
