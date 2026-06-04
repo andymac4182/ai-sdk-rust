@@ -2738,6 +2738,142 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn awk_jbc25_string_builtin_concat_compare_and_coercion_rows() {
+        // Maps the remaining portable rows of awk.strings.test.ts that the Rust
+        // awk subset implements 1:1. Each assertion mirrors the upstream vitest
+        // expectation exactly (strict stdout + exit code). Cited file:line refer
+        // to packages/just-bash/src/commands/awk/awk.strings.test.ts.
+        let env = Bash::default();
+        let cases: &[(&str, &str)] = &[
+            // substr() middle portion (awk.strings.test.ts:80).
+            (
+                r#"echo "" | awk 'BEGIN { print substr("abcdefgh", 3, 4) }'"#,
+                "cdef\n",
+            ),
+            // index() single character (awk.strings.test.ts:109).
+            (
+                r#"echo "" | awk 'BEGIN { print index("abcdef", "c") }'"#,
+                "3\n",
+            ),
+            // index() first occurrence (awk.strings.test.ts:118).
+            (
+                r#"echo "" | awk 'BEGIN { print index("abcabc", "bc") }'"#,
+                "2\n",
+            ),
+            // tolower() basic (awk.strings.test.ts:147).
+            (
+                r#"echo "" | awk 'BEGIN { print tolower("hello") }'"#,
+                "hello\n",
+            ),
+            // tolower() preserves digits/symbols (awk.strings.test.ts:165).
+            (
+                r#"echo "" | awk 'BEGIN { print tolower("ABC123!@#") }'"#,
+                "abc123!@#\n",
+            ),
+            // toupper() basic (awk.strings.test.ts:185).
+            (
+                r#"echo "" | awk 'BEGIN { print toupper("HELLO") }'"#,
+                "HELLO\n",
+            ),
+            // toupper() mixed case (awk.strings.test.ts:194).
+            (
+                r#"echo "" | awk 'BEGIN { print toupper("HeLLo WoRLd") }'"#,
+                "HELLO WORLD\n",
+            ),
+            // sub() returns 1 on a match and mutates $0 (awk.strings.test.ts:214).
+            (
+                r#"echo "hello" | awk '{ n = sub(/l/, "L"); print n, $0 }'"#,
+                "1 heLlo\n",
+            ),
+            // sub() returns 0 on no match (awk.strings.test.ts:223).
+            (
+                r#"echo "hello" | awk '{ n = sub(/x/, "X"); print n, $0 }'"#,
+                "0 hello\n",
+            ),
+            // sub() with an explicit target variable (awk.strings.test.ts:232).
+            (
+                r#"echo "test" | awk '{ x = "foo bar foo"; sub(/foo/, "baz", x); print x }'"#,
+                "baz bar foo\n",
+            ),
+            // gsub() returns 0 when nothing matches (awk.strings.test.ts:271).
+            (
+                r#"echo "hello" | awk '{ n = gsub(/x/, "X"); print n, $0 }'"#,
+                "0 hello\n",
+            ),
+            // gsub() replaces every digit (awk.strings.test.ts:289).
+            (
+                r##"echo "a1b2c3" | awk '{ gsub(/[0-9]/, "#"); print }'"##,
+                "a#b#c#\n",
+            ),
+            // sprintf() right-justified width (awk.strings.test.ts:327).
+            (
+                r#"echo "" | awk 'BEGIN { print sprintf("[%10s]", "hi") }'"#,
+                "[        hi]\n",
+            ),
+            // sprintf() left-justified width (awk.strings.test.ts:336).
+            (
+                r#"echo "" | awk 'BEGIN { print sprintf("[%-10s]", "hi") }'"#,
+                "[hi        ]\n",
+            ),
+            // sprintf() zero-padded integer (awk.strings.test.ts:345).
+            (
+                r#"echo "" | awk 'BEGIN { print sprintf("%05d", 42) }'"#,
+                "00042\n",
+            ),
+            // string concatenation of variables (awk.strings.test.ts:365).
+            (
+                r#"echo "" | awk 'BEGIN { a = "hello"; b = "world"; print a " " b }'"#,
+                "hello world\n",
+            ),
+            // literal string concatenation (awk.strings.test.ts:374).
+            (
+                r#"echo "" | awk 'BEGIN { print "foo" "bar" "baz" }'"#,
+                "foobarbaz\n",
+            ),
+            // numeric literals concatenate as strings (awk.strings.test.ts:383).
+            (r#"echo "" | awk 'BEGIN { print 1 2 3 }'"#, "123\n"),
+            // accumulating concatenation (awk.strings.test.ts:390).
+            (
+                r#"echo "" | awk 'BEGIN { s = "a"; s = s "b"; s = s "c"; print s }'"#,
+                "abc\n",
+            ),
+            // string equality comparison (awk.strings.test.ts:401).
+            (
+                r#"echo "" | awk 'BEGIN { if ("abc" == "abc") print "equal" }'"#,
+                "equal\n",
+            ),
+            // string inequality comparison (awk.strings.test.ts:410).
+            (
+                r#"echo "" | awk 'BEGIN { if ("abc" != "xyz") print "different" }'"#,
+                "different\n",
+            ),
+            // lexicographic less-than (awk.strings.test.ts:419).
+            (
+                r#"echo "" | awk 'BEGIN { if ("abc" < "abd") print "less" }'"#,
+                "less\n",
+            ),
+            // lexicographic greater-than (awk.strings.test.ts:428).
+            (
+                r#"echo "" | awk 'BEGIN { if ("z" > "a") print "greater" }'"#,
+                "greater\n",
+            ),
+            // numeric string + 0 coercion (awk.strings.test.ts:439).
+            (r#"echo "" | awk 'BEGIN { print "42" + 0 }'"#, "42\n"),
+            // leading-numeric string coercion (awk.strings.test.ts:446).
+            (r#"echo "" | awk 'BEGIN { print "123abc" + 0 }'"#, "123\n"),
+            // non-numeric string coerces to 0 (awk.strings.test.ts:455).
+            (r#"echo "" | awk 'BEGIN { print "hello" + 0 }'"#, "0\n"),
+            // number-to-string via empty concatenation (awk.strings.test.ts:464).
+            (r#"echo "" | awk 'BEGIN { n = 42; print n "" }'"#, "42\n"),
+        ];
+        for (prog, want) in cases {
+            let r = env.exec(prog);
+            assert_eq!(r.exit_code, 0, "{prog}: stderr={:?}", r.stderr);
+            assert_eq!(&r.stdout, want, "{prog}");
+        }
+    }
+
+    #[test]
     fn awk_jbc35_field_rebuild_printf_and_edge_rows() {
         let env = Bash::with_options(BashOptions {
             files: BTreeMap::from([
