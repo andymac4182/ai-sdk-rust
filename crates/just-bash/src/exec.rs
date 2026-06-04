@@ -6124,6 +6124,7 @@ struct RgOptions {
     only_matching: bool,
     quiet: bool,
     no_filename: bool,
+    with_filename: bool,
     hidden: bool,
     no_ignore: bool,
     text: bool,
@@ -6140,6 +6141,8 @@ struct RgOptions {
     globs: Vec<String>,
     type_includes: Vec<String>,
     type_excludes: Vec<String>,
+    type_clears: Vec<String>,
+    type_adds: Vec<String>,
     ignore_files: Vec<String>,
     stats: bool,
     explicit_after: Option<usize>,
@@ -6163,6 +6166,7 @@ impl Default for RgOptions {
             only_matching: false,
             quiet: false,
             no_filename: false,
+            with_filename: false,
             hidden: false,
             no_ignore: false,
             text: false,
@@ -6179,6 +6183,8 @@ impl Default for RgOptions {
             globs: Vec::new(),
             type_includes: Vec::new(),
             type_excludes: Vec::new(),
+            type_clears: Vec::new(),
+            type_adds: Vec::new(),
             ignore_files: Vec::new(),
             stats: false,
             explicit_after: None,
@@ -6299,6 +6305,7 @@ fn parse_rg_option(
         "--only-matching" => options.only_matching = true,
         "--quiet" => options.quiet = true,
         "--no-filename" => options.no_filename = true,
+        "--with-filename" => options.with_filename = true,
         "--text" => options.text = true,
         "--follow" => options.follow_symlinks = true,
         "--include-zero" => options.include_zero = true,
@@ -6331,6 +6338,12 @@ fn parse_rg_option(
         "--type-not" => options
             .type_excludes
             .push(rg_option_value(args, index, "--type-not")?),
+        "--type-clear" => options
+            .type_clears
+            .push(rg_option_value(args, index, "--type-clear")?),
+        "--type-add" => options
+            .type_adds
+            .push(rg_option_value(args, index, "--type-add")?),
         "--max-count" => {
             options.max_count = Some(rg_parse_usize(&rg_option_value(
                 args,
@@ -6421,6 +6434,16 @@ fn parse_rg_option(
             options
                 .type_excludes
                 .push(arg["--type-not=".len()..].to_string());
+        }
+        _ if arg.starts_with("--type-clear=") => {
+            options
+                .type_clears
+                .push(arg["--type-clear=".len()..].to_string());
+        }
+        _ if arg.starts_with("--type-add=") => {
+            options
+                .type_adds
+                .push(arg["--type-add=".len()..].to_string());
         }
         // `--threads=N` compatibility flag: value consumed, no-op (ignored).
         _ if arg.starts_with("--threads=") => {}
@@ -6519,6 +6542,7 @@ fn parse_rg_short_flags(
             'q' => options.quiet = true,
             'o' => options.only_matching = true,
             'I' => options.no_filename = true,
+            'H' => options.with_filename = true,
             'a' => options.text = true,
             '0' => options.null_separator = true,
             'L' => options.follow_symlinks = true,
@@ -6806,41 +6830,105 @@ fn rg_path_is_hidden(path: &str) -> bool {
 }
 
 fn rg_type_filters_match(path: &str, options: &RgOptions) -> bool {
+    let registry = rg_type_registry(options);
     if !options.type_includes.is_empty()
         && !options
             .type_includes
             .iter()
-            .any(|type_name| rg_path_matches_type(path, type_name).unwrap_or(false))
+            .any(|type_name| rg_path_matches_type(&registry, path, type_name))
     {
         return false;
     }
     !options
         .type_excludes
         .iter()
-        .any(|type_name| rg_path_matches_type(path, type_name).unwrap_or(false))
+        .any(|type_name| rg_path_matches_type(&registry, path, type_name))
 }
 
-fn rg_path_matches_type(path: &str, type_name: &str) -> Option<bool> {
-    let extension = path.rsplit_once('.').map(|(_, extension)| {
-        extension
-            .chars()
-            .flat_map(char::to_lowercase)
-            .collect::<String>()
-    })?;
-    let extensions = match type_name {
-        "js" | "javascript" => &["js", "jsx"][..],
-        "ts" | "typescript" => &["ts", "tsx"][..],
-        "py" | "python" => &["py"][..],
-        "rs" | "rust" => &["rs"][..],
-        "css" => &["css"][..],
-        "md" | "markdown" => &["md", "markdown", "mdown"][..],
-        "json" => &["json"][..],
-        "html" => &["html", "htm"][..],
-        "txt" | "text" => &["txt"][..],
-        "log" => &["log"][..],
-        _ => return None,
-    };
-    Some(extensions.contains(&extension.as_str()))
+/// Default ripgrep-style type definitions, expressed as the file extensions
+/// that belong to each type name (and its aliases).
+fn rg_default_type_definitions() -> Vec<(&'static str, Vec<String>)> {
+    [
+        ("js", &["js", "jsx"][..]),
+        ("javascript", &["js", "jsx"][..]),
+        ("ts", &["ts", "tsx"][..]),
+        ("typescript", &["ts", "tsx"][..]),
+        ("py", &["py"][..]),
+        ("python", &["py"][..]),
+        ("rs", &["rs"][..]),
+        ("rust", &["rs"][..]),
+        ("css", &["css"][..]),
+        ("md", &["md", "markdown", "mdown"][..]),
+        ("markdown", &["md", "markdown", "mdown"][..]),
+        ("json", &["json"][..]),
+        ("html", &["html", "htm"][..]),
+        ("txt", &["txt"][..]),
+        ("text", &["txt"][..]),
+        ("log", &["log"][..]),
+    ]
+    .into_iter()
+    .map(|(name, extensions)| {
+        (
+            name,
+            extensions.iter().map(|ext| (*ext).to_string()).collect(),
+        )
+    })
+    .collect()
+}
+
+/// Resolved type registry: maps a type name to the set of glob patterns it
+/// matches. Built from the default definitions, then mutated by `--type-clear`
+/// and `--type-add` in argument order so later flags override earlier state.
+fn rg_type_registry(options: &RgOptions) -> BTreeMap<String, Vec<String>> {
+    let mut registry: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (name, extensions) in rg_default_type_definitions() {
+        registry
+            .entry(name.to_string())
+            .or_default()
+            .extend(extensions.into_iter().map(|ext| format!("*.{ext}")));
+    }
+    for cleared in &options.type_clears {
+        registry.insert(cleared.clone(), Vec::new());
+    }
+    for added in &options.type_adds {
+        // Forms: `name:glob` or `name:include:other` (compose from another type).
+        let Some((name, rest)) = added.split_once(':') else {
+            continue;
+        };
+        if let Some(included) = rest.strip_prefix("include:") {
+            let patterns = registry.get(included).cloned().unwrap_or_default();
+            registry
+                .entry(name.to_string())
+                .or_default()
+                .extend(patterns);
+        } else {
+            registry
+                .entry(name.to_string())
+                .or_default()
+                .push(rest.to_string());
+        }
+    }
+    registry
+}
+
+fn rg_path_matches_type(
+    registry: &BTreeMap<String, Vec<String>>,
+    path: &str,
+    type_name: &str,
+) -> bool {
+    let label = path.rsplit_once('/').map_or(path, |(_, name)| name);
+    // The pseudo type `all` matches any file that belongs to a known type.
+    if type_name == "all" {
+        return registry
+            .values()
+            .flatten()
+            .any(|glob| rg_glob_matches_path(glob, label));
+    }
+    registry
+        .get(type_name)
+        .into_iter()
+        .flatten()
+        .any(|glob| rg_glob_matches_path(glob, label))
 }
 
 fn rg_globs_match(label: &str, globs: &[String]) -> bool {
@@ -6872,10 +6960,16 @@ struct RgIgnoreRule {
 }
 
 fn rg_ignore_rules(fs: &VirtualFileSystem) -> Vec<RgIgnoreRule> {
+    // ripgrep honours `.gitignore`, the generic `.ignore`, and the
+    // ripgrep-specific `.rgignore` for filtering directory traversal.
     let mut paths = fs
         .get_all_paths()
         .into_iter()
-        .filter(|path| path.ends_with("/.gitignore"))
+        .filter(|path| {
+            path.ends_with("/.gitignore")
+                || path.ends_with("/.ignore")
+                || path.ends_with("/.rgignore")
+        })
         .collect::<Vec<_>>();
     paths.sort();
     let mut rules = Vec::new();
@@ -7138,7 +7232,7 @@ fn rg_push_matches(
     if line_matches.is_empty() {
         return;
     }
-    if request.options.heading && rg_show_filename(request, input) {
+    if request.options.heading && !request.options.no_filename {
         stdout.push_str(&input.label);
         stdout.push('\n');
     }
@@ -7234,7 +7328,10 @@ fn rg_push_line(
 }
 
 fn rg_show_filename(request: &RgRequest, input: &RgInput) -> bool {
-    !request.options.no_filename && !input.explicit_file
+    if request.options.no_filename {
+        return false;
+    }
+    request.options.with_filename || !input.explicit_file
 }
 
 fn rg_show_line_number(request: &RgRequest, input: &RgInput) -> bool {
