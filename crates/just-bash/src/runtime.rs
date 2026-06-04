@@ -11071,6 +11071,195 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn structured_data_yq_fixtures_yaml_json_ini_csv_rows() {
+        // packages/just-bash/src/commands/yq/yq.fixtures.test.ts
+        //   YAML: :103   JSON: :139,:149,:158,:167
+        //   INI:  :222,:231,:241,:252,:259
+        //   CSV:  :273,:282,:291,:300,:310
+        // Each assertion mirrors the upstream vitest expectation exactly,
+        // exercising the portable yq YAML/JSON/INI/CSV input parsers.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/fixtures/yaml/users.yaml".to_string(),
+                    concat!(
+                        "users:\n",
+                        "  - name: alice\n    age: 30\n    email: alice@example.com\n    active: true\n",
+                        "  - name: bob\n    age: 25\n    email: bob@example.com\n    active: false\n",
+                        "  - name: charlie\n    age: 35\n    email: charlie@example.com\n    active: true\n",
+                        "metadata:\n  version: 1.0\n  generated: \"2024-01-01\"\n",
+                    )
+                    .to_string(),
+                ),
+                (
+                    "/fixtures/json/users.json".to_string(),
+                    concat!(
+                        "{\n  \"users\": [\n",
+                        "    { \"name\": \"alice\", \"age\": 30, \"email\": \"alice@example.com\", \"active\": true },\n",
+                        "    { \"name\": \"bob\", \"age\": 25, \"email\": \"bob@example.com\", \"active\": false },\n",
+                        "    { \"name\": \"charlie\", \"age\": 35, \"email\": \"charlie@example.com\", \"active\": true }\n",
+                        "  ]\n}\n",
+                    )
+                    .to_string(),
+                ),
+                (
+                    "/fixtures/json/nested.json".to_string(),
+                    concat!(
+                        "{\n  \"company\": {\n    \"name\": \"Acme Corp\",\n    \"departments\": [\n",
+                        "      { \"name\": \"Engineering\", \"employees\": 50, \"budget\": 500000 },\n",
+                        "      { \"name\": \"Sales\", \"employees\": 30, \"budget\": 300000 },\n",
+                        "      { \"name\": \"Marketing\", \"employees\": 20, \"budget\": 200000 }\n",
+                        "    ]\n  }\n}\n",
+                    )
+                    .to_string(),
+                ),
+                (
+                    "/fixtures/ini/config.ini".to_string(),
+                    concat!(
+                        "[database]\nhost=localhost\nport=5432\nname=myapp\nssl=true\n\n",
+                        "[server]\nhost=0.0.0.0\nport=8080\ndebug=false\nworkers=4\n\n",
+                        "[logging]\nlevel=info\nformat=json\npath=/var/log/app.log\n",
+                    )
+                    .to_string(),
+                ),
+                (
+                    "/fixtures/ini/app.ini".to_string(),
+                    concat!(
+                        "name=MyApp\nversion=2.5.0\nenvironment=production\n\n",
+                        "[features]\ndark_mode=true\nnotifications=true\nanalytics=false\n\n",
+                        "[limits]\nmax_users=1000\nmax_requests=10000\ntimeout=30\n",
+                    )
+                    .to_string(),
+                ),
+                (
+                    "/fixtures/csv/users.csv".to_string(),
+                    concat!(
+                        "name,age,email,active\n",
+                        "alice,30,alice@example.com,true\n",
+                        "bob,25,bob@example.com,false\n",
+                        "charlie,35,charlie@example.com,true\n",
+                    )
+                    .to_string(),
+                ),
+                (
+                    "/fixtures/csv/products.csv".to_string(),
+                    concat!(
+                        "id,name,price,category,in_stock\n",
+                        "1,Widget,19.99,electronics,true\n",
+                        "2,Gadget,29.99,electronics,true\n",
+                        "3,Gizmo,9.99,accessories,false\n",
+                        "4,Doodad,49.99,electronics,true\n",
+                        "5,Thingamajig,14.99,accessories,true\n",
+                    )
+                    .to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // --- YAML fixtures ---
+        // :103 should extract user names from users.yaml
+        let names = env.exec("yq '.users[].name' /fixtures/yaml/users.yaml");
+        assert_eq!(names.exit_code, 0);
+        assert_eq!(names.stdout, "alice\nbob\ncharlie\n");
+
+        // --- JSON fixtures ---
+        // :139 should extract user emails from users.json
+        let emails = env.exec("yq -p json '.users[].email' /fixtures/json/users.json");
+        assert_eq!(emails.exit_code, 0);
+        assert!(emails.stdout.contains("alice@example.com"));
+        assert!(emails.stdout.contains("bob@example.com"));
+
+        // :149 should get department names from nested.json
+        let departments =
+            env.exec("yq -p json '.company.departments[].name' /fixtures/json/nested.json");
+        assert_eq!(departments.exit_code, 0);
+        assert_eq!(departments.stdout, "Engineering\nSales\nMarketing\n");
+
+        // :158 should calculate total employees from nested.json
+        let employees = env.exec(
+            "yq -p json '[.company.departments[].employees] | add' /fixtures/json/nested.json",
+        );
+        assert_eq!(employees.exit_code, 0);
+        assert_eq!(employees.stdout, "100\n");
+
+        // :167 should find departments with budget > 250000
+        let budget = env.exec(
+            "yq -p json '[.company.departments[] | select(.budget > 250000) | .name]' /fixtures/json/nested.json -o json",
+        );
+        assert_eq!(budget.exit_code, 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&budget.stdout).unwrap(),
+            serde_json::json!(["Engineering", "Sales"])
+        );
+
+        // --- INI fixtures ---
+        // :222 should get database host from config.ini
+        let ini_host = env.exec("yq -p ini '.database.host' /fixtures/ini/config.ini");
+        assert_eq!(ini_host.exit_code, 0);
+        assert_eq!(ini_host.stdout, "localhost\n");
+
+        // :231 should get server port from config.ini (INI values are strings)
+        let ini_port = env.exec("yq -p ini '.server.port' /fixtures/ini/config.ini");
+        assert_eq!(ini_port.exit_code, 0);
+        assert!(ini_port.stdout.trim().contains("8080"));
+
+        // :241 should get all section keys from config.ini
+        let ini_keys = env.exec("yq -p ini 'keys' /fixtures/ini/config.ini");
+        assert_eq!(ini_keys.exit_code, 0);
+        assert!(ini_keys.stdout.contains("database"));
+        assert!(ini_keys.stdout.contains("server"));
+        assert!(ini_keys.stdout.contains("logging"));
+
+        // :252 should get top-level name from app.ini
+        let ini_name = env.exec("yq -p ini '.name' /fixtures/ini/app.ini");
+        assert_eq!(ini_name.exit_code, 0);
+        assert_eq!(ini_name.stdout, "MyApp\n");
+
+        // :259 should get feature flags from app.ini (booleans)
+        let ini_features = env.exec("yq -p ini '.features' /fixtures/ini/app.ini -o json");
+        assert_eq!(ini_features.exit_code, 0);
+        let features = serde_json::from_str::<serde_json::Value>(&ini_features.stdout).unwrap();
+        assert_eq!(features["dark_mode"], serde_json::json!(true));
+        assert_eq!(features["notifications"], serde_json::json!(true));
+        assert_eq!(features["analytics"], serde_json::json!(false));
+
+        // --- CSV fixtures ---
+        // :273 should get first user name from users.csv
+        let csv_first = env.exec("yq -p csv '.[0].name' /fixtures/csv/users.csv");
+        assert_eq!(csv_first.exit_code, 0);
+        assert_eq!(csv_first.stdout, "alice\n");
+
+        // :282 should get all user ages from users.csv (numbers)
+        let csv_ages = env.exec("yq -p csv '.[].age' /fixtures/csv/users.csv");
+        assert_eq!(csv_ages.exit_code, 0);
+        assert_eq!(csv_ages.stdout, "30\n25\n35\n");
+
+        // :291 should filter electronics products from products.csv
+        let csv_filter = env.exec(
+            "yq -p csv '[.[] | select(.category == \"electronics\") | .name]' /fixtures/csv/products.csv -o json",
+        );
+        assert_eq!(csv_filter.exit_code, 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&csv_filter.stdout).unwrap(),
+            serde_json::json!(["Widget", "Gadget", "Doodad"])
+        );
+
+        // :300 should calculate total price of in-stock items from products.csv
+        let csv_total = env.exec(
+            "yq -p csv '[.[] | select(.in_stock == true) | .price] | add' /fixtures/csv/products.csv",
+        );
+        assert_eq!(csv_total.exit_code, 0);
+        let total: f64 = csv_total.stdout.trim().parse().unwrap();
+        assert!((total - 114.96).abs() < 0.01, "total was {total}");
+
+        // :310 should get product count from products.csv
+        let csv_count = env.exec("yq -p csv 'length' /fixtures/csv/products.csv");
+        assert_eq!(csv_count.exit_code, 0);
+        assert_eq!(csv_count.stdout, "5\n");
+    }
+
+    #[test]
     fn awk_jbc_command_awk_expression_edge_and_error_rows() {
         // Maps the portable pending rows of awk.expressions.test.ts,
         // awk.edge-cases.test.ts, and awk.errors.test.ts that the Rust awk
