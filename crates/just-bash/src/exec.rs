@@ -2075,6 +2075,7 @@ fn command_grep(
     let mut line_regexp = false;
     let mut only_matching = false;
     let mut no_filename = false;
+    let mut quiet = false;
     let mut before_context = 0usize;
     let mut after_context = 0usize;
     let mut max_count: Option<usize> = None;
@@ -2098,6 +2099,7 @@ fn command_grep(
             "-x" | "--line-regexp" => line_regexp = true,
             "-o" | "--only-matching" => only_matching = true,
             "-h" | "--no-filename" => no_filename = true,
+            "-q" | "--quiet" | "--silent" => quiet = true,
             "-E" | "--extended-regexp" => mode = GrepMode::ExtendedRegex,
             "-F" | "--fixed-strings" => mode = GrepMode::Fixed,
             "-e" => {
@@ -2191,6 +2193,7 @@ fn command_grep(
                         'x' => line_regexp = true,
                         'o' => only_matching = true,
                         'h' => no_filename = true,
+                        'q' => quiet = true,
                         'E' => mode = GrepMode::ExtendedRegex,
                         'F' => mode = GrepMode::Fixed,
                         'A' | 'B' | 'C' | 'm' => {
@@ -2376,7 +2379,7 @@ fn command_grep(
     };
     CommandResult {
         exit_code,
-        stdout,
+        stdout: if quiet { String::new() } else { stdout },
         ..CommandResult::default()
     }
 }
@@ -3050,13 +3053,22 @@ fn command_ls(state: &ExecState<'_>, args: &[String]) -> CommandResult {
                 stdout.push('\n');
             }
             Ok(_) => {
+                // GNU `ls` echoes the directory operand exactly as the user
+                // typed it in the header (and in recursive sub-headers),
+                // including `.` for the implicit current-directory operand.
+                let display_path = raw_path.as_str();
                 if multi || options.recursive {
-                    stdout.push_str(&path);
+                    stdout.push_str(display_path);
                     stdout.push_str(":\n");
                 }
                 stdout.push_str(&format_ls_directory(&fs, &path, &options));
                 if options.recursive {
-                    stdout.push_str(&format_ls_recursive_children(&fs, &path, &options));
+                    stdout.push_str(&format_ls_recursive_children(
+                        &fs,
+                        &path,
+                        display_path,
+                        &options,
+                    ));
                 }
                 if multi && index + 1 < paths.len() {
                     stdout.push('\n');
@@ -4193,7 +4205,12 @@ fn format_ls_directory(fs: &VirtualFileSystem, path: &str, options: &LsOptions) 
     stdout
 }
 
-fn format_ls_recursive_children(fs: &VirtualFileSystem, path: &str, options: &LsOptions) -> String {
+fn format_ls_recursive_children(
+    fs: &VirtualFileSystem,
+    path: &str,
+    display_path: &str,
+    options: &LsOptions,
+) -> String {
     let mut entries = match fs.readdir_with_file_types(path) {
         Ok(entries) => entries,
         Err(_) => return String::new(),
@@ -4210,11 +4227,17 @@ fn format_ls_recursive_children(fs: &VirtualFileSystem, path: &str, options: &Ls
     let mut stdout = String::new();
     for entry in entries {
         let child = join_directory_child(path, &entry.name);
+        let child_display = join_directory_child(display_path, &entry.name);
         stdout.push('\n');
-        stdout.push_str(&child);
+        stdout.push_str(&child_display);
         stdout.push_str(":\n");
         stdout.push_str(&format_ls_directory(fs, &child, options));
-        stdout.push_str(&format_ls_recursive_children(fs, &child, options));
+        stdout.push_str(&format_ls_recursive_children(
+            fs,
+            &child,
+            &child_display,
+            options,
+        ));
     }
     stdout
 }
@@ -8850,10 +8873,27 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
 
 fn command_head(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
     let mut lines = 10;
+    let mut bytes: Option<usize> = None;
     let mut paths = Vec::new();
     let mut index = 0;
     while let Some(arg) = args.get(index) {
-        if arg == "-n" {
+        if arg == "-c" || arg == "--bytes" {
+            if let Some(value) = args
+                .get(index + 1)
+                .and_then(|value| value.parse::<usize>().ok())
+            {
+                bytes = Some(value);
+            }
+            index += 2;
+        } else if let Some(value) = arg
+            .strip_prefix("--bytes=")
+            .or_else(|| arg.strip_prefix("-c"))
+            .filter(|value| !value.is_empty())
+            .and_then(|value| value.parse::<usize>().ok())
+        {
+            bytes = Some(value);
+            index += 1;
+        } else if arg == "-n" {
             if let Some(value) = args
                 .get(index + 1)
                 .and_then(|value| value.parse::<usize>().ok())
@@ -8888,6 +8928,13 @@ fn command_head(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandR
             }
             stdout.push_str(&format!("==> {} <==\n", input.label));
         }
+        if let Some(byte_count) = bytes {
+            // `head -c N` emits the first N bytes verbatim (no added newline).
+            let raw = input.text.as_bytes();
+            let take = byte_count.min(raw.len());
+            stdout.push_str(&String::from_utf8_lossy(&raw[..take]));
+            continue;
+        }
         let selected = input
             .text
             .lines()
@@ -8901,9 +8948,29 @@ fn command_head(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandR
 
 fn command_tail(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
     let mut lines = TailLines::Last(10);
+    let mut bytes: Option<usize> = None;
     let mut paths = Vec::new();
     let mut index = 0;
     while let Some(arg) = args.get(index) {
+        if arg == "-c" || arg == "--bytes" {
+            if let Some(value) = args
+                .get(index + 1)
+                .and_then(|value| value.parse::<usize>().ok())
+            {
+                bytes = Some(value);
+            }
+            index += 2;
+            continue;
+        } else if let Some(value) = arg
+            .strip_prefix("--bytes=")
+            .or_else(|| arg.strip_prefix("-c"))
+            .filter(|value| !value.is_empty())
+            .and_then(|value| value.parse::<usize>().ok())
+        {
+            bytes = Some(value);
+            index += 1;
+            continue;
+        }
         if arg == "-n" {
             if let Some(value) = args
                 .get(index + 1)
@@ -8935,6 +9002,13 @@ fn command_tail(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandR
                 stdout.push('\n');
             }
             stdout.push_str(&format!("==> {} <==\n", input.label));
+        }
+        if let Some(byte_count) = bytes {
+            // `tail -c N` emits the last N bytes verbatim.
+            let raw = input.text.as_bytes();
+            let start = raw.len().saturating_sub(byte_count);
+            stdout.push_str(&String::from_utf8_lossy(&raw[start..]));
+            continue;
         }
         let all_lines = input
             .text
@@ -13041,7 +13115,12 @@ fn parse_cut_list(value: &str) -> Vec<CutRange> {
         .split(',')
         .filter_map(|entry| {
             if let Some((start, end)) = entry.split_once('-') {
-                let start = start.parse().ok()?;
+                // `-N` is shorthand for `1-N` and `N-` is `N` to end of line.
+                let start = if start.is_empty() {
+                    1
+                } else {
+                    start.parse().ok()?
+                };
                 let end = if end.is_empty() {
                     None
                 } else {
@@ -24551,6 +24630,52 @@ mod tests {
             ..Default::default()
         })
         .exec(cmd)
+    }
+
+    // JBC-46: locks the spec-comparison command-family behaviors promoted to the
+    // Rust conformance corpus this round so a regression fails here too, not only
+    // in the generated fixture runner.
+    //   - grep -q/--quiet/--silent suppresses stdout while preserving exit code.
+    //   - head -c N / tail -c N emit byte windows verbatim.
+    //   - cut -c-N / cut -cN- treat the open side as 1 / end-of-line.
+    //   - ls prints the directory operand as typed (relative) in headers.
+    #[test]
+    fn spec_comparison_grep_quiet_head_tail_bytes_cut_open_range_and_ls_operand_headers() {
+        // grep -q: silent, exit 0 on match, used as a guard.
+        let quiet = xan_run_with_files(
+            "grep -q hello test.txt && echo found",
+            &[("/test.txt", "hello world\n")],
+        );
+        assert_eq!(quiet.stdout, "found\n");
+        assert_eq!(quiet.exit_code, 0);
+        let quiet_no_match =
+            xan_run_with_files("grep -q zzz test.txt", &[("/test.txt", "hello world\n")]);
+        assert_eq!(quiet_no_match.stdout, "");
+        assert_eq!(quiet_no_match.exit_code, 1);
+
+        // head -c / tail -c byte windows.
+        let head_bytes =
+            xan_run_with_files("head -c 5 test.txt", &[("/test.txt", "Hello World!\n")]);
+        assert_eq!(head_bytes.stdout, "Hello");
+        let head_over = xan_run_with_files("head -c 100 test.txt", &[("/test.txt", "short\n")]);
+        assert_eq!(head_over.stdout, "short\n");
+        let tail_bytes =
+            xan_run_with_files("tail -c 5 test.txt", &[("/test.txt", "Hello World!\n")]);
+        assert_eq!(tail_bytes.stdout, "rld!\n");
+        let tail_over = xan_run_with_files("tail -c 100 test.txt", &[("/test.txt", "short\n")]);
+        assert_eq!(tail_over.stdout, "short\n");
+
+        // cut -c-N is shorthand for 1-N.
+        let cut_open =
+            xan_run_with_files("cut -c-5 test.txt", &[("/test.txt", "abcdefg\n1234567\n")]);
+        assert_eq!(cut_open.stdout, "abcde\n12345\n");
+
+        // ls operand-name directory headers for relative operands.
+        let ls_two = xan_run_with_files(
+            "ls dir1 dir2",
+            &[("/dir1/a.txt", "a\n"), ("/dir2/b.txt", "b\n")],
+        );
+        assert_eq!(ls_two.stdout, "dir1:\na.txt\n\ndir2:\nb.txt\n");
     }
 
     // xan.select-advanced.test.ts: glob, range, negation, index, and duplicate
