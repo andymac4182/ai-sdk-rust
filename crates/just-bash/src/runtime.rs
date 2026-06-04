@@ -10548,4 +10548,251 @@ be, to a very large extent, the result of luck. Sherlock Holmes\n",
         let bad_prec = env.exec("echo '1' | awk '{ printf \"%10.5\", $1 }'");
         assert_eq!(bad_prec.exit_code, 0);
     }
+
+    // JBC-awk: multiple pattern/action rules, default print action, next, and
+    // BEGIN/main/END ordering across multiple rules.
+    // Upstream: packages/just-bash/src/commands/awk/awk.functions.test.ts
+    //   :142 multiple rules in order, :153 next skips remaining rules,
+    //   :162 default action for pattern-only rule, :171 mixed pattern/action,
+    //   :184 BEGIN/main/END ordering, :210 next skips remaining rules.
+    #[test]
+    fn awk_jbc_command_awk_multiple_rules_and_next_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/data.txt".to_string(),
+                    "apple\nbanana\ncherry\n".to_string(),
+                ),
+                ("/ab.txt".to_string(), "a\nb\nc\n".to_string()),
+                (
+                    "/hw.txt".to_string(),
+                    "hello\nworld\nhello world\n".to_string(),
+                ),
+                ("/num123.txt".to_string(), "1\n2\n3\n".to_string()),
+                ("/skipkeep.txt".to_string(), "skip\nkeep\n".to_string()),
+                ("/abonly.txt".to_string(), "a\nb\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // :142 should execute multiple rules in order
+        assert_eq!(
+            env.exec(r#"awk '/apple/{print "FRUIT"} /banana/{print "YELLOW"}' /data.txt"#)
+                .stdout,
+            "FRUIT\nYELLOW\n"
+        );
+        // :153 should handle pattern with next to skip rules
+        assert_eq!(
+            env.exec(r#"awk '/b/{next}{print}' /ab.txt"#).stdout,
+            "a\nc\n"
+        );
+        // :162 should execute default action (print) for pattern-only rules
+        assert_eq!(
+            env.exec(r#"awk '/hello/' /hw.txt"#).stdout,
+            "hello\nhello world\n"
+        );
+        // :171 should handle mixed pattern and action-only rules
+        assert_eq!(
+            env.exec(r#"awk '/2/{print "TWO"} {print "line:" $0}' /num123.txt"#)
+                .stdout,
+            "line:1\nTWO\nline:2\nline:3\n"
+        );
+        // :184 should execute BEGIN, main rules, and END in order
+        let begin_end =
+            env.exec(r#"awk 'BEGIN{print "START"} {print $0} END{print "END"}' /abonly.txt"#);
+        assert_eq!(begin_end.stdout, "START\na\nb\nEND\n");
+        assert_eq!(begin_end.exit_code, 0);
+        // :210 should skip remaining rules for current line
+        assert_eq!(
+            env.exec(r#"awk '/skip/{next}{print "processed:", $0}' /skipkeep.txt"#)
+                .stdout,
+            "processed: keep\n"
+        );
+    }
+
+    // JBC-awk: special variables FILENAME/FNR and string functions
+    // match()/RSTART/RLENGTH/gensub(), printf %x/%X/%o/%c, and the ^/** power
+    // operators with a fractional exponent.
+    // Upstream: packages/just-bash/src/commands/awk/awk.functions.test.ts
+    //   :307 FILENAME contains filename,
+    //   :316 FILENAME empty for stdin, :325 FNR resets per file,
+    //   :343 RSTART/RLENGTH set by match, :352 RSTART/RLENGTH no match,
+    //   :365 match position, :374 match returns 0, :383 match regex,
+    //   :394 gensub first, :403 gensub g, :421 gensub Nth,
+    //   :434 power ^, :441 power **, :448 fractional exponent,
+    //   :459 %x lower, :468 %X upper, :479 %o octal, :490 %c char.
+    #[test]
+    fn awk_jbc_command_awk_special_vars_string_fns_and_printf_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/test.txt".to_string(), "line1\n".to_string()),
+                ("/a.txt".to_string(), "a1\na2\n".to_string()),
+                ("/b.txt".to_string(), "b1\nb2\nb3\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // :307 FILENAME should contain current filename
+        assert_eq!(
+            env.exec(r#"awk '{print FILENAME}' /test.txt"#).stdout,
+            "/test.txt\n"
+        );
+        // :316 FILENAME should be empty for stdin
+        assert_eq!(
+            env.exec(r#"echo "test" | awk '{print FILENAME}'"#).stdout,
+            "\n"
+        );
+        // :325 FNR should reset for each file
+        assert_eq!(
+            env.exec(r#"awk '{print FILENAME, FNR, NR}' /a.txt /b.txt"#)
+                .stdout,
+            "/a.txt 1 1\n/a.txt 2 2\n/b.txt 1 3\n/b.txt 2 4\n/b.txt 3 5\n"
+        );
+        // :343 RSTART/RLENGTH should be set by match()
+        assert_eq!(
+            env.exec(r#"echo "hello world" | awk '{ match($0, /wor/); print RSTART, RLENGTH }'"#)
+                .stdout,
+            "7 3\n"
+        );
+        // :352 RSTART/RLENGTH should be 0 and -1 when no match
+        assert_eq!(
+            env.exec(r#"echo "hello" | awk '{ match($0, /xyz/); print RSTART, RLENGTH }'"#)
+                .stdout,
+            "0 -1\n"
+        );
+        // :365 match() should return position of match
+        assert_eq!(
+            env.exec(r#"echo "hello world" | awk '{ print match($0, /world/) }'"#)
+                .stdout,
+            "7\n"
+        );
+        // :374 match() should return 0 for no match
+        assert_eq!(
+            env.exec(r#"echo "hello" | awk '{ print match($0, /xyz/) }'"#)
+                .stdout,
+            "0\n"
+        );
+        // :383 match() should work with regex patterns
+        assert_eq!(
+            env.exec(r#"echo "test123abc" | awk '{ match($0, /[0-9]+/); print RSTART, RLENGTH }'"#)
+                .stdout,
+            "5 3\n"
+        );
+        // :394 gensub() should replace first occurrence
+        assert_eq!(
+            env.exec(r#"echo "hello hello" | awk '{ print gensub(/hello/, "hi", 1) }'"#)
+                .stdout,
+            "hi hello\n"
+        );
+        // :403 gensub() should replace all occurrences with g
+        assert_eq!(
+            env.exec(r#"echo "hello hello" | awk '{ print gensub(/hello/, "hi", "g") }'"#)
+                .stdout,
+            "hi hi\n"
+        );
+        // :421 gensub() should replace Nth occurrence
+        assert_eq!(
+            env.exec(r#"echo "a b a b a" | awk '{ print gensub(/a/, "X", 2) }'"#)
+                .stdout,
+            "a b X b a\n"
+        );
+        // :434 power operator with ^
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 2^10 }'"#).stdout,
+            "1024\n"
+        );
+        // :441 power operator with **
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 3**4 }'"#).stdout,
+            "81\n"
+        );
+        // :448 fractional exponent
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 9^0.5 }'"#).stdout,
+            "3\n"
+        );
+        // :459 printf %x hex lowercase
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { printf "%x\n", 255 }'"#)
+                .stdout,
+            "ff\n"
+        );
+        // :468 printf %X hex uppercase
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { printf "%X\n", 255 }'"#)
+                .stdout,
+            "FF\n"
+        );
+        // :479 printf %o octal
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { printf "%o\n", 64 }'"#)
+                .stdout,
+            "100\n"
+        );
+        // :490 printf %c numeric -> character
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { printf "%c\n", 65 }'"#)
+                .stdout,
+            "A\n"
+        );
+    }
+
+    // JBC-awk: field iteration with C-style for loops over $i / NF, string
+    // reversal via length()/substr(), and regex/multichar/character-class -F
+    // field separators.
+    // Upstream files:
+    //   awk.fields.test.ts :317 iterate over all fields, :326 iterate reverse,
+    //     :335 sum all fields.
+    //   awk.functions.test.ts :523 regex FS split, :534 multichar FS,
+    //     :545 character-class FS.
+    #[test]
+    fn awk_jbc_command_awk_field_iteration_and_fs_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/a1b.txt".to_string(), "a1b2c3d\n".to_string()),
+                ("/colons.txt".to_string(), "a::b::c\n".to_string()),
+                ("/seps.txt".to_string(), "a,b;c:d\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // fields :317 should iterate over all fields
+        assert_eq!(
+            env.exec(r#"echo "a b c" | awk '{ for(i=1; i<=NF; i++) print i, $i }'"#)
+                .stdout,
+            "1 a\n2 b\n3 c\n"
+        );
+        // fields :326 should iterate in reverse
+        assert_eq!(
+            env.exec(r#"echo "a b c" | awk '{ for(i=NF; i>=1; i--) printf $i " "; print "" }'"#)
+                .stdout,
+            "c b a \n"
+        );
+        // fields :335 should sum all fields
+        assert_eq!(
+            env.exec(
+                r#"echo "1 2 3 4 5" | awk '{ sum=0; for(i=1; i<=NF; i++) sum+=$i; print sum }'"#
+            )
+            .stdout,
+            "15\n"
+        );
+        // functions :523 should split on regex pattern (-F)
+        assert_eq!(
+            env.exec(r#"awk -F'[0-9]' '{print $1, $2, $3, $4}' /a1b.txt"#)
+                .stdout,
+            "a b c d\n"
+        );
+        // functions :534 should split on multiple characters (-F'::')
+        assert_eq!(
+            env.exec(r#"awk -F'::' '{print $1, $2, $3}' /colons.txt"#)
+                .stdout,
+            "a b c\n"
+        );
+        // functions :545 should handle character class (-F'[,;:]')
+        assert_eq!(
+            env.exec(r#"awk -F'[,;:]' '{print $1, $2, $3, $4}' /seps.txt"#)
+                .stdout,
+            "a b c d\n"
+        );
+    }
 }
