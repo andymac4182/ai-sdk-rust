@@ -4406,6 +4406,158 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn rg_imported_gitignore_anchoring_and_exit_code_rows_are_portable() {
+        // JBC-10: closes a cluster of imported ripgrep regression/gitignore/feature
+        // rows that exercise base-anchored gitignore patterns (slash-containing or
+        // rooted patterns match a path or any descendant, never a free-floating
+        // substring deeper in the tree), interspersed flags after the positional
+        // pattern, empty pattern-file exit semantics, and --files-without-match
+        // exit codes / quiet suppression. Each assertion fails if the rg port
+        // regresses the upstream behaviour.
+
+        // gitignore.test.ts:63 + regression r2747 family: a non-rooted pattern that
+        // contains a slash (`doc/frotz`) is rooted at the gitignore base. It hides
+        // `doc/frotz` but NOT `a/doc/frotz`.
+        assert_eq!(
+            home_bash(&[
+                (".git/.gitkeep", ""),
+                (".gitignore", "doc/frotz\n"),
+                ("doc/frotz", "x\n"),
+            ])
+            .exec("rg x")
+            .exit_code,
+            1,
+            "doc/frotz should be ignored at the root",
+        );
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "doc/frotz\n"),
+                ("a/doc/frotz", "x\n"),
+            ],
+            "rg x",
+            0,
+            "a/doc/frotz:1:x\n",
+        );
+
+        // regression.test.ts:137 - negation of root with include (`/*` then `!/dir`):
+        // only the whitelisted directory survives.
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "/*\n!/dir\n"),
+                ("foo/bar", "test\n"),
+                ("dir/bar", "test\n"),
+            ],
+            "rg test",
+            0,
+            "dir/bar:1:test\n",
+        );
+
+        // regression.test.ts:355 - a `-g` glob supplied AFTER the positional pattern
+        // is still parsed as an option (interspersed flags), not as a path root.
+        assert_home_exec(
+            &[("foo/bar.txt", "test\n")],
+            "rg test -g '*.txt'",
+            0,
+            "foo/bar.txt:1:test\n",
+        );
+
+        // regression.test.ts:659 - gitignore for a hidden subdirectory (`.a/b`):
+        // hides `.a/b/**` but not `.a/c/**` under `--hidden`.
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", ".a/b\n"),
+                (".a/b/file", "test\n"),
+                (".a/c/file", "test\n"),
+            ],
+            "rg --hidden test",
+            0,
+            ".a/c/file:1:test\n",
+        );
+
+        // regression.test.ts:677 - r829 anchored `/a/b`: excludes `a/b/**`.
+        assert_eq!(
+            home_bash(&[(".ignore", "/a/b\n"), ("a/b/test.txt", "Sample text\n")])
+                .exec("rg Sample")
+                .exit_code,
+            1,
+            "/a/b should ignore a/b/test.txt",
+        );
+
+        // regression.test.ts:702 - r829 `/a/*/b`: only the path matching the rooted
+        // single-segment wildcard is excluded.
+        assert_home_exec(
+            &[
+                (".ignore", "/a/*/b\n"),
+                ("a/c/b/foo", ""),
+                ("a/src/f/b/foo", ""),
+            ],
+            "rg --files",
+            0,
+            "a/src/f/b/foo\n",
+        );
+
+        // regression.test.ts:757 - an empty `-f` pattern file matches nothing and
+        // exits 1 (no matches), NOT 2 (no pattern given).
+        let empty_pat =
+            home_bash(&[("sherlock", SHERLOCK), ("pat", "")]).exec("rg -f pat sherlock");
+        assert_eq!(empty_pat.exit_code, 1, "empty pattern file exit");
+        assert_eq!(empty_pat.stdout, "", "empty pattern file stdout");
+        assert_eq!(empty_pat.stderr, "", "empty pattern file stderr");
+
+        // regression.test.ts:1174 - `.ignore` with a path prefix (`rust/target`):
+        // only the source file outside the ignored directory is listed.
+        assert_home_exec(
+            &[
+                (".ignore", "rust/target\n"),
+                ("rust/source.rs", "needle\n"),
+                ("rust/target/rustdoc-output.html", "needle\n"),
+            ],
+            "rg --files-with-matches needle rust",
+            0,
+            "rust/source.rs\n",
+        );
+
+        // regression.test.ts:1447 + r3067 - gitignore `foobar/debug` hides
+        // `foobar/debug/**` but not the unrelated `foobar/some/debug/**`.
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "foobar/debug\n"),
+                ("foobar/some/debug/flag", "baz\n"),
+                ("foobar/debug/flag2", "baz\n"),
+            ],
+            "rg baz",
+            0,
+            "foobar/some/debug/flag:1:baz\n",
+        );
+
+        // regression.test.ts:1465 - --files-without-match exit codes and quiet mode.
+        assert_home_exec(
+            &[("yes-match", "abc\n"), ("non-match", "xyz\n")],
+            "rg --files-without-match abc non-match",
+            0,
+            "non-match\n",
+        );
+        assert_eq!(
+            home_bash(&[("yes-match", "abc\n"), ("non-match", "xyz\n")])
+                .exec("rg --files-without-match abc yes-match")
+                .exit_code,
+            1,
+            "files-without-match against a matching file exits 1",
+        );
+        let fwm_q = home_bash(&[("yes-match", "abc\n"), ("non-match", "xyz\n")])
+            .exec("rg --files-without-match -q abc non-match");
+        assert_eq!(fwm_q.exit_code, 0, "quiet files-without-match exit");
+        assert_eq!(
+            fwm_q.stdout, "",
+            "quiet files-without-match suppresses output"
+        );
+    }
+
+    #[test]
     fn rg_upstream_basic_rows_are_portable() {
         assert_home_exec(
             &[("file.txt", "hello world\nfoo bar\n")],

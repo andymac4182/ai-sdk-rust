@@ -1194,6 +1194,24 @@ const jbc10CaseGroups = [
       'JBC-10 verifies the imported rg misc -a (text) row searches binary (NUL-containing) file content literally and prints the matching lines over the virtual filesystem.',
   },
   {
+    file: 'packages/just-bash/src/commands/rg/gitignore.test.ts',
+    lines: [63],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_gitignore_anchoring_and_exit_code_rows_are_portable',
+    notes:
+      'JBC-10 verifies a non-rooted gitignore pattern that contains a slash (`doc/frotz`) is rooted at the gitignore base: it hides `doc/frotz` but not `a/doc/frotz`.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [137, 355, 659, 677, 702, 757, 1174, 1447, 1465],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_gitignore_anchoring_and_exit_code_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported ripgrep regression rows for base-anchored gitignore semantics (slash-containing or rooted patterns match a path or any descendant, never a free-floating substring deeper in the tree: `/*`+`!/dir` negation, `.a/b`, `/a/b`, `/a/*/b`, `rust/target`, `foobar/debug`), interspersed `-g` glob flags after the positional pattern, an empty `-f` pattern file exiting 1 (no matches) rather than 2 (no pattern given), and `--files-without-match` exit codes plus `-q` quiet suppression over the virtual filesystem.',
+  },
+  {
     file: 'packages/just-bash/src/commands/rg/imported-tests/feature.test.ts',
     lines: [965, 966, 967, 968, 969, 970, 1047],
     status: 'js-only-documented',
