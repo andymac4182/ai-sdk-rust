@@ -924,6 +924,33 @@ const jbc09CaseGroups = [
     notes:
       'just-bash-command-awk verifies portable awk field iteration with C-style for loops: iterating $i forward over NF, iterating in reverse, and summing all fields.',
   },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.expressions.test.ts',
+    lines: [114, 132, 149, 460, 498],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_loop_break_continue_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk C-style loop control: nested for/while, break and continue scoped to the innermost loop, and the fibonacci and string-reversal loop idioms.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.functions.test.ts',
+    lines: [247, 256, 265, 274],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_loop_break_continue_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk break/continue in for and while loops within BEGIN blocks.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.functions.test.ts',
+    lines: [285, 294],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_do_while_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk do-while loops execute the body at least once and re-test the condition after each iteration.',
+  },
 ];
 
 const jbc10CaseGroups = [
