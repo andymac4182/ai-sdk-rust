@@ -998,12 +998,15 @@ const jbc09CaseGroups = [
   },
   {
     file: 'packages/just-bash/src/commands/awk/awk.patterns.test.ts',
-    lines: [6, 15, 24, 33, 42],
+    lines: [
+      6, 15, 24, 33, 42, 51, 71, 80, 107, 116, 165, 174, 183, 192, 203, 212,
+      221, 232, 243,
+    ],
     status: 'portable-verified',
     owner: 'crates/just-bash::runtime::awk',
     rustTest: 'awk_jbc_command_awk_regex_pattern_rows',
     notes:
-      'just-bash-command-awk verifies portable awk regex patterns: a literal /ana/ match, ^ and $ anchors, a [cd] character class, and a negated [^a-z] character class selecting digit records.',
+      'just-bash-command-awk verifies portable awk regex patterns: literal /ana/, ^/$ anchors, [cd] and negated [^a-z] character classes, alternation /red|blue/, expression patterns ($1 ==/!= numeric, string equality, lexicographic comparison), combined NR patterns (NR == 1, NR > 1, range, every Nth via NR % 2), field regex-match patterns ($1 ~/!~ /^a/, $2 ~ /^a/), action-only rule on every record, and pattern-only rule printing matches.',
   },
 ];
 
@@ -3945,13 +3948,14 @@ const jbc42CaseGroups = [
     file: 'packages/just-bash/src/commands/awk/awk.parsing.test.ts',
     lines: [
       6, 13, 22, 33, 50, 60, 71, 81, 91, 101, 112, 125, 143, 152, 161,
-      170, 179, 186, 193, 200, 207, 272, 282, 383, 392,
+      170, 179, 186, 193, 200, 207, 216, 225, 234, 243, 252, 261, 272, 282,
+      294, 303, 313, 322, 331, 342, 349, 358, 367, 374, 383, 392,
     ],
     status: 'portable-verified',
     owner: 'crates/just-bash::runtime::awk',
     rustTest: 'awk_jbc42_parser_comment_numeric_and_if_rows',
     notes:
-      'JBC-42 verifies portable AWK whitespace and newline continuation parsing, string escapes, scientific and leading-decimal numeric literals, line comments, and simple if/else actions; loops, for-in, getline, output redirection, and parser error edges remain pending.',
+      'JBC-42 verifies portable AWK whitespace and newline continuation parsing, string escapes, scientific and leading-decimal numeric literals, line comments, simple if/else actions, regex-literal parsing (special chars, brackets, anchors, quantifiers, regex-vs-division disambiguation), two-character/compound-assignment/increment-decrement/logical/regex operator parsing, and block-structure parsing (empty blocks, multiple rules, BEGIN+END, pattern-without-action, action-without-pattern); loops, for-in, getline, output redirection, and parser error edges remain pending.',
   },
   {
     file: 'packages/just-bash/src/commands/awk/awk.parsing.test.ts',
