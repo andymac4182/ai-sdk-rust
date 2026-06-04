@@ -4475,6 +4475,27 @@ const jbInterpreterBuiltinsCaseGroups = [
   },
 ];
 
+const jbR5ParserInterpreterCaseGroups = [
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/break.test.ts',
+    lines: [6, 19, 34, 51, 66, 78, 93, 101, 112, 123, 134, 151, 165, 178],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::builtins::break',
+    rustTest: 'r5_interpreter_builtin_break_matches_upstream',
+    notes:
+      'R5 verifies the portable `break` builtin 1:1 with break.test.ts: exiting for/while/until loops early, `break n` multi-level and single-level breaks, level exceeding loop depth, silent no-op outside a loop, fatal numeric-argument-required errors (non-numeric/zero/negative) with exit 128, fatal too-many-arguments error with exit 1, and break inside case/if/function nested in a loop.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/continue.test.ts',
+    lines: [6, 19, 34, 51, 67, 78, 93, 101, 112, 123, 134, 151, 165, 178],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::builtins::continue',
+    rustTest: 'r5_interpreter_builtin_continue_matches_upstream',
+    notes:
+      'R5 verifies the portable `continue` builtin 1:1 with continue.test.ts: skipping to the next iteration of for/while/until loops, `continue n` multi-level and single-level continues, level exceeding loop depth, silent no-op outside a loop, fatal numeric-argument-required errors (non-numeric/zero/negative) with exit 1, fatal too-many-arguments error with exit 1, and continue inside case/if/function nested in a loop. The two C-style `for (( ))` rows (L197, L208) stay pending until C-style for loops are implemented.',
+  },
+];
+
 const jbExecOptionsLoggingCaseGroups = [
   {
     file: 'packages/just-bash/src/Bash.exec-options.test.ts',
@@ -4581,6 +4602,7 @@ function caseOverrideFor(testCase) {
   const group = [
     ...jbAliasCaseGroups,
     ...jbInterpreterBuiltinsCaseGroups,
+    ...jbR5ParserInterpreterCaseGroups,
     ...jbExecOptionsLoggingCaseGroups,
     ...jbc39CaseGroups,
     ...jbc28CaseGroups,
