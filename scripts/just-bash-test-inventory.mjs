@@ -885,6 +885,45 @@ const jbc09CaseGroups = [
     notes:
       'just-bash-command-awk verifies portable awk error/edge handling: negative field index, split() with the array argument omitted, an undefined function call returning empty, NF growing when a high field is set, assigning to NF, and graceful printf handling of an unknown specifier and width/precision with no conversion.',
   },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.functions.test.ts',
+    lines: [142, 153, 162, 171, 184, 210],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_multiple_rules_and_next_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk multiple pattern/action rules executing in order, next skipping the remaining rules for a record, the default print action for a pattern-only rule, mixed pattern and action-only rules, and BEGIN/main/END ordering.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.functions.test.ts',
+    lines: [
+      307, 316, 325, 343, 352, 365, 374, 383, 394, 403, 421, 434, 441, 448, 459,
+      468, 479, 490,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_special_vars_string_fns_and_printf_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk FILENAME (file and empty-for-stdin), FNR resetting per file, match() setting RSTART/RLENGTH and returning position/0, gensub() first/global/Nth replacement, the ^ and ** power operators with a fractional exponent, and printf %x/%X/%o/%c formatting.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.functions.test.ts',
+    lines: [523, 534, 545],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_field_iteration_and_fs_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk -F regex field separators: a bracket character class on digits, a multi-character literal separator, and a punctuation character class.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.fields.test.ts',
+    lines: [317, 326, 335],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_field_iteration_and_fs_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk field iteration with C-style for loops: iterating $i forward over NF, iterating in reverse, and summing all fields.',
+  },
 ];
 
 const jbc10CaseGroups = [
