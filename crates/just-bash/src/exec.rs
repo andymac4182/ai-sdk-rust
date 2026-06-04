@@ -12452,6 +12452,18 @@ fn json_add(value: &JsonValue) -> Result<JsonValue, String> {
         }
         return Ok(JsonValue::Array(output));
     }
+    if values.iter().all(JsonValue::is_object) {
+        // jq `add` over objects merges them; later keys override earlier ones.
+        let mut output = JsonMap::new();
+        for value in values {
+            if let JsonValue::Object(map) = value {
+                for (key, entry) in map {
+                    output.insert(key.clone(), entry.clone());
+                }
+            }
+        }
+        return Ok(JsonValue::Object(output));
+    }
     Err("unsupported add inputs".to_string())
 }
 
