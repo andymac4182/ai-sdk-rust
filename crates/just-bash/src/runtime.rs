@@ -2017,6 +2017,190 @@ and exhibited clearly, with a label attached.\n";
         );
     }
 
+    fn sort_env(content: &str) -> Bash {
+        Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/test.txt".to_string(), content.to_string())]),
+            cwd: Some("/".to_string()),
+            ..BashOptions::default()
+        })
+    }
+
+    #[test]
+    fn sort_upstream_advanced_human_version_month_dictionary_blanks_check_output_stable_perkey() {
+        // maps packages/just-bash/src/commands/sort/sort.advanced.test.ts
+
+        // sort -h (human numeric)
+        let r = sort_env("1K\n2M\n500\n1G\n100K\n").exec("sort -h /test.txt");
+        assert_eq!(r.stdout, "500\n1K\n100K\n2M\n1G\n");
+        assert_eq!(r.exit_code, 0);
+        let r = sort_env("1k\n2M\n3g\n").exec("sort -h /test.txt");
+        assert_eq!(r.stdout, "1k\n2M\n3g\n");
+        assert_eq!(r.exit_code, 0);
+        let r = sort_env("1.5K\n2K\n1K\n").exec("sort -h /test.txt");
+        assert_eq!(r.stdout, "1K\n1.5K\n2K\n");
+        assert_eq!(r.exit_code, 0);
+        let r = sort_env("1K\n1M\n1G\n").exec("sort -hr /test.txt");
+        assert_eq!(r.stdout, "1G\n1M\n1K\n");
+        assert_eq!(r.exit_code, 0);
+
+        // sort -V (version)
+        let r = sort_env("file1.10\nfile1.2\nfile1.1\n").exec("sort -V /test.txt");
+        assert_eq!(r.stdout, "file1.1\nfile1.2\nfile1.10\n");
+        assert_eq!(r.exit_code, 0);
+        let r = sort_env("v2.0\nv1.10\nv1.2\n").exec("sort -V /test.txt");
+        assert_eq!(r.stdout, "v1.2\nv1.10\nv2.0\n");
+        assert_eq!(r.exit_code, 0);
+        let r = sort_env("1.0.0\n1.0.10\n1.0.2\n").exec("sort -V /test.txt");
+        assert_eq!(r.stdout, "1.0.0\n1.0.2\n1.0.10\n");
+        assert_eq!(r.exit_code, 0);
+
+        // sort -M (month)
+        let r = sort_env("Mar\nJan\nDec\nFeb\n").exec("sort -M /test.txt");
+        assert_eq!(r.stdout, "Jan\nFeb\nMar\nDec\n");
+        assert_eq!(r.exit_code, 0);
+        let r = sort_env("mar\njan\nfeb\n").exec("sort -M /test.txt");
+        assert_eq!(r.stdout, "jan\nfeb\nmar\n");
+        assert_eq!(r.exit_code, 0);
+        let r = sort_env("Mar\nfoo\nJan\n").exec("sort -M /test.txt");
+        assert_eq!(r.stdout, "foo\nJan\nMar\n");
+        assert_eq!(r.exit_code, 0);
+
+        // sort -d (dictionary order)
+        let r = sort_env("b-c\na_b\nc.d\n").exec("sort -d /test.txt");
+        assert_eq!(r.stdout, "a_b\nb-c\nc.d\n");
+        assert_eq!(r.exit_code, 0);
+
+        // sort -b (ignore leading blanks)
+        let r = sort_env("  b\na\n   c\n").exec("sort -b /test.txt");
+        assert_eq!(r.stdout, "a\n  b\n   c\n");
+        assert_eq!(r.exit_code, 0);
+        let r = sort_env("  2\n1\n   3\n").exec("sort -bn /test.txt");
+        assert_eq!(r.stdout, "1\n  2\n   3\n");
+        assert_eq!(r.exit_code, 0);
+
+        // sort -c (check)
+        let r = sort_env("a\nb\nc\n").exec("sort -c /test.txt");
+        assert_eq!(r.stdout, "");
+        assert_eq!(r.stderr, "");
+        assert_eq!(r.exit_code, 0);
+        let r = sort_env("b\na\nc\n").exec("sort -c /test.txt");
+        assert_eq!(r.stdout, "");
+        assert_eq!(r.stderr, "sort: /test.txt:2: disorder: a\n");
+        assert_eq!(r.exit_code, 1);
+        let r = sort_env("1\n2\n10\n").exec("sort -cn /test.txt");
+        assert_eq!(r.exit_code, 0);
+
+        // sort -o (output file)
+        let env = sort_env("c\na\nb\n");
+        env.exec("sort -o /out.txt /test.txt");
+        assert_eq!(env.exec("cat /out.txt").stdout, "a\nb\nc\n");
+        let env = sort_env("c\na\nb\n");
+        env.exec("sort -o /test.txt /test.txt");
+        assert_eq!(env.exec("cat /test.txt").stdout, "a\nb\nc\n");
+        let env = sort_env("c\na\nb\n");
+        env.exec("sort --output=/out.txt /test.txt");
+        assert_eq!(env.exec("cat /out.txt").stdout, "a\nb\nc\n");
+
+        // sort -s (stable)
+        let r = sort_env("1 b\n1 a\n2 c\n").exec("sort -s -k1,1 /test.txt");
+        assert_eq!(r.stdout, "1 b\n1 a\n2 c\n");
+        assert_eq!(r.exit_code, 0);
+
+        // sort per-key modifiers
+        let r = sort_env("a 1M\nb 1K\nc 1G\n").exec("sort -k2h /test.txt");
+        assert_eq!(r.stdout, "b 1K\na 1M\nc 1G\n");
+        assert_eq!(r.exit_code, 0);
+        let r = sort_env("a v1.10\nb v1.2\nc v2.0\n").exec("sort -k2V /test.txt");
+        assert_eq!(r.stdout, "b v1.2\na v1.10\nc v2.0\n");
+        assert_eq!(r.exit_code, 0);
+        let r = sort_env("2023 Mar\n2023 Jan\n2023 Feb\n").exec("sort -k2M /test.txt");
+        assert_eq!(r.stdout, "2023 Jan\n2023 Feb\n2023 Mar\n");
+        assert_eq!(r.exit_code, 0);
+
+        // sort --help
+        let r = Bash::new().exec("sort --help");
+        assert!(r.stdout.contains("-h"));
+        assert!(r.stdout.contains("-V"));
+        assert!(r.stdout.contains("-M"));
+        assert!(r.stdout.contains("-d"));
+        assert!(r.stdout.contains("-b"));
+        assert!(r.stdout.contains("-c"));
+        assert!(r.stdout.contains("-o"));
+        assert!(r.stdout.contains("-s"));
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn sort_upstream_complex_key_syntax_ranges_perkey_modifiers_delimiter_and_long_key() {
+        // maps packages/just-bash/src/commands/sort/sort.test.ts complex -k syntax rows
+        let r = sort_env("a b c\na a c\nb a a\n").exec("sort -k1,2 /test.txt");
+        assert_eq!(r.stdout, "a a c\na b c\nb a a\n");
+        let r = sort_env("1 banana\n2 apple\n3 cherry\n").exec("sort -k2,2 /test.txt");
+        assert_eq!(r.stdout, "2 apple\n1 banana\n3 cherry\n");
+        let r = sort_env("a 10\nb 2\nc 1\n").exec("sort -k2n /test.txt");
+        assert_eq!(r.stdout, "c 1\nb 2\na 10\n");
+        let r = sort_env("a 1\nb 2\nc 3\n").exec("sort -k1r /test.txt");
+        assert_eq!(r.stdout, "c 3\nb 2\na 1\n");
+        let r = sort_env("x 5\ny 10\nz 2\n").exec("sort -k2,2nr /test.txt");
+        assert_eq!(r.stdout, "y 10\nx 5\nz 2\n");
+        let r = sort_env("a 2\nb 1\na 1\nb 2\n").exec("sort -k1,1 -k2,2n /test.txt");
+        assert_eq!(r.stdout, "a 1\na 2\nb 1\nb 2\n");
+        let r = sort_env("abc\nabc\nbac\naac\n").exec("sort -k1.2 /test.txt");
+        assert_eq!(r.stdout, "aac\nbac\nabc\nabc\n");
+        let r = sort_env("Zebra\napple\nBANANA\n").exec("sort -k1f /test.txt");
+        assert_eq!(r.stdout, "apple\nBANANA\nZebra\n");
+        let r = sort_env("c:3\na:1\nb:2\n").exec("sort -t: -k2n /test.txt");
+        assert_eq!(r.stdout, "a:1\nb:2\nc:3\n");
+        let r = sort_env("3 c\n1 a\n2 b\n").exec("sort --key=1n /test.txt");
+        assert_eq!(r.stdout, "1 a\n2 b\n3 c\n");
+    }
+
+    #[test]
+    fn sort_upstream_binary_safe_and_utf8_preserving_case_fold_dictionary() {
+        // maps packages/just-bash/src/commands/sort/sort.binary.test.ts
+        // Binary-safe ASCII lines.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "c\na\nb\n".to_string())]),
+            cwd: Some("/".to_string()),
+            ..BashOptions::default()
+        });
+        let r = env.exec("sort /data.txt");
+        assert_eq!(r.stdout, "a\nb\nc\n");
+        assert_eq!(r.exit_code, 0);
+
+        // UTF-8 leading bytes preserved under -f case-fold (É is U+00C9).
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.bin".to_string(), "A\n\u{00C9}\n".to_string())]),
+            cwd: Some("/".to_string()),
+            ..BashOptions::default()
+        });
+        let r = env.exec("sort -f /data.bin");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "A\n\u{00C9}\n");
+
+        // UTF-8 preserved under -k1f per-key case-fold.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.bin".to_string(), "B\n\u{00C9}\nA\n".to_string())]),
+            cwd: Some("/".to_string()),
+            ..BashOptions::default()
+        });
+        let r = env.exec("sort -k1f /data.bin");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "A\nB\n\u{00C9}\n");
+
+        // UTF-8 bytes preserved under -k1d per-key dictionary order (é round-trips whole).
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.bin".to_string(), "B\n\u{00E9}\nA\n".to_string())]),
+            cwd: Some("/".to_string()),
+            ..BashOptions::default()
+        });
+        let r = env.exec("sort -k1d /data.bin");
+        assert_eq!(r.exit_code, 0);
+        let mut got: Vec<&str> = r.stdout.split('\n').filter(|s| !s.is_empty()).collect();
+        got.sort_unstable();
+        assert_eq!(got, vec!["A", "B", "\u{00E9}"]);
+    }
+
     #[test]
     fn mkdir_rm_upstream_command_flags_and_errors_are_virtual() {
         // maps selected portable mkdir/rm upstream command rows
@@ -8432,7 +8616,7 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         );
         assert_eq!(
             env.exec("sort -fr /case-mixed.txt").stdout,
-            "zebra\nZebra\nalpha\nAlpha\n"
+            "Zebra\nzebra\nAlpha\nalpha\n"
         );
         assert_eq!(
             env.exec("echo -e 'apple\\nBanana\\ncherry' | sort -fr")
