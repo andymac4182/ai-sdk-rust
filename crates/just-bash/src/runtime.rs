@@ -6018,6 +6018,110 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn rg_imported_regression_misc_pattern_file_context_and_filter_rows_are_portable() {
+        // packages/just-bash/src/commands/rg/imported-tests/regression.test.ts
+        // 247 - r105: gitignore with full path pattern hides foo/sherlock but keeps foo/watson
+        let r105 = home_bash(&[
+            (".git/.gitkeep", ""),
+            (".gitignore", "foo/sherlock\n"),
+            ("foo/sherlock", SHERLOCK),
+            ("foo/watson", SHERLOCK),
+        ])
+        .exec("rg Sherlock");
+        assert_eq!(r105.exit_code, 0, "r105");
+        assert!(r105.stdout.contains("foo/watson:"), "r105 keeps watson");
+        assert!(
+            !r105.stdout.contains("foo/sherlock:"),
+            "r105 ignores sherlock"
+        );
+        assert_eq!(r105.stderr, "", "r105 stderr");
+
+        // 594 - r553_switch: repeated -i flag stays case-insensitive
+        let r553i = home_bash(&[("sherlock", SHERLOCK)]).exec("rg -i -i sherlock");
+        assert_eq!(r553i.exit_code, 0, "r553_switch");
+        assert!(r553i.stdout.contains("Sherlock"), "r553_switch matches");
+        assert_eq!(r553i.stderr, "", "r553_switch stderr");
+
+        // 606 - r553_flag: later -C 0 overrides an earlier -C 1, removing the context separator
+        let r553c = home_bash(&[("sherlock", SHERLOCK)]);
+        let with_ctx = r553c.exec("rg -C 1 'world|attached' sherlock");
+        assert_eq!(with_ctx.exit_code, 0, "r553_flag ctx");
+        assert!(with_ctx.stdout.contains("--"), "r553_flag has separator");
+        let no_ctx = r553c.exec("rg -C 1 -C 0 'world|attached' sherlock");
+        assert_eq!(no_ctx.exit_code, 0, "r553_flag override");
+        assert!(
+            !no_ctx.stdout.contains("--"),
+            "r553_flag override removes separator"
+        );
+
+        // 916 - r1176_literal_file: -F with a pattern file treats the pattern literally
+        assert_home_exec(
+            &[("patterns", "foo(bar\n"), ("test", "foo(bar\n")],
+            "rg -F -f patterns test",
+            0,
+            "foo(bar\n",
+        );
+        // 929 - r1176_line_regex: -x with a pattern file requires a whole-line match
+        assert_home_exec(
+            &[("patterns", "foo\n"), ("test", "foobar\nfoo\nbarfoo\n")],
+            "rg -x -f patterns test",
+            0,
+            "foo\n",
+        );
+
+        // 1003 - r1319: DNA sequence regex with bounded repetition matches the corpus line
+        let dna = home_bash(&[(
+            "input",
+            "CCAGCTACTCGGGAGGCTGAGGCTGGAGGATCGCTTGAGTCCAGGAGTTC\n",
+        )])
+        .exec("rg 'TTGAGTCCAGGAG[ATCG]{2}C'");
+        assert_eq!(dna.exit_code, 0, "r1319 exit");
+        assert!(
+            dna.stdout
+                .contains("CCAGCTACTCGGGAGGCTGAGGCTGGAGGATCGCTTGAGTCCAGGAGTTC"),
+            "r1319 matches DNA line"
+        );
+        assert_eq!(dna.stderr, "", "r1319 stderr");
+
+        // 1364 - r2236: multiple -e patterns with --only-matching list each match in order
+        assert_home_exec(
+            &[("file", "FooBar\n")],
+            "rg --only-matching -e Foo -e Bar file",
+            0,
+            "Foo\nBar\n",
+        );
+
+        // 1429 - r2770: --stats reports the bytes searched summary line
+        let stats = home_bash(&[("haystack", "foo1\nfoo2\nfoo3\nfoo4\nfoo5\n")])
+            .exec("rg --stats -m2 foo .");
+        assert_eq!(stats.exit_code, 0, "r2770 exit");
+        assert!(
+            stats.stdout.contains("bytes searched"),
+            "r2770 reports bytes searched"
+        );
+        assert_eq!(stats.stderr, "", "r2770 stderr");
+    }
+
+    #[test]
+    fn rg_imported_misc_type_list_and_unrestricted_rows_are_portable() {
+        // packages/just-bash/src/commands/rg/imported-tests/misc.test.ts
+        // 1004 - unrestricted2: -uu includes hidden dotfiles in the search
+        assert_home_exec(
+            &[(".sherlock", SHERLOCK)],
+            "rg -uu Sherlock",
+            0,
+            ".sherlock:1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+.sherlock:3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 1167 - files (type-list): --type-list lists the known file types
+        let type_list = home_bash(&[]).exec("rg --type-list");
+        assert_eq!(type_list.exit_code, 0, "type-list exit");
+        assert!(type_list.stdout.contains("rust"), "type-list has rust");
+        assert!(type_list.stdout.contains("py"), "type-list has py");
+        assert_eq!(type_list.stderr, "", "type-list stderr");
+    }
+
+    #[test]
     fn text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows() {
         let env = Bash::with_options(BashOptions {
             files: BTreeMap::from([
