@@ -1182,6 +1182,24 @@ const jbc10CaseGroups = [
     notes:
       'JBC-10 verifies imported ripgrep regression rows for gitignore, file-listing, and exit codes: build-directory negation with -l, a**b non-match, --files-with-matches / --files-without-match listings, invalid-flag and match/no-match/quiet exit codes, ** and **/**/* gitignore non-matches, pattern files without trailing newline, **/bar/* -l non-match, and unclosed character class allowed in gitignore over the virtual filesystem.',
   },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [247, 594, 606, 916, 929, 1003, 1364, 1429],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_regression_misc_pattern_file_context_and_filter_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported ripgrep regression rows: full-path gitignore pattern hiding foo/sherlock while keeping foo/watson (r105), repeated -i staying case-insensitive (r553_switch), a later -C 0 overriding an earlier -C 1 to drop the context separator (r553_flag), -F and -x with a pattern file (r1176 literal/line-regex), a bounded-repetition DNA sequence regex (r1319), multiple -e patterns with --only-matching listing each match (r2236), and --stats reporting the bytes-searched summary line (r2770) over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
+    lines: [1004, 1167],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_misc_type_list_and_unrestricted_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported rg misc rows: -uu (unrestricted2) including hidden dotfiles in the search results, and --type-list listing the known file types (rust, py) over the virtual filesystem.',
+  },
 ];
 
 const jbc12SourceGroups = [
