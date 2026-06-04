@@ -14046,6 +14046,8 @@ fn command_xan(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
         "sample" => xan_sample(state, &args[1..], stdin),
         "flatten" | "f" => xan_flatten(state, &args[1..], stdin),
         "frequency" => xan_frequency(state, &args[1..], stdin),
+        "cat" => xan_cat(state, &args[1..]),
+        "join" => xan_join(state, &args[1..]),
         "parallel" => stderr_result(1, "xan parallel: not yet implemented\n"),
         other => stderr_result(1, format!("xan: unknown command: {other}\n")),
     }
@@ -14198,6 +14200,224 @@ fn xan_select_drop(
         }
         Err(result) => result,
     }
+}
+
+/// `xan cat`: concatenate CSV files, mirroring upstream `cmdCat`
+/// (packages/just-bash/src/commands/xan/xan-simple.ts). Headers must match
+/// across files unless `-p`/`--pad` is given, in which case the union of
+/// headers (first-appearance order) is emitted and missing cells are padded
+/// with empty values.
+fn xan_cat(state: &ExecState<'_>, args: &[String]) -> CommandResult {
+    let mut pad = false;
+    let mut file_args: Vec<&str> = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-p" | "--pad" => pad = true,
+            other if !other.starts_with('-') => file_args.push(other),
+            _ => {}
+        }
+    }
+
+    if file_args.is_empty() {
+        return stderr_result(1, "xan cat: no files specified\n");
+    }
+
+    let mut parsed: Vec<CsvData> = Vec::with_capacity(file_args.len());
+    let mut all_headers: Vec<String> = Vec::new();
+    for path in &file_args {
+        let csv = match read_csv_arg(state, Some(path), "", "xan cat") {
+            Ok(csv) => csv,
+            Err(result) => return result,
+        };
+        for header in &csv.headers {
+            if !all_headers.contains(header) {
+                all_headers.push(header.clone());
+            }
+        }
+        parsed.push(csv);
+    }
+
+    if !pad {
+        let first = &parsed[0].headers;
+        if parsed.iter().any(|csv| &csv.headers != first) {
+            return stderr_result(1, "xan cat: headers do not match (use -p to pad)\n");
+        }
+        all_headers = first.clone();
+    }
+
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for csv in &parsed {
+        for row in &csv.rows {
+            let new_row = all_headers
+                .iter()
+                .map(|header| {
+                    csv.headers
+                        .iter()
+                        .position(|candidate| candidate == header)
+                        .and_then(|index| row.get(index))
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect();
+            rows.push(new_row);
+        }
+    }
+
+    stdout_result(render_csv(&CsvData {
+        headers: all_headers,
+        rows,
+    }))
+}
+
+/// `xan join`: relational join of two CSV files, mirroring upstream `cmdJoin`
+/// (packages/just-bash/src/commands/xan/xan-reshape.ts). Supports inner (default),
+/// `--left`, `--right`, `--full` join modes and `-D`/`--default` fill values.
+fn xan_join(state: &ExecState<'_>, args: &[String]) -> CommandResult {
+    #[derive(PartialEq)]
+    enum JoinType {
+        Inner,
+        Left,
+        Right,
+        Full,
+    }
+
+    let mut join_type = JoinType::Inner;
+    let mut default_value = String::new();
+    let mut positionals: Vec<&str> = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--left" => join_type = JoinType::Left,
+            "--right" => join_type = JoinType::Right,
+            "--full" => join_type = JoinType::Full,
+            "-D" | "--default" => {
+                if let Some(value) = args.get(index + 1) {
+                    default_value = value.clone();
+                    index += 1;
+                }
+            }
+            other if !other.starts_with('-') => positionals.push(other),
+            _ => {}
+        }
+        index += 1;
+    }
+
+    let [key1, file1, key2, file2] = match positionals.as_slice() {
+        [k1, f1, k2, f2] => [*k1, *f1, *k2, *f2],
+        _ => {
+            return stderr_result(
+                1,
+                "xan join: usage: xan join KEY1 FILE1 KEY2 FILE2 [OPTIONS]\n",
+            );
+        }
+    };
+
+    let csv1 = match read_csv_arg(state, Some(file1), "", "xan join") {
+        Ok(csv) => csv,
+        Err(result) => return result,
+    };
+    let csv2 = match read_csv_arg(state, Some(file2), "", "xan join") {
+        Ok(csv) => csv,
+        Err(result) => return result,
+    };
+
+    let Some(key1_idx) = csv1.headers.iter().position(|h| h == key1) else {
+        return stderr_result(
+            1,
+            format!("xan join: column '{key1}' not found in first file\n"),
+        );
+    };
+    let Some(key2_idx) = csv2.headers.iter().position(|h| h == key2) else {
+        return stderr_result(
+            1,
+            format!("xan join: column '{key2}' not found in second file\n"),
+        );
+    };
+
+    let cell = |row: &[String], idx: usize| row.get(idx).cloned().unwrap_or_default();
+
+    // Index file2 rows by key value, preserving insertion order.
+    let mut index2: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (row_index, row) in csv2.rows.iter().enumerate() {
+        index2
+            .entry(cell(row, key2_idx))
+            .or_default()
+            .push(row_index);
+    }
+
+    // Combined headers: headers1 then unique headers2.
+    let headers2_unique: Vec<(usize, &String)> = csv2
+        .headers
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| !csv1.headers.contains(h))
+        .collect();
+    let mut new_headers = csv1.headers.clone();
+    new_headers.extend(headers2_unique.iter().map(|(_, h)| (*h).clone()));
+
+    let mut new_rows: Vec<Vec<String>> = Vec::new();
+    let mut matched_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for row1 in &csv1.rows {
+        let key_val = cell(row1, key1_idx);
+        match index2.get(&key_val) {
+            Some(matches) if !matches.is_empty() => {
+                matched_keys.insert(key_val.clone());
+                for &row2_index in matches {
+                    let row2 = &csv2.rows[row2_index];
+                    let mut new_row: Vec<String> =
+                        (0..csv1.headers.len()).map(|i| cell(row1, i)).collect();
+                    for (idx2, _) in &headers2_unique {
+                        new_row.push(cell(row2, *idx2));
+                    }
+                    new_rows.push(new_row);
+                }
+            }
+            _ => {
+                if join_type == JoinType::Left || join_type == JoinType::Full {
+                    let mut new_row: Vec<String> =
+                        (0..csv1.headers.len()).map(|i| cell(row1, i)).collect();
+                    for _ in &headers2_unique {
+                        new_row.push(default_value.clone());
+                    }
+                    new_rows.push(new_row);
+                }
+            }
+        }
+    }
+
+    if join_type == JoinType::Right || join_type == JoinType::Full {
+        for row2 in &csv2.rows {
+            let key_val = cell(row2, key2_idx);
+            if matched_keys.contains(&key_val) {
+                continue;
+            }
+            let mut new_row: Vec<String> = csv1
+                .headers
+                .iter()
+                .map(|header| {
+                    match csv2
+                        .headers
+                        .iter()
+                        .position(|candidate| candidate == header)
+                    {
+                        Some(idx2) => cell(row2, idx2),
+                        None => default_value.clone(),
+                    }
+                })
+                .collect();
+            for (idx2, _) in &headers2_unique {
+                new_row.push(cell(row2, *idx2));
+            }
+            new_rows.push(new_row);
+        }
+    }
+
+    stdout_result(render_csv(&CsvData {
+        headers: new_headers,
+        rows: new_rows,
+    }))
 }
 
 fn xan_rename(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
@@ -15374,18 +15594,175 @@ fn positional_arg(args: &[String]) -> Option<&str> {
     positional
 }
 
-fn csv_column_indexes(headers: &[String], spec: &str) -> Vec<usize> {
-    let mut indexes = Vec::new();
-    for part in spec.split(',') {
-        if let Some((start, end)) = part.split_once('-') {
-            if let (Ok(start), Ok(end)) = (start.parse::<usize>(), end.parse::<usize>()) {
-                indexes.extend(start..=end.min(headers.len().saturating_sub(1)));
+/// Resolve a column specification to header names, mirroring upstream
+/// `parseColumnSpec` (packages/just-bash/src/commands/xan/column-selection.ts).
+/// Supports glob (`*`, `vec_*`, `*_1`), name ranges (`name:email`, `:b`, `d:`),
+/// numeric ranges (`1-3`), numeric indices, exact names, and negation (`!b`).
+fn xan_column_spec_names(headers: &[String], spec: &str) -> Vec<String> {
+    let mut result: Vec<String> = Vec::new();
+    let mut excludes: Vec<String> = Vec::new();
+
+    for raw in spec.split(',') {
+        let trimmed = raw.trim();
+
+        // Negation: recursively resolve and collect names to exclude.
+        if let Some(rest) = trimmed.strip_prefix('!') {
+            for col in xan_column_spec_names(headers, rest) {
+                if !excludes.contains(&col) {
+                    excludes.push(col);
+                }
             }
-        } else if let Ok(index) = part.parse::<usize>() {
-            indexes.push(index);
-        } else if let Some(index) = headers.iter().position(|header| header == part) {
-            indexes.push(index);
+            continue;
         }
+
+        // Select all, de-duplicated by name.
+        if trimmed == "*" {
+            for header in headers {
+                if !result.contains(header) {
+                    result.push(header.clone());
+                }
+            }
+            continue;
+        }
+
+        // Glob pattern containing `*` (but not the bare `*` handled above).
+        if trimmed.contains('*') {
+            for header in headers {
+                if xan_glob_matches(trimmed, header) && !result.contains(header) {
+                    result.push(header.clone());
+                }
+            }
+            continue;
+        }
+
+        // Column name range: `start:end`, `:end`, `start:` (exactly one colon).
+        if let Some((start_col, end_col)) = trimmed.split_once(':') {
+            if !start_col.contains(':')
+                && !end_col.contains(':')
+                && (!start_col.is_empty() || !end_col.is_empty())
+            {
+                let start_idx = if start_col.is_empty() {
+                    Some(0usize)
+                } else {
+                    headers.iter().position(|header| header == start_col)
+                };
+                let end_idx = if end_col.is_empty() {
+                    headers.len().checked_sub(1)
+                } else {
+                    headers.iter().position(|header| header == end_col)
+                };
+                if let (Some(start_idx), Some(end_idx)) = (start_idx, end_idx) {
+                    if start_idx <= end_idx {
+                        for header in &headers[start_idx..=end_idx] {
+                            if !result.contains(header) {
+                                result.push(header.clone());
+                            }
+                        }
+                    } else {
+                        for index in (end_idx..=start_idx).rev() {
+                            let header = &headers[index];
+                            if !result.contains(header) {
+                                result.push(header.clone());
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+
+        // Numeric range: `start-end`.
+        if let Some((start, end)) = trimmed.split_once('-') {
+            if let (Ok(start), Ok(end)) = (start.parse::<usize>(), end.parse::<usize>()) {
+                let mut index = start;
+                while index <= end && index < headers.len() {
+                    result.push(headers[index].clone());
+                    index += 1;
+                }
+                continue;
+            }
+        }
+
+        // Numeric index.
+        if let Ok(index) = trimmed.parse::<usize>() {
+            if index < headers.len() {
+                result.push(headers[index].clone());
+            }
+            continue;
+        }
+
+        // Exact column name (duplicates allowed when named explicitly).
+        if headers.iter().any(|header| header == trimmed) {
+            result.push(trimmed.to_string());
+        }
+    }
+
+    if excludes.is_empty() {
+        result
+    } else {
+        result
+            .into_iter()
+            .filter(|col| !excludes.contains(col))
+            .collect()
+    }
+}
+
+/// Glob match supporting only `*` as a wildcard, anchored at both ends,
+/// matching upstream `globToRegex`.
+fn xan_glob_matches(pattern: &str, text: &str) -> bool {
+    let segments: Vec<&str> = pattern.split('*').collect();
+    if segments.len() == 1 {
+        return pattern == text;
+    }
+    let mut position = 0usize;
+    // First segment must be a prefix.
+    let first = segments[0];
+    if !text[position..].starts_with(first) {
+        return false;
+    }
+    position += first.len();
+    // Last segment must be a suffix.
+    let last = segments[segments.len() - 1];
+    let suffix_start = match text.len().checked_sub(last.len()) {
+        Some(start) if start >= position => start,
+        _ => return false,
+    };
+    if &text[suffix_start..] != last {
+        return false;
+    }
+    // Middle segments must appear in order within the remaining window.
+    for segment in &segments[1..segments.len() - 1] {
+        if segment.is_empty() {
+            continue;
+        }
+        match text[position..suffix_start].find(segment) {
+            Some(found) => position += found + segment.len(),
+            None => return false,
+        }
+    }
+    true
+}
+
+fn csv_column_indexes(headers: &[String], spec: &str) -> Vec<usize> {
+    let names = xan_column_spec_names(headers, spec);
+    // Resolve selected names back to header indexes. Track per-name occurrence so
+    // duplicate explicit selections (e.g. `a,a`) project the same column twice.
+    let mut used: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut indexes = Vec::with_capacity(names.len());
+    for name in &names {
+        let positions: Vec<usize> = headers
+            .iter()
+            .enumerate()
+            .filter(|(_, header)| header.as_str() == name.as_str())
+            .map(|(index, _)| index)
+            .collect();
+        if positions.is_empty() {
+            continue;
+        }
+        let counter = used.entry(name.as_str()).or_insert(0);
+        let index = positions[(*counter).min(positions.len() - 1)];
+        *counter += 1;
+        indexes.push(index);
     }
     indexes
 }
@@ -21157,6 +21534,252 @@ fn format_subcommand_help(namespace: &str, subcommand: &ToolSubcommand) -> Strin
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // Builds a Bash session pre-loaded with the given virtual files and runs `cmd`.
+    fn xan_run_with_files(cmd: &str, files: &[(&str, &str)]) -> JustBashExecResult {
+        let mut fmap = std::collections::BTreeMap::new();
+        for (path, content) in files {
+            fmap.insert((*path).to_string(), (*content).to_string());
+        }
+        crate::runtime::Bash::with_options(crate::runtime::BashOptions {
+            files: fmap,
+            ..Default::default()
+        })
+        .exec(cmd)
+    }
+
+    // xan.select-advanced.test.ts: glob, range, negation, index, and duplicate
+    // column selectors mirror upstream parseColumnSpec semantics exactly.
+    #[test]
+    fn xan_select_advanced_glob_range_negation_and_index_match_upstream() {
+        const GLOB: &str = "name,vec_1,vec_2,count_1,count_2\njohn,1,2,3,4\nmary,5,6,7,8\n";
+        const RANGE: &str = "a,b,c,d,e\n1,2,3,4,5\n";
+        const FOUR: &str = "a,b,c,d\n1,2,3,4\n";
+        let cases: &[(&str, &str, &str)] = &[
+            // Glob patterns.
+            (
+                "xan select 'vec_*' /data.csv",
+                GLOB,
+                "vec_1,vec_2\n1,2\n5,6\n",
+            ),
+            (
+                "xan select '*_1' /data.csv",
+                GLOB,
+                "vec_1,count_1\n1,3\n5,7\n",
+            ),
+            (
+                "xan select 'name,vec_*' /data.csv",
+                GLOB,
+                "name,vec_1,vec_2\njohn,1,2\nmary,5,6\n",
+            ),
+            (
+                "xan select '*' /data.csv",
+                "a,b,c\n1,2,3\n",
+                "a,b,c\n1,2,3\n",
+            ),
+            ("xan select '*,a' /data.csv", "a,b\n1,2\n", "a,b,a\n1,2,1\n"),
+            // Column-name ranges.
+            ("xan select 'a:c' /data.csv", RANGE, "a,b,c\n1,2,3\n"),
+            ("xan select 'c:a' /data.csv", RANGE, "c,b,a\n3,2,1\n"),
+            ("xan select 'd:' /data.csv", RANGE, "d,e\n4,5\n"),
+            ("xan select ':b' /data.csv", RANGE, "a,b\n1,2\n"),
+            (
+                "xan select 'a:b,d:e' /data.csv",
+                RANGE,
+                "a,b,d,e\n1,2,4,5\n",
+            ),
+            // Negation.
+            ("xan select '*,!b' /data.csv", FOUR, "a,c,d\n1,3,4\n"),
+            ("xan select '*,!b,!d' /data.csv", FOUR, "a,c\n1,3\n"),
+            ("xan select '*,!b:c' /data.csv", FOUR, "a,d\n1,4\n"),
+            // Numeric indices/ranges and duplicates.
+            ("xan select '0,2' /data.csv", FOUR, "a,c\n1,3\n"),
+            ("xan select '1-3' /data.csv", FOUR, "b,c,d\n2,3,4\n"),
+            ("xan select 'a,a' /data.csv", FOUR, "a,a\n1,1\n"),
+        ];
+        for (cmd, data, expected) in cases {
+            let result = xan_run_with_files(cmd, &[("/data.csv", data)]);
+            assert_eq!(result.exit_code, 0, "{cmd}");
+            assert_eq!(&result.stdout, expected, "{cmd}");
+        }
+    }
+
+    // xan.prototype-pollution.test.ts: CSV headers equal to JavaScript prototype
+    // keywords must be treated as ordinary column names across xan subcommands.
+    #[test]
+    fn xan_prototype_keyword_headers_are_plain_columns() {
+        // select keeps the keyword header and row value.
+        let r = crate::runtime::Bash::new()
+            .exec("echo 'constructor,value\ntest,data' | xan select constructor");
+        assert_eq!(r.exit_code, 0);
+        assert!(
+            r.stdout.contains("constructor") && r.stdout.contains("test"),
+            "{}",
+            r.stdout
+        );
+
+        let r = crate::runtime::Bash::new()
+            .exec("echo 'toString,value\ntest,data' | xan select toString");
+        assert_eq!(r.exit_code, 0);
+        assert!(
+            r.stdout.contains("toString") && r.stdout.contains("test"),
+            "{}",
+            r.stdout
+        );
+
+        // drop removes the keyword column, keeping the rest.
+        let r = crate::runtime::Bash::new()
+            .exec("echo 'prototype,value,normal\ntest,data,keep' | xan drop prototype");
+        assert_eq!(r.exit_code, 0);
+        assert!(
+            r.stdout.contains("value") && r.stdout.contains("normal"),
+            "{}",
+            r.stdout
+        );
+
+        // sort orders rows by a keyword-named column.
+        let r = crate::runtime::Bash::new()
+            .exec("echo 'constructor,data\nz,1\na,2' | xan sort -s constructor");
+        assert_eq!(r.exit_code, 0);
+        let lines: Vec<&str> = r.stdout.trim().split('\n').collect();
+        assert!(
+            lines[1].contains("a") && lines[2].contains("z"),
+            "{}",
+            r.stdout
+        );
+
+        // headers lists every keyword header.
+        let r = crate::runtime::Bash::new().exec(
+            "echo 'constructor,prototype,hasOwnProperty,isPrototypeOf,propertyIsEnumerable' | xan headers",
+        );
+        assert_eq!(r.exit_code, 0);
+        for keyword in [
+            "constructor",
+            "prototype",
+            "hasOwnProperty",
+            "isPrototypeOf",
+            "propertyIsEnumerable",
+        ] {
+            assert!(
+                r.stdout.contains(keyword),
+                "missing {keyword}: {}",
+                r.stdout
+            );
+        }
+
+        // transpose keeps keyword cells as data.
+        let r = crate::runtime::Bash::new()
+            .exec("echo 'constructor,a,b\nprototype,1,2' | xan transpose");
+        assert_eq!(r.exit_code, 0);
+        assert!(
+            r.stdout.contains("constructor") && r.stdout.contains("prototype"),
+            "{}",
+            r.stdout
+        );
+
+        // enum adds an index column with a keyword name.
+        let r =
+            crate::runtime::Bash::new().exec("printf 'value\\na\\nb\\n' | xan enum -c constructor");
+        assert_eq!(r.exit_code, 0);
+        assert!(
+            r.stdout.contains("constructor") && r.stdout.contains("0") && r.stdout.contains("1"),
+            "{}",
+            r.stdout
+        );
+    }
+
+    // xan.multifile.test.ts (xan cat): concatenate CSVs with matching headers,
+    // error on mismatched headers, pad with -p, and error with no files.
+    #[test]
+    fn xan_cat_concatenates_pads_and_errors() {
+        let r = xan_run_with_files(
+            "xan cat /a.csv /b.csv",
+            &[
+                ("/a.csv", "id,name\n1,alice\n2,bob\n"),
+                ("/b.csv", "id,name\n3,charlie\n"),
+            ],
+        );
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "id,name\n1,alice\n2,bob\n3,charlie\n");
+
+        let r = xan_run_with_files(
+            "xan cat /a.csv /b.csv",
+            &[
+                ("/a.csv", "id,name\n1,alice\n"),
+                ("/b.csv", "id,email\n2,bob@x.com\n"),
+            ],
+        );
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("headers do not match"), "{}", r.stderr);
+
+        let r = xan_run_with_files(
+            "xan cat -p /a.csv /b.csv",
+            &[
+                ("/a.csv", "id,name\n1,alice\n"),
+                ("/b.csv", "id,email\n2,bob@x.com\n"),
+            ],
+        );
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "id,name,email\n1,alice,\n2,,bob@x.com\n");
+
+        let r = xan_run_with_files("xan cat", &[]);
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("no files"), "{}", r.stderr);
+    }
+
+    // xan.multifile.test.ts (xan join): inner, left, right, and full joins
+    // produce the upstream column order and default-fill behavior.
+    #[test]
+    fn xan_join_inner_left_right_and_full_match_upstream() {
+        let r = xan_run_with_files(
+            "xan join id /left.csv user_id /right.csv",
+            &[
+                ("/left.csv", "id,name\n1,alice\n2,bob\n3,charlie\n"),
+                ("/right.csv", "user_id,score\n1,100\n2,85\n4,90\n"),
+            ],
+        );
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(
+            r.stdout,
+            "id,name,user_id,score\n1,alice,1,100\n2,bob,2,85\n"
+        );
+
+        let r = xan_run_with_files(
+            "xan join --left id /left.csv user_id /right.csv",
+            &[
+                ("/left.csv", "id,name\n1,alice\n2,bob\n3,charlie\n"),
+                ("/right.csv", "user_id,score\n1,100\n2,85\n"),
+            ],
+        );
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(
+            r.stdout,
+            "id,name,user_id,score\n1,alice,1,100\n2,bob,2,85\n3,charlie,,\n"
+        );
+
+        let r = xan_run_with_files(
+            "xan join --right id /left.csv user_id /right.csv",
+            &[
+                ("/left.csv", "id,name\n1,alice\n"),
+                ("/right.csv", "user_id,score\n1,100\n2,85\n"),
+            ],
+        );
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "id,name,user_id,score\n1,alice,1,100\n,,2,85\n");
+
+        let r = xan_run_with_files(
+            "xan join --full id /left.csv user_id /right.csv",
+            &[
+                ("/left.csv", "id,name\n1,alice\n2,bob\n"),
+                ("/right.csv", "user_id,score\n2,85\n3,90\n"),
+            ],
+        );
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(
+            r.stdout,
+            "id,name,user_id,score\n1,alice,,\n2,bob,2,85\n,,3,90\n"
+        );
+    }
 
     fn math_executor() -> JustBashExecutor {
         JustBashExecutor::new()
