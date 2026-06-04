@@ -5878,8 +5878,44 @@ const r13jbCommandAwkCaseGroups = [
   },
 ];
 
+const r13jbSortCommandCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/sort/sort.advanced.test.ts',
+    lines: [
+      5, 14, 23, 32, 43, 52, 61, 72, 81, 90, 101, 114, 123, 134, 144, 154,
+      164, 173, 182, 193, 205, 214, 223, 234,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sort',
+    rustTest:
+      'sort_upstream_advanced_human_version_month_dictionary_blanks_check_output_stable_perkey',
+    notes:
+      'just-bash-command-sort ports the full GNU-style sort comparator to crates/just-bash/src/exec.rs (human -h, version -V, month -M, dictionary -d, ignore-leading-blanks -b, check -c with disorder diagnostics, output -o/--output=, stable -s, per-key h/V/M modifiers, and --help listing the new options) and verifies each advanced row against deterministic virtual-filesystem expectations.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sort/sort.binary.test.ts',
+    lines: [5, 24, 45, 68],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sort',
+    rustTest: 'sort_upstream_binary_safe_and_utf8_preserving_case_fold_dictionary',
+    notes:
+      'just-bash-command-sort verifies binary-safe line sorting and UTF-8 round-tripping under -f case-fold, per-key -k1f case-fold, and per-key -k1d dictionary order, so multibyte Latin characters (É/é) are never half-mangled by case folding or non-alphanumeric stripping.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sort/sort.test.ts',
+    lines: [167, 176],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sort',
+    rustTest:
+      'sort_upstream_complex_key_syntax_ranges_perkey_modifiers_delimiter_and_long_key',
+    notes:
+      'just-bash-command-sort verifies complex -k key syntax: field ranges -k1,2 and single-field -k2,2 against deterministic virtual-filesystem expectations. Remaining complex-key rows stay pending for a later round.',
+  },
+];
+
 function caseOverrideFor(testCase) {
   const group = [
+    ...r13jbSortCommandCaseGroups,
     ...r13jbCommandAwkCaseGroups,
     ...r10jbCommandAwkCaseGroups,
     ...jbSedTestTsCaseGroups,
