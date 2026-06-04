@@ -2904,17 +2904,29 @@ pub struct AppliedRedirection {
     pub here_doc: Option<HereDoc>,
 }
 
+/// Exit code reported when an execution safety limit (recursion depth, command
+/// count, loop iterations) is exceeded. Mirrors upstream
+/// `ExecutionLimitError.EXIT_CODE`.
+pub const EXECUTION_LIMIT_EXIT_CODE: i32 = 126;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionLimits {
     pub max_loop_iterations: usize,
+    /// Maximum total commands executed during a single `exec` call before the
+    /// interpreter aborts with an execution-limit error. Mirrors upstream
+    /// `maxCommandCount`.
     pub max_commands: usize,
+    /// Maximum function call (recursion) depth before the interpreter aborts
+    /// with a "maximum recursion depth" error. Mirrors upstream `maxCallDepth`.
+    pub max_call_depth: usize,
 }
 
 impl Default for ExecutionLimits {
     fn default() -> Self {
         Self {
             max_loop_iterations: 10_000,
-            max_commands: 100_000,
+            max_commands: 10_000,
+            max_call_depth: 100,
         }
     }
 }
@@ -2985,6 +2997,11 @@ pub struct ShellState {
     errexit_suppressed: u32,
     xtrace: bool,
     exited: Option<i32>,
+    /// Pending execution-limit abort (recursion depth, command count, or loop
+    /// iterations exceeded). Carries the diagnostic message. Once set it
+    /// short-circuits all further statement execution like an `exit`, and the
+    /// top-level `exec` reports it with exit code [`EXECUTION_LIMIT_EXIT_CODE`].
+    execution_limit: Option<String>,
     /// Pending `return` signal raised by the `return` builtin. Carries the
     /// status the enclosing function call should resolve to. Cleared once the
     /// nearest `call_function` consumes it. Only valid while `function_depth`
@@ -3160,7 +3177,8 @@ impl<D: CommandDispatcher> Interpreter<D> {
         self.state.errexit = false;
         self.state.errexit_suppressed = 0;
         self.state.command_count = 0;
-        let output = match parse(source) {
+        self.state.execution_limit = None;
+        let mut output = match parse(source) {
             Ok(script) => self.exec_script(&script),
             Err(error) => ExecOutput {
                 stdout: String::new(),
@@ -3168,6 +3186,14 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 exit_code: 2,
             },
         };
+        // An execution-limit abort overrides the script's running status with a
+        // dedicated diagnostic and exit code, mirroring upstream's
+        // `ExecutionLimitError` propagation to the top-level result.
+        if let Some(message) = self.state.execution_limit.take() {
+            output.stderr.push_str(&message);
+            output.stderr.push('\n');
+            output.exit_code = EXECUTION_LIMIT_EXIT_CODE;
+        }
         self.state.functions = old_functions;
         self.state.aliases = old_aliases;
         self.state.exited = None;
@@ -3184,6 +3210,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
             if self.state.exited.is_some()
                 || self.state.loop_control.is_some()
                 || self.state.returning.is_some()
+                || self.state.execution_limit.is_some()
             {
                 break;
             }
@@ -3295,12 +3322,15 @@ impl<D: CommandDispatcher> Interpreter<D> {
     }
 
     fn execute_command(&mut self, command: &Command, stdin: String) -> ExecOutput {
-        if let Err(error) = self.count_command() {
-            return ExecOutput {
-                stdout: String::new(),
-                stderr: format!("{error}\n"),
-                exit_code: 125,
-            };
+        if let Err(message) = self.count_command() {
+            // Raise an execution-limit abort that short-circuits the rest of
+            // the script (mirroring upstream's propagating `ExecutionLimitError`)
+            // rather than letting subsequent commands keep running.
+            self.state.execution_limit = Some(message);
+            return ExecOutput::default();
+        }
+        if self.state.execution_limit.is_some() {
+            return ExecOutput::default();
         }
 
         match command {
@@ -3946,6 +3976,18 @@ impl<D: CommandDispatcher> Interpreter<D> {
     }
 
     fn call_function(&mut self, function: FunctionDef, args: Vec<String>) -> ExecOutput {
+        // Guard against runaway recursion before pushing a new call frame.
+        // Mirrors upstream `callFunction`: the depth counter is incremented, and
+        // if it exceeds `maxCallDepth` an execution-limit abort is raised that
+        // short-circuits the rest of the script instead of overflowing the
+        // native stack.
+        if self.state.function_depth as usize >= self.limits.max_call_depth {
+            self.state.execution_limit = Some(format!(
+                "{}: maximum recursion depth ({}) exceeded, increase executionLimits.maxCallDepth",
+                function.name, self.limits.max_call_depth
+            ));
+            return ExecOutput::default();
+        }
         let saved_positionals = std::mem::replace(&mut self.state.positionals, args);
         self.state.local_scopes.push(BTreeMap::new());
         self.state.function_depth += 1;
@@ -4007,13 +4049,18 @@ impl<D: CommandDispatcher> Interpreter<D> {
         for value in words {
             iterations += 1;
             if iterations > self.limits.max_loop_iterations {
-                output.stderr.push_str("too many iterations\n");
-                output.exit_code = 125;
+                self.state.execution_limit = Some(format!(
+                    "for loop: too many iterations ({}), increase executionLimits.maxLoopIterations",
+                    self.limits.max_loop_iterations
+                ));
                 break;
             }
             self.state.assign_var(command.variable.clone(), value);
             output.append(self.execute_statements(&command.body));
-            if self.state.exited.is_some() || self.state.returning.is_some() {
+            if self.state.exited.is_some()
+                || self.state.returning.is_some()
+                || self.state.execution_limit.is_some()
+            {
                 break;
             }
             match self.consume_loop_control() {
@@ -4062,12 +4109,14 @@ impl<D: CommandDispatcher> Interpreter<D> {
             }
             iterations += 1;
             if iterations > self.limits.max_loop_iterations {
-                output.stderr.push_str("too many iterations\n");
-                output.exit_code = 125;
+                self.state.execution_limit = Some(format!(
+                    "for loop: too many iterations ({}), increase executionLimits.maxLoopIterations",
+                    self.limits.max_loop_iterations
+                ));
                 break;
             }
             output.append(self.execute_statements(&command.body));
-            if self.state.exited.is_some() {
+            if self.state.exited.is_some() || self.state.execution_limit.is_some() {
                 break;
             }
             match self.consume_loop_control() {
@@ -4130,7 +4179,10 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 return output;
             }
             output.append(self.execute_statements(&command.body));
-            if self.state.exited.is_some() || self.state.returning.is_some() {
+            if self.state.exited.is_some()
+                || self.state.returning.is_some()
+                || self.state.execution_limit.is_some()
+            {
                 self.state.loop_depth -= 1;
                 return output;
             }
@@ -4143,8 +4195,11 @@ impl<D: CommandDispatcher> Interpreter<D> {
             }
         }
         self.state.loop_depth -= 1;
-        output.stderr.push_str("too many iterations\n");
-        output.exit_code = 125;
+        let loop_kind = if is_while { "while" } else { "until" };
+        self.state.execution_limit = Some(format!(
+            "{loop_kind} loop: too many iterations ({}), increase executionLimits.maxLoopIterations",
+            self.limits.max_loop_iterations
+        ));
         output
     }
 
@@ -4424,10 +4479,13 @@ impl<D: CommandDispatcher> Interpreter<D> {
         output.trim_end_matches('\n').replace('\n', " ")
     }
 
-    fn count_command(&mut self) -> Result<(), &'static str> {
+    fn count_command(&mut self) -> Result<(), String> {
         self.state.command_count += 1;
         if self.state.command_count > self.limits.max_commands {
-            Err("too many commands")
+            Err(format!(
+                "too many commands executed (>{}), increase executionLimits.maxCommandCount",
+                self.limits.max_commands
+            ))
         } else {
             Ok(())
         }
@@ -11137,6 +11195,307 @@ greet World",
                 || until_loop.stderr.contains("too many commands"),
             "until stderr={:?}",
             until_loop.stderr
+        );
+    }
+
+    /// Maps `packages/just-bash/src/syntax/execution-protection.test.ts`. The
+    /// interpreter must bound function recursion depth (`maxCallDepth`), total
+    /// command count (`maxCommandCount`), and loop iterations (`maxLoopIterations`)
+    /// with the upstream `ExecutionLimitError` exit code (126) and diagnostic
+    /// strings, regardless of whether the runaway is reached through plain
+    /// recursion, mutual recursion, `eval`, command substitution, arithmetic
+    /// expansion, subshells, pipelines, `case`, or `local`. Each hard assertion
+    /// below fails if a protection gap regresses (hang / stack overflow / wrong
+    /// exit code / missing message).
+    #[test]
+    fn jbpi_syntax_execution_protection_rows_match_upstream() {
+        fn shell_with(limits: ExecutionLimits) -> Interpreter<FakeCommands> {
+            Interpreter::new(FakeCommands::default()).with_limits(limits)
+        }
+        fn limits(max_call_depth: usize) -> ExecutionLimits {
+            ExecutionLimits {
+                max_call_depth,
+                ..ExecutionLimits::default()
+            }
+        }
+        // Shared assertion mirroring upstream `expectProtectionTriggered`: a
+        // safety limit triggered (exit 126), produced a diagnostic, and is NOT a
+        // native stack overflow (our limits kick in first).
+        fn expect_protection_triggered(label: &str, output: &ExecOutput) {
+            assert_eq!(
+                output.exit_code, EXECUTION_LIMIT_EXIT_CODE,
+                "{label}: expected execution-limit exit code, stderr={:?}",
+                output.stderr
+            );
+            assert!(
+                !output.stderr.is_empty(),
+                "{label}: expected a diagnostic message"
+            );
+            assert!(
+                !output.stderr.contains("stack"),
+                "{label}: must not be a native stack overflow, stderr={:?}",
+                output.stderr
+            );
+        }
+
+        // recursion depth protection ---------------------------------------
+        // :35 simple infinite recursion errors with the recursion diagnostic.
+        let result = shell_with(limits(50)).exec("recurse() { recurse; }; recurse");
+        assert_eq!(result.exit_code, EXECUTION_LIMIT_EXIT_CODE);
+        assert!(result.stderr.contains("maximum recursion depth"));
+        assert!(result.stderr.contains("exceeded"));
+
+        // :44 reasonable bounded recursion (countdown) succeeds.
+        let countdown = shell().exec(
+            "echo 5 > /count.txt; countdown() { local n=$(cat /count.txt); \
+             if [ \"$n\" -gt 0 ]; then echo $n; echo $((n-1)) > /count.txt; countdown; fi; }; \
+             countdown",
+        );
+        assert_eq!(
+            countdown.exit_code, 0,
+            "countdown stderr={:?}",
+            countdown.stderr
+        );
+
+        // :52 recursion error names the offending function.
+        let named = shell_with(limits(50)).exec("myinfinite() { myinfinite; }; myinfinite");
+        assert!(named.stderr.contains("myinfinite"));
+        assert!(named.stderr.contains("maximum recursion depth"));
+
+        // :60 mutual recursion (A->B->A) is bounded with the recursion message.
+        let mutual = shell_with(limits(50)).exec("ping() { pong; }\npong() { ping; }\nping\n");
+        expect_protection_triggered("mutual recursion", &mutual);
+        assert!(mutual.stderr.contains("maximum recursion depth"));
+
+        // :72 three-way mutual recursion (A->B->C->A) is bounded.
+        let three_way = shell_with(limits(50)).exec("a() { b; }\nb() { c; }\nc() { a; }\na\n");
+        expect_protection_triggered("three-way mutual recursion", &three_way);
+
+        // :84 recursion through eval is bounded.
+        let via_eval = shell_with(limits(50)).exec("boom() { eval 'boom'; }\nboom\n");
+        expect_protection_triggered("recursion through eval", &via_eval);
+
+        // :94 recursion through command substitution is bounded.
+        let via_subst = shell_with(limits(50)).exec("boom() { echo $(boom); }\nboom\n");
+        expect_protection_triggered("recursion through command substitution", &via_subst);
+
+        // :104 recursion carrying local variables is bounded.
+        let via_local = shell_with(limits(50)).exec(
+            "deep() {\n  local depth=$1\n  echo \"depth: $depth\"\n  deep $((depth + 1))\n}\ndeep 0\n",
+        );
+        expect_protection_triggered("recursion with local variables", &via_local);
+
+        // :118 recursion through arithmetic expansion is bounded.
+        let via_arith =
+            shell_with(limits(50)).exec("counter=0\nboom() { echo $((counter++)); boom; }\nboom\n");
+        expect_protection_triggered("recursion through arithmetic expansion", &via_arith);
+
+        // command count protection -----------------------------------------
+        // :131 `while true` is bounded by the loop iteration cap.
+        let too_many_iter = shell_with(ExecutionLimits {
+            max_loop_iterations: 100,
+            ..ExecutionLimits::default()
+        })
+        .exec("while true; do echo x; done");
+        assert_eq!(too_many_iter.exit_code, EXECUTION_LIMIT_EXIT_CODE);
+        assert!(too_many_iter.stderr.contains("too many iterations"));
+
+        // :139 the command count resets between exec calls.
+        let mut session = shell();
+        session.exec("echo 1; echo 2; echo 3");
+        let reset = session.exec("echo done");
+        assert_eq!(reset.stdout, "done\n");
+        assert_eq!(reset.exit_code, 0);
+
+        // :147 200 semicolon-separated commands trip a 100-command cap.
+        let commands = vec!["echo x"; 200].join("; ");
+        let many_semis = shell_with(ExecutionLimits {
+            max_commands: 100,
+            ..ExecutionLimits::default()
+        })
+        .exec(&commands);
+        expect_protection_triggered("many commands via semicolons", &many_semis);
+        assert!(many_semis.stderr.contains("too many commands"));
+
+        // :157 the fork-bomb pattern is bounded by recursion/command limits.
+        let fork_bomb = shell_with(ExecutionLimits {
+            max_call_depth: 20,
+            max_commands: 1000,
+            ..ExecutionLimits::default()
+        })
+        .exec("bomb() { bomb | bomb & }\nbomb\n");
+        expect_protection_triggered("fork bomb pattern", &fork_bomb);
+
+        // loop protection ---------------------------------------------------
+        // :180 `while true` is bounded.
+        let inf_while = shell_with(ExecutionLimits {
+            max_loop_iterations: 100,
+            ..ExecutionLimits::default()
+        })
+        .exec("while true; do echo loop; done");
+        assert_eq!(inf_while.exit_code, EXECUTION_LIMIT_EXIT_CODE);
+        assert!(inf_while.stderr.contains("too many iterations"));
+
+        // :196 nested infinite loops are bounded.
+        let nested = shell_with(ExecutionLimits {
+            max_loop_iterations: 100,
+            ..ExecutionLimits::default()
+        })
+        .exec("while true; do\n  while true; do\n    echo inner\n  done\ndone\n");
+        expect_protection_triggered("nested infinite loops", &nested);
+
+        // :216 an infinite loop whose break never triggers is bounded.
+        let never_break = shell_with(ExecutionLimits {
+            max_loop_iterations: 100,
+            ..ExecutionLimits::default()
+        })
+        .exec("while true; do\n  if false; then break; fi\n  echo loop\ndone\n");
+        expect_protection_triggered("break that never triggers", &never_break);
+
+        // :228 continue abuse inside an infinite loop is bounded.
+        let continue_abuse = shell_with(ExecutionLimits {
+            max_loop_iterations: 100,
+            ..ExecutionLimits::default()
+        })
+        .exec("i=0\nwhile true; do\n  i=$((i+1))\n  continue\ndone\n");
+        expect_protection_triggered("continue abuse", &continue_abuse);
+
+        // :264 `eval` inside an infinite loop is bounded.
+        let eval_in_loop = shell_with(ExecutionLimits {
+            max_loop_iterations: 100,
+            ..ExecutionLimits::default()
+        })
+        .exec("while true; do\n  eval 'echo x'\ndone\n");
+        expect_protection_triggered("eval in loop", &eval_in_loop);
+
+        // loop protection ---------------------------------------------------
+        // :171 a 200-element for-list exceeds a 100-iteration cap.
+        let long_list = vec!["x"; 200].join(" ");
+        let big_for = shell_with(ExecutionLimits {
+            max_loop_iterations: 100,
+            ..ExecutionLimits::default()
+        })
+        .exec(&format!("for i in {long_list}; do echo $i; done"));
+        assert_eq!(big_for.exit_code, EXECUTION_LIMIT_EXIT_CODE);
+        assert!(big_for.stderr.contains("too many iterations"));
+
+        // :188 `until false` is bounded.
+        let until_loop = shell_with(ExecutionLimits {
+            max_loop_iterations: 100,
+            ..ExecutionLimits::default()
+        })
+        .exec("until false; do echo loop; done");
+        assert_eq!(until_loop.exit_code, EXECUTION_LIMIT_EXIT_CODE);
+        assert!(until_loop.stderr.contains("too many iterations"));
+
+        // :209 C-style `for ((;;))` infinite loop is bounded.
+        let c_style = shell_with(ExecutionLimits {
+            max_loop_iterations: 100,
+            ..ExecutionLimits::default()
+        })
+        .exec("for ((;;)); do echo x; done");
+        expect_protection_triggered("C-style infinite loop", &c_style);
+
+        // combined protection ----------------------------------------------
+        // :252 a loop calling an infinitely recursive function is bounded.
+        let loop_calls_recurse = shell_with(ExecutionLimits {
+            max_call_depth: 20,
+            max_loop_iterations: 100,
+            ..ExecutionLimits::default()
+        })
+        .exec("recurse() { recurse; }\nfor i in 1 2 3 4 5; do\n  recurse\ndone\n");
+        expect_protection_triggered("loop calling recursive function", &loop_calls_recurse);
+
+        // expansion protection ---------------------------------------------
+        // :349 recursive command substitution via a function is bounded.
+        let recursive_subst = shell_with(limits(50)).exec("f() { echo \"$(f)\"; }\nf\n");
+        expect_protection_triggered(
+            "recursive command substitution via function",
+            &recursive_subst,
+        );
+
+        // subshell protection ----------------------------------------------
+        // :408 infinite subshell recursion is bounded.
+        let subshell_recurse = shell_with(ExecutionLimits {
+            max_call_depth: 50,
+            max_commands: 1000,
+            ..ExecutionLimits::default()
+        })
+        .exec("f() { (f); }\nf\n");
+        expect_protection_triggered("infinite subshell recursion", &subshell_recurse);
+
+        // pipeline protection ----------------------------------------------
+        // :431 an infinite pipeline through a function is bounded.
+        let inf_pipe = shell_with(limits(50))
+            .exec("infinite_pipe() { echo x | infinite_pipe; }\ninfinite_pipe\n");
+        expect_protection_triggered("infinite pipeline through function", &inf_pipe);
+
+        // edge cases --------------------------------------------------------
+        // :529 an empty loop body is still bounded.
+        let empty_body = shell_with(ExecutionLimits {
+            max_loop_iterations: 100,
+            ..ExecutionLimits::default()
+        })
+        .exec("while true; do :; done");
+        expect_protection_triggered("empty loop body", &empty_body);
+
+        // :548 infinite recursion through `case` is bounded.
+        let case_recurse =
+            shell_with(limits(50)).exec("f() {\n  case x in\n    *) f ;;\n  esac\n}\nf\n");
+        expect_protection_triggered("infinite case recursion", &case_recurse);
+
+        // configurable limits ----------------------------------------------
+        // :479 a custom maxCallDepth is reflected in the diagnostic.
+        let custom_depth = shell_with(limits(5)).exec("recurse() { recurse; }; recurse");
+        assert_eq!(custom_depth.exit_code, EXECUTION_LIMIT_EXIT_CODE);
+        assert!(custom_depth.stderr.contains("(5)"));
+        assert!(custom_depth.stderr.contains("maxCallDepth"));
+
+        // :488 a custom maxLoopIterations is reflected in the diagnostic.
+        let custom_iter = shell_with(ExecutionLimits {
+            max_loop_iterations: 50,
+            ..ExecutionLimits::default()
+        })
+        .exec("while true; do echo x; done");
+        assert_eq!(custom_iter.exit_code, EXECUTION_LIMIT_EXIT_CODE);
+        assert!(custom_iter.stderr.contains("(50)"));
+        assert!(custom_iter.stderr.contains("maxLoopIterations"));
+
+        // :505 higher loop limits let a 150-element list complete.
+        let mut higher = String::from("for i in");
+        for _ in 0..150 {
+            higher.push_str(" x");
+        }
+        higher.push_str("; do echo $i; done");
+        let higher_ok = shell_with(ExecutionLimits {
+            max_loop_iterations: 200,
+            ..ExecutionLimits::default()
+        })
+        .exec(&higher);
+        assert_eq!(
+            higher_ok.exit_code, 0,
+            "higher stderr={:?}",
+            higher_ok.stderr
+        );
+
+        // :515 very strict limits trip on even a single recursion.
+        let strict = shell_with(ExecutionLimits {
+            max_call_depth: 3,
+            max_loop_iterations: 5,
+            max_commands: 10,
+        })
+        .exec("f() { f; }; f");
+        expect_protection_triggered("very strict limits", &strict);
+
+        // input size protection --------------------------------------------
+        // :385 input above the parser limit is rejected with a "too large" error.
+        let too_long = format!("echo \"{}\"", "x".repeat(1_100_000));
+        let oversized = shell().exec(&too_long);
+        assert_ne!(oversized.exit_code, 0);
+        assert!(
+            oversized.stderr.contains("too large"),
+            "oversized stderr={:?}",
+            oversized.stderr
         );
     }
 
