@@ -9097,6 +9097,233 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn text_search_jbc49_grep_perl_unicode_and_inline_modifier_rows() {
+        // JBC-49: grep Perl mode (-P) Unicode code-point classes/sequences and
+        // (?i:...) inline case-insensitive groups exercised by
+        // packages/just-bash/src/commands/grep/grep.perl.test.ts (lines 348-628).
+        fn check(files: &[(&str, &str)], script: &str, exit_code: i32, stdout: &str) {
+            let result = home_bash(files).exec(script);
+            assert_eq!(result.exit_code, exit_code, "{script}");
+            assert_eq!(result.stdout, stdout, "{script}");
+        }
+
+        // ---- \x{NNNN} multiple and combined patterns ----
+        // grep.perl.test.ts:348 should match multiple Unicode in character class
+        check(
+            &[("/test.txt", "Stars: \u{2605}\u{2606}\u{2605}\n")],
+            "grep -oP '[\\x{2605}\\x{2606}]+' /test.txt",
+            0,
+            "\u{2605}\u{2606}\u{2605}\n",
+        );
+        // grep.perl.test.ts:359 should match sequence of Unicode code points
+        check(
+            &[("/test.txt", "Card: \u{2660}\u{2665}\u{2666}\u{2663}\n")],
+            "grep -oP '\\x{2660}\\x{2665}\\x{2666}\\x{2663}' /test.txt",
+            0,
+            "\u{2660}\u{2665}\u{2666}\u{2663}\n",
+        );
+        // grep.perl.test.ts:370 should combine Unicode with regular patterns
+        check(
+            &[("/test.txt", "Price: \u{20AC}100\nPrice: \u{20AC}50\n")],
+            "grep -oP '\\x{20AC}\\d+' /test.txt",
+            0,
+            "\u{20AC}100\n\u{20AC}50\n",
+        );
+        // grep.perl.test.ts:379 should work with Unicode and \K
+        check(
+            &[("/test.txt", "\u{20AC}100\n\u{20AC}200\n")],
+            "grep -oP '\\x{20AC}\\K\\d+' /test.txt",
+            0,
+            "100\n200\n",
+        );
+
+        // ---- \x{NNNN} edge cases ----
+        // grep.perl.test.ts:390 should handle lowercase hex digits
+        check(
+            &[("/test.txt", "Test \u{f1} char\n")],
+            "grep -oP '\\x{f1}' /test.txt",
+            0,
+            "\u{f1}\n",
+        );
+        // grep.perl.test.ts:399 should handle mixed case hex digits (no match)
+        check(
+            &[("/test.txt", "Hello \u{2603} World\n")],
+            "grep -oP '\\x{26Fa}' /test.txt",
+            1,
+            "",
+        );
+        // grep.perl.test.ts:409 should handle single digit code point (tab)
+        check(
+            &[("/test.txt", "Tab:\there\n")],
+            "grep -oP '\\x{9}' /test.txt",
+            0,
+            "\t\n",
+        );
+        // grep.perl.test.ts:418 should handle null character code point (matches 'e')
+        check(
+            &[("/test.txt", "test\n")],
+            "grep -oP '\\x{65}' /test.txt",
+            0,
+            "e\n",
+        );
+
+        // ---- (?i:...) basic case insensitivity ----
+        // grep.perl.test.ts:435 should apply case-insensitive only to group
+        check(
+            &[(
+                "/test.txt",
+                "Hello world\nhello world\nHELLO world\nHello WORLD\n",
+            )],
+            "grep -oP '(?i:hello) world' /test.txt",
+            0,
+            "Hello world\nhello world\nHELLO world\n",
+        );
+        // grep.perl.test.ts:446 should handle single letter case insensitivity
+        check(
+            &[("/test.txt", "Apple\napple\nAPPLE\n")],
+            "grep -oP '(?i:a)pple' /test.txt",
+            0,
+            "Apple\napple\n",
+        );
+        // grep.perl.test.ts:455 should handle mixed case pattern
+        check(
+            &[("/test.txt", "CamelCase\ncamelcase\nCAMELCASE\n")],
+            "grep -oP '(?i:CamelCase)' /test.txt",
+            0,
+            "CamelCase\ncamelcase\nCAMELCASE\n",
+        );
+
+        // ---- (?i:...) combining with other patterns ----
+        // grep.perl.test.ts:466 should preserve regex patterns inside modifier group
+        check(
+            &[("/test.txt", "abc123\nABC123\naBc456\n")],
+            "grep -oP '(?i:abc)\\d+' /test.txt",
+            0,
+            "abc123\nABC123\naBc456\n",
+        );
+        // grep.perl.test.ts:475 should handle character class inside modifier group
+        check(
+            &[("/test.txt", "cat\nCAT\nCat\ndog\n")],
+            "grep -oP '(?i:[cd]at)' /test.txt",
+            0,
+            "cat\nCAT\nCat\n",
+        );
+        // grep.perl.test.ts:484 should handle quantifiers inside modifier group
+        check(
+            &[("/test.txt", "aaa\nAAA\nAaA\nbbb\n")],
+            "grep -oP '(?i:a+)' /test.txt",
+            0,
+            "aaa\nAAA\nAaA\n",
+        );
+        // grep.perl.test.ts:493 should handle alternation inside modifier group
+        check(
+            &[("/test.txt", "yes\nYES\nno\nNO\nmaybe\n")],
+            "grep -oP '(?i:yes|no)' /test.txt",
+            0,
+            "yes\nYES\nno\nNO\n",
+        );
+
+        // ---- (?i:...) multiple modifier groups ----
+        // grep.perl.test.ts:504 should handle adjacent modifier groups
+        check(
+            &[("/test.txt", "TestCase\ntestcase\nTESTCASE\ntestCASE\n")],
+            "grep -oP '(?i:test)(?i:case)' /test.txt",
+            0,
+            "TestCase\ntestcase\nTESTCASE\ntestCASE\n",
+        );
+        // grep.perl.test.ts:515 should handle modifier group followed by literal
+        check(
+            &[("/test.txt", "ABCdef\nabcdef\nABCDEF\n")],
+            "grep -oP '(?i:abc)def' /test.txt",
+            0,
+            "ABCdef\nabcdef\n",
+        );
+        // grep.perl.test.ts:524 should handle literal followed by modifier group
+        check(
+            &[("/test.txt", "abcDEF\nabcdef\nABCDEF\n")],
+            "grep -oP 'abc(?i:def)' /test.txt",
+            0,
+            "abcDEF\nabcdef\n",
+        );
+
+        // ---- (?i:...) edge cases ----
+        // grep.perl.test.ts:535 should handle empty modifier group
+        check(
+            &[("/test.txt", "test\n")],
+            "grep -oP 'te(?i:)st' /test.txt",
+            0,
+            "test\n",
+        );
+        // grep.perl.test.ts:544 should handle digits in modifier group (unchanged)
+        check(
+            &[("/test.txt", "abc123\nABC123\n")],
+            "grep -oP '(?i:abc123)' /test.txt",
+            0,
+            "abc123\nABC123\n",
+        );
+        // grep.perl.test.ts:553 should handle special chars in modifier group
+        check(
+            &[("/test.txt", "a.b\nA.B\na.B\n")],
+            "grep -oP '(?i:a\\.b)' /test.txt",
+            0,
+            "a.b\nA.B\na.B\n",
+        );
+        // grep.perl.test.ts:562 should handle escape sequences in modifier group
+        check(
+            &[("/test.txt", "a1b\nA2B\na3B\n")],
+            "grep -oP '(?i:a)\\d(?i:b)' /test.txt",
+            0,
+            "a1b\nA2B\na3B\n",
+        );
+        // grep.perl.test.ts:571 should preserve non-alpha chars in modifier group
+        check(
+            &[("/test.txt", "a-b_c\nA-B_C\n")],
+            "grep -oP '(?i:a-b_c)' /test.txt",
+            0,
+            "a-b_c\nA-B_C\n",
+        );
+
+        // ---- (?i:...) interaction with \K ----
+        // grep.perl.test.ts:582 should work with \K after modifier group
+        check(
+            &[("/test.txt", "Key=value\nKEY=VALUE\nkey=data\n")],
+            "grep -oP '(?i:key)=\\K\\w+' /test.txt",
+            0,
+            "value\nVALUE\ndata\n",
+        );
+        // grep.perl.test.ts:591 should work with \K inside modifier group
+        check(
+            &[("/test.txt", "prefix:VALUE\nPREFIX:value\n")],
+            "grep -oP '(?i:prefix:\\K\\w+)' /test.txt",
+            0,
+            "VALUE\nvalue\n",
+        );
+
+        // ---- (?P<name>...) named groups ----
+        // grep.perl.test.ts:608 should support named groups
+        check(
+            &[("/test.txt", "hello world\n")],
+            "grep -P '(?P<word>\\w+)' /test.txt",
+            0,
+            "hello world\n",
+        );
+        // grep.perl.test.ts:617 should support multiple named groups
+        check(
+            &[("/test.txt", "John:25\nJane:30\n")],
+            "grep -P '(?P<name>\\w+):(?P<age>\\d+)' /test.txt",
+            0,
+            "John:25\nJane:30\n",
+        );
+        // grep.perl.test.ts:628 should support named groups with -o
+        check(
+            &[("/test.txt", "email: test@example.com\n")],
+            "grep -oP '(?P<user>\\w+)@(?P<domain>[\\w.]+)' /test.txt",
+            0,
+            "test@example.com\n",
+        );
+    }
+
+    #[test]
     fn text_search_jbc_grep_exclude_files_without_match_and_bracket_rows() {
         // grep --exclude: skip files whose basename matches the glob.
         let exclude = Bash::with_options(BashOptions {
