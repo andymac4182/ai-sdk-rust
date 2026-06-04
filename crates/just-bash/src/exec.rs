@@ -9373,6 +9373,33 @@ fn sed_substitute_line(
 }
 
 fn command_awk(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    // awk evaluation is recursive (expressions, user functions). A program may
+    // legitimately recurse up to AWK_MAX_RECURSION_DEPTH (100) user-function
+    // frames, each of which nests several Rust frames. On small (2 MiB) worker
+    // and test threads that can overflow the host stack before the awk-level
+    // recursion limit fires. Run the interpreter on a dedicated thread with a
+    // generous stack so the depth is bounded by AWK_MAX_RECURSION_DEPTH (a
+    // controlled execution-limit error) rather than a host-stack abort.
+    // 64 MiB comfortably covers AWK_MAX_RECURSION_DEPTH (100) awk frames even in
+    // unoptimized debug builds, where each frame is at its largest.
+    const AWK_STACK_SIZE: usize = 64 * 1024 * 1024;
+    std::thread::scope(|scope| {
+        match std::thread::Builder::new()
+            .stack_size(AWK_STACK_SIZE)
+            .spawn_scoped(scope, || command_awk_inner(state, args, stdin))
+        {
+            Ok(handle) => handle
+                .join()
+                // A panic inside awk evaluation is reported as a generic error
+                // rather than propagating across the thread boundary.
+                .unwrap_or_else(|_| stderr_result(1, "awk: internal error\n")),
+            // If the host cannot spawn a thread, fall back to evaluating inline.
+            Err(_) => command_awk_inner(state, args, stdin),
+        }
+    })
+}
+
+fn command_awk_inner(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
     let mut separator = AwkSeparator::Whitespace;
     let mut variables = BTreeMap::new();
     let mut program = None;
@@ -9401,7 +9428,7 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
             "-v" => {
                 if let Some(value) = args.get(index + 1) {
                     if let Err(error) = assign_awk_variable(value, &mut variables) {
-                        return stderr_result(1, format!("awk: {error}\n"));
+                        return awk_error_result(&error);
                     }
                     index += 2;
                 } else {
@@ -9410,7 +9437,7 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
             }
             _ if arg.starts_with("-v") && arg.len() > 2 => {
                 if let Err(error) = assign_awk_variable(&arg[2..], &mut variables) {
-                    return stderr_result(1, format!("awk: {error}\n"));
+                    return awk_error_result(&error);
                 }
                 index += 1;
             }
@@ -9429,11 +9456,11 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
     };
     let program = match parse_awk_program(&program) {
         Ok(program) => program,
-        Err(error) => return stderr_result(1, format!("awk: {error}\n")),
+        Err(error) => return awk_error_result(&error),
     };
     let inputs = match collect_named_text_inputs(state, &paths, stdin, "awk") {
         Ok(inputs) => inputs,
-        Err(error) => return stderr_result(1, format!("awk: {error}\n")),
+        Err(error) => return awk_error_result(&error),
     };
     let mut stdout = String::new();
     // Flatten every input file into a single record stream up front so a plain
@@ -9464,6 +9491,12 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
         cwd: state.cwd.clone(),
         getline_files: BTreeMap::new(),
         output_files: BTreeMap::new(),
+        // Default awk seed (POSIX leaves it implementation-defined; using a
+        // fixed non-zero constant keeps `rand()` deterministic until `srand` is
+        // called, matching gawk's reproducible default).
+        rng_state: AWK_DEFAULT_RNG_SEED,
+        recursion_depth: 0,
+        output_bytes: 0,
     };
     let mut nr = 0usize;
     let mut last_filename = String::new();
@@ -9480,7 +9513,7 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
             &mut runtime,
             &mut stdout,
         ) {
-            Ok(AwkFlow::Continue) | Ok(AwkFlow::Next) => {}
+            Ok(AwkFlow::Continue) | Ok(AwkFlow::Next) | Ok(AwkFlow::NextFile) => {}
             Ok(AwkFlow::Exit(code)) => {
                 runtime.flush_output_files();
                 return CommandResult {
@@ -9492,7 +9525,7 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
             Ok(AwkFlow::Return(_)) | Ok(AwkFlow::Break) | Ok(AwkFlow::LoopContinue) => {
                 return stderr_result(1, "awk: unsupported program\n");
             }
-            Err(error) => return stderr_result(1, format!("awk: {error}\n")),
+            Err(error) => return awk_error_result(&error),
         }
     }
 
@@ -9519,7 +9552,7 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
             let matches =
                 match awk_pattern_matches(&rule.pattern, rule_index, &mut context, &mut runtime) {
                     Ok(matches) => matches,
-                    Err(error) => return stderr_result(1, format!("awk: {error}\n")),
+                    Err(error) => return awk_error_result(&error),
                 };
             if matches {
                 match execute_awk_actions(
@@ -9530,6 +9563,12 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
                 ) {
                     Ok(AwkFlow::Continue) => {}
                     Ok(AwkFlow::Next) => break,
+                    Ok(AwkFlow::NextFile) => {
+                        // Skip the rest of the current file, then stop running
+                        // rules for this record.
+                        runtime.skip_remaining_in_file(&context.filename);
+                        break;
+                    }
                     Ok(AwkFlow::Exit(code)) => {
                         runtime.flush_output_files();
                         return CommandResult {
@@ -9541,7 +9580,7 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
                     Ok(AwkFlow::Return(_)) | Ok(AwkFlow::Break) | Ok(AwkFlow::LoopContinue) => {
                         return stderr_result(1, "awk: unsupported program\n");
                     }
-                    Err(error) => return stderr_result(1, format!("awk: {error}\n")),
+                    Err(error) => return awk_error_result(&error),
                 }
             }
         }
@@ -9562,7 +9601,7 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
             &mut runtime,
             &mut stdout,
         ) {
-            Ok(AwkFlow::Continue) | Ok(AwkFlow::Next) => {}
+            Ok(AwkFlow::Continue) | Ok(AwkFlow::Next) | Ok(AwkFlow::NextFile) => {}
             Ok(AwkFlow::Exit(code)) => {
                 runtime.flush_output_files();
                 return CommandResult {
@@ -9574,7 +9613,7 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
             Ok(AwkFlow::Return(_)) | Ok(AwkFlow::Break) | Ok(AwkFlow::LoopContinue) => {
                 return stderr_result(1, "awk: unsupported program\n");
             }
-            Err(error) => return stderr_result(1, format!("awk: {error}\n")),
+            Err(error) => return awk_error_result(&error),
         }
     }
     runtime.flush_output_files();
@@ -10217,9 +10256,66 @@ struct AwkRuntime<'a> {
     /// Buffered output for `print > FILE` / `print >> FILE`, keyed by resolved
     /// path and flushed to the session filesystem when the program finishes.
     output_files: BTreeMap<String, String>,
+    /// Current PRNG state for `rand()`. `srand(seed)` reseeds it; without an
+    /// explicit `srand` awk uses a fixed default seed so a program is
+    /// reproducible across runs, which is what `rand()` returning `[0, 1)`
+    /// relies on here. The generator is a deterministic SplitMix64 step so the
+    /// sequence is stable and host-independent.
+    rng_state: u64,
+    /// Current user-function call depth, bounded by [`AWK_MAX_RECURSION_DEPTH`]
+    /// so unbounded recursion fails with an execution-limit error instead of
+    /// overflowing the host stack.
+    recursion_depth: usize,
+    /// Running count of bytes written to stdout, used to enforce
+    /// [`AWK_MAX_OUTPUT_BYTES`] on runaway `print` loops.
+    output_bytes: usize,
 }
 
+/// Fixed default seed for `rand()` before any `srand` call. Chosen as a
+/// non-zero constant so the SplitMix64 step never degenerates and the default
+/// sequence is reproducible across runs and hosts.
+const AWK_DEFAULT_RNG_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
 impl AwkRuntime<'_> {
+    /// Reseeds the `rand()` generator for `srand(seed)`. A zero seed is mapped
+    /// onto the default constant so the SplitMix64 step still advances.
+    fn srand(&mut self, seed: f64) {
+        let seed = seed as i64 as u64;
+        self.rng_state = if seed == 0 {
+            AWK_DEFAULT_RNG_SEED
+        } else {
+            seed
+        };
+    }
+
+    /// Returns the next `rand()` value in `[0, 1)`. Uses a deterministic
+    /// SplitMix64 step on `rng_state`, then scales the top 53 bits into a
+    /// double so the result is always strictly less than 1.
+    fn rand(&mut self) -> f64 {
+        self.rng_state = self.rng_state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.rng_state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        // Scale the high 53 bits into [0, 1): 2^53 is the largest exactly
+        // representable consecutive-integer bound for f64.
+        ((z >> 11) as f64) / ((1u64 << 53) as f64)
+    }
+
+    /// Advances the shared main-input cursor past every remaining record that
+    /// belongs to `label`, implementing `nextfile`. Records are laid out
+    /// file-by-file, so skipping the contiguous run with the matching label
+    /// resumes the loop at the first record of the next file.
+    fn skip_remaining_in_file(&mut self, label: &str) {
+        while self
+            .main_input
+            .get(self.main_cursor)
+            .is_some_and(|record| record.label == label)
+        {
+            self.main_cursor += 1;
+        }
+    }
+
     /// Advances the shared main-input cursor by one record, returning the
     /// consumed record. Returns `None` at end of input. Used by plain `getline`
     /// and `getline VAR`, which read the next record from the main stream.
@@ -10345,7 +10441,43 @@ enum AwkUnaryOp {
 /// Upper bound on `for`/`while` loop iterations. Guards against runaway or
 /// infinite loops (e.g. `while (1)`) while comfortably exceeding the iteration
 /// counts exercised by the portable awk test corpus.
-const AWK_MAX_LOOP_ITERATIONS: usize = 10_000_000;
+const AWK_MAX_LOOP_ITERATIONS: usize = 1_000_000;
+
+/// Maximum user-function call depth. Recursive awk programs that never return
+/// (`function f() { f() }`) would otherwise overflow the host stack; this bound
+/// turns them into a controlled execution-limit error instead.
+const AWK_MAX_RECURSION_DEPTH: usize = 100;
+
+/// Maximum length (in chars) any single awk string value may reach. Doubling a
+/// string in a loop (`s = s s`) grows exponentially; this cap turns that into a
+/// controlled execution-limit error rather than an out-of-memory abort.
+const AWK_MAX_STRING_LENGTH: usize = 10_000_000;
+
+/// Maximum total bytes awk may write to stdout in one run. A tight `print` loop
+/// would otherwise buffer unbounded output before the iteration cap triggers.
+const AWK_MAX_OUTPUT_BYTES: usize = 1_000_000;
+
+/// Prefix marking an awk error as a fatal execution-limit breach. Errors that
+/// start with this sentinel are reported with exit code 126 (matching the
+/// upstream `ExecutionLimitError.EXIT_CODE`); all other awk errors exit 1. The
+/// sentinel is stripped before the message is written to stderr.
+const AWK_LIMIT_MARKER: &str = "\u{0}awk-execution-limit\u{0}";
+
+/// Builds an execution-limit error string carrying the [`AWK_LIMIT_MARKER`].
+fn awk_limit_error(message: impl Into<String>) -> String {
+    format!("{AWK_LIMIT_MARKER}{}", message.into())
+}
+
+/// Converts an awk error string into a [`CommandResult`], choosing exit code
+/// 126 for execution-limit breaches (sentinel-prefixed) and exit code 1 for all
+/// other errors. The sentinel is stripped before the message is rendered.
+fn awk_error_result(error: &str) -> CommandResult {
+    if let Some(message) = error.strip_prefix(AWK_LIMIT_MARKER) {
+        stderr_result(126, format!("awk: {message}\n"))
+    } else {
+        stderr_result(1, format!("awk: {error}\n"))
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AwkAssignOp {
@@ -10362,6 +10494,10 @@ enum AwkAssignOp {
 enum AwkFlow {
     Continue,
     Next,
+    /// `nextfile`: stop processing the current input file and resume with the
+    /// first record of the next file. The main loop skips every remaining
+    /// record belonging to the current file.
+    NextFile,
     Exit(i32),
     Return(String),
     /// `break` out of the innermost enclosing loop.
@@ -10404,6 +10540,7 @@ enum AwkAction {
         else_actions: Vec<AwkAction>,
     },
     Next,
+    NextFile,
     Exit(Option<AwkExpr>),
     Return(Option<AwkExpr>),
     Delete {
@@ -10701,6 +10838,11 @@ fn parse_awk_actions(body: &str) -> Result<Vec<AwkAction>, String> {
         }
         if statement == "next" {
             actions.push(AwkAction::Next);
+            index += 1;
+            continue;
+        }
+        if statement == "nextfile" {
+            actions.push(AwkAction::NextFile);
             index += 1;
             continue;
         }
@@ -11569,7 +11711,11 @@ impl<'a> AwkExprParser<'a> {
             let Some(op) = op else {
                 break;
             };
-            let right = self.parse_power()?;
+            // POSIX awk: unary minus/plus binds tighter than `* / %`, so the
+            // right operand of a multiplicative operator may itself begin with a
+            // unary sign (`7 % -3`, `a * -b`). Parsing it as a unary expression
+            // keeps that working while still letting `^` bind tighter inside it.
+            let right = self.parse_unary()?;
             expression = AwkExpr::Binary {
                 left: Box::new(expression),
                 op,
@@ -11886,7 +12032,15 @@ fn awk_emit_output(
     stdout: &mut String,
 ) -> Result<(), String> {
     match redirect {
-        None => stdout.push_str(text),
+        None => {
+            // Bound total stdout so a runaway `print` loop fails with an
+            // execution-limit error before buffering unbounded output.
+            runtime.output_bytes = runtime.output_bytes.saturating_add(text.len());
+            if runtime.output_bytes > AWK_MAX_OUTPUT_BYTES {
+                return Err(awk_limit_error("output size limit exceeded"));
+            }
+            stdout.push_str(text);
+        }
         Some(AwkRedirect { kind, path }) => {
             let path = eval_awk_expr(path, context, runtime)?;
             let resolved = runtime.resolve_redirect_path(&path);
@@ -11954,6 +12108,7 @@ fn execute_awk_actions(
                 }
             }
             AwkAction::Next => return Ok(AwkFlow::Next),
+            AwkAction::NextFile => return Ok(AwkFlow::NextFile),
             AwkAction::Break => return Ok(AwkFlow::Break),
             AwkAction::Continue => return Ok(AwkFlow::LoopContinue),
             AwkAction::Getline { target } => {
@@ -12061,7 +12216,7 @@ fn execute_awk_actions(
                     if iterations >= AWK_MAX_LOOP_ITERATIONS {
                         // Guards against `for (;;)` / runaway loops spinning
                         // forever; the bound comfortably exceeds the corpus.
-                        return Err("awk loop iteration limit exceeded".to_string());
+                        return Err(awk_limit_error("loop iteration limit exceeded"));
                     }
                 }
             }
@@ -12075,7 +12230,7 @@ fn execute_awk_actions(
                     }
                     iterations += 1;
                     if iterations >= AWK_MAX_LOOP_ITERATIONS {
-                        return Err("awk loop iteration limit exceeded".to_string());
+                        return Err(awk_limit_error("loop iteration limit exceeded"));
                     }
                 }
             }
@@ -12089,7 +12244,7 @@ fn execute_awk_actions(
                     }
                     iterations += 1;
                     if iterations >= AWK_MAX_LOOP_ITERATIONS {
-                        return Err("awk loop iteration limit exceeded".to_string());
+                        return Err(awk_limit_error("loop iteration limit exceeded"));
                     }
                     if !eval_awk_truth(condition, context, runtime)? {
                         break;
@@ -12154,11 +12309,19 @@ fn eval_awk_expr(
             let updated = increment_awk_target(target, *delta, context, runtime)?;
             Ok(if *prefix { updated } else { previous })
         }
-        AwkExpr::Concat(expressions) => Ok(expressions
-            .iter()
-            .map(|expr| eval_awk_expr(expr, context, runtime))
-            .collect::<Result<Vec<_>, _>>()?
-            .join("")),
+        AwkExpr::Concat(expressions) => {
+            let parts = expressions
+                .iter()
+                .map(|expr| eval_awk_expr(expr, context, runtime))
+                .collect::<Result<Vec<_>, _>>()?;
+            let total: usize = parts.iter().map(|part| part.len()).sum();
+            // Exponential string growth (`s = s s`) is bounded so it fails with
+            // an execution-limit error rather than exhausting memory.
+            if total > AWK_MAX_STRING_LENGTH {
+                return Err(awk_limit_error("string length limit exceeded"));
+            }
+            Ok(parts.join(""))
+        }
         AwkExpr::InArray { key, array } => {
             let key = eval_awk_array_key(key, context, runtime)?;
             let present = runtime
@@ -12602,6 +12765,19 @@ fn eval_awk_function(
             )?);
             Ok(format_awk_number(y.atan2(x)))
         }
+        "rand" => Ok(format_awk_number(runtime.rand())),
+        "srand" => {
+            // `srand([seed])` reseeds the generator and returns the previous
+            // seed value. With no argument awk seeds from time-of-day; here the
+            // default constant is used so the call stays deterministic.
+            let seed = match args.first() {
+                Some(arg) => awk_to_number(&eval_awk_expr(arg, context, runtime)?),
+                None => AWK_DEFAULT_RNG_SEED as i64 as f64,
+            };
+            let previous = runtime.rng_state as i64 as f64;
+            runtime.srand(seed);
+            Ok(format_awk_number(previous))
+        }
         "sprintf" => {
             let format =
                 eval_awk_expr(args.first().ok_or("unsupported program")?, context, runtime)?;
@@ -12718,6 +12894,26 @@ fn eval_awk_user_function(
     context: &mut AwkRecordContext,
     runtime: &mut AwkRuntime<'_>,
 ) -> Result<String, String> {
+    // Bound recursion before doing any work so `function f() { f() }` (and
+    // mutual recursion) fail with a controlled execution-limit error instead of
+    // overflowing the host stack. The depth is restored on every exit path.
+    if runtime.recursion_depth >= AWK_MAX_RECURSION_DEPTH {
+        return Err(awk_limit_error(format!(
+            "recursion depth exceeded maximum ({AWK_MAX_RECURSION_DEPTH})"
+        )));
+    }
+    runtime.recursion_depth += 1;
+    let result = eval_awk_user_function_body(function, args, context, runtime);
+    runtime.recursion_depth -= 1;
+    result
+}
+
+fn eval_awk_user_function_body(
+    function: &AwkFunction,
+    args: &[AwkExpr],
+    context: &mut AwkRecordContext,
+    runtime: &mut AwkRuntime<'_>,
+) -> Result<String, String> {
     let values = args
         .iter()
         .map(|arg| eval_awk_expr(arg, context, runtime))
@@ -12744,6 +12940,7 @@ fn eval_awk_user_function(
         Ok(AwkFlow::Return(value)) => Ok(value),
         Ok(AwkFlow::Continue) => Ok(String::new()),
         Ok(AwkFlow::Next)
+        | Ok(AwkFlow::NextFile)
         | Ok(AwkFlow::Exit(_))
         | Ok(AwkFlow::Break)
         | Ok(AwkFlow::LoopContinue) => Err("unsupported program".to_string()),
