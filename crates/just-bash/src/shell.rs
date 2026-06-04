@@ -350,8 +350,41 @@ enum TokenKind {
     Eof,
 }
 
+/// Maximum accepted parser input size in bytes, mirroring upstream
+/// `packages/just-bash/src/parser/types.ts` `MAX_INPUT_SIZE` (1 MB). Inputs
+/// larger than this are rejected before tokenizing so the parser cannot be
+/// driven into runaway compute.
+pub const MAX_INPUT_SIZE: usize = 1_000_000;
+
+/// Maximum number of lexer tokens the parser will accept, mirroring upstream
+/// `MAX_TOKENS`. Token streams larger than this are rejected.
+pub const MAX_TOKENS: usize = 100_000;
+
 pub fn parse(input: &str) -> ShellResult<Script> {
-    Parser::new(input)?.parse()
+    // Mirror upstream `Parser.parse`: reject oversized input before tokenizing.
+    if input.len() > MAX_INPUT_SIZE {
+        return Err(ShellError::new(
+            format!(
+                "Input too large: {} bytes exceeds limit of {MAX_INPUT_SIZE}",
+                input.len()
+            ),
+            1,
+            1,
+        ));
+    }
+    let parser = Parser::new(input)?;
+    // Mirror upstream token-count guard after tokenizing.
+    if parser.tokens.len() > MAX_TOKENS {
+        return Err(ShellError::new(
+            format!(
+                "Too many tokens: {} exceeds limit of {MAX_TOKENS}",
+                parser.tokens.len()
+            ),
+            1,
+            1,
+        ));
+    }
+    parser.parse()
 }
 
 pub fn serialize(script: &Script) -> String {
@@ -11061,5 +11094,134 @@ greet World",
         let mut sh = shell();
         sh.exec("greet() { echo hello; }");
         assert_eq!(sh.exec("greet").exit_code, 127);
+    }
+
+    /// Maps `packages/just-bash/src/syntax/loops.test.ts` loop-protection rows
+    /// (`:135` infinite for, `:145` infinite while, `:153` infinite until). Each
+    /// runaway loop must be bounded by the interpreter's execution limits and
+    /// surface a "too many iterations/commands" diagnostic instead of hanging.
+    #[test]
+    fn jbpi_syntax_loops_protection_rows_match_upstream() {
+        // :135 a 10001-element for-list is rejected by the iteration/command cap.
+        let long_list = vec!["x"; 10001].join(" ");
+        let for_loop = shell().exec(&format!("for i in {long_list}; do echo $i; done"));
+        assert_ne!(for_loop.exit_code, 0, "for stderr={:?}", for_loop.stderr);
+        assert!(
+            for_loop.stderr.contains("too many iterations")
+                || for_loop.stderr.contains("too many commands"),
+            "for stderr={:?}",
+            for_loop.stderr
+        );
+        // :145 `while true` is bounded by the same protection.
+        let while_loop = shell().exec("while true; do echo loop; done");
+        assert_ne!(
+            while_loop.exit_code, 0,
+            "while stderr={:?}",
+            while_loop.stderr
+        );
+        assert!(
+            while_loop.stderr.contains("too many iterations")
+                || while_loop.stderr.contains("too many commands"),
+            "while stderr={:?}",
+            while_loop.stderr
+        );
+        // :153 `until false` is bounded by the same protection.
+        let until_loop = shell().exec("until false; do echo loop; done");
+        assert_ne!(
+            until_loop.exit_code, 0,
+            "until stderr={:?}",
+            until_loop.stderr
+        );
+        assert!(
+            until_loop.stderr.contains("too many iterations")
+                || until_loop.stderr.contains("too many commands"),
+            "until stderr={:?}",
+            until_loop.stderr
+        );
+    }
+
+    /// Maps `packages/just-bash/src/syntax/parser-protection.test.ts`. The parser
+    /// must reject oversized input (`:17`) and complete in bounded time on every
+    /// pathological shape (long names/strings, deep nesting, many tokens, etc.),
+    /// and execution must bound brace/range expansion (`:209`, `:220`). The hard
+    /// failures here are: oversized input throws, each shape parses fast, and the
+    /// expansion rows exit cleanly with bounded output.
+    #[test]
+    fn jbpi_syntax_parser_protection_rows_match_upstream() {
+        use std::time::Instant;
+
+        // :17 input above MAX_INPUT_SIZE is rejected before tokenizing.
+        let too_long = format!("echo {}", "x".repeat(2_000_000));
+        assert!(parse(&too_long).is_err(), ":17 oversized input must error");
+
+        // Each pathological shape must parse (or error) well within its upstream
+        // time budget; we assert a generous 5s ceiling so the test is a real
+        // anti-hang guard without being flaky on slow CI.
+        let bounded = |label: &str, input: &str| {
+            let start = Instant::now();
+            let _ = parse(input);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_secs() < 5,
+                "{label} took {}ms (parser hang)",
+                elapsed.as_millis()
+            );
+        };
+        bounded(
+            ":24 long var name",
+            &format!("{}=value", "a".repeat(100_000)),
+        );
+        bounded(
+            ":39 long string",
+            &format!("echo \"{}\"", "x".repeat(500_000)),
+        );
+        bounded(
+            ":55 nested parens",
+            &format!("echo {}test{}", "(".repeat(1000), ")".repeat(1000)),
+        );
+        bounded(
+            ":71 nested braces",
+            &format!("echo {}test{}", "{".repeat(1000), "}".repeat(1000)),
+        );
+        let mut nested_subst = "echo x".to_string();
+        for _ in 0..100 {
+            nested_subst = format!("echo $({nested_subst})");
+        }
+        bounded(":87 nested command subst", &nested_subst);
+        let mut nested_arith = "1".to_string();
+        for _ in 0..500 {
+            nested_arith = format!("({nested_arith}+1)");
+        }
+        bounded(
+            ":103 nested arithmetic",
+            &format!("echo $(({nested_arith}))"),
+        );
+        bounded(
+            ":122 many tokens",
+            &format!("echo {}", vec!["x"; 50000].join(" ")),
+        );
+        bounded(":137 many semicolons", &vec!["echo x"; 10000].join("; "));
+        bounded(":150 many pipes", &vec!["cat"; 1000].join(" | "));
+        bounded(
+            ":165 repeated brace patterns",
+            "echo {a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,n}{o,p}",
+        );
+        bounded(
+            ":179 many redirections",
+            &format!("echo test {}", vec!["> /dev/null"; 500].join(" ")),
+        );
+        bounded(
+            ":193 alternating quotes",
+            &format!("echo {}", r#""a"'b'"#.repeat(10000)),
+        );
+
+        // :209 brace expansion during execution is bounded (does not hang).
+        let brace = shell().exec("echo {a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,n}{o,p}{q,r}{s,t}");
+        assert_eq!(brace.exit_code, 0, ":209 exit");
+
+        // :220 range expansion is bounded: completes with limited output.
+        let range = shell().exec("echo {1..100000}");
+        assert_eq!(range.exit_code, 0, ":220 exit");
+        assert!(range.stdout.len() < 1_000_000, ":220 output length bound");
     }
 }

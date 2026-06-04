@@ -15566,4 +15566,114 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
             "    x = 1\n\n    x = 2\n"
         );
     }
+
+    /// Maps real-command pipeline and short-circuit rows from
+    /// `packages/just-bash/src/syntax/operators.test.ts` and `set-errexit.test.ts`
+    /// that exercise the registry-backed `Bash` runtime (head/tail/grep/find/mkdir
+    /// plus `set -e` short-circuit semantics) rather than the parser-only
+    /// interpreter. Each tuple mirrors an upstream `Bash().exec(...)` assertion and
+    /// fails if the documented stdout/exit-code or filesystem effect regresses.
+    #[test]
+    fn jbpi_real_bash_operator_pipeline_and_errexit_rows_match_upstream() {
+        let env = Bash::new();
+        // operators.test.ts:247 first n lines with head in a pipe.
+        assert_eq!(
+            env.exec("echo -e \"1\\n2\\n3\\n4\\n5\" | head -n 2").stdout,
+            "1\n2\n"
+        );
+        // operators.test.ts:253 last n lines with tail in a pipe.
+        assert_eq!(
+            env.exec("echo -e \"1\\n2\\n3\\n4\\n5\" | tail -n 2").stdout,
+            "4\n5\n"
+        );
+        // operators.test.ts:259 head and tail combined in a pipe.
+        assert_eq!(
+            env.exec("echo -e \"1\\n2\\n3\\n4\\n5\" | head -n 4 | tail -n 2")
+                .stdout,
+            "3\n4\n"
+        );
+        // operators.test.ts:267 file contents through multiple filters.
+        let dat = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "apple\nbanana\napricot\nblueberry\navocado\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            dat.exec("cat /data.txt | grep a | head -n 3").stdout,
+            "apple\nbanana\napricot\n"
+        );
+
+        // operators.test.ts:36 `&&` runs the second command and persists its
+        // filesystem effect when the first succeeds.
+        let fx = Bash::new();
+        fx.exec("mkdir /test && echo created > /test/file.txt");
+        assert_eq!(fx.read_file("/test/file.txt").unwrap(), "created\n");
+
+        // operators.test.ts:108 `||` error-handler pattern: the first `mkdir`
+        // succeeds silently; a repeated `mkdir` of the existing dir fails and the
+        // `||` branch runs.
+        let eh = Bash::new();
+        assert_eq!(
+            eh.exec("mkdir /dir || echo \"dir already exists\"").stdout,
+            ""
+        );
+        assert_eq!(
+            eh.exec("mkdir /dir || echo \"dir already exists\"").stdout,
+            "dir already exists\n"
+        );
+
+        // control-flow.test.ts:335 `! ` passes through to `find -not`, excluding
+        // utils*.ts while keeping app.ts.
+        let proj = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/project/src/app.ts".to_string(), "code".to_string()),
+                ("/project/src/utils.ts".to_string(), "utils".to_string()),
+                ("/project/test.json".to_string(), "{}".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let found = proj.exec("find /project -name \"*.ts\" -not -name \"utils*\"");
+        assert!(found.stdout.contains("app.ts"), "found={:?}", found.stdout);
+        assert!(
+            !found.stdout.contains("utils.ts"),
+            "found={:?}",
+            found.stdout
+        );
+
+        // variables.test.ts:157 `echo -e` with escaped double backslashes emits a
+        // single literal backslash per pair.
+        assert_eq!(
+            env.exec("echo -e \"path\\\\\\\\to\\\\\\\\file\"").stdout,
+            "path\\to\\file\n"
+        );
+
+        // set-errexit.test.ts short-circuit/disable rows.
+        let run = |script: &str| {
+            let bash = Bash::new();
+            let r = bash.exec(script);
+            (r.stdout, r.exit_code)
+        };
+        // :85 `set +o errexit` re-enables continuing past a failed command.
+        assert_eq!(
+            run("set -o errexit\nset +o errexit\necho before\nfalse\necho after"),
+            ("before\nafter\n".to_string(), 0)
+        );
+        // :100 a failed command on the left of `&&` does not trip errexit.
+        assert_eq!(
+            run("set -e\nfalse && echo \"not reached\"\necho after"),
+            ("after\n".to_string(), 0)
+        );
+        // :111 a failed command on the left of `||` does not trip errexit.
+        assert_eq!(
+            run("set -e\nfalse || echo \"fallback\"\necho after"),
+            ("fallback\nafter\n".to_string(), 0)
+        );
+        // :134 `&& ... ||` list that ends by succeeding does not trip errexit.
+        assert_eq!(
+            run("set -e\nfalse && echo \"skip\" || echo \"fallback\"\necho after"),
+            ("fallback\nafter\n".to_string(), 0)
+        );
+    }
 }
