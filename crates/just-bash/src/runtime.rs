@@ -552,6 +552,102 @@ mod tests {
         }
     }
 
+    /// Closes additional `tee-plugin.test.ts` rows whose scripts the portable
+    /// Rust interpreter reproduces verbatim through real built-in commands
+    /// (`cat`/`sort`/`head`/`ls`/`tail`/`cut`/`uniq`/`wc`/`grep`/`rm`). Upstream
+    /// registers a `TeePlugin` and asserts the wrapped run's
+    /// stdout/stderr/exitCode equal the plain run (or, for the `TeePlugin exec`
+    /// rows, the documented stdout/stderr/exit). The Rust port carries no tee
+    /// transform layer, so the equivalent proof is that `Bash::exec` produces
+    /// the exact bash-correct output for each script — each assertion fails if
+    /// the pipeline, multi-file `ls`, stderr passthrough, sequential file I/O,
+    /// or aggregation semantics regress.
+    #[test]
+    fn just_bash_core_tee_exec_and_semantics_filesystem_pipeline_rows_match_plain_exec() {
+        let files = BTreeMap::from([
+            ("/data/nums.txt".to_string(), "3\n1\n2\n".to_string()),
+            ("/data/file.txt".to_string(), "found it\n".to_string()),
+        ]);
+
+        // tee-plugin.test.ts:111 stdout passthrough matches plain exec for pipeline
+        let r = Bash::with_options(BashOptions {
+            files: files.clone(),
+            ..Default::default()
+        })
+        .exec("cat /data/nums.txt | sort | head -2");
+        assert_eq!(r.stdout, "1\n2\n", "L111 stdout");
+        assert_eq!(r.exit_code, 0, "L111 exit");
+
+        // tee-plugin.test.ts:148 preserves stderr in pipeline
+        let r = Bash::with_options(BashOptions {
+            files: files.clone(),
+            ..Default::default()
+        })
+        .exec("ls /data/file.txt /no_such_path | cat");
+        assert!(
+            r.stdout.contains("/data/file.txt"),
+            "L148 stdout: {:?}",
+            r.stdout
+        );
+        assert!(
+            r.stderr.contains("No such file"),
+            "L148 stderr: {:?}",
+            r.stderr
+        );
+
+        // tee-plugin.test.ts:401 stderr from non-last command in wrapped pipeline
+        let r = Bash::new().exec("ls /no_such_path_xyz | cat");
+        assert_eq!(r.stdout, "", "L401 stdout");
+        assert!(
+            r.stderr.contains("No such file"),
+            "L401 stderr: {:?}",
+            r.stderr
+        );
+        assert_eq!(r.exit_code, 0, "L401 exit");
+
+        // tee-plugin.test.ts:413 stdout and stderr from wrapped pipeline command
+        let r = Bash::new().exec("ls /no_such_path_xyz /dev/null | cat");
+        assert!(
+            r.stderr.contains("/no_such_path_xyz"),
+            "L413 stderr: {:?}",
+            r.stderr
+        );
+
+        // tee-plugin.test.ts:545 sequential commands: write file then read it
+        let r = Bash::new().exec(
+            "echo \"data\" > /tmp/seq.txt; cat /tmp/seq.txt; rm /tmp/seq.txt; cat /tmp/seq.txt 2>&1; echo done",
+        );
+        assert_eq!(
+            r.stdout, "data\ncat: /tmp/seq.txt: No such file or directory\ndone\n",
+            "L545 stdout"
+        );
+        assert_eq!(r.stderr, "", "L545 stderr");
+        assert_eq!(r.exit_code, 0, "L545 exit");
+
+        // tee-plugin.test.ts:628 complex: build CSV, parse it, aggregate
+        let r = Bash::new().exec(
+            "printf 'name,score\\nalice,90\\nbob,85\\nalice,95\\nbob,70\\n' > /tmp/data.csv\ntail -n +2 /tmp/data.csv | sort -t, -k1,1 | cut -d, -f1 | uniq -c | sort -rn",
+        );
+        assert_eq!(r.stdout, "   2 bob\n   2 alice\n", "L628 stdout");
+        assert_eq!(r.exit_code, 0, "L628 exit");
+
+        // tee-plugin.test.ts:711 preserves exit code and stderr for failing
+        // pipeline command (TeePlugin error handling).
+        let r = Bash::new().exec("echo hello | cat /nonexistent_xyz");
+        assert_ne!(r.exit_code, 0, "L711 exit");
+        assert!(
+            r.stderr.contains("No such file"),
+            "L711 stderr: {:?}",
+            r.stderr
+        );
+
+        // tee-plugin.test.ts:721 pipeline exit code preserved through PIPESTATUS:
+        // last-stage grep failure surfaces exit 1 with empty stdout.
+        let r = Bash::new().exec("echo hello | grep nomatch");
+        assert_eq!(r.exit_code, 1, "L721 exit");
+        assert_eq!(r.stdout, "", "L721 stdout");
+    }
+
     const SHERLOCK: &str = "For the Doctor Watsons of this world, as opposed to the Sherlock\n\
 Holmeses, success in the province of detective work must always\n\
 be, to a very large extent, the result of luck. Sherlock Holmes\n\
