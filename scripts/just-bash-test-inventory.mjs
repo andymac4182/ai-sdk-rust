@@ -3926,6 +3926,27 @@ const jbpiParserInterpreterCaseGroups = [
     notes:
       'JB-PI verifies the portable `set -u` (nounset) non-error rows through the Rust shell: a set variable and an empty-string value read without error, `+u` / `+o nounset` disable it, the `$?` / `$#` / `$@` special vars never trip it, `${var:-}` / `${var:=}` / `${var:+}` parameter expansion is allowed, and `set -eu` with a set variable runs cleanly. The unbound-variable error rows stay pending until nounset error reporting lands.',
   },
+  {
+    file: 'packages/just-bash/src/syntax/parse-errors.test.ts',
+    lines: [
+      6, 13, 19, 29, 35, 43, 50, 57, 75, 82, 89, 99, 106, 115, 122, 131,
+      139, 156, 165, 188, 197, 204, 210, 216,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_syntax_parse_errors_match_upstream',
+    notes:
+      'JB-PI verifies portable parse-error rows through the Rust parser/interpreter: unclosed/missing-keyword if/for/while/until syntax errors (exit 2 with "syntax error"), the elif-condition selection, else/fi without if, a digit-starting function name accepted, unclosed function body, graceful handling of unclosed quotes / missing redirect target / empty pipe and &&/|| operands, the unknown-command 127 row, and the local-outside-function exit-1 row. The runtime invalid-identifier row (L64) and filesystem-backed redirect/path/cat rows (L147, L172, L179) stay pending.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/set-errexit.test.ts',
+    lines: [6, 18, 29, 43, 56, 73],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_syntax_set_errexit_match_upstream',
+    notes:
+      'JB-PI verifies portable set -e (errexit) rows through the Rust parser/interpreter: `set -e` exits on the first failure, execution continues without it, success does not exit, `set +e` disables and `set -e` re-enables, and `set -o errexit` enables it. The same test also exercises the &&/||, if/elif-condition, while/until-condition and -body, negated-command, and preserve-exit-code exemptions; the unimplemented combined-flag (`-ee`/`-ze`/`-ez`) and `set` help/list/invalid-option rows stay pending.',
+  },
 ];
 
 const jbc35CaseGroups = [
