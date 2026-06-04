@@ -17160,4 +17160,76 @@ but Watson, Doctor has to have it taken out for him and dusted,\n"
             "linkdir/file.txt:1:hello\nsubdir/file.txt:1:hello\n"
         );
     }
+
+    #[test]
+    fn rg_imported_dot_prefix_preservation_and_json_replacement_rows_are_portable() {
+        // JBC: closes imported ripgrep rows that exercise literal `./` path-prefix
+        // preservation (feature.test.ts "should preserve ./ prefix when given",
+        // regression.test.ts "should preserve ./ prefix") and the JSON submatch
+        // `replacement` field (json.test.ts "replacement: JSON output with
+        // replacement text"). Each assertion fails if the rg port regresses.
+
+        // feature.test.ts:265 — `rg --files ./sub` preserves the `./sub/` prefix on
+        // listed files instead of collapsing to the cwd-relative `sub/file.txt`.
+        assert_home_exec(
+            &[("sub/file.txt", "content\n")],
+            "rg --files ./sub",
+            0,
+            "./sub/file.txt\n",
+        );
+
+        // regression.test.ts:1398 — `rg --hidden --files ./` preserves the bare `./`
+        // prefix, labelling the hidden file `./a/.ignore` (not `a/.ignore`).
+        assert_home_exec(
+            &[("a/.ignore", ".foo\n")],
+            "rg --hidden --files ./",
+            0,
+            "./a/.ignore\n",
+        );
+
+        // A bare `.` root is NOT prefixed (ripgrep only preserves an explicit
+        // `./`): `rg --files .` keeps the cwd-relative label.
+        assert_home_exec(
+            &[("sub/file.txt", "content\n")],
+            "rg --files .",
+            0,
+            "sub/file.txt\n",
+        );
+
+        // json.test.ts:82 — `rg --json '<pat>' -r '<rep>'` attaches the raw replace
+        // string verbatim as the submatch `replacement` field.
+        let result = home_bash(&[("sherlock", SHERLOCK)])
+            .exec("rg --json 'Sherlock Holmes' -r 'John Watson' sherlock");
+        assert_eq!(result.exit_code, 0);
+        let match_line = result
+            .stdout
+            .lines()
+            .find(|line| line.contains("\"type\":\"match\""))
+            .expect("a match message");
+        let value: serde_json::Value = serde_json::from_str(match_line).expect("valid match JSON");
+        let submatch = &value["data"]["submatches"][0];
+        assert_eq!(submatch["match"]["text"], "Sherlock Holmes");
+        assert_eq!(
+            submatch["replacement"],
+            serde_json::json!({ "text": "John Watson" }),
+            "JSON submatch must carry the raw -r replacement text",
+        );
+
+        // Without `-r`, no `replacement` key is emitted on the submatch.
+        let plain =
+            home_bash(&[("sherlock", SHERLOCK)]).exec("rg --json 'Sherlock Holmes' sherlock");
+        let plain_match = plain
+            .stdout
+            .lines()
+            .find(|line| line.contains("\"type\":\"match\""))
+            .expect("a match message");
+        let plain_value: serde_json::Value =
+            serde_json::from_str(plain_match).expect("valid match JSON");
+        assert!(
+            plain_value["data"]["submatches"][0]
+                .get("replacement")
+                .is_none(),
+            "no replacement key without -r",
+        );
+    }
 }
