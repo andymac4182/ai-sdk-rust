@@ -5749,6 +5749,275 @@ be, to a very large extent, the result of luck. Sherlock Holmes\n",
     }
 
     #[test]
+    fn rg_imported_misc_filename_ignore_and_hidden_rows_are_portable() {
+        // packages/just-bash/src/commands/rg/imported-tests/misc.test.ts
+        // 38 - dir: should search directory with filename prefix
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg Sherlock",
+            0,
+            "sherlock:1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+sherlock:3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 55 - line_numbers: should show line numbers with -n
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -n Sherlock sherlock",
+            0,
+            "1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 844 - ignore_hidden: should ignore hidden files by default
+        assert_home_exec(&[(".sherlock", SHERLOCK)], "rg Sherlock", 1, "");
+        // 858 - no_ignore_hidden: should include hidden files with --hidden
+        assert_home_exec(
+            &[(".sherlock", SHERLOCK)],
+            "rg --hidden Sherlock",
+            0,
+            ".sherlock:1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+.sherlock:3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 875 - ignore_git: should respect .gitignore
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                ("sherlock", SHERLOCK),
+                (".gitignore", "sherlock\n"),
+            ],
+            "rg Sherlock",
+            1,
+            "",
+        );
+        // 921 - no_ignore: should ignore .gitignore with --no-ignore
+        assert_home_exec(
+            &[("sherlock", SHERLOCK), (".gitignore", "sherlock\n")],
+            "rg --no-ignore Sherlock",
+            0,
+            "sherlock:1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+sherlock:3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 986 - unrestricted1: should ignore .gitignore with -u
+        assert_home_exec(
+            &[("sherlock", SHERLOCK), (".gitignore", "sherlock\n")],
+            "rg -u Sherlock",
+            0,
+            "sherlock:1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+sherlock:3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+    }
+
+    #[test]
+    fn rg_imported_regression_regex_word_and_flag_rows_are_portable() {
+        // packages/just-bash/src/commands/rg/imported-tests/regression.test.ts
+        // 56 - r41: negation after double-star in gitignore
+        assert_home_exec(
+            &[
+                (".gitignore", "vendor/**\n!vendor/manifest\n"),
+                ("vendor/manifest", "test\n"),
+                ("vendor/other", "test\n"),
+            ],
+            "rg test",
+            0,
+            "vendor/manifest:1:test\n",
+        );
+        // 303 - r156: should match complex regex pattern (-N, output spans multiple lines)
+        let cx = home_bash(&[(
+            "testcase.txt",
+            "#parse('widgets/foo_bar_macros.vm')\n\
+#parse ( 'widgets/mobile/foo_bar_macros.vm' )\n\
+#parse (\"widgets/foobarhiddenformfields.vm\")\n",
+        )]);
+        let r303 = cx.exec(
+            "rg -N '#(?:parse|include)\\s*\\(\\s*(?:\"|'\"'\"')[./A-Za-z_-]+(?:\"|'\"'\"')' testcase.txt",
+        );
+        assert_eq!(r303.exit_code, 0);
+        assert!(r303.stdout.split('\n').count() > 1, "{:?}", r303.stdout);
+        // 340 - r196: smart case with word boundary regex
+        assert_home_exec(
+            &[("foo", "tEsT\n")],
+            "rg --smart-case '\\btest\\b'",
+            0,
+            "foo:1:tEsT\n",
+        );
+        // 564 - r488: word boundary with leading/trailing spaces
+        assert_home_exec(
+            &[("input.txt", "peshwaship 're seminomata\n")],
+            "rg -o \"\\b 're \\b\" input.txt",
+            0,
+            " 're \n",
+        );
+        // 579 - r506: -w -o with alternation
+        assert_home_exec(
+            &[("wb.txt", "min minimum amin\nmax maximum amax\n")],
+            "rg -w -o 'min|max' wb.txt",
+            0,
+            "min\nmax\n",
+        );
+        // 625 - r568: -e leading hyphen pattern
+        assert_home_exec(
+            &[("file", "foo bar -baz\n")],
+            "rg -e '-baz' file",
+            0,
+            "foo bar -baz\n",
+        );
+        // 643 - r693: should ignore context with -c
+        assert_home_exec(
+            &[("bar", "xyz\n"), ("foo", "xyz\n")],
+            "rg -C1 -c --sort path xyz",
+            0,
+            "bar:1\nfoo:1\n",
+        );
+        // 772 - r1064: should match with capture group
+        assert_home_exec(&[("input", "abc\n")], "rg 'a(.*c)'", 0, "input:1:abc\n");
+        // 945 - r1322: should match patterns ending with repeated zeros
+        let z = home_bash(&[("test", "153.230000\n")]);
+        let z1 = z.exec("rg '\\d\\d\\d00' test");
+        assert_eq!(z1.exit_code, 0);
+        assert_eq!(z1.stdout, "153.230000\n");
+        let z2 = z.exec("rg '\\d\\d\\d000' test");
+        assert_eq!(z2.exit_code, 0);
+        assert_eq!(z2.stdout, "153.230000\n");
+        // 1056 - r1389(prev): should limit matches with -m and show context
+        assert_home_exec(
+            &[("foo", "a\nb\nc\nd\ne\nd\ne\nd\ne\nd\ne\n")],
+            "rg -A2 -m1 d foo",
+            0,
+            "d\ne\nd\n",
+        );
+        // 1102 - r1559: should match semicolon comma pattern
+        assert_home_exec(
+            &[("foo", "abc;de,fg\n")],
+            "rg ';(.*,){1}'",
+            0,
+            "foo:1:abc;de,fg\n",
+        );
+        // 1117 - r1559: should match pattern with multiple spaces between fields
+        let spaced = home_bash(&[(
+            "foo",
+            "type A struct {\n\tTaskID int `json:\"taskID\"`\n}\n\n\
+type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:\"taskID\"`\n}\n",
+        )]);
+        let spaced_result = spaced.exec("rg 'TaskID +int'");
+        assert_eq!(spaced_result.exit_code, 0);
+        assert_eq!(spaced_result.stderr, "");
+        assert!(
+            spaced_result.stdout.contains("TaskID int"),
+            "{:?}",
+            spaced_result.stdout
+        );
+        assert!(
+            spaced_result.stdout.contains("TaskID   int"),
+            "{:?}",
+            spaced_result.stdout
+        );
+    }
+
+    #[test]
+    fn rg_imported_regression_gitignore_files_and_exit_code_rows_are_portable() {
+        // packages/just-bash/src/commands/rg/imported-tests/regression.test.ts
+        // 689 - r829_2731: negation of build directory with -l
+        assert_home_exec(
+            &[
+                (".ignore", "build/\n!/some_dir/build/\n"),
+                ("some_dir/build/foo", "string\n"),
+            ],
+            "rg -l string",
+            0,
+            "some_dir/build/foo\n",
+        );
+        // 787 - r1098: a**b pattern in gitignore (no match)
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "a**b\n"),
+                ("afoob", "test\n"),
+            ],
+            "rg test",
+            1,
+            "",
+        );
+        // 803 - r1130: should list files with matches
+        assert_home_exec(
+            &[("foo", "test\n")],
+            "rg --files-with-matches test foo",
+            0,
+            "foo\n",
+        );
+        // 815 - r1130: should list files without matches
+        assert_home_exec(
+            &[("foo", "test\n")],
+            "rg --files-without-match nada foo",
+            0,
+            "foo\n",
+        );
+        // 830 - r1159_invalid_flag: should return nonzero exit code for invalid flag
+        let invalid = home_bash(&[]).exec("rg --wat test");
+        assert_ne!(invalid.exit_code, 0);
+        // 839 - r1159_exit_status: should return correct exit codes
+        let codes = home_bash(&[("foo", "test\n")]);
+        assert_eq!(codes.exec("rg test").exit_code, 0);
+        assert_eq!(codes.exec("rg nada").exit_code, 1);
+        assert_eq!(codes.exec("rg -q test").exit_code, 0);
+        assert_eq!(codes.exec("rg -q nada").exit_code, 1);
+        // 884 - r1174(prev): should handle ** in gitignore (no match)
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "**\n"),
+                ("foo", "test\n"),
+            ],
+            "rg test",
+            1,
+            "",
+        );
+        // 900 - r1174: should handle **/**/* in gitignore (no match)
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "**/**/*\n"),
+                ("a/foo", "test\n"),
+            ],
+            "rg test",
+            1,
+            "",
+        );
+        // 967 - r1330: pattern file without trailing newline
+        assert_home_exec(
+            &[
+                ("patterns-nonl", "[foo]"),
+                ("patterns-nl", "[foo]\n"),
+                ("test", "fz\n"),
+            ],
+            "rg -f patterns-nonl test",
+            0,
+            "fz\n",
+        );
+        // 1413 - r2901: **/bar/* pattern with -l (no match)
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "**/bar/*\n"),
+                ("foo/bar/baz", "quux\n"),
+            ],
+            "rg -l quux",
+            1,
+            "",
+        );
+        // 1490 - r3127_gitignore_allow_unclosed_class: unclosed class allowed in gitignore
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "[abc\n"),
+                ("[abc", ""),
+                ("test", ""),
+            ],
+            "rg --files",
+            0,
+            "test\n",
+        );
+    }
+
+    #[test]
     fn text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows() {
         let env = Bash::with_options(BashOptions {
             files: BTreeMap::from([

@@ -1155,6 +1155,33 @@ const jbc10CaseGroups = [
     notes:
       'JBC-10 classifies the upstream `it.skip` regression rg rows for unimplemented features: color output (r428 color context path / unrecognized style, r599 color with empty matches via --color/--colors), case-insensitive ignore-file matching (r1164 via --ignore-file-case-insensitive), and multiline/vimgrep/passthru/replacement rows (--multiline/-U, --vimgrep, --passthru, --replace/-r). The Rust port rejects each of these flags as unrecognized options, asserted by the named Rust test so it fails if support is ever added.',
   },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
+    lines: [38, 55, 844, 858, 875, 921, 986],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_misc_filename_ignore_and_hidden_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported rg misc rows: directory search with filename prefix, -n line numbers, hidden-file exclusion by default and inclusion with --hidden, .gitignore exclusion, and --no-ignore / -u unrestricted overrides over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [56, 303, 340, 564, 579, 625, 643, 772, 945, 1056, 1102, 1117],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_regression_regex_word_and_flag_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported ripgrep regression rows for regex and flag behavior: gitignore negation after double-star, complex parse/include regex (-N), smart-case word boundaries, word-boundary with spaces, -w -o alternation, -e leading-hyphen patterns, -c ignoring -C context, capture groups, repeated-zero patterns, -A -m context-with-max-count, semicolon/comma regex, and multi-space field matching over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [689, 787, 803, 815, 830, 839, 884, 900, 967, 1413, 1490],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_regression_gitignore_files_and_exit_code_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported ripgrep regression rows for gitignore, file-listing, and exit codes: build-directory negation with -l, a**b non-match, --files-with-matches / --files-without-match listings, invalid-flag and match/no-match/quiet exit codes, ** and **/**/* gitignore non-matches, pattern files without trailing newline, **/bar/* -l non-match, and unclosed character class allowed in gitignore over the virtual filesystem.',
+  },
 ];
 
 const jbc12SourceGroups = [
