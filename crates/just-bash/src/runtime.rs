@@ -142,6 +142,246 @@ mod tests {
         Bash::new()
     }
 
+    // Helper: build a fresh root session rooted at `/` with the supplied files.
+    fn sed_session(files: &[(&str, &str)]) -> Bash {
+        Bash::with_options(BashOptions {
+            files: files
+                .iter()
+                .map(|(p, c)| (p.to_string(), c.to_string()))
+                .collect::<BTreeMap<_, _>>(),
+            cwd: Some("/".to_string()),
+            ..BashOptions::default()
+        })
+    }
+
+    #[test]
+    fn sed_test_ts_zap_list_range_and_branch_rows() {
+        // Cycle-engine rows from sed.test.ts that exercise the z (zap pattern
+        // space), l (list with escapes), pattern-range tracking, and T (branch if
+        // no substitution) commands. Each assertion mirrors the upstream verbatim.
+
+        // z command — :696 `1z` empties the pattern space on the addressed line.
+        assert_eq!(
+            sed_session(&[("/test.txt", "hello\nworld\n")])
+                .exec("sed '1z' /test.txt")
+                .stdout,
+            "\nworld\n"
+        );
+        // T command — :707 `-n 's/foo/FOO/;T;p'` branches to end (skipping p) when
+        // no substitution was made, so only the substituted line is printed.
+        assert_eq!(
+            sed_session(&[("/test.txt", "foo\nbar\n")])
+                .exec("sed -n 's/foo/FOO/;T;p' /test.txt")
+                .stdout,
+            "FOO\n"
+        );
+
+        // l command (list with escapes) — sed.test.ts.
+        // :866 escapes a tab as `\t` and marks end of line with `$`.
+        assert_eq!(
+            sed_session(&[("/test.txt", "hello\tworld\n")])
+                .exec("sed -n 'l' /test.txt")
+                .stdout,
+            "hello\\tworld$\n"
+        );
+        // :875 escapes a backslash as `\\`.
+        assert_eq!(
+            sed_session(&[("/test.txt", "a\\b\n")])
+                .exec("sed -n 'l' /test.txt")
+                .stdout,
+            "a\\\\b$\n"
+        );
+        // :884 marks end of line with `$`.
+        assert_eq!(
+            sed_session(&[("/test.txt", "test\n")])
+                .exec("sed -n 'l' /test.txt")
+                .stdout,
+            "test$\n"
+        );
+
+        // z command (zap) — sed.test.ts second block.
+        // :895 `z` empties every pattern space.
+        assert_eq!(
+            sed_session(&[("/test.txt", "hello\nworld\n")])
+                .exec("sed 'z' /test.txt")
+                .stdout,
+            "\n\n"
+        );
+        // :904 `2z` empties only the addressed line.
+        assert_eq!(
+            sed_session(&[("/test.txt", "line1\nline2\nline3\n")])
+                .exec("sed '2z' /test.txt")
+                .stdout,
+            "line1\n\nline3\n"
+        );
+
+        // Pattern range state tracking — sed.test.ts.
+        // :915 `/START/,/END/d` deletes the inclusive range across lines.
+        assert_eq!(
+            sed_session(&[("/test.txt", "a\nSTART\nb\nc\nEND\nd\n")])
+                .exec("sed '/START/,/END/d' /test.txt")
+                .stdout,
+            "a\nd\n"
+        );
+        // :924 multiple independent ranges in the same file are tracked separately.
+        assert_eq!(
+            sed_session(&[("/test.txt", "a\nSTART\nb\nEND\nc\nSTART\nd\nEND\ne\n")])
+                .exec("sed '/START/,/END/d' /test.txt")
+                .stdout,
+            "a\nc\ne\n"
+        );
+        // :933 an unclosed range (no END) deletes through to EOF.
+        assert_eq!(
+            sed_session(&[("/test.txt", "a\nSTART\nb\nc\n")])
+                .exec("sed '/START/,/END/d' /test.txt")
+                .stdout,
+            "a\n"
+        );
+
+        // T command — :958 `s/x/y/;T add;b end;:add;s/$/X/;:end` branches via T to
+        // the `add` label (appending X) only when no substitution was made.
+        assert_eq!(
+            sed_session(&[("/test.txt", "a\nb\n")])
+                .exec("sed 's/x/y/;T add;b end;:add;s/$/X/;:end' /test.txt")
+                .stdout,
+            "aX\nbX\n"
+        );
+    }
+
+    #[test]
+    fn sed_jbc_pattern_bracket_literal_close_row() {
+        // sed.regex.test.ts:399 — a `]` that appears first inside a bracket
+        // expression is a literal class member, so `[][]` matches `]` or `[`.
+        assert_eq!(
+            sed_session(&[("/test.txt", "a]b\na[b\n")])
+                .exec("sed 's/a[][]b/X/' /test.txt")
+                .stdout,
+            "X\nX\n"
+        );
+    }
+
+    #[test]
+    fn sed_errors_address_command_and_step_rows() {
+        // sed.errors.test.ts address/step-address rows.
+        // :202 `a\\nappended` (a command with text) executes without error.
+        let r = sed_session(&[("/test/file.txt", "line 1\nline 2\nline 3\n")])
+            .exec("sed 'a\\\\nappended' /test/file.txt");
+        assert_eq!(r.exit_code, 0);
+        // :211 `1~0d` step-0 address is handled gracefully (GNU sed: `first~0`
+        // matches `first` through end of file, so every line is deleted here).
+        let r = sed_session(&[("/test/file.txt", "line 1\nline 2\nline 3\n")])
+            .exec("sed '1~0d' /test/file.txt");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "");
+        // :218 a negative step address `1~-1d` is rejected with exit code 1.
+        let r = sed_session(&[("/test/file.txt", "1\n2\n3\n")]).exec("sed '1~-1d' /test/file.txt");
+        assert_eq!(r.exit_code, 1);
+    }
+
+    #[test]
+    fn sed_security_rejects_e_shell_execution_command() {
+        // sed.security.test.ts — the `e` command (shell execution) is blocked in
+        // the sandbox; both the `e command` and bare `e` forms are rejected.
+        // :11 `e whoami` with a specified command.
+        let r = bash().exec("echo hello | sed 'e whoami'");
+        assert_ne!(r.exit_code, 0);
+        assert!(
+            r.stderr
+                .contains("e command (shell execution) is not supported"),
+            "stderr was {:?}",
+            r.stderr
+        );
+        // :20 bare `e` (execute the pattern space).
+        let r = bash().exec("echo 'ls' | sed 'e'");
+        assert_ne!(r.exit_code, 0);
+        assert!(
+            r.stderr
+                .contains("e command (shell execution) is not supported"),
+            "stderr was {:?}",
+            r.stderr
+        );
+        // Sanity: normal substitution still works (the rejection is scoped to `e`).
+        let r = bash().exec("echo hello | sed 's/hello/world/'");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "world\n");
+    }
+
+    #[test]
+    fn sed_limits_iteration_and_resource_rows() {
+        // sed.limits.test.ts — runaway-compute protection and bounded handling of
+        // large inputs. The iteration cap is 10000 command executions; exceeding it
+        // is a fatal execution-limit error (exit code 126).
+        // :16 branch loop `:loop; b loop` must hit the iteration limit.
+        let r = bash().exec("echo \"test\" | sed ':loop; b loop'");
+        assert_eq!(r.exit_code, 126);
+        assert!(
+            r.stderr.contains("exceeded maximum iterations"),
+            "stderr was {:?}",
+            r.stderr
+        );
+        // :26 test loop `:loop; s/./&/; t loop` (always-true substitution) loops.
+        let r = bash().exec("echo \"test\" | sed ':loop; s/./&/; t loop'");
+        assert_eq!(r.exit_code, 126);
+        assert!(
+            r.stderr.contains("exceeded maximum iterations"),
+            "stderr was {:?}",
+            r.stderr
+        );
+        // :37 unconditional branch at start `b; p` completes (branch to end).
+        let r = bash().exec("echo \"test\" | sed 'b; p'");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "test\n");
+
+        // :47 global substitution on a long (100k char) line completes.
+        let long = "a".repeat(100_000);
+        let r = sed_session(&[("/input.txt", long.as_str())]).exec("sed 's/a/b/g' /input.txt");
+        assert_eq!(r.exit_code, 0);
+        assert!(!r.stdout.is_empty());
+
+        // :79 appending many lines to the hold space completes.
+        let many = std::iter::repeat("line")
+            .take(1000)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let r = sed_session(&[("/input.txt", many.as_str())]).exec("sed 'H' /input.txt");
+        assert_eq!(r.exit_code, 0);
+
+        // :90 exchange with large buffers `h; x; x` round-trips unchanged.
+        let bigx = "x".repeat(10_000);
+        let r = sed_session(&[("/input.txt", bigx.as_str())]).exec("sed 'h; x; x' /input.txt");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, format!("{bigx}\n"));
+
+        // :163 step address on large (10k line) input completes.
+        let tenk = std::iter::repeat("line")
+            .take(10_000)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let r = sed_session(&[("/input.txt", tenk.as_str())]).exec("sed -n '0~100p' /input.txt");
+        assert_eq!(r.exit_code, 0);
+
+        // :175 many (100) chained commands complete.
+        let cmds = std::iter::repeat("s/a/b/")
+            .take(100)
+            .collect::<Vec<_>>()
+            .join("; ");
+        let r = bash().exec(&format!("echo \"aaa\" | sed '{cmds}'"));
+        assert_eq!(r.exit_code, 0);
+
+        // :183 deeply nested command blocks `{ { { p } } }` complete (p + autoprint).
+        let r = bash().exec("echo \"test\" | sed '{ { { p } } }'");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "test\ntest\n");
+
+        // :193 N accumulation `:a; N; ba` terminates when no next line remains.
+        let hundred = std::iter::repeat("line")
+            .take(100)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let r = sed_session(&[("/input.txt", hundred.as_str())]).exec("sed ':a; N; ba' /input.txt");
+        assert_eq!(r.exit_code, 0);
+    }
+
     #[test]
     fn text_search_jbc_grep_glob_operand_and_binary_rows() {
         // grep expands unquoted glob file operands itself (the shell leaves them
