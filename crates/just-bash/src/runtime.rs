@@ -142,6 +142,87 @@ mod tests {
         Bash::new()
     }
 
+    #[test]
+    fn text_search_jbc_grep_glob_operand_and_binary_rows() {
+        // grep expands unquoted glob file operands itself (the shell leaves them
+        // literal). `grep foo *.ts` in /dir matches a.ts and b.ts, so two files
+        // are searched and the filename prefix is shown; only a.ts contains foo.
+        // maps packages/just-bash/src/commands/grep/grep.advanced.test.ts:349
+        let expand_star = Bash::with_options(BashOptions {
+            cwd: Some("/dir".to_string()),
+            files: BTreeMap::from([
+                ("/dir/a.ts".to_string(), "foo\n".to_string()),
+                ("/dir/b.ts".to_string(), "bar\n".to_string()),
+                ("/dir/c.js".to_string(), "foo\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let result = expand_star.exec("grep foo *.ts");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "a.ts:foo\n");
+        assert_eq!(result.stderr, "");
+
+        // A path-qualified glob expands within its directory, preserving the
+        // directory prefix on each matched label, sorted by path.
+        // maps packages/just-bash/src/commands/grep/grep.advanced.test.ts:363
+        let expand_path = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/src/a.ts".to_string(), "test\n".to_string()),
+                ("/src/b.ts".to_string(), "test\n".to_string()),
+                ("/src/c.js".to_string(), "test\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let result = expand_path.exec("grep test /src/*.ts");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "/src/a.ts:test\n/src/b.ts:test\n");
+        assert_eq!(result.stderr, "");
+
+        // A glob operand that matches nothing expands to no files: grep searches
+        // nothing (it does not fall back to stdin or error), giving empty output
+        // and the no-match exit code 1 with no diagnostic.
+        // maps packages/just-bash/src/commands/grep/grep.advanced.test.ts:376
+        let no_match = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/dir/file.js".to_string(), "content\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let result = no_match.exec("grep test /dir/*.ts");
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.stdout, "");
+        assert_eq!(result.stderr, "");
+
+        // grep treats virtual files as text: a single "binary" file searched for
+        // a present pattern prints the matching line without a filename prefix.
+        // maps packages/just-bash/src/commands/grep/grep.binary.test.ts:5
+        let binary_plain = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/binary.bin".to_string(), "foo\nbar\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let result = binary_plain.exec("grep foo /binary.bin");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "foo\n");
+        assert_eq!(result.stderr, "");
+
+        // Content with leading NUL bytes still matches on the relevant line and
+        // exits 0; the matched line is emitted verbatim (NUL preserved).
+        // maps packages/just-bash/src/commands/grep/grep.binary.test.ts:26
+        let binary_nul = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/binary.bin".to_string(),
+                "\u{0}\u{0}test\n\u{0}foo\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        let result = binary_nul.exec("grep test /binary.bin");
+        assert_eq!(result.exit_code, 0);
+        assert!(
+            result.stdout.contains("test"),
+            "stdout: {:?}",
+            result.stdout
+        );
+        assert_eq!(result.stderr, "");
+    }
+
     /// Closes the just-bash-core `tee-plugin.test.ts` "TeePlugin semantics
     /// preservation" rows that the portable Rust interpreter reproduces
     /// verbatim. Upstream registers a `TeePlugin` and asserts the wrapped run's

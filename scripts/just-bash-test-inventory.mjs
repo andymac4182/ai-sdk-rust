@@ -3151,6 +3151,27 @@ const jbc34CaseGroups = [
   },
 ];
 
+const jbR11JbGrepGlobBinaryCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/grep/grep.advanced.test.ts',
+    lines: [349, 363, 376],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-search',
+    rustTest: 'text_search_jbc_grep_glob_operand_and_binary_rows',
+    notes:
+      'R11JB verifies grep expands unquoted glob file operands itself (the shell leaves them literal): a bare `*.ts` glob matches multiple files in the cwd and adds the filename prefix, a path-qualified `/src/*.ts` glob preserves the directory prefix sorted by path, and a glob that matches nothing searches no files (no stdin fallback, no error) yielding empty output with the no-match exit code 1.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/grep/grep.binary.test.ts',
+    lines: [5, 26],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-search',
+    rustTest: 'text_search_jbc_grep_glob_operand_and_binary_rows',
+    notes:
+      'R11JB verifies grep treats virtual "binary" files as text: a single file searched for a present pattern prints the matching line without a filename prefix, and content with leading NUL bytes still matches on the relevant line and exits 0.',
+  },
+];
+
 const jbc24CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/jq/jq.functions.test.ts',
@@ -5340,6 +5361,7 @@ function caseOverrideFor(testCase) {
     ...jbc22CaseGroups,
     ...jbc23CaseGroups,
     ...jbc34CaseGroups,
+    ...jbR11JbGrepGlobBinaryCaseGroups,
     ...jbc36CaseGroups,
     ...jbc24CaseGroups,
     ...jbc25CaseGroups,
