@@ -12256,4 +12256,254 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         assert_eq!(scientific.exit_code, 0);
         assert_eq!(scientific.stdout, "1.23e+3\n");
     }
+
+    #[test]
+    fn awk_jbc_command_awk_ternary_operator_rows() {
+        // Mirrors packages/just-bash/src/commands/awk/awk.ternary.test.ts
+        // (basic, comparison, nested, assignment, function, and truthiness rows;
+        // the getline-backed async rows remain pending without getline support).
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "1\n2\n3\n".to_string())]),
+            ..BashOptions::default()
+        });
+
+        // :6 true condition selects the consequent branch.
+        let r = env.exec(r#"echo "" | awk 'BEGIN { print 1 ? "yes" : "no" }'"#);
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "yes\n");
+        // :15 false condition selects the alternate branch.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 0 ? "yes" : "no" }'"#)
+                .stdout,
+            "no\n"
+        );
+        // :24 expressions are evaluated inside the chosen branch (5*2 = 10).
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x = 5; print x > 3 ? x * 2 : x / 2 }'"#)
+                .stdout,
+            "10\n"
+        );
+        // :35 numeric comparison condition.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { n = 10; print n > 5 ? "big" : "small" }'"#)
+                .stdout,
+            "big\n"
+        );
+        // :44 string comparison condition.
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN { s = "hello"; print s == "hello" ? "match" : "no match" }'"#
+            )
+            .stdout,
+            "match\n"
+        );
+        // :53 equality check over each record's first field.
+        assert_eq!(
+            env.exec(r#"awk '{ print $1 == 2 ? "two" : "not two" }' /data.txt"#)
+                .stdout,
+            "not two\ntwo\nnot two\n"
+        );
+        // :66 nested ternary resolves to the final alternate ("zero").
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN { x = 0; print x > 0 ? "positive" : x < 0 ? "negative" : "zero" }'"#
+            )
+            .stdout,
+            "zero\n"
+        );
+        // :75 multiple nesting falls through to "other".
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN { x = 5; print x == 1 ? "one" : x == 2 ? "two" : x == 3 ? "three" : "other" }'"#
+            )
+            .stdout,
+            "other\n"
+        );
+        // :86 ternary result assigned to a variable.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { a = 10; b = a > 5 ? "high" : "low"; print b }'"#)
+                .stdout,
+            "high\n"
+        );
+        // :95 ternary inside a compound expression ((10)+5 = 15).
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x = 3; y = (x > 2 ? 10 : 1) + 5; print y }'"#)
+                .stdout,
+            "15\n"
+        );
+        // :106 function call in the condition (length("abc") > 2).
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print length("abc") > 2 ? "long" : "short" }'"#)
+                .stdout,
+            "long\n"
+        );
+        // :115 function calls in the branches.
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN { x = 1; print x ? toupper("yes") : tolower("NO") }'"#
+            )
+            .stdout,
+            "YES\n"
+        );
+        // :150 empty string is falsy.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x = ""; print x ? "truthy" : "falsy" }'"#)
+                .stdout,
+            "falsy\n"
+        );
+        // :159 non-empty string is truthy.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x = "hello"; print x ? "truthy" : "falsy" }'"#)
+                .stdout,
+            "truthy\n"
+        );
+        // :168 non-zero number (negative) is truthy.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print -5 ? "truthy" : "falsy" }'"#)
+                .stdout,
+            "truthy\n"
+        );
+    }
+
+    #[test]
+    fn awk_jbc_command_awk_modulo_operator_rows() {
+        // Mirrors packages/just-bash/src/commands/awk/awk.modulo.test.ts
+        // (basic %, %= with variables, modulo conditions, modulo in a for loop,
+        // and signed operands).
+        let evens = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "1\n2\n3\n4\n5\n6\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let lines = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "a\nb\nc\nd\ne\nf\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let env = Bash::default();
+
+        // :13 modulo of an exact division is 0.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 10 % 2 }'"#).stdout,
+            "0\n"
+        );
+        // :20 floating-point modulo.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 5.5 % 2 }'"#)
+                .stdout,
+            "1.5\n"
+        );
+        // :27 zero dividend.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 0 % 5 }'"#).stdout,
+            "0\n"
+        );
+        // :45 %= compound assignment between variables (25 % 7 = 4).
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { a = 25; b = 7; a %= b; print a }'"#)
+                .stdout,
+            "4\n"
+        );
+        // :65 even-number filter via $1 % 2 == 0.
+        assert_eq!(
+            evens
+                .exec(r#"awk '$1 % 2 == 0 { print }' /data.txt"#)
+                .stdout,
+            "2\n4\n6\n"
+        );
+        // :83 every Nth line via NR % 3 == 0.
+        assert_eq!(
+            lines
+                .exec(r#"awk 'NR % 3 == 0 { print }' /data.txt"#)
+                .stdout,
+            "c\nf\n"
+        );
+        // :94 modulo inside a for loop.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { for(i=1; i<=10; i++) if(i%3==0) print i }'"#)
+                .stdout,
+            "3\n6\n9\n"
+        );
+        // :105 negative dividend keeps the dividend's sign (-7 % 3 = -1).
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print -7 % 3 }'"#).stdout,
+            "-1\n"
+        );
+    }
+
+    #[test]
+    fn awk_jbc_command_awk_atan2_math_rows() {
+        // Mirrors the deterministic atan2 rows in
+        // packages/just-bash/src/commands/awk/awk.math.test.ts.
+        let env = Bash::default();
+
+        // :59 atan2(0, 1) is exactly 0.
+        assert_eq!(
+            env.exec(r#"echo '0 1' | awk '{ print atan2($1, $2) }'"#)
+                .stdout,
+            "0\n"
+        );
+        // :97 atan2(1, 0) is pi/2; assert it is close to the expected value.
+        let distance = env.exec(r#"echo '1 0' | awk '{ print atan2($1, $2) }'"#);
+        assert_eq!(distance.exit_code, 0);
+        let value: f64 = distance
+            .stdout
+            .trim()
+            .parse()
+            .expect("numeric atan2 output");
+        assert!(
+            (value - std::f64::consts::FRAC_PI_2).abs() < 1e-5,
+            "atan2(1, 0) should be ~pi/2, got {value}"
+        );
+    }
+
+    #[test]
+    fn awk_jbc_command_awk_regex_pattern_rows() {
+        // Mirrors the leading regex-pattern rows in
+        // packages/just-bash/src/commands/awk/awk.patterns.test.ts.
+        let fruits = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "apple\nbanana\ncherry\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        let anchored = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "apple\nbanana\napricot\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        let suffix = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "hello\nworld\nfellow\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        let animals = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "cat\ndog\ncow\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let mixed = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "abc\nxyz\n123\n".to_string())]),
+            ..BashOptions::default()
+        });
+
+        // :6 literal regex matches only the record containing "ana".
+        assert_eq!(fruits.exec(r#"awk '/ana/' /data.txt"#).stdout, "banana\n");
+        // :15 ^ anchors the match to the start of the record.
+        assert_eq!(
+            anchored.exec(r#"awk '/^a/' /data.txt"#).stdout,
+            "apple\napricot\n"
+        );
+        // :24 $ anchors the match to the end of the record.
+        assert_eq!(suffix.exec(r#"awk '/llo$/' /data.txt"#).stdout, "hello\n");
+        // :33 character class matches every record containing c or d.
+        assert_eq!(
+            animals.exec(r#"awk '/[cd]/' /data.txt"#).stdout,
+            "cat\ndog\ncow\n"
+        );
+        // :42 negated character class [^a-z] matches only the digit record.
+        assert_eq!(mixed.exec(r#"awk '/[^a-z]/' /data.txt"#).stdout, "123\n");
+    }
 }

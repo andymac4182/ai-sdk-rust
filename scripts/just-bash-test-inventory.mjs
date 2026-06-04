@@ -969,6 +969,42 @@ const jbc09CaseGroups = [
     notes:
       'just-bash-command-awk verifies portable awk gensub() backreferences (\\2 \\1 reorder captured groups), printf %c printing the first character of a string argument, and printf %.2e scientific notation matching JS toExponential (1.23e+3).',
   },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.ternary.test.ts',
+    lines: [6, 15, 24, 35, 44, 53, 66, 75, 86, 95, 106, 115, 150, 159, 168],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_ternary_operator_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk ternary ?: semantics: true/false branch selection, expressions evaluated in the chosen branch, numeric/string/equality comparison conditions, single- and multi-level nested ternary, assignment of the result, ternary inside a compound expression, function calls in the condition and branches, and truthiness of empty strings, non-empty strings, and non-zero numbers. The getline-backed async rows remain pending without getline support.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.modulo.test.ts',
+    lines: [13, 20, 27, 45, 65, 83, 94, 105],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_modulo_operator_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk modulo: exact-division zero result, floating-point modulo, zero dividend, the %= compound assignment between variables, even-number and every-Nth-record filters via $1 % 2 and NR % 3, modulo inside a for loop, and a negative dividend keeping the dividend sign. The negative-divisor row (7 % -3) remains pending unary-minus operand parsing.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.math.test.ts',
+    lines: [59, 97],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_atan2_math_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk atan2(): atan2(0, 1) is exactly 0 and atan2(1, 0) is pi/2. The non-deterministic rand()/srand() rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.patterns.test.ts',
+    lines: [6, 15, 24, 33, 42],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_regex_pattern_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk regex patterns: a literal /ana/ match, ^ and $ anchors, a [cd] character class, and a negated [^a-z] character class selecting digit records.',
+  },
 ];
 
 const jbc10CaseGroups = [
