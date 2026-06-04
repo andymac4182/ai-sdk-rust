@@ -3172,6 +3172,38 @@ const jbR11JbGrepGlobBinaryCaseGroups = [
   },
 ];
 
+const r11jbR2RgCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/json.test.ts',
+    lines: [37, 103, 124, 157, 189, 207],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest:
+      'rg_json_basic_output_structure_matches_ripgrep; rg_json_quiet_emits_only_summary; rg_json_reports_all_submatches_on_a_line; rg_json_emits_begin_end_per_file; rg_json_outputs_summary_with_no_matches; rg_json_handles_empty_file_with_summary',
+    notes:
+      'r11jb-r2 implements `rg --json` JSON Lines output: a begin/match*/end group per matching file plus a final summary message. Verifies the basic structure (path, line_number, absolute_offset, submatch start/end/text), --quiet emitting only the summary, all per-line submatches reported, begin/end emitted per file, and summaries reporting searches_with_match/bytes_searched for the no-match and empty-file cases.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [171, 203, 405, 420, 489, 866, 1040, 1505],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest:
+      'rg_gitignore_negation_unhides_dotfile; rg_heading_groups_matches_under_file_path; rg_follow_symlinked_directory_root_with_dash_l; rg_follow_symlinked_directory_root_with_dash_l_and_single_thread; rg_negated_glob_with_leading_slash_is_root_anchored; rg_strips_leading_utf8_bom_before_anchored_match; rg_fixed_strings_from_file_match_many_duplicate_literals; rg_files_errors_on_glob_with_unclosed_character_class',
+    notes:
+      'r11jb-r2 closes ripgrep regression rows: r90 (`!.foo` gitignore negation un-hides the dotfile), r99 (--heading groups matches under the file label), r256 (-L and -L -j1 follow a symlinked directory root), r405 (`-g !/foo/**` is root-anchored), r1163 (a leading UTF-8 BOM is stripped so `^` still anchors line 1), r1334 (40 duplicate `-Ff` literal patterns match), and r3127 (`-g [abc` errors on an unclosed glob character class).',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/rg.flags.test.ts',
+    lines: [63],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_follow_symlinked_subdirectory_surfaces_content_through_both_paths',
+    notes:
+      'r11jb-r2 verifies that with -L a symlinked subdirectory discovered while walking the cwd is searched and its content surfaced through both the real and symlinked paths (`linkdir/file.txt` and `subdir/file.txt`), while without -L only the real directory is searched.',
+  },
+];
+
 const jbc24CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/jq/jq.functions.test.ts',
@@ -4146,6 +4178,62 @@ const jbpiParserInterpreterCaseGroups = [
     notes:
       'R10JB verifies the portable until-loop row that executes once when its condition is initially false (a grep -q over a virtual file) through the Rust shell.',
   },
+  {
+    file: 'packages/just-bash/src/syntax/operators.test.ts',
+    lines: [36, 108, 247, 253, 259, 267],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_real_bash_operator_pipeline_and_errexit_rows_match_upstream',
+    notes:
+      'JB-PI verifies portable registry-backed operator rows through the Rust `Bash` runtime: `&&` filesystem effect (mkdir then write), the `||` mkdir error-handler pattern, and head/tail/grep filter pipes. The remaining operators rows stay pending with their command owners.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/control-flow.test.ts',
+    lines: [335],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_real_bash_operator_pipeline_and_errexit_rows_match_upstream',
+    notes:
+      'JB-PI verifies the portable `! ` passthrough to `find -not` row through the Rust `Bash` runtime: app.ts is kept and utils*.ts excluded.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/variables.test.ts',
+    lines: [157],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_real_bash_operator_pipeline_and_errexit_rows_match_upstream',
+    notes:
+      'JB-PI verifies the portable `echo -e` literal-backslash row (`\\\\\\\\` -> `\\`) through the Rust `Bash` runtime.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/set-errexit.test.ts',
+    lines: [85, 100, 111, 134],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_real_bash_operator_pipeline_and_errexit_rows_match_upstream',
+    notes:
+      'JB-PI verifies portable errexit short-circuit/disable rows through the Rust `Bash` runtime: `set +o errexit` re-enables continuation, a failed left operand of `&&`/`||` does not trip errexit, and a `&& ... ||` list that ends by succeeding does not trip errexit. The `true && false` final-failure, negated-command, and combined/help/list `set` option rows stay pending.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/loops.test.ts',
+    lines: [135, 145, 153],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_syntax_loops_protection_rows_match_upstream',
+    notes:
+      'JB-PI verifies portable loop-protection rows through the Rust interpreter: an infinite for/while/until loop is bounded by the execution iteration/command cap and surfaces a "too many iterations/commands" diagnostic with a non-zero exit instead of hanging.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/parser-protection.test.ts',
+    lines: [
+      17, 24, 39, 55, 71, 87, 103, 122, 137, 150, 165, 179, 193, 209, 220,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_syntax_parser_protection_rows_match_upstream',
+    notes:
+      'JB-PI verifies portable parser-protection rows through the Rust parser/interpreter: oversized input above MAX_INPUT_SIZE is rejected before tokenizing, every pathological shape (long names/strings, deeply nested parens/braces/command-substitutions/arithmetic, many tokens/semicolons/pipes/redirections, repeated brace patterns, alternating quotes) parses in bounded time without hanging, and brace/range expansion during execution stays bounded (clean exit, output length bound).',
+  },
 ];
 
 const jbc35CaseGroups = [
@@ -4689,6 +4777,21 @@ const jbc43CaseGroups = [
   },
 ];
 
+const jbc48CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/grep/grep.perl.test.ts',
+    lines: [
+      10, 19, 33, 49, 58, 68, 77, 86, 97, 130, 142, 154, 170, 179, 188, 197,
+      208, 217, 226, 237, 246, 255, 267, 276, 285, 294, 310, 319, 328, 337,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::grep',
+    rustTest: 'text_search_jbc48_grep_perl_mode_rows',
+    notes:
+      'JBC-48 verifies portable grep Perl mode (-P): \\K reset-match-start with -o (capturing groups, alternation, quantifiers, multi-file/-h/-n options), \\Q...\\E literal quoting (unterminated, empty, multiple pairs, combining with regex/\\K/character class), and \\x{NNNN} Unicode code points (ASCII/BMP/supplementary/math symbols) over the virtual filesystem without host grep.',
+  },
+];
+
 const jbc45CaseGroups = [
   {
     file: 'packages/just-bash/src/Bash.general.test.ts',
@@ -4897,6 +5000,27 @@ const r10jbTarCaseGroups = [
     rustTest: 'r10jb_tar_binary_null_all_bytes_pipe_and_special_filename_rows',
     notes:
       'R10JB verifies binary-faithful tar round trips for files with embedded null bytes and all 256 byte values, listing and extraction of an archive piped through cat (binary stdin), gzip and bzip2 archives piped through cat, xz and zstd fail-closed rejection, UTF-8 text round trip, gzip UTF-8 round trip, and special-character filename listing.',
+  },
+];
+
+const r11jbTarCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/tar/tar.security.test.ts',
+    lines: [93, 100, 107, 115],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'r11jb_tar_native_codec_decode_gates_and_utf8_stdin_pipe',
+    notes:
+      'R11JB verifies the archive-level native-codec gates at the tar command surface: xz/zstd encode (-cJf / --zstd) fail closed with "compression is disabled by default (native codec risk)", and extracting a payload carrying real xz (FD 37 7A 58 5A 00) or zstd (28 B5 2F FD) magic fails closed with "decompression is disabled by default (native codec risk)" instead of being handed to a native decoder.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tar/tar.utf8-stdin.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'r11jb_tar_native_codec_decode_gates_and_utf8_stdin_pipe',
+    notes:
+      'R11JB verifies multibyte file content round-trips through a `tar -cf - dir | tar -xOf - dir/k.txt` pipe: -xO decodes entry bytes as UTF-8 (mirroring upstream `new TextDecoder().decode(entry.content)`) so the Korean/accented/CJK content is reproduced exactly.',
   },
 ];
 
@@ -5394,6 +5518,7 @@ function caseOverrideFor(testCase) {
     ...jbc23CaseGroups,
     ...jbc34CaseGroups,
     ...jbR11JbGrepGlobBinaryCaseGroups,
+    ...r11jbR2RgCaseGroups,
     ...jbc36CaseGroups,
     ...jbc24CaseGroups,
     ...r11jbSqlite3CaseGroups,
@@ -5405,8 +5530,10 @@ function caseOverrideFor(testCase) {
     ...jbc41CaseGroups,
     ...jbc43CaseGroups,
     ...jbc45CaseGroups,
+    ...jbc48CaseGroups,
     ...jbc46CaseGroups,
     ...r10jbTarCaseGroups,
+    ...r11jbTarCaseGroups,
     ...jbc47CaseGroups,
     ...jbc27CaseGroups,
     ...jbc30AgentExampleCaseGroups,

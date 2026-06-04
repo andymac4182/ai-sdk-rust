@@ -8625,6 +8625,242 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn text_search_jbc48_grep_perl_mode_rows() {
+        // JBC-48: grep Perl mode (-P) — \K reset-match-start, \Q...\E literal
+        // quoting, and the file-option interactions exercised by
+        // packages/just-bash/src/commands/grep/grep.perl.test.ts.
+        fn check(files: &[(&str, &str)], script: &str, exit_code: i32, stdout: &str) {
+            let result = home_bash(files).exec(script);
+            assert_eq!(result.exit_code, exit_code, "{script}");
+            assert_eq!(result.stdout, stdout, "{script}");
+        }
+
+        // ---- \K reset match start: basic functionality ----
+        // grep.perl.test.ts:10 should extract text after \K with -oP
+        check(
+            &[("/test.txt", "foo=bar\nbaz=qux\n")],
+            "grep -oP '=\\K\\w+' /test.txt",
+            0,
+            "bar\nqux\n",
+        );
+        // grep.perl.test.ts:19 should work with \K in useEffect pattern
+        check(
+            &[(
+                "/app.tsx",
+                "useEffect(() => { }, [count]);\nuseEffect(() => { }, [name, id]);\n",
+            )],
+            "grep -oP \"useEffect\\(.*?\\[\\K[^\\]]+\" /app.tsx",
+            0,
+            "count\nname, id\n",
+        );
+        // grep.perl.test.ts:33 should extract URLs after protocol with \K
+        check(
+            &[(
+                "/test.txt",
+                "http://example.com\nhttps://test.org\nftp://files.net\n",
+            )],
+            "grep -oP 'https?://\\K[^\\s]+' /test.txt",
+            0,
+            "example.com\ntest.org\n",
+        );
+        // ---- \K reset match start: edge cases ----
+        // grep.perl.test.ts:49 should return empty string when \K is at end
+        check(
+            &[("/test.txt", "prefix\n")],
+            "grep -oP 'prefix\\K' /test.txt",
+            0,
+            "\n",
+        );
+        // grep.perl.test.ts:58 should work with \K at start of pattern
+        check(
+            &[("/test.txt", "hello world\n")],
+            "grep -oP '\\K\\w+' /test.txt",
+            0,
+            "hello\nworld\n",
+        );
+        // grep.perl.test.ts:68 should work with \K and capturing groups before
+        check(
+            &[("/test.txt", "foo123bar\n")],
+            "grep -oP '(foo)\\K\\d+' /test.txt",
+            0,
+            "123\n",
+        );
+        // grep.perl.test.ts:77 should work with \K and capturing groups after
+        check(
+            &[("/test.txt", "foo123bar\n")],
+            "grep -oP 'foo\\K(\\d+)' /test.txt",
+            0,
+            "123\n",
+        );
+        // grep.perl.test.ts:86 should work with \K inside alternation
+        check(
+            &[("/test.txt", "foo=1\nbar:2\n")],
+            "grep -oP '(?:foo=|bar:)\\K\\d+' /test.txt",
+            0,
+            "1\n2\n",
+        );
+        // grep.perl.test.ts:97 should work with \K and quantifiers
+        check(
+            &[("/test.txt", "aaabbb\nabbbb\n")],
+            "grep -oP 'a+\\Kb+' /test.txt",
+            0,
+            "bbb\nbbbb\n",
+        );
+        // ---- \K reset match start: with file options ----
+        // grep.perl.test.ts:130 should work with multiple files
+        check(
+            &[("/a.txt", "key=value1\n"), ("/b.txt", "key=value2\n")],
+            "grep -oP 'key=\\K\\w+' /a.txt /b.txt",
+            0,
+            "/a.txt:value1\n/b.txt:value2\n",
+        );
+        // grep.perl.test.ts:142 should work with -h flag to suppress filename
+        check(
+            &[("/a.txt", "x=1\n"), ("/b.txt", "x=2\n")],
+            "grep -ohP 'x=\\K\\d+' /a.txt /b.txt",
+            0,
+            "1\n2\n",
+        );
+        // grep.perl.test.ts:154 should work with -n for line numbers
+        check(
+            &[("/test.txt", "skip\nfoo=bar\nskip\nfoo=baz\n")],
+            "grep -onP 'foo=\\K\\w+' /test.txt",
+            0,
+            "2:bar\n4:baz\n",
+        );
+        // ---- \Q...\E quote metacharacters: basic functionality ----
+        // grep.perl.test.ts:170 should match literal dot
+        check(
+            &[("/test.txt", "foo.bar\nfooxbar\n")],
+            "grep -oP '\\Q.\\E' /test.txt",
+            0,
+            ".\n",
+        );
+        // grep.perl.test.ts:179 should match literal asterisk
+        check(
+            &[("/test.txt", "a*b\naaab\n")],
+            "grep -oP '\\Q*\\E' /test.txt",
+            0,
+            "*\n",
+        );
+        // grep.perl.test.ts:188 should match multiple special characters
+        check(
+            &[("/test.txt", "foo.bar*baz\nfooxbarybaz\n")],
+            "grep -oP '\\Qfoo.bar*\\E' /test.txt",
+            0,
+            "foo.bar*\n",
+        );
+        // grep.perl.test.ts:197 should match regex metacharacters
+        check(
+            &[("/test.txt", "test^$.*+?end\nother\n")],
+            "grep -oP '\\Q^$.*+?\\E' /test.txt",
+            0,
+            "^$.*+?\n",
+        );
+        // ---- \Q...\E quote metacharacters: edge cases ----
+        // grep.perl.test.ts:208 should handle \Q without \E (quotes to end)
+        check(
+            &[("/test.txt", "test[0]++\ntest0\n")],
+            "grep -oP '\\Q[0]++' /test.txt",
+            0,
+            "[0]++\n",
+        );
+        // grep.perl.test.ts:217 should handle empty \Q\E
+        check(
+            &[("/test.txt", "abc\n")],
+            "grep -oP 'a\\Q\\Ebc' /test.txt",
+            0,
+            "abc\n",
+        );
+        // grep.perl.test.ts:226 should handle multiple \Q...\E pairs
+        check(
+            &[("/test.txt", "a+b=c*d\na1b2c3d\n")],
+            "grep -oP '\\Q+\\E.\\Q=\\E.\\Q*\\E' /test.txt",
+            0,
+            "+b=c*\n",
+        );
+        // grep.perl.test.ts:237 should handle \Q...\E at start of pattern
+        check(
+            &[("/test.txt", "^start\nstart\n")],
+            "grep -oP '\\Q^\\Estart' /test.txt",
+            0,
+            "^start\n",
+        );
+        // grep.perl.test.ts:246 should handle \Q...\E at end of pattern
+        check(
+            &[("/test.txt", "end$\nend\n")],
+            "grep -oP 'end\\Q$\\E' /test.txt",
+            0,
+            "end$\n",
+        );
+        // grep.perl.test.ts:255 should not interpret \E without preceding \Q
+        check(
+            &[("/test.txt", "test\\Evalue\nother\n")],
+            "grep -P 'test' /test.txt",
+            0,
+            "test\\Evalue\n",
+        );
+        // ---- \Q...\E combining with regex ----
+        // grep.perl.test.ts:267 should combine \Q...\E with regular regex after
+        check(
+            &[("/test.txt", "price: $100\nprice: $250\n")],
+            "grep -oP '\\Q$\\E\\d+' /test.txt",
+            0,
+            "$100\n$250\n",
+        );
+        // grep.perl.test.ts:276 should combine \Q...\E with regex before
+        check(
+            &[("/test.txt", "file.txt\nfile.doc\n")],
+            "grep -oP '\\w+\\Q.txt\\E' /test.txt",
+            0,
+            "file.txt\n",
+        );
+        // grep.perl.test.ts:285 should combine \Q...\E with \K
+        check(
+            &[("/test.txt", "var=value\nother\n")],
+            "grep -oP '\\Qvar=\\E\\K\\w+' /test.txt",
+            0,
+            "value\n",
+        );
+        // grep.perl.test.ts:294 should combine \Q...\E with character class
+        check(
+            &[("/test.txt", "a+1\na+2\nb+1\n")],
+            "grep -oP '[ab]\\Q+\\E\\d' /test.txt",
+            0,
+            "a+1\na+2\nb+1\n",
+        );
+        // ---- \x{NNNN} Unicode code points: basic functionality ----
+        // grep.perl.test.ts:310 should match ASCII by code point
+        check(
+            &[("/test.txt", "Hello\n")],
+            "grep -oP '\\x{48}' /test.txt",
+            0,
+            "H\n",
+        );
+        // grep.perl.test.ts:319 should match BMP Unicode characters
+        check(
+            &[("/test.txt", "Hello \u{2603} World\n")],
+            "grep -oP '\\x{2603}' /test.txt",
+            0,
+            "\u{2603}\n",
+        );
+        // grep.perl.test.ts:328 should match supplementary plane emoji
+        check(
+            &[("/test.txt", "Test \u{1F600} emoji\n")],
+            "grep -oP '\\x{1F600}' /test.txt",
+            0,
+            "\u{1F600}\n",
+        );
+        // grep.perl.test.ts:337 should match mathematical symbols
+        check(
+            &[("/test.txt", "Sum: \u{2211} Integral: \u{222B}\n")],
+            "grep -oP '\\x{2211}' /test.txt",
+            0,
+            "\u{2211}\n",
+        );
+    }
+
+    #[test]
     fn text_search_jbc_grep_exclude_files_without_match_and_bracket_rows() {
         // grep --exclude: skip files whose basename matches the glob.
         let exclude = Bash::with_options(BashOptions {
@@ -15564,6 +15800,343 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
             env.exec("sqlite3 -line :memory: \"SELECT 1 as x UNION SELECT 2\"")
                 .stdout,
             "    x = 1\n\n    x = 2\n"
+        );
+    }
+
+    /// Maps real-command pipeline and short-circuit rows from
+    /// `packages/just-bash/src/syntax/operators.test.ts` and `set-errexit.test.ts`
+    /// that exercise the registry-backed `Bash` runtime (head/tail/grep/find/mkdir
+    /// plus `set -e` short-circuit semantics) rather than the parser-only
+    /// interpreter. Each tuple mirrors an upstream `Bash().exec(...)` assertion and
+    /// fails if the documented stdout/exit-code or filesystem effect regresses.
+    #[test]
+    fn jbpi_real_bash_operator_pipeline_and_errexit_rows_match_upstream() {
+        let env = Bash::new();
+        // operators.test.ts:247 first n lines with head in a pipe.
+        assert_eq!(
+            env.exec("echo -e \"1\\n2\\n3\\n4\\n5\" | head -n 2").stdout,
+            "1\n2\n"
+        );
+        // operators.test.ts:253 last n lines with tail in a pipe.
+        assert_eq!(
+            env.exec("echo -e \"1\\n2\\n3\\n4\\n5\" | tail -n 2").stdout,
+            "4\n5\n"
+        );
+        // operators.test.ts:259 head and tail combined in a pipe.
+        assert_eq!(
+            env.exec("echo -e \"1\\n2\\n3\\n4\\n5\" | head -n 4 | tail -n 2")
+                .stdout,
+            "3\n4\n"
+        );
+        // operators.test.ts:267 file contents through multiple filters.
+        let dat = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "apple\nbanana\napricot\nblueberry\navocado\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            dat.exec("cat /data.txt | grep a | head -n 3").stdout,
+            "apple\nbanana\napricot\n"
+        );
+
+        // operators.test.ts:36 `&&` runs the second command and persists its
+        // filesystem effect when the first succeeds.
+        let fx = Bash::new();
+        fx.exec("mkdir /test && echo created > /test/file.txt");
+        assert_eq!(fx.read_file("/test/file.txt").unwrap(), "created\n");
+
+        // operators.test.ts:108 `||` error-handler pattern: the first `mkdir`
+        // succeeds silently; a repeated `mkdir` of the existing dir fails and the
+        // `||` branch runs.
+        let eh = Bash::new();
+        assert_eq!(
+            eh.exec("mkdir /dir || echo \"dir already exists\"").stdout,
+            ""
+        );
+        assert_eq!(
+            eh.exec("mkdir /dir || echo \"dir already exists\"").stdout,
+            "dir already exists\n"
+        );
+
+        // control-flow.test.ts:335 `! ` passes through to `find -not`, excluding
+        // utils*.ts while keeping app.ts.
+        let proj = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/project/src/app.ts".to_string(), "code".to_string()),
+                ("/project/src/utils.ts".to_string(), "utils".to_string()),
+                ("/project/test.json".to_string(), "{}".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let found = proj.exec("find /project -name \"*.ts\" -not -name \"utils*\"");
+        assert!(found.stdout.contains("app.ts"), "found={:?}", found.stdout);
+        assert!(
+            !found.stdout.contains("utils.ts"),
+            "found={:?}",
+            found.stdout
+        );
+
+        // variables.test.ts:157 `echo -e` with escaped double backslashes emits a
+        // single literal backslash per pair.
+        assert_eq!(
+            env.exec("echo -e \"path\\\\\\\\to\\\\\\\\file\"").stdout,
+            "path\\to\\file\n"
+        );
+
+        // set-errexit.test.ts short-circuit/disable rows.
+        let run = |script: &str| {
+            let bash = Bash::new();
+            let r = bash.exec(script);
+            (r.stdout, r.exit_code)
+        };
+        // :85 `set +o errexit` re-enables continuing past a failed command.
+        assert_eq!(
+            run("set -o errexit\nset +o errexit\necho before\nfalse\necho after"),
+            ("before\nafter\n".to_string(), 0)
+        );
+        // :100 a failed command on the left of `&&` does not trip errexit.
+        assert_eq!(
+            run("set -e\nfalse && echo \"not reached\"\necho after"),
+            ("after\n".to_string(), 0)
+        );
+        // :111 a failed command on the left of `||` does not trip errexit.
+        assert_eq!(
+            run("set -e\nfalse || echo \"fallback\"\necho after"),
+            ("fallback\nafter\n".to_string(), 0)
+        );
+        // :134 `&& ... ||` list that ends by succeeding does not trip errexit.
+        assert_eq!(
+            run("set -e\nfalse && echo \"skip\" || echo \"fallback\"\necho after"),
+            ("fallback\nafter\n".to_string(), 0)
+        );
+    }
+
+    const RG_SHERLOCK: &str = "For the Doctor Watsons of this world, as opposed to the Sherlock\nHolmeses, success in the province of detective work must always\nbe, to a very large extent, the result of luck. Sherlock Holmes\ncan extract a clew from a wisp of straw or a flake of cigar ash;\nbut Doctor Watson has to have it taken out for him and dusted,\nand exhibited clearly, with a label attached.\n";
+
+    fn rg_json_messages(stdout: &str) -> Vec<serde_json::Value> {
+        stdout
+            .trim()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSON line"))
+            .collect()
+    }
+
+    #[test]
+    fn rg_json_basic_output_structure_matches_ripgrep() {
+        // maps imported-tests/json.test.ts:37 "basic: JSON output structure".
+        let result =
+            home_bash(&[("sherlock", RG_SHERLOCK)]).exec("rg --json 'Sherlock Holmes' sherlock");
+        assert_eq!(result.exit_code, 0);
+        let msgs = rg_json_messages(&result.stdout);
+        assert_eq!(msgs[0]["type"], "begin");
+        assert_eq!(
+            msgs[0]["data"]["path"],
+            serde_json::json!({ "text": "sherlock" })
+        );
+        assert_eq!(msgs[1]["type"], "match");
+        assert_eq!(
+            msgs[1]["data"]["lines"],
+            serde_json::json!({
+                "text": "be, to a very large extent, the result of luck. Sherlock Holmes\n"
+            })
+        );
+        assert_eq!(msgs[1]["data"]["line_number"], 3);
+        assert_eq!(msgs[1]["data"]["absolute_offset"], 129);
+        let submatches = msgs[1]["data"]["submatches"].as_array().unwrap();
+        assert_eq!(submatches.len(), 1);
+        assert_eq!(
+            submatches[0]["match"],
+            serde_json::json!({ "text": "Sherlock Holmes" })
+        );
+        assert_eq!(submatches[0]["start"], 48);
+        assert_eq!(submatches[0]["end"], 63);
+        assert_eq!(msgs[2]["type"], "end");
+        assert_eq!(msgs[2]["data"]["binary_offset"], serde_json::Value::Null);
+        assert_eq!(msgs[3]["type"], "summary");
+        assert_eq!(msgs[3]["data"]["stats"]["searches_with_match"], 1);
+    }
+
+    #[test]
+    fn rg_json_quiet_emits_only_summary() {
+        // maps imported-tests/json.test.ts:103 "quiet_stats: JSON with --quiet shows only summary".
+        let result = home_bash(&[("sherlock", RG_SHERLOCK)])
+            .exec("rg --json --quiet 'Sherlock Holmes' sherlock");
+        assert_eq!(result.exit_code, 0);
+        let msgs = rg_json_messages(&result.stdout);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["type"], "summary");
+        assert_eq!(msgs[0]["data"]["stats"]["searches_with_match"], 1);
+    }
+
+    #[test]
+    fn rg_json_reports_all_submatches_on_a_line() {
+        // maps imported-tests/json.test.ts:124 "should output all matches with correct submatches".
+        let result =
+            home_bash(&[("test.txt", "foo bar foo baz foo\n")]).exec("rg --json foo test.txt");
+        assert_eq!(result.exit_code, 0);
+        let msgs = rg_json_messages(&result.stdout);
+        let matched = msgs.iter().find(|m| m["type"] == "match").unwrap();
+        let submatches = matched["data"]["submatches"].as_array().unwrap();
+        assert_eq!(submatches.len(), 3);
+        assert_eq!(
+            submatches[0],
+            serde_json::json!({ "match": { "text": "foo" }, "start": 0, "end": 3 })
+        );
+        assert_eq!(
+            submatches[1],
+            serde_json::json!({ "match": { "text": "foo" }, "start": 8, "end": 11 })
+        );
+        assert_eq!(
+            submatches[2],
+            serde_json::json!({ "match": { "text": "foo" }, "start": 16, "end": 19 })
+        );
+    }
+
+    #[test]
+    fn rg_json_emits_begin_end_per_file() {
+        // maps imported-tests/json.test.ts:157 "should output multiple files with begin/end messages".
+        let result =
+            home_bash(&[("a.txt", "hello\n"), ("b.txt", "hello\n")]).exec("rg --json hello");
+        assert_eq!(result.exit_code, 0);
+        let msgs = rg_json_messages(&result.stdout);
+        assert_eq!(msgs.iter().filter(|m| m["type"] == "begin").count(), 2);
+        assert_eq!(msgs.iter().filter(|m| m["type"] == "end").count(), 2);
+        assert_eq!(msgs.iter().filter(|m| m["type"] == "match").count(), 2);
+        assert_eq!(msgs.iter().filter(|m| m["type"] == "summary").count(), 1);
+    }
+
+    #[test]
+    fn rg_json_outputs_summary_with_no_matches() {
+        // maps imported-tests/json.test.ts:189 "should output summary even with no matches".
+        let result = home_bash(&[("test.txt", "hello world\n")]).exec("rg --json notfound");
+        assert_eq!(result.exit_code, 1);
+        let msgs = rg_json_messages(&result.stdout);
+        let summary = msgs.iter().find(|m| m["type"] == "summary").unwrap();
+        assert_eq!(summary["data"]["stats"]["searches_with_match"], 0);
+    }
+
+    #[test]
+    fn rg_json_handles_empty_file_with_summary() {
+        // maps imported-tests/json.test.ts:207 "should handle empty file with summary".
+        let result = home_bash(&[("empty.txt", "")]).exec("rg --json foo empty.txt");
+        assert_eq!(result.exit_code, 1);
+        let msgs = rg_json_messages(&result.stdout);
+        let summary = msgs.iter().find(|m| m["type"] == "summary").unwrap();
+        assert_eq!(summary["data"]["stats"]["searches_with_match"], 0);
+        assert_eq!(summary["data"]["stats"]["bytes_searched"], 0);
+    }
+
+    #[test]
+    fn rg_heading_groups_matches_under_file_path() {
+        // maps imported-tests/regression.test.ts:203 "r99: should show heading output format".
+        let result = home_bash(&[("foo1", "test\n"), ("foo2", "zzz\n"), ("bar", "test\n")])
+            .exec("rg --heading test");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("test"));
+        // Heading mode prints the file label on its own line above the matches.
+        assert!(result.stdout.contains("bar\n"));
+        assert!(result.stdout.contains("foo1\n"));
+    }
+
+    #[test]
+    fn rg_strips_leading_utf8_bom_before_anchored_match() {
+        // maps imported-tests/regression.test.ts:866 "r1163: should handle UTF-8 BOM".
+        let result = home_bash(&[("bom.txt", "\u{FEFF}test123\ntest123\n")]).exec("rg '^test123'");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "bom.txt:1:test123\nbom.txt:2:test123\n");
+    }
+
+    #[test]
+    fn rg_fixed_strings_from_file_match_many_duplicate_literals() {
+        // maps imported-tests/regression.test.ts:1040
+        // "r1334_crazy_literals: should handle many literal patterns".
+        let patterns = "1.208.0.0/12\n".repeat(40);
+        let result = home_bash(&[
+            ("patterns", patterns.as_str()),
+            ("corpus", "1.208.0.0/12\n"),
+        ])
+        .exec("rg -Ff patterns corpus");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "1.208.0.0/12\n");
+    }
+
+    #[test]
+    fn rg_files_errors_on_glob_with_unclosed_character_class() {
+        // maps imported-tests/regression.test.ts:1505
+        // "r3127_glob_flag_not_allow_unclosed_class: should error on unclosed class in glob".
+        let result = home_bash(&[("[abc", ""), ("test", "")]).exec("rg --files -g '[abc'");
+        assert_ne!(result.exit_code, 0);
+        assert_eq!(
+            result.stderr,
+            "rg: glob '[abc' has an unclosed character class\n"
+        );
+    }
+
+    #[test]
+    fn rg_negated_glob_with_leading_slash_is_root_anchored() {
+        // maps imported-tests/regression.test.ts:489 "r405: should handle negated glob with path".
+        let result = home_bash(&[
+            ("foo/bar/file1.txt", "test\n"),
+            ("bar/foo/file2.txt", "test\n"),
+        ])
+        .exec("rg -g '!/foo/**' test");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "bar/foo/file2.txt:1:test\n");
+    }
+
+    #[test]
+    fn rg_follow_symlinked_directory_root_with_dash_l() {
+        // maps imported-tests/regression.test.ts:405 "r256: should follow directory symlinks with -L".
+        let bash = home_bash(&[("realdir/test.txt", "test content\n")]);
+        bash.exec("ln -s realdir /home/user/linkdir");
+        let result = bash.exec("rg -L test linkdir");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("test content"));
+    }
+
+    #[test]
+    fn rg_follow_symlinked_directory_root_with_dash_l_and_single_thread() {
+        // maps imported-tests/regression.test.ts:420
+        // "r256: should follow directory symlinks with -L and -j1".
+        let bash = home_bash(&[("realdir/test.txt", "test content\n")]);
+        bash.exec("ln -s realdir /home/user/linkdir");
+        let result = bash.exec("rg -L -j1 test linkdir");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("test content"));
+    }
+
+    #[test]
+    fn rg_gitignore_negation_unhides_dotfile() {
+        // maps imported-tests/regression.test.ts:171
+        // "r90: should handle negation of hidden file in gitignore".
+        let result = home_bash(&[
+            (".git/.gitkeep", ""),
+            (".gitignore", "!.foo\n"),
+            (".foo", "test\n"),
+        ])
+        .exec("rg test");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, ".foo:1:test\n");
+    }
+
+    #[test]
+    fn rg_follow_symlinked_subdirectory_surfaces_content_through_both_paths() {
+        // maps rg.flags.test.ts:63 "should follow symlinks to directories with -L".
+        let bash = home_bash(&[("subdir/file.txt", "hello\n")]);
+        bash.exec("ln -s subdir /home/user/linkdir");
+        // Without -L only the real directory is searched.
+        let without = bash.exec("rg hello");
+        assert_eq!(without.exit_code, 0);
+        assert_eq!(without.stdout, "subdir/file.txt:1:hello\n");
+        // With -L the file is found through both the real and symlinked paths.
+        let with = bash.exec("rg -L --sort path hello");
+        assert_eq!(with.exit_code, 0);
+        assert_eq!(
+            with.stdout,
+            "linkdir/file.txt:1:hello\nsubdir/file.txt:1:hello\n"
         );
     }
 }

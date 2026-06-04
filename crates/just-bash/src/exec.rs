@@ -2056,6 +2056,7 @@ enum GrepMode {
     BasicRegex,
     ExtendedRegex,
     Fixed,
+    PerlRegex,
 }
 
 fn command_grep(
@@ -2102,6 +2103,7 @@ fn command_grep(
             "-q" | "--quiet" | "--silent" => quiet = true,
             "-E" | "--extended-regexp" => mode = GrepMode::ExtendedRegex,
             "-F" | "--fixed-strings" => mode = GrepMode::Fixed,
+            "-P" | "--perl-regexp" => mode = GrepMode::PerlRegex,
             "-e" => {
                 pattern = args.get(index + 1).cloned();
                 index += 2;
@@ -2196,6 +2198,7 @@ fn command_grep(
                         'q' => quiet = true,
                         'E' => mode = GrepMode::ExtendedRegex,
                         'F' => mode = GrepMode::Fixed,
+                        'P' => mode = GrepMode::PerlRegex,
                         'A' | 'B' | 'C' | 'm' => {
                             let tail = flags[flag_index + 1..].iter().collect::<String>();
                             let value = if tail.is_empty() {
@@ -2542,7 +2545,19 @@ enum LineMatcher {
         line_regexp: bool,
     },
     Regex(Regex),
+    /// Perl-mode (`-P`) matcher. When the pattern contains a `\K`
+    /// reset-match-start escape, the text after `\K` is captured in a named
+    /// group so `-o` (only-matching) output can keep just that suffix while the
+    /// full pattern still drives line matching.
+    PerlRegex {
+        regex: Regex,
+        has_k_capture: bool,
+    },
 }
+
+/// Named capture group used to model the `\K` reset-match-start escape so that
+/// `-oP` only-matching output can keep just the suffix after `\K`.
+const PERL_K_CAPTURE: &str = "jbkrest";
 
 impl LineMatcher {
     fn new_with_line_regexp(
@@ -2559,6 +2574,24 @@ impl LineMatcher {
                 word_regexp,
                 line_regexp,
             });
+        }
+        if mode == GrepMode::PerlRegex {
+            let (translated, has_k_capture) = translate_perl_grep_regex(pattern);
+            let translated = if line_regexp {
+                format!("^(?:{translated})$")
+            } else if word_regexp {
+                format!(r"\b(?:{translated})\b")
+            } else {
+                translated
+            };
+            return RegexBuilder::new(&translated)
+                .case_insensitive(ignore_case)
+                .build()
+                .map(|regex| Self::PerlRegex {
+                    regex,
+                    has_k_capture,
+                })
+                .map_err(|error| error.to_string());
         }
         let pattern = normalize_grep_regex(pattern, mode);
         let pattern = if line_regexp {
@@ -2578,6 +2611,7 @@ impl LineMatcher {
     fn is_match(&self, line: &str) -> bool {
         match self {
             Self::Regex(regex) => regex.is_match(line),
+            Self::PerlRegex { regex, .. } => regex.is_match(line),
             Self::Fixed {
                 pattern,
                 ignore_case,
@@ -2593,6 +2627,42 @@ impl LineMatcher {
                 .find_iter(line)
                 .map(|matched| matched.as_str().to_string())
                 .collect(),
+            Self::PerlRegex {
+                regex,
+                has_k_capture,
+            } => {
+                if *has_k_capture {
+                    // `\K` resets the match start: only the text captured after
+                    // `\K` is part of the `-o` output, while the prefix still
+                    // anchors the match. Iterate non-overlapping matches and emit
+                    // the named suffix group.
+                    let mut out = Vec::new();
+                    let mut start = 0usize;
+                    while start <= line.len() {
+                        let Some(caps) = regex.captures_at(line, start) else {
+                            break;
+                        };
+                        let whole = caps.get(0).expect("group 0 always present");
+                        let rest = caps
+                            .name(PERL_K_CAPTURE)
+                            .map(|m| m.as_str().to_string())
+                            .unwrap_or_default();
+                        out.push(rest);
+                        // Advance past this match; guard against zero-width loops.
+                        start = if whole.end() > whole.start() {
+                            whole.end()
+                        } else {
+                            whole.end() + 1
+                        };
+                    }
+                    out
+                } else {
+                    regex
+                        .find_iter(line)
+                        .map(|matched| matched.as_str().to_string())
+                        .collect()
+                }
+            }
             Self::Fixed {
                 pattern,
                 ignore_case,
@@ -2601,6 +2671,169 @@ impl LineMatcher {
             } => fixed_line_matches(line, pattern, *ignore_case, *word_regexp, *line_regexp),
         }
     }
+
+    /// Match spans within `line` as `(start_char, end_char, text)` triples. The
+    /// offsets are character indices (matching the JS `match.index`/`match[0]`
+    /// semantics upstream uses for `--json` submatches).
+    fn match_ranges(&self, line: &str) -> Vec<(usize, usize, String)> {
+        let byte_to_char = |byte: usize| line[..byte].chars().count();
+        match self {
+            Self::Regex(regex) => regex
+                .find_iter(line)
+                .map(|matched| {
+                    (
+                        byte_to_char(matched.start()),
+                        byte_to_char(matched.end()),
+                        matched.as_str().to_string(),
+                    )
+                })
+                .collect(),
+            Self::PerlRegex {
+                regex,
+                has_k_capture,
+            } => {
+                if *has_k_capture {
+                    // `\K` resets the match start: the reported range covers only
+                    // the text captured after `\K`, mirroring `match_texts`.
+                    let mut out = Vec::new();
+                    let mut start = 0usize;
+                    while start <= line.len() {
+                        let Some(caps) = regex.captures_at(line, start) else {
+                            break;
+                        };
+                        let whole = caps.get(0).expect("group 0 always present");
+                        if let Some(rest) = caps.name(PERL_K_CAPTURE) {
+                            out.push((
+                                byte_to_char(rest.start()),
+                                byte_to_char(rest.end()),
+                                rest.as_str().to_string(),
+                            ));
+                        }
+                        start = if whole.end() > whole.start() {
+                            whole.end()
+                        } else {
+                            whole.end() + 1
+                        };
+                    }
+                    out
+                } else {
+                    regex
+                        .find_iter(line)
+                        .map(|matched| {
+                            (
+                                byte_to_char(matched.start()),
+                                byte_to_char(matched.end()),
+                                matched.as_str().to_string(),
+                            )
+                        })
+                        .collect()
+                }
+            }
+            Self::Fixed {
+                pattern,
+                ignore_case,
+                word_regexp,
+                line_regexp,
+            } => fixed_line_match_ranges(line, pattern, *ignore_case, *word_regexp, *line_regexp),
+        }
+    }
+}
+
+/// Translate a Perl-mode (`-P`) grep pattern into a pattern the Rust `regex`
+/// crate accepts. The Rust engine already supports `\x{NNNN}`, `(?i:...)`,
+/// `(?P<name>...)`, and non-greedy quantifiers, so only two GNU/PCRE escapes
+/// need rewriting:
+///
+///   * `\Q...\E` quotes every metacharacter between the markers literally
+///     (an unterminated `\Q` quotes to the end of the pattern); and
+///   * `\K` resets the match start, which is modelled by wrapping the text that
+///     follows it in a named capture group so `-o` can emit just that suffix.
+///
+/// Returns the translated pattern and whether a `\K` suffix capture exists.
+fn translate_perl_grep_regex(pattern: &str) -> (String, bool) {
+    let chars = pattern.chars().collect::<Vec<_>>();
+    let mut output = String::new();
+    let mut k_split: Option<String> = None;
+    let mut quoting = false;
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if quoting {
+            if ch == '\\' && chars.get(index + 1) == Some(&'E') {
+                quoting = false;
+                index += 2;
+                continue;
+            }
+            push_regex_literal(&mut output, ch);
+            index += 1;
+            continue;
+        }
+        if ch == '\\' {
+            match chars.get(index + 1) {
+                Some('Q') => {
+                    quoting = true;
+                    index += 2;
+                    continue;
+                }
+                Some('E') => {
+                    // `\E` without a preceding `\Q` is ignored (matches GNU grep).
+                    index += 2;
+                    continue;
+                }
+                Some('K') => {
+                    // Everything emitted so far is the prefix; capture the rest.
+                    k_split = Some(std::mem::take(&mut output));
+                    index += 2;
+                    continue;
+                }
+                Some(next) => {
+                    output.push('\\');
+                    output.push(*next);
+                    index += 2;
+                    continue;
+                }
+                None => {
+                    output.push('\\');
+                    index += 1;
+                    continue;
+                }
+            }
+        }
+        output.push(ch);
+        index += 1;
+    }
+    match k_split {
+        Some(prefix) => (format!("{prefix}(?P<{PERL_K_CAPTURE}>{output})"), true),
+        None => (output, false),
+    }
+}
+
+/// Escape a single character so it is matched literally by the Rust regex
+/// engine (used for `\Q...\E` quoted spans).
+fn push_regex_literal(output: &mut String, ch: char) {
+    if matches!(
+        ch,
+        '\\' | '.'
+            | '+'
+            | '*'
+            | '?'
+            | '('
+            | ')'
+            | '|'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | '^'
+            | '$'
+            | '#'
+            | '&'
+            | '-'
+            | '~'
+    ) {
+        output.push('\\');
+    }
+    output.push(ch);
 }
 
 fn normalize_grep_regex(pattern: &str, mode: GrepMode) -> String {
@@ -2869,6 +3102,61 @@ fn fixed_line_matches(
                     .is_none_or(|ch| !is_word_char(ch)))
         {
             matches.push(line[start..end].to_string());
+        }
+        offset = end;
+    }
+    matches
+}
+
+/// Like `fixed_line_matches` but returns each match span as
+/// `(start_char, end_char, text)` for `--json` submatch reporting.
+fn fixed_line_match_ranges(
+    line: &str,
+    pattern: &str,
+    ignore_case: bool,
+    word_regexp: bool,
+    line_regexp: bool,
+) -> Vec<(usize, usize, String)> {
+    if !fixed_line_match(line, pattern, ignore_case, word_regexp, line_regexp) {
+        return Vec::new();
+    }
+    if line_regexp {
+        return vec![(0, line.chars().count(), line.to_string())];
+    }
+    let haystack = if ignore_case {
+        line.to_ascii_lowercase()
+    } else {
+        line.to_string()
+    };
+    let needle = if ignore_case {
+        pattern.to_ascii_lowercase()
+    } else {
+        pattern.to_string()
+    };
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let byte_to_char = |byte: usize| line[..byte].chars().count();
+    let mut matches = Vec::new();
+    let mut offset = 0;
+    while let Some(index) = haystack[offset..].find(&needle) {
+        let start = offset + index;
+        let end = start + needle.len();
+        if !word_regexp
+            || (line[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !is_word_char(ch))
+                && line[end..]
+                    .chars()
+                    .next()
+                    .is_none_or(|ch| !is_word_char(ch)))
+        {
+            matches.push((
+                byte_to_char(start),
+                byte_to_char(end),
+                line[start..end].to_string(),
+            ));
         }
         offset = end;
     }
@@ -6326,6 +6614,10 @@ fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
         Err(result) => return result,
     };
 
+    if let Some(error) = rg_validate_globs(&request.options.globs) {
+        return stderr_result(1, error);
+    }
+
     if request.options.files {
         return command_rg_files(state, &request);
     }
@@ -6389,6 +6681,10 @@ fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
         }
     };
 
+    if request.options.json {
+        return rg_render_json(&request, &matchers, &inputs);
+    }
+
     rg_render_search(&request, &matchers, &inputs)
 }
 
@@ -6436,6 +6732,7 @@ struct RgOptions {
     type_adds: Vec<String>,
     ignore_files: Vec<String>,
     stats: bool,
+    json: bool,
     explicit_after: Option<usize>,
     explicit_before: Option<usize>,
     explicit_context: Option<usize>,
@@ -6478,6 +6775,7 @@ impl Default for RgOptions {
             type_adds: Vec::new(),
             ignore_files: Vec::new(),
             stats: false,
+            json: false,
             explicit_after: None,
             explicit_before: None,
             explicit_context: None,
@@ -6600,6 +6898,7 @@ fn parse_rg_option(
         "--follow" => options.follow_symlinks = true,
         "--include-zero" => options.include_zero = true,
         "--heading" => options.heading = true,
+        "--json" => options.json = true,
         "--stats" => options.stats = true,
         "--ignore-file" => {
             options
@@ -6787,7 +7086,9 @@ fn parse_rg_option(
         _ if arg.starts_with("-T") && arg.len() > 2 => {
             options.type_excludes.push(arg[2..].to_string());
         }
-        _ if arg.starts_with('-') => parse_rg_short_flags(args, index, options)?,
+        _ if arg.starts_with('-') => {
+            parse_rg_short_flags(args, index, options, patterns, pattern_files)?
+        }
         _ => {}
     }
     *index += 1;
@@ -6798,11 +7099,31 @@ fn parse_rg_short_flags(
     args: &[String],
     index: &mut usize,
     options: &mut RgOptions,
+    patterns: &mut Vec<String>,
+    pattern_files: &mut Vec<String>,
 ) -> Result<(), CommandResult> {
     let arg = args[*index].clone();
     let mut unrestricted = 0;
     let mut chars = arg[1..].chars().peekable();
     while let Some(flag) = chars.next() {
+        // Value-taking flags inside a bundled group (e.g. `-Ff patterns`,
+        // `-Ne pat`, `-ng glob`). ripgrep treats the remaining characters as the
+        // attached value, or consumes the next positional argument when the flag
+        // is the last char of the group.
+        if matches!(flag, 'f' | 'e' | 'g') {
+            let value: String = if chars.peek().is_some() {
+                chars.collect()
+            } else {
+                rg_option_value(args, index, &format!("-{flag}"))?
+            };
+            match flag {
+                'f' => pattern_files.push(value),
+                'e' => patterns.push(value),
+                'g' => options.globs.push(value),
+                _ => unreachable!(),
+            }
+            break;
+        }
         // `-j`/threads is a ripgrep compatibility flag: it consumes a value but
         // is intentionally ignored. When bundled (e.g. `-Iij 4`) it must be the
         // last flag in the group, taking the following positional as its value.
@@ -6993,17 +7314,39 @@ fn rg_inputs(state: &ExecState<'_>, request: &RgRequest) -> Result<Vec<RgInput>,
                     root: &root,
                     path: &root,
                     explicit_file: true,
+                    display_override: None,
                 },
             );
             continue;
         }
+        // When the search root itself is a symlink to a directory, ripgrep under
+        // -L/--follow walks the symlink target but labels every hit beneath the
+        // symlink path the user supplied (regression r256). Resolve the target so
+        // its stored files are enumerable, and remember the prefix to relabel.
+        let mut real_root = root.clone();
+        if request.options.follow_symlinks {
+            if let Ok(link_stat) = fs.lstat(&root) {
+                if link_stat.is_symbolic_link {
+                    if let Ok(resolved) = fs.realpath(&root) {
+                        real_root = resolved;
+                    }
+                }
+            }
+        }
         let mut paths = fs
             .get_all_paths()
             .into_iter()
-            .filter(|path| path.starts_with(&format!("{root}/")))
+            .filter(|path| path.starts_with(&format!("{real_root}/")))
             .collect::<Vec<_>>();
         paths.sort();
-        for path in paths {
+        for path in &paths {
+            // Relabel a symlinked-root walk back under the user-supplied root.
+            let display_override = if real_root != root {
+                path.strip_prefix(&real_root)
+                    .map(|rest| relative_display_path(&state.cwd, &format!("{root}{rest}")))
+            } else {
+                None
+            };
             rg_push_input(
                 &state.cwd,
                 &fs,
@@ -7012,10 +7355,60 @@ fn rg_inputs(state: &ExecState<'_>, request: &RgRequest) -> Result<Vec<RgInput>,
                 &mut inputs,
                 RgCandidate {
                     root: &root,
-                    path: &path,
+                    path,
                     explicit_file: false,
+                    display_override,
                 },
             );
+        }
+        // Expand symlinked subdirectories discovered while walking the (real)
+        // root: under -L their target files are searched and labelled beneath the
+        // symlink path, surfacing the same content through both paths (r256,
+        // rg.flags symlink-to-directory).
+        if request.options.follow_symlinks {
+            let mut symlink_dirs = fs
+                .get_all_paths()
+                .into_iter()
+                .filter(|path| path.starts_with(&format!("{real_root}/")))
+                .filter(|path| {
+                    fs.lstat(path)
+                        .map(|stat| stat.is_symbolic_link)
+                        .unwrap_or(false)
+                        && fs.stat(path).map(|stat| !stat.is_file).unwrap_or(false)
+                })
+                .collect::<Vec<_>>();
+            symlink_dirs.sort();
+            for link_dir in symlink_dirs {
+                let Ok(target_dir) = fs.realpath(&link_dir) else {
+                    continue;
+                };
+                let mut target_paths = fs
+                    .get_all_paths()
+                    .into_iter()
+                    .filter(|path| path.starts_with(&format!("{target_dir}/")))
+                    .collect::<Vec<_>>();
+                target_paths.sort();
+                for path in &target_paths {
+                    let Some(rest) = path.strip_prefix(&target_dir) else {
+                        continue;
+                    };
+                    let display_label =
+                        relative_display_path(&state.cwd, &format!("{link_dir}{rest}"));
+                    rg_push_input(
+                        &state.cwd,
+                        &fs,
+                        request,
+                        &ignore_rules,
+                        &mut inputs,
+                        RgCandidate {
+                            root: &real_root,
+                            path,
+                            explicit_file: false,
+                            display_override: Some(display_label),
+                        },
+                    );
+                }
+            }
         }
     }
     inputs.sort_by(|left, right| left.label.cmp(&right.label));
@@ -7026,6 +7419,7 @@ struct RgCandidate<'a> {
     root: &'a str,
     path: &'a str,
     explicit_file: bool,
+    display_override: Option<String>,
 }
 
 fn rg_push_input(
@@ -7038,8 +7432,12 @@ fn rg_push_input(
 ) {
     // Upstream rg skips symlinks during directory traversal unless -L/--follow
     // is set (rg-search.ts followSymlinks). Explicit file arguments are always
-    // dereferenced.
-    if !candidate.explicit_file && !request.options.follow_symlinks {
+    // dereferenced. A candidate carrying a `display_override` is an already
+    // resolved symlink-target file, so the symlink guard does not apply.
+    if candidate.display_override.is_none()
+        && !candidate.explicit_file
+        && !request.options.follow_symlinks
+    {
         if let Ok(link_stat) = fs.lstat(candidate.path) {
             if link_stat.is_symbolic_link {
                 return;
@@ -7052,7 +7450,10 @@ fn rg_push_input(
     if !stat.is_file {
         return;
     }
-    let label = relative_display_path(cwd, candidate.path);
+    let label = candidate
+        .display_override
+        .clone()
+        .unwrap_or_else(|| relative_display_path(cwd, candidate.path));
     if !rg_file_passes_filters(
         candidate.path,
         &label,
@@ -7066,6 +7467,15 @@ fn rg_push_input(
     let Ok(text) = fs.read_file(candidate.path) else {
         return;
     };
+    // ripgrep transparently strips a leading UTF-8 BOM before searching, so an
+    // anchored pattern (`^test`) still matches the first line and column indexes
+    // start after the BOM (regression r1163/r1638). Upstream just-bash relies on
+    // its TextDecoder dropping the BOM at read time; the Rust VFS stores the raw
+    // bytes, so strip it here.
+    let text = text
+        .strip_prefix('\u{FEFF}')
+        .map(str::to_string)
+        .unwrap_or(text);
     // Upstream rg samples only the first 8192 chars when detecting binary
     // files (rg-search.ts: `content.slice(0, 8192)`), so a NUL byte that
     // appears after the sample window does not mark the file as binary.
@@ -7094,7 +7504,11 @@ fn rg_file_passes_filters(
         return false;
     }
     if !request.options.hidden && rg_path_is_hidden(label) {
-        return false;
+        // ripgrep still searches a hidden file when a gitignore negation pattern
+        // explicitly whitelists it (regression r90: `!.foo` un-hides `.foo`).
+        if explicit_file || !rg_is_whitelisted(path, ignore_rules) {
+            return false;
+        }
     }
     if !ignore_rules.is_empty() && rg_is_ignored(path, ignore_rules) {
         return false;
@@ -7221,20 +7635,56 @@ fn rg_path_matches_type(
         .any(|glob| rg_glob_matches_path(glob, label))
 }
 
+/// Reject a glob with an unclosed `[` character class, mirroring upstream
+/// rg-search.ts validateGlob (regression r3127: `rg --files -g '[abc'` errors).
+/// The leading `!` negation marker is stripped before validation and the error
+/// message reports the stripped glob, matching ripgrep's exit-status-1 failure.
+fn rg_validate_globs(globs: &[String]) -> Option<String> {
+    for glob in globs {
+        let candidate = glob.strip_prefix('!').unwrap_or(glob);
+        let mut in_class = false;
+        for ch in candidate.chars() {
+            match ch {
+                '[' if !in_class => in_class = true,
+                ']' if in_class => in_class = false,
+                _ => {}
+            }
+        }
+        if in_class {
+            return Some(format!(
+                "rg: glob '{candidate}' has an unclosed character class\n"
+            ));
+        }
+    }
+    None
+}
+
 fn rg_globs_match(label: &str, globs: &[String]) -> bool {
+    // Mirror upstream rg-search.ts shouldIncludeFile glob handling: a glob is
+    // tested against both the file basename and the root-relative path. A
+    // negated glob with a leading `/` is anchored to the search root, so the `/`
+    // is stripped and the remainder is matched against the relative path only
+    // (regression r405: `-g '!/foo/**'` excludes only the top-level `foo/`).
+    let basename = label.rsplit('/').next().unwrap_or(label);
     let mut saw_positive = false;
     let mut positive_match = false;
     for glob in globs {
         let (negated, pattern) = glob
             .strip_prefix('!')
             .map_or((false, glob.as_str()), |pattern| (true, pattern));
-        let matched = rg_glob_matches_path(pattern, label);
-        if negated && matched {
-            return false;
-        }
-        if !negated {
+        if negated {
+            let excluded = if let Some(rooted) = pattern.strip_prefix('/') {
+                rg_glob_matches_path(rooted, label)
+            } else {
+                rg_glob_match(pattern, basename) || rg_glob_matches_path(pattern, label)
+            };
+            if excluded {
+                return false;
+            }
+        } else {
             saw_positive = true;
-            positive_match |= matched;
+            positive_match |=
+                rg_glob_match(pattern, basename) || rg_glob_matches_path(pattern, label);
         }
     }
     !saw_positive || positive_match
@@ -7309,6 +7759,19 @@ fn rg_is_ignored(path: &str, rules: &[RgIgnoreRule]) -> bool {
         }
     }
     ignored
+}
+
+/// True when a gitignore negation pattern (`!pattern`) explicitly whitelists
+/// `path`. ripgrep uses this to un-hide an otherwise-hidden file (regression
+/// r90: `!.foo` makes the dotfile `.foo` searchable).
+fn rg_is_whitelisted(path: &str, rules: &[RgIgnoreRule]) -> bool {
+    let mut whitelisted = false;
+    for rule in rules {
+        if rg_ignore_rule_matches(rule, path) {
+            whitelisted = rule.negated;
+        }
+    }
+    whitelisted
 }
 
 fn rg_ignore_rule_matches(rule: &RgIgnoreRule, path: &str) -> bool {
@@ -7507,6 +7970,126 @@ fn rg_render_search(
     }
     CommandResult {
         exit_code: if total_matches == 0 { 1 } else { 0 },
+        stdout,
+        ..CommandResult::default()
+    }
+}
+
+/// Render `rg --json` JSON Lines output, mirroring upstream rg-search.ts
+/// searchFiles JSON mode: a `begin`/`match`*/`end` group per matching file
+/// followed by a final `summary` message. `--quiet --json` suppresses the
+/// per-file groups and emits only the summary. Offsets are character indices
+/// (the JS `match.index`/string-length semantics upstream relies on).
+fn rg_render_json(
+    request: &RgRequest,
+    matchers: &[LineMatcher],
+    inputs: &[RgInput],
+) -> CommandResult {
+    use serde_json::json;
+    let mut messages: Vec<String> = Vec::new();
+    let mut files_with_match = 0usize;
+    let mut total_matches = 0usize;
+    let mut bytes_searched = 0usize;
+    let quiet = request.options.quiet;
+
+    for input in inputs {
+        bytes_searched += input.text.chars().count();
+        let line_matches = rg_line_matches(input, matchers, &request.options);
+        if line_matches.is_empty() {
+            continue;
+        }
+        files_with_match += 1;
+        let file_matches: usize = line_matches
+            .iter()
+            .map(|line_match| line_match.only_matches.len().max(1))
+            .sum();
+        total_matches += file_matches;
+        if quiet {
+            continue;
+        }
+
+        messages.push(
+            json!({ "type": "begin", "data": { "path": { "text": input.label } } }).to_string(),
+        );
+
+        // Upstream walks `content.split("\n")` (which yields a trailing empty
+        // segment after the final newline) and accumulates a per-line absolute
+        // character offset.
+        let lines: Vec<&str> = input.text.split('\n').collect();
+        let mut line_offset = 0usize;
+        for (line_index, line) in lines.iter().enumerate() {
+            let mut submatches: Vec<JsonValue> = Vec::new();
+            for matcher in matchers {
+                for (start, end, text) in matcher.match_ranges(line) {
+                    submatches.push(json!({
+                        "match": { "text": text },
+                        "start": start,
+                        "end": end,
+                    }));
+                }
+            }
+            if !submatches.is_empty() {
+                messages.push(
+                    json!({
+                        "type": "match",
+                        "data": {
+                            "path": { "text": input.label },
+                            "lines": { "text": format!("{line}\n") },
+                            "line_number": line_index + 1,
+                            "absolute_offset": line_offset,
+                            "submatches": submatches,
+                        },
+                    })
+                    .to_string(),
+                );
+            }
+            line_offset += line.chars().count() + 1;
+        }
+
+        messages.push(
+            json!({
+                "type": "end",
+                "data": {
+                    "path": { "text": input.label },
+                    "binary_offset": JsonValue::Null,
+                    "stats": {
+                        "elapsed": { "secs": 0, "nanos": 0, "human": "0s" },
+                        "searches": 1,
+                        "searches_with_match": 1,
+                        "bytes_searched": input.text.chars().count(),
+                        "bytes_printed": 0,
+                        "matched_lines": file_matches,
+                        "matches": file_matches,
+                    },
+                },
+            })
+            .to_string(),
+        );
+    }
+
+    messages.push(
+        json!({
+            "type": "summary",
+            "data": {
+                "elapsed_total": { "secs": 0, "nanos": 0, "human": "0s" },
+                "stats": {
+                    "elapsed": { "secs": 0, "nanos": 0, "human": "0s" },
+                    "searches": inputs.len(),
+                    "searches_with_match": files_with_match,
+                    "bytes_searched": bytes_searched,
+                    "bytes_printed": 0,
+                    "matched_lines": total_matches,
+                    "matches": total_matches,
+                },
+            },
+        })
+        .to_string(),
+    );
+
+    let mut stdout = messages.join("\n");
+    stdout.push('\n');
+    CommandResult {
+        exit_code: if files_with_match == 0 { 1 } else { 0 },
         stdout,
         ..CommandResult::default()
     }
@@ -23050,7 +23633,11 @@ fn command_tar_extract(state: &ExecState<'_>, options: &TarOptions, stdin: &str)
             .filter_map(|entry| {
                 content_to_bytes(entry.content_base64.as_str(), BufferEncoding::Base64).ok()
             })
-            .map(|bytes| bytes_to_string(&bytes, BufferEncoding::Binary))
+            // Mirror upstream `tar -xO`, which decodes entry bytes via a UTF-8
+            // TextDecoder (tar.ts: `new TextDecoder().decode(entry.content)`), so
+            // multibyte text round-trips faithfully through a `tar -cf - | tar -xOf -`
+            // pipe instead of being mangled by a byte-for-byte latin1 view.
+            .map(|bytes| bytes_to_string(&bytes, BufferEncoding::Utf8))
             .collect::<String>();
         return stdout_result(stdout);
     }
@@ -23371,12 +23958,40 @@ fn read_tar_payload_from_file(state: &ExecState<'_>, path: &str) -> Result<Strin
         .fs
         .lock()
         .map_err(|_| stderr_result(1, "tar: filesystem lock poisoned\n"))?;
-    fs.read_file(&resolved).map_err(|_| {
+    let bytes = fs.read_file_buffer(&resolved).map_err(|_| {
         stderr_result(
             2,
             format!("tar: {path}: Cannot open: No such file or directory\n"),
         )
-    })
+    })?;
+    // Native-codec (xz/zstd) payloads carry magic bytes that are not valid UTF-8;
+    // detect them on the raw buffer (before any lossy decode) so they fail closed
+    // with the right message instead of being mangled into a "not a tar archive".
+    reject_native_codec_payload(&bytes)?;
+    Ok(bytes_to_string(&bytes, BufferEncoding::Utf8))
+}
+
+/// xz stream magic `FD 37 7A 58 5A 00`.
+const XZ_MAGIC_BYTES: [u8; 6] = [0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00];
+/// zstd frame magic `28 B5 2F FD`.
+const ZSTD_MAGIC_BYTES: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
+/// Fails closed when raw archive bytes look like a native xz/zstd codec stream,
+/// mirroring upstream parseXz/parseZstdCompressedArchive default rejection.
+fn reject_native_codec_payload(bytes: &[u8]) -> Result<(), CommandResult> {
+    if bytes.starts_with(&XZ_MAGIC_BYTES) {
+        return Err(stderr_result(
+            2,
+            "tar: xz decompression is disabled by default (native codec risk)\n",
+        ));
+    }
+    if bytes.starts_with(&ZSTD_MAGIC_BYTES) {
+        return Err(stderr_result(
+            2,
+            "tar: zstd decompression is disabled by default (native codec risk)\n",
+        ));
+    }
+    Ok(())
 }
 
 fn write_tar_payload(
@@ -23483,11 +24098,31 @@ fn decode_virtual_tar(content: &str) -> Result<(VirtualTarArchive, TarCompressio
         let (archive, _) = decode_virtual_tar(&plain)?;
         return Ok((archive, TarCompression::Bzip2));
     }
+    // Real native-codec payloads (xz/zstd) are detected by their magic bytes and
+    // fail closed by default, mirroring upstream parseXz/parseZstdCompressedArchive:
+    // we never hand untrusted bytes to a native xz/zstd decoder.
+    if content.starts_with(XZ_MAGIC_PREFIX) {
+        return Err(stderr_result(
+            2,
+            "tar: xz decompression is disabled by default (native codec risk)\n",
+        ));
+    }
+    if content.starts_with(ZSTD_MAGIC_PREFIX) {
+        return Err(stderr_result(
+            2,
+            "tar: zstd decompression is disabled by default (native codec risk)\n",
+        ));
+    }
     Err(stderr_result(
         2,
         "tar: This does not look like a tar archive\n",
     ))
 }
+
+/// xz stream magic `FD 37 7A 58 5A 00`, as latin1-decoded archive bytes.
+const XZ_MAGIC_PREFIX: &str = "\u{fd}7zXZ\u{00}";
+/// zstd frame magic `28 B5 2F FD`, as latin1-decoded archive bytes.
+const ZSTD_MAGIC_PREFIX: &str = "\u{28}\u{b5}\u{2f}\u{fd}";
 
 fn virtual_bzip_pack(content: &str) -> String {
     format!(
@@ -28244,6 +28879,103 @@ mod tests {
                 .stdout
                 .contains("file-name_123.txt")
         );
+    }
+
+    #[test]
+    fn r11jb_tar_native_codec_decode_gates_and_utf8_stdin_pipe() {
+        // tar.security.test.ts:93/100 createXz/createZstdCompressedArchive reject by
+        // default: at the tar command surface, -cJf (xz) and --zstd encode fail closed
+        // with the native-codec-risk message and exit 2.
+        let create_bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/src/test.txt", "data"),
+        );
+        let xz_create = create_bash.exec(
+            "tar -cJf /out.tar.xz -C /src test.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(xz_create.exit_code, 2);
+        assert!(
+            xz_create
+                .stderr
+                .contains("xz compression is disabled by default (native codec risk)"),
+            "xz create gate message: {:?}",
+            xz_create.stderr
+        );
+        let zstd_create = create_bash.exec(
+            "tar --zstd -cf /out.tar.zst -C /src test.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(zstd_create.exit_code, 2);
+        assert!(
+            zstd_create
+                .stderr
+                .contains("zstd compression is disabled by default (native codec risk)"),
+            "zstd create gate message: {:?}",
+            zstd_create.stderr
+        );
+
+        // tar.security.test.ts:107 parseXzCompressedArchive rejects by default: an
+        // archive carrying the real xz stream magic (FD 37 7A 58 5A 00) is never handed
+        // to a native decoder; extraction fails closed with the decompression message.
+        let xz_bash = JustBashSession::new();
+        let mut xz_payload = vec![0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00];
+        xz_payload.extend_from_slice(&[0x01, 0x02, 0x03]);
+        xz_bash
+            .inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file("/archive.tar.xz", xz_payload)
+            .unwrap();
+        let xz_extract = xz_bash.exec(
+            "mkdir /dest && tar -xf /archive.tar.xz -C /dest",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(xz_extract.exit_code, 2);
+        assert!(
+            xz_extract
+                .stderr
+                .contains("xz decompression is disabled by default (native codec risk)"),
+            "xz parse gate message: {:?}",
+            xz_extract.stderr
+        );
+
+        // tar.security.test.ts:115 parseZstdCompressedArchive rejects by default: the
+        // real zstd frame magic (28 B5 2F FD) is likewise fail-closed on extract.
+        let zstd_bash = JustBashSession::new();
+        let mut zstd_payload = vec![0x28, 0xB5, 0x2F, 0xFD];
+        zstd_payload.extend_from_slice(&[0x01, 0x02, 0x03]);
+        zstd_bash
+            .inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file("/archive.tar.zst", zstd_payload)
+            .unwrap();
+        let zstd_extract = zstd_bash.exec(
+            "mkdir /dest && tar -xf /archive.tar.zst -C /dest",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(zstd_extract.exit_code, 2);
+        assert!(
+            zstd_extract
+                .stderr
+                .contains("zstd decompression is disabled by default (native codec risk)"),
+            "zstd parse gate message: {:?}",
+            zstd_extract.stderr
+        );
+
+        // tar.utf8-stdin.test.ts:5 round-trips multibyte file content through a
+        // `tar -cf - dir | tar -xOf - dir/k.txt` pipe.
+        let utf8_bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/dir/k.txt", "한글 / café / 漢字\n"),
+        );
+        let piped = utf8_bash.exec(
+            "cd / && tar -cf - dir | tar -xOf - dir/k.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(piped.exit_code, 0, "pipe stderr: {:?}", piped.stderr);
+        assert_eq!(piped.stdout, "한글 / café / 漢字\n");
     }
 
     #[test]
