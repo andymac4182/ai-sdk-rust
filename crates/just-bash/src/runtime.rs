@@ -2035,6 +2035,151 @@ and exhibited clearly, with a label attached.\n";
         assert_eq!(env.exec("awk '{print NF}' /fields.txt").stdout, "3\n3\n");
     }
 
+    /// JBC-47 closes portable sed argument/error-handling and single-command
+    /// extras: `-f` script files, `y///` transliteration, addressed single-
+    /// command `{ }` blocks, and the GNU sed diagnostics for missing scripts,
+    /// unknown options, undefined branch labels, context-address errors, and
+    /// malformed transliteration sets. Each assertion mirrors the upstream
+    /// `sed.errors.test.ts` and `sed.advanced.test.ts` expectations exactly.
+    #[test]
+    fn sed_jbc47_argument_errors_transliteration_blocks_and_script_files() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/test/file.txt".to_string(),
+                "line 1\nline 2\nline 3\n".to_string(),
+            )]),
+            cwd: Some("/test".to_string()),
+            ..BashOptions::default()
+        });
+
+        // sed.errors.test.ts:37 — `-f` on a missing script file reports
+        // "No such file or directory" and exits 1.
+        let missing_f = env.exec("sed -f /nonexistent.sed /test/file.txt");
+        assert_eq!(missing_f.exit_code, 1);
+        assert!(missing_f.stderr.contains("No such file or directory"));
+
+        // sed.errors.test.ts:44 — unterminated substitution does not hang and
+        // returns a defined result.
+        let unterminated_s = env.exec("sed 's/foo/bar' /test/file.txt");
+        assert_eq!(unterminated_s.exit_code, 1);
+
+        // sed.errors.test.ts:59 — unknown command `z` is handled gracefully
+        // (a defined result rather than a panic / hang).
+        let _unknown_cmd = env.exec("sed 'z' /test/file.txt");
+
+        // sed.errors.test.ts:66 — unknown substitution flag is ignored, exit 0.
+        assert_eq!(env.exec("sed 's/a/b/z' /test/file.txt").exit_code, 0);
+
+        // sed.errors.test.ts:75 — line-0 address is handled gracefully.
+        assert_eq!(env.exec("sed '0d' /test/file.txt").exit_code, 0);
+
+        // sed.errors.test.ts:82 — `,3p` (missing start address) reports
+        // "expected context address".
+        let ctx_addr = env.exec("sed -n ',3p' /test/file.txt");
+        assert_eq!(ctx_addr.exit_code, 1);
+        assert!(ctx_addr.stderr.contains("expected context address"));
+
+        // sed.errors.test.ts:89 — `/foo d` (unterminated address regex)
+        // reports "command expected".
+        let malformed_addr = env.exec("sed '/foo d' /test/file.txt");
+        assert_eq!(malformed_addr.exit_code, 1);
+        assert!(malformed_addr.stderr.contains("command expected"));
+
+        // sed.errors.test.ts:106 / :113 — branch (`b`) and conditional branch
+        // (`t`) to an undefined label both report "undefined label".
+        let b_undef = env.exec("sed 'b undefined' /test/file.txt");
+        assert_eq!(b_undef.exit_code, 1);
+        assert!(b_undef.stderr.contains("undefined label"));
+        let t_undef = env.exec("sed 't missing' /test/file.txt");
+        assert_eq!(t_undef.exit_code, 1);
+        assert!(t_undef.stderr.contains("undefined label"));
+
+        // sed.errors.test.ts:122 / :129 — unknown short and long options.
+        let short_opt = env.exec("sed -z 's/a/b/' /test/file.txt");
+        assert_eq!(short_opt.exit_code, 1);
+        assert!(short_opt.stderr.contains("invalid option"));
+        let long_opt = env.exec("sed --unknown 's/a/b/' /test/file.txt");
+        assert_eq!(long_opt.exit_code, 1);
+        assert!(long_opt.stderr.contains("unrecognized option"));
+
+        // sed.errors.test.ts:170 / :177 — mismatched and unterminated `y`.
+        let y_mismatch = env.exec("sed 'y/abc/xy/' /test/file.txt");
+        assert_eq!(y_mismatch.exit_code, 1);
+        assert!(y_mismatch.stderr.contains("same length"));
+        let y_unterminated = env.exec("sed 'y/abc/xyz' /test/file.txt");
+        assert_eq!(y_unterminated.exit_code, 1);
+        assert!(y_unterminated.stderr.contains("unterminated"));
+
+        // sed.errors.test.ts:186 — addressed single-command block `1{d;}`.
+        let block_delete = env.exec("sed '1{d;}' /test/file.txt");
+        assert_eq!(block_delete.exit_code, 0);
+        assert_eq!(block_delete.stdout, "line 2\nline 3\n");
+
+        // sed.errors.test.ts:193 — block with substitution `1{s/1/X/;}`.
+        let block_sub = env.exec("sed '1{s/1/X/;}' /test/file.txt");
+        assert_eq!(block_sub.exit_code, 0);
+        assert!(block_sub.stdout.contains("line X"));
+
+        // A separate environment with no preset cwd for the `sed` (no script)
+        // and transliteration / script-file rows.
+        let plain = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/test.txt".to_string(), "hello world\n".to_string()),
+                ("/rotate.txt".to_string(), "abc\n".to_string()),
+                (
+                    "/multi.sed".to_string(),
+                    "s/hello/HELLO/\ns/world/WORLD/\n".to_string(),
+                ),
+                (
+                    "/comment.sed".to_string(),
+                    "# This is a comment\ns/hello/HELLO/\n".to_string(),
+                ),
+                ("/one.sed".to_string(), "s/hello/HELLO/\n".to_string()),
+                ("/lower.txt".to_string(), "hello\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // sed.errors.test.ts:38 / sed.ts — `sed` with no script reports
+        // "no script specified".
+        let no_script = plain.exec("sed");
+        assert_eq!(no_script.exit_code, 1);
+        assert!(no_script.stderr.contains("no script specified"));
+
+        // sed.advanced.test.ts:35 — `y` lowercase to uppercase.
+        assert_eq!(
+            plain
+                .exec("sed 'y/abcdefghijklmnopqrstuvwxyz/ABCDEFGHIJKLMNOPQRSTUVWXYZ/' /test.txt")
+                .stdout,
+            "HELLO WORLD\n"
+        );
+        // sed.advanced.test.ts:45 — `y` rotation.
+        assert_eq!(plain.exec("sed 'y/abc/bca/' /rotate.txt").stdout, "bca\n");
+
+        // sed.advanced.test.ts:122 — `-f` reads a multi-command script file.
+        assert_eq!(
+            plain.exec("sed -f /multi.sed /test.txt").stdout,
+            "HELLO WORLD\n"
+        );
+        // sed.advanced.test.ts:133 — `-f` ignores `#` comments.
+        assert_eq!(
+            plain.exec("sed -f /comment.sed /lower.txt").stdout,
+            "HELLO\n"
+        );
+        // sed.advanced.test.ts:144 — combines `-f` and `-e`.
+        assert_eq!(
+            plain
+                .exec("sed -f /one.sed -e 's/world/WORLD/' /test.txt")
+                .stdout,
+            "HELLO WORLD\n"
+        );
+        // sed.advanced.test.ts:157 — `-f` on a missing file reports
+        // "couldn't open file".
+        let missing_script = plain.exec("sed -f /nope.sed /test.txt");
+        assert_eq!(missing_script.exit_code, 1);
+        assert!(missing_script.stderr.contains("couldn't open file"));
+    }
+
     #[test]
     fn awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors() {
         let env = Bash::with_options(BashOptions {
