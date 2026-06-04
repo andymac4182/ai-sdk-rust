@@ -3468,6 +3468,45 @@ const jbr1CaseGroups = [
   },
 ];
 
+const jbR2CaseGroups = [
+  {
+    file: 'packages/just-bash/src/interpreter/control-flow.test.ts',
+    lines: [42, 60, 73, 247, 260, 272, 291, 304, 318, 331, 343, 358],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r2_interpreter_control_flow_rows_match_upstream',
+    notes:
+      'JBR-2 verifies portable interpreter control-flow rows — elif chains, &&-conditioned and nested if, while/until execution and skip, nested while, break/continue, and break/continue N — through the Rust shell. IFS-splitting, positional-parameter, invalid-identifier-error, and C-style for (( )) rows stay pending.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/parser-edge-cases.test.ts',
+    lines: [30, 68, 186, 193, 247, 254, 260, 266, 272, 281, 288, 295, 303, 311, 318, 324],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r2_syntax_parser_edge_cases_and_redirection_rows_match_upstream',
+    notes:
+      'JBR-2 verifies additional portable parser-edge-cases rows — adjacent quoting, escaped space, && / || precedence and semicolons, pipes with semicolons, assignment-vs-argument, empty/whitespace input, bare/double semicolon syntax errors, long argument, unicode, double-quoted newline, and 2>/dev/null / 2>&1 redirection — through the Rust shell.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/operators.test.ts',
+    lines: [275],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r2_syntax_parser_edge_cases_and_redirection_rows_match_upstream',
+    notes:
+      'JBR-2 verifies that the operators.test.ts `||`-is-not-a-pipe row falls back to the right-hand command when the left command fails, through the Rust shell.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/arithmetic.test.ts',
+    lines: [487],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r2_interpreter_arithmetic_command_assignment_row_matches_upstream',
+    notes:
+      'JBR-2 verifies the portable arithmetic-command assignment row `(( x = 5 + 3 )); echo $x` through the Rust shell. Division/modulo-by-zero and negative-exponent error rows stay pending until arithmetic error reporting lands.',
+  },
+];
+
 const jbc35CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/awk/awk.fields.test.ts',
@@ -4343,6 +4382,7 @@ function caseOverrideFor(testCase) {
     ...jbc30AgentExampleCaseGroups,
     ...jbc33CaseGroups,
     ...jbr1CaseGroups,
+    ...jbR2CaseGroups,
     ...jbc37CaseGroups,
     ...jbc44CaseGroups,
   ].find(
