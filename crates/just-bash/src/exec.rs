@@ -16413,15 +16413,49 @@ fn parse_toml_input(input: &str) -> Result<JsonValue, String> {
         let (key, value_text) = line
             .split_once('=')
             .ok_or_else(|| format!("toml: invalid line: {line}"))?;
-        // Support multi-line arrays by joining until brackets balance.
-        let mut value_text = value_text.trim().to_string();
-        while toml_value_is_incomplete(&value_text) && index < lines.len() {
-            value_text.push(' ');
-            value_text.push_str(strip_toml_comment(lines[index].trim()));
-            index += 1;
-        }
+        let raw_value = value_text.trim();
         let key_path = parse_toml_key_path(key.trim())?;
-        let value = parse_toml_value(&value_text)?;
+        // Multi-line basic (`"""`) or literal (`'''`) strings: collect raw lines
+        // until the matching closing delimiter, mirroring smol-toml.
+        let value = if let Some(delim) = toml_multiline_delim(raw_value) {
+            let mut body = String::new();
+            // Content begins after the opening delimiter on the same line.
+            let mut after = &raw_value[delim.len()..];
+            // A newline immediately after the opening delimiter is trimmed.
+            let mut first = true;
+            loop {
+                if let Some(end) = after.find(delim) {
+                    body.push_str(&after[..end]);
+                    break;
+                }
+                body.push_str(after);
+                let next = lines
+                    .get(index)
+                    .ok_or_else(|| format!("toml: unterminated multiline string: {raw_value}"))?;
+                index += 1;
+                body.push('\n');
+                after = next;
+                let _ = first;
+                first = false;
+            }
+            let _ = first;
+            // Trim a single leading newline right after the opening delimiter.
+            let trimmed = body.strip_prefix('\n').unwrap_or(&body);
+            if delim == "'''" {
+                JsonValue::String(trimmed.to_string())
+            } else {
+                JsonValue::String(toml_unescape(trimmed))
+            }
+        } else {
+            // Support multi-line arrays by joining until brackets balance.
+            let mut value_text = raw_value.to_string();
+            while toml_value_is_incomplete(&value_text) && index < lines.len() {
+                value_text.push(' ');
+                value_text.push_str(strip_toml_comment(lines[index].trim()));
+                index += 1;
+            }
+            parse_toml_value(&value_text)?
+        };
         let mut full_path = current.clone();
         full_path.extend(key_path);
         toml_insert(&mut root, &full_path, value)?;
@@ -16533,6 +16567,20 @@ fn toml_insert(
     let parent = toml_ensure_table(root, parents)?;
     parent.insert(last.clone(), value);
     Ok(())
+}
+
+/// Returns the multiline-string delimiter (`"""` or `'''`) if `value` opens
+/// one and it is not closed on the same line, otherwise `None`.
+fn toml_multiline_delim(value: &str) -> Option<&'static str> {
+    for delim in ["\"\"\"", "'''"] {
+        if let Some(rest) = value.strip_prefix(delim) {
+            // Single-line `"""x"""` is handled by the normal scalar path.
+            if !rest.contains(delim) {
+                return Some(delim);
+            }
+        }
+    }
+    None
 }
 
 fn parse_toml_value(text: &str) -> Result<JsonValue, String> {
