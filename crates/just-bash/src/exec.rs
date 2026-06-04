@@ -23050,7 +23050,11 @@ fn command_tar_extract(state: &ExecState<'_>, options: &TarOptions, stdin: &str)
             .filter_map(|entry| {
                 content_to_bytes(entry.content_base64.as_str(), BufferEncoding::Base64).ok()
             })
-            .map(|bytes| bytes_to_string(&bytes, BufferEncoding::Binary))
+            // Mirror upstream `tar -xO`, which decodes entry bytes via a UTF-8
+            // TextDecoder (tar.ts: `new TextDecoder().decode(entry.content)`), so
+            // multibyte text round-trips faithfully through a `tar -cf - | tar -xOf -`
+            // pipe instead of being mangled by a byte-for-byte latin1 view.
+            .map(|bytes| bytes_to_string(&bytes, BufferEncoding::Utf8))
             .collect::<String>();
         return stdout_result(stdout);
     }
@@ -23371,12 +23375,40 @@ fn read_tar_payload_from_file(state: &ExecState<'_>, path: &str) -> Result<Strin
         .fs
         .lock()
         .map_err(|_| stderr_result(1, "tar: filesystem lock poisoned\n"))?;
-    fs.read_file(&resolved).map_err(|_| {
+    let bytes = fs.read_file_buffer(&resolved).map_err(|_| {
         stderr_result(
             2,
             format!("tar: {path}: Cannot open: No such file or directory\n"),
         )
-    })
+    })?;
+    // Native-codec (xz/zstd) payloads carry magic bytes that are not valid UTF-8;
+    // detect them on the raw buffer (before any lossy decode) so they fail closed
+    // with the right message instead of being mangled into a "not a tar archive".
+    reject_native_codec_payload(&bytes)?;
+    Ok(bytes_to_string(&bytes, BufferEncoding::Utf8))
+}
+
+/// xz stream magic `FD 37 7A 58 5A 00`.
+const XZ_MAGIC_BYTES: [u8; 6] = [0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00];
+/// zstd frame magic `28 B5 2F FD`.
+const ZSTD_MAGIC_BYTES: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
+/// Fails closed when raw archive bytes look like a native xz/zstd codec stream,
+/// mirroring upstream parseXz/parseZstdCompressedArchive default rejection.
+fn reject_native_codec_payload(bytes: &[u8]) -> Result<(), CommandResult> {
+    if bytes.starts_with(&XZ_MAGIC_BYTES) {
+        return Err(stderr_result(
+            2,
+            "tar: xz decompression is disabled by default (native codec risk)\n",
+        ));
+    }
+    if bytes.starts_with(&ZSTD_MAGIC_BYTES) {
+        return Err(stderr_result(
+            2,
+            "tar: zstd decompression is disabled by default (native codec risk)\n",
+        ));
+    }
+    Ok(())
 }
 
 fn write_tar_payload(
@@ -23483,11 +23515,31 @@ fn decode_virtual_tar(content: &str) -> Result<(VirtualTarArchive, TarCompressio
         let (archive, _) = decode_virtual_tar(&plain)?;
         return Ok((archive, TarCompression::Bzip2));
     }
+    // Real native-codec payloads (xz/zstd) are detected by their magic bytes and
+    // fail closed by default, mirroring upstream parseXz/parseZstdCompressedArchive:
+    // we never hand untrusted bytes to a native xz/zstd decoder.
+    if content.starts_with(XZ_MAGIC_PREFIX) {
+        return Err(stderr_result(
+            2,
+            "tar: xz decompression is disabled by default (native codec risk)\n",
+        ));
+    }
+    if content.starts_with(ZSTD_MAGIC_PREFIX) {
+        return Err(stderr_result(
+            2,
+            "tar: zstd decompression is disabled by default (native codec risk)\n",
+        ));
+    }
     Err(stderr_result(
         2,
         "tar: This does not look like a tar archive\n",
     ))
 }
+
+/// xz stream magic `FD 37 7A 58 5A 00`, as latin1-decoded archive bytes.
+const XZ_MAGIC_PREFIX: &str = "\u{fd}7zXZ\u{00}";
+/// zstd frame magic `28 B5 2F FD`, as latin1-decoded archive bytes.
+const ZSTD_MAGIC_PREFIX: &str = "\u{28}\u{b5}\u{2f}\u{fd}";
 
 fn virtual_bzip_pack(content: &str) -> String {
     format!(
@@ -28244,6 +28296,103 @@ mod tests {
                 .stdout
                 .contains("file-name_123.txt")
         );
+    }
+
+    #[test]
+    fn r11jb_tar_native_codec_decode_gates_and_utf8_stdin_pipe() {
+        // tar.security.test.ts:93/100 createXz/createZstdCompressedArchive reject by
+        // default: at the tar command surface, -cJf (xz) and --zstd encode fail closed
+        // with the native-codec-risk message and exit 2.
+        let create_bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/src/test.txt", "data"),
+        );
+        let xz_create = create_bash.exec(
+            "tar -cJf /out.tar.xz -C /src test.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(xz_create.exit_code, 2);
+        assert!(
+            xz_create
+                .stderr
+                .contains("xz compression is disabled by default (native codec risk)"),
+            "xz create gate message: {:?}",
+            xz_create.stderr
+        );
+        let zstd_create = create_bash.exec(
+            "tar --zstd -cf /out.tar.zst -C /src test.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(zstd_create.exit_code, 2);
+        assert!(
+            zstd_create
+                .stderr
+                .contains("zstd compression is disabled by default (native codec risk)"),
+            "zstd create gate message: {:?}",
+            zstd_create.stderr
+        );
+
+        // tar.security.test.ts:107 parseXzCompressedArchive rejects by default: an
+        // archive carrying the real xz stream magic (FD 37 7A 58 5A 00) is never handed
+        // to a native decoder; extraction fails closed with the decompression message.
+        let xz_bash = JustBashSession::new();
+        let mut xz_payload = vec![0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00];
+        xz_payload.extend_from_slice(&[0x01, 0x02, 0x03]);
+        xz_bash
+            .inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file("/archive.tar.xz", xz_payload)
+            .unwrap();
+        let xz_extract = xz_bash.exec(
+            "mkdir /dest && tar -xf /archive.tar.xz -C /dest",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(xz_extract.exit_code, 2);
+        assert!(
+            xz_extract
+                .stderr
+                .contains("xz decompression is disabled by default (native codec risk)"),
+            "xz parse gate message: {:?}",
+            xz_extract.stderr
+        );
+
+        // tar.security.test.ts:115 parseZstdCompressedArchive rejects by default: the
+        // real zstd frame magic (28 B5 2F FD) is likewise fail-closed on extract.
+        let zstd_bash = JustBashSession::new();
+        let mut zstd_payload = vec![0x28, 0xB5, 0x2F, 0xFD];
+        zstd_payload.extend_from_slice(&[0x01, 0x02, 0x03]);
+        zstd_bash
+            .inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file("/archive.tar.zst", zstd_payload)
+            .unwrap();
+        let zstd_extract = zstd_bash.exec(
+            "mkdir /dest && tar -xf /archive.tar.zst -C /dest",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(zstd_extract.exit_code, 2);
+        assert!(
+            zstd_extract
+                .stderr
+                .contains("zstd decompression is disabled by default (native codec risk)"),
+            "zstd parse gate message: {:?}",
+            zstd_extract.stderr
+        );
+
+        // tar.utf8-stdin.test.ts:5 round-trips multibyte file content through a
+        // `tar -cf - dir | tar -xOf - dir/k.txt` pipe.
+        let utf8_bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/dir/k.txt", "한글 / café / 漢字\n"),
+        );
+        let piped = utf8_bash.exec(
+            "cd / && tar -cf - dir | tar -xOf - dir/k.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(piped.exit_code, 0, "pipe stderr: {:?}", piped.stderr);
+        assert_eq!(piped.stdout, "한글 / café / 漢字\n");
     }
 
     #[test]
