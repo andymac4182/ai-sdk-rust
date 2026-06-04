@@ -15676,4 +15676,231 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
             ("fallback\nafter\n".to_string(), 0)
         );
     }
+
+    const RG_SHERLOCK: &str = "For the Doctor Watsons of this world, as opposed to the Sherlock\nHolmeses, success in the province of detective work must always\nbe, to a very large extent, the result of luck. Sherlock Holmes\ncan extract a clew from a wisp of straw or a flake of cigar ash;\nbut Doctor Watson has to have it taken out for him and dusted,\nand exhibited clearly, with a label attached.\n";
+
+    fn rg_json_messages(stdout: &str) -> Vec<serde_json::Value> {
+        stdout
+            .trim()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSON line"))
+            .collect()
+    }
+
+    #[test]
+    fn rg_json_basic_output_structure_matches_ripgrep() {
+        // maps imported-tests/json.test.ts:37 "basic: JSON output structure".
+        let result =
+            home_bash(&[("sherlock", RG_SHERLOCK)]).exec("rg --json 'Sherlock Holmes' sherlock");
+        assert_eq!(result.exit_code, 0);
+        let msgs = rg_json_messages(&result.stdout);
+        assert_eq!(msgs[0]["type"], "begin");
+        assert_eq!(
+            msgs[0]["data"]["path"],
+            serde_json::json!({ "text": "sherlock" })
+        );
+        assert_eq!(msgs[1]["type"], "match");
+        assert_eq!(
+            msgs[1]["data"]["lines"],
+            serde_json::json!({
+                "text": "be, to a very large extent, the result of luck. Sherlock Holmes\n"
+            })
+        );
+        assert_eq!(msgs[1]["data"]["line_number"], 3);
+        assert_eq!(msgs[1]["data"]["absolute_offset"], 129);
+        let submatches = msgs[1]["data"]["submatches"].as_array().unwrap();
+        assert_eq!(submatches.len(), 1);
+        assert_eq!(
+            submatches[0]["match"],
+            serde_json::json!({ "text": "Sherlock Holmes" })
+        );
+        assert_eq!(submatches[0]["start"], 48);
+        assert_eq!(submatches[0]["end"], 63);
+        assert_eq!(msgs[2]["type"], "end");
+        assert_eq!(msgs[2]["data"]["binary_offset"], serde_json::Value::Null);
+        assert_eq!(msgs[3]["type"], "summary");
+        assert_eq!(msgs[3]["data"]["stats"]["searches_with_match"], 1);
+    }
+
+    #[test]
+    fn rg_json_quiet_emits_only_summary() {
+        // maps imported-tests/json.test.ts:103 "quiet_stats: JSON with --quiet shows only summary".
+        let result = home_bash(&[("sherlock", RG_SHERLOCK)])
+            .exec("rg --json --quiet 'Sherlock Holmes' sherlock");
+        assert_eq!(result.exit_code, 0);
+        let msgs = rg_json_messages(&result.stdout);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["type"], "summary");
+        assert_eq!(msgs[0]["data"]["stats"]["searches_with_match"], 1);
+    }
+
+    #[test]
+    fn rg_json_reports_all_submatches_on_a_line() {
+        // maps imported-tests/json.test.ts:124 "should output all matches with correct submatches".
+        let result =
+            home_bash(&[("test.txt", "foo bar foo baz foo\n")]).exec("rg --json foo test.txt");
+        assert_eq!(result.exit_code, 0);
+        let msgs = rg_json_messages(&result.stdout);
+        let matched = msgs.iter().find(|m| m["type"] == "match").unwrap();
+        let submatches = matched["data"]["submatches"].as_array().unwrap();
+        assert_eq!(submatches.len(), 3);
+        assert_eq!(
+            submatches[0],
+            serde_json::json!({ "match": { "text": "foo" }, "start": 0, "end": 3 })
+        );
+        assert_eq!(
+            submatches[1],
+            serde_json::json!({ "match": { "text": "foo" }, "start": 8, "end": 11 })
+        );
+        assert_eq!(
+            submatches[2],
+            serde_json::json!({ "match": { "text": "foo" }, "start": 16, "end": 19 })
+        );
+    }
+
+    #[test]
+    fn rg_json_emits_begin_end_per_file() {
+        // maps imported-tests/json.test.ts:157 "should output multiple files with begin/end messages".
+        let result =
+            home_bash(&[("a.txt", "hello\n"), ("b.txt", "hello\n")]).exec("rg --json hello");
+        assert_eq!(result.exit_code, 0);
+        let msgs = rg_json_messages(&result.stdout);
+        assert_eq!(msgs.iter().filter(|m| m["type"] == "begin").count(), 2);
+        assert_eq!(msgs.iter().filter(|m| m["type"] == "end").count(), 2);
+        assert_eq!(msgs.iter().filter(|m| m["type"] == "match").count(), 2);
+        assert_eq!(msgs.iter().filter(|m| m["type"] == "summary").count(), 1);
+    }
+
+    #[test]
+    fn rg_json_outputs_summary_with_no_matches() {
+        // maps imported-tests/json.test.ts:189 "should output summary even with no matches".
+        let result = home_bash(&[("test.txt", "hello world\n")]).exec("rg --json notfound");
+        assert_eq!(result.exit_code, 1);
+        let msgs = rg_json_messages(&result.stdout);
+        let summary = msgs.iter().find(|m| m["type"] == "summary").unwrap();
+        assert_eq!(summary["data"]["stats"]["searches_with_match"], 0);
+    }
+
+    #[test]
+    fn rg_json_handles_empty_file_with_summary() {
+        // maps imported-tests/json.test.ts:207 "should handle empty file with summary".
+        let result = home_bash(&[("empty.txt", "")]).exec("rg --json foo empty.txt");
+        assert_eq!(result.exit_code, 1);
+        let msgs = rg_json_messages(&result.stdout);
+        let summary = msgs.iter().find(|m| m["type"] == "summary").unwrap();
+        assert_eq!(summary["data"]["stats"]["searches_with_match"], 0);
+        assert_eq!(summary["data"]["stats"]["bytes_searched"], 0);
+    }
+
+    #[test]
+    fn rg_heading_groups_matches_under_file_path() {
+        // maps imported-tests/regression.test.ts:203 "r99: should show heading output format".
+        let result = home_bash(&[("foo1", "test\n"), ("foo2", "zzz\n"), ("bar", "test\n")])
+            .exec("rg --heading test");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("test"));
+        // Heading mode prints the file label on its own line above the matches.
+        assert!(result.stdout.contains("bar\n"));
+        assert!(result.stdout.contains("foo1\n"));
+    }
+
+    #[test]
+    fn rg_strips_leading_utf8_bom_before_anchored_match() {
+        // maps imported-tests/regression.test.ts:866 "r1163: should handle UTF-8 BOM".
+        let result = home_bash(&[("bom.txt", "\u{FEFF}test123\ntest123\n")]).exec("rg '^test123'");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "bom.txt:1:test123\nbom.txt:2:test123\n");
+    }
+
+    #[test]
+    fn rg_fixed_strings_from_file_match_many_duplicate_literals() {
+        // maps imported-tests/regression.test.ts:1040
+        // "r1334_crazy_literals: should handle many literal patterns".
+        let patterns = "1.208.0.0/12\n".repeat(40);
+        let result = home_bash(&[
+            ("patterns", patterns.as_str()),
+            ("corpus", "1.208.0.0/12\n"),
+        ])
+        .exec("rg -Ff patterns corpus");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "1.208.0.0/12\n");
+    }
+
+    #[test]
+    fn rg_files_errors_on_glob_with_unclosed_character_class() {
+        // maps imported-tests/regression.test.ts:1505
+        // "r3127_glob_flag_not_allow_unclosed_class: should error on unclosed class in glob".
+        let result = home_bash(&[("[abc", ""), ("test", "")]).exec("rg --files -g '[abc'");
+        assert_ne!(result.exit_code, 0);
+        assert_eq!(
+            result.stderr,
+            "rg: glob '[abc' has an unclosed character class\n"
+        );
+    }
+
+    #[test]
+    fn rg_negated_glob_with_leading_slash_is_root_anchored() {
+        // maps imported-tests/regression.test.ts:489 "r405: should handle negated glob with path".
+        let result = home_bash(&[
+            ("foo/bar/file1.txt", "test\n"),
+            ("bar/foo/file2.txt", "test\n"),
+        ])
+        .exec("rg -g '!/foo/**' test");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "bar/foo/file2.txt:1:test\n");
+    }
+
+    #[test]
+    fn rg_follow_symlinked_directory_root_with_dash_l() {
+        // maps imported-tests/regression.test.ts:405 "r256: should follow directory symlinks with -L".
+        let bash = home_bash(&[("realdir/test.txt", "test content\n")]);
+        bash.exec("ln -s realdir /home/user/linkdir");
+        let result = bash.exec("rg -L test linkdir");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("test content"));
+    }
+
+    #[test]
+    fn rg_follow_symlinked_directory_root_with_dash_l_and_single_thread() {
+        // maps imported-tests/regression.test.ts:420
+        // "r256: should follow directory symlinks with -L and -j1".
+        let bash = home_bash(&[("realdir/test.txt", "test content\n")]);
+        bash.exec("ln -s realdir /home/user/linkdir");
+        let result = bash.exec("rg -L -j1 test linkdir");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("test content"));
+    }
+
+    #[test]
+    fn rg_gitignore_negation_unhides_dotfile() {
+        // maps imported-tests/regression.test.ts:171
+        // "r90: should handle negation of hidden file in gitignore".
+        let result = home_bash(&[
+            (".git/.gitkeep", ""),
+            (".gitignore", "!.foo\n"),
+            (".foo", "test\n"),
+        ])
+        .exec("rg test");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, ".foo:1:test\n");
+    }
+
+    #[test]
+    fn rg_follow_symlinked_subdirectory_surfaces_content_through_both_paths() {
+        // maps rg.flags.test.ts:63 "should follow symlinks to directories with -L".
+        let bash = home_bash(&[("subdir/file.txt", "hello\n")]);
+        bash.exec("ln -s subdir /home/user/linkdir");
+        // Without -L only the real directory is searched.
+        let without = bash.exec("rg hello");
+        assert_eq!(without.exit_code, 0);
+        assert_eq!(without.stdout, "subdir/file.txt:1:hello\n");
+        // With -L the file is found through both the real and symlinked paths.
+        let with = bash.exec("rg -L --sort path hello");
+        assert_eq!(with.exit_code, 0);
+        assert_eq!(
+            with.stdout,
+            "linkdir/file.txt:1:hello\nsubdir/file.txt:1:hello\n"
+        );
+    }
 }
