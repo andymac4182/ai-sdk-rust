@@ -8043,6 +8043,11 @@ enum AwkUnaryOp {
     Not,
 }
 
+/// Upper bound on `for`/`while` loop iterations. Guards against runaway or
+/// infinite loops (e.g. `while (1)`) while comfortably exceeding the iteration
+/// counts exercised by the portable awk test corpus.
+const AWK_MAX_LOOP_ITERATIONS: usize = 10_000_000;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AwkAssignOp {
     Assign,
@@ -8103,6 +8108,16 @@ enum AwkAction {
         array: String,
         body: Vec<AwkAction>,
     },
+    For {
+        init: Option<Box<AwkAction>>,
+        condition: Option<AwkExpr>,
+        update: Option<Box<AwkAction>>,
+        body: Vec<AwkAction>,
+    },
+    While {
+        condition: AwkExpr,
+        body: Vec<AwkAction>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -8144,6 +8159,11 @@ enum AwkExpr {
     InArray {
         key: Box<AwkExpr>,
         array: String,
+    },
+    Assign {
+        target: AwkTarget,
+        op: AwkAssignOp,
+        value: Box<AwkExpr>,
     },
 }
 
@@ -8322,31 +8342,10 @@ fn parse_awk_actions(body: &str) -> Result<Vec<AwkAction>, String> {
             index += 1;
             continue;
         }
-        if let Some((condition, then_source)) = parse_awk_if_statement(statement)? {
-            let then_actions = parse_awk_nested_actions(&then_source)?;
-            let mut else_actions = Vec::new();
-            let mut next_index = index + 1;
-            if let Some(next) = statements.get(next_index) {
-                let next = next.trim();
-                if let Some(rest) = strip_awk_keyword(next, "else") {
-                    if rest.is_empty() {
-                        next_index += 1;
-                        let Some(else_source) = statements.get(next_index) else {
-                            return Err("unsupported program".to_string());
-                        };
-                        else_actions = parse_awk_nested_actions(else_source)?;
-                    } else {
-                        else_actions = parse_awk_nested_actions(rest)?;
-                    }
-                    next_index += 1;
-                }
-            }
-            actions.push(AwkAction::If {
-                condition,
-                then_actions,
-                else_actions,
-            });
-            index = next_index;
+        if parse_awk_if_statement(statement)?.is_some() {
+            let (action, consumed) = parse_awk_if_chain(&statements, index)?;
+            actions.push(action);
+            index += consumed;
             continue;
         }
         if strip_awk_keyword(statement, "else").is_some() {
@@ -8365,6 +8364,16 @@ fn parse_awk_actions(body: &str) -> Result<Vec<AwkAction>, String> {
                 body,
             });
             index += 1;
+            continue;
+        }
+        if let Some((action, consumed)) = parse_awk_for_statement(&statements, index)? {
+            actions.push(action);
+            index += consumed;
+            continue;
+        }
+        if let Some((action, consumed)) = parse_awk_while_statement(&statements, index)? {
+            actions.push(action);
+            index += consumed;
             continue;
         }
         if let Some(rest) = strip_awk_keyword(statement, "delete") {
@@ -8447,6 +8456,82 @@ fn parse_awk_actions(body: &str) -> Result<Vec<AwkAction>, String> {
     Ok(actions)
 }
 
+/// Parses an `if (...) ... [else ...]` chain starting at `start`, where each
+/// statement was produced by [`split_awk_statements`]. Returns the assembled
+/// [`AwkAction::If`] and the number of statements consumed. Handles arbitrary
+/// `else if` chains by recursing: an `else` whose body is itself an `if` is
+/// parsed as a nested chain so its own trailing `else` is consumed correctly.
+fn parse_awk_if_chain(statements: &[String], start: usize) -> Result<(AwkAction, usize), String> {
+    let statement = statements[start].trim();
+    let Some((condition, then_source)) = parse_awk_if_statement(statement)? else {
+        return Err("unsupported program".to_string());
+    };
+    let mut consumed = 1usize;
+    let then_actions = if then_source.is_empty() {
+        // Bodyless `if (...)`: the body is the following statement, which may
+        // itself begin a nested `if`/`else` chain.
+        let body_index = start + consumed;
+        let Some(body) = statements.get(body_index) else {
+            return Err("unsupported program".to_string());
+        };
+        if parse_awk_if_statement(body.trim())?.is_some() {
+            let (action, nested_consumed) = parse_awk_if_chain(statements, body_index)?;
+            consumed += nested_consumed;
+            vec![action]
+        } else {
+            consumed += 1;
+            parse_awk_nested_actions(body)?
+        }
+    } else {
+        parse_awk_nested_actions(&then_source)?
+    };
+    let mut else_actions = Vec::new();
+    if let Some(next) = statements.get(start + consumed) {
+        let next = next.trim();
+        if let Some(rest) = strip_awk_keyword(next, "else") {
+            consumed += 1;
+            let rest = rest.trim();
+            if rest.is_empty() {
+                // `else` on its own line; the body is the following statement,
+                // which may itself begin an `if`/`else` chain.
+                let body_index = start + consumed;
+                let Some(else_source) = statements.get(body_index) else {
+                    return Err("unsupported program".to_string());
+                };
+                if parse_awk_if_statement(else_source.trim())?.is_some() {
+                    let (action, nested_consumed) = parse_awk_if_chain(statements, body_index)?;
+                    else_actions = vec![action];
+                    consumed += nested_consumed;
+                } else {
+                    else_actions = parse_awk_nested_actions(else_source)?;
+                    consumed += 1;
+                }
+            } else if parse_awk_if_statement(rest)?.is_some() {
+                // `else if (...)` on the same statement: rebuild the slice so
+                // the nested chain can consume any following `else`.
+                let mut nested = Vec::with_capacity(statements.len() - (start + consumed) + 1);
+                nested.push(rest.to_string());
+                nested.extend_from_slice(&statements[start + consumed..]);
+                let (action, nested_consumed) = parse_awk_if_chain(&nested, 0)?;
+                else_actions = vec![action];
+                // The first nested statement is the synthetic `rest`; every
+                // additional consumed statement maps 1:1 onto the real slice.
+                consumed += nested_consumed - 1;
+            } else {
+                else_actions = parse_awk_nested_actions(rest)?;
+            }
+        }
+    }
+    Ok((
+        AwkAction::If {
+            condition,
+            then_actions,
+            else_actions,
+        },
+        consumed,
+    ))
+}
+
 fn parse_awk_if_statement(statement: &str) -> Result<Option<(AwkExpr, String)>, String> {
     let Some(rest) = strip_awk_keyword(statement, "if") else {
         return Ok(None);
@@ -8458,10 +8543,10 @@ fn parse_awk_if_statement(statement: &str) -> Result<Option<(AwkExpr, String)>, 
     let condition_end =
         find_matching_awk_paren(rest, 0).ok_or_else(|| "unsupported program".to_string())?;
     let condition = parse_awk_expr(&rest[1..condition_end])?;
+    // `then_source` may be empty for a bodyless `if (...)` whose body is the
+    // following statement (e.g. a nested `if` on the next line); the caller in
+    // `parse_awk_if_chain` consumes that following statement.
     let then_source = rest[condition_end + 1..].trim();
-    if then_source.is_empty() {
-        return Err("unsupported program".to_string());
-    }
     Ok(Some((condition, then_source.to_string())))
 }
 
@@ -8476,11 +8561,11 @@ fn parse_awk_for_in_statement(statement: &str) -> Result<Option<(String, String,
     let header_end =
         find_matching_awk_paren(rest, 0).ok_or_else(|| "unsupported program".to_string())?;
     let header = &rest[1..header_end];
-    // Only the `for (k in array)` form is supported here; the C-style
-    // `for (init; cond; step)` form has no semicolons inside its header that we
-    // accept, so bail out to keep behavior explicit.
-    if header.contains(';') {
-        return Err("unsupported program".to_string());
+    // Only the `for (k in array)` form is handled here; the C-style
+    // `for (init; cond; step)` form has top-level semicolons in its header, so
+    // defer to `parse_awk_for_statement` by reporting no match.
+    if find_awk_top_level_char(header, ';').is_some() {
+        return Ok(None);
     }
     let Some(variable_part) = strip_awk_keyword_value(header, "in") else {
         return Err("unsupported program".to_string());
@@ -8499,6 +8584,112 @@ fn parse_awk_for_in_statement(statement: &str) -> Result<Option<(String, String,
         array.to_string(),
         body_source.to_string(),
     )))
+}
+
+/// Parses a single clause of a C-style `for (init; cond; update)` header into
+/// one [`AwkAction`]. An empty clause yields `None`.
+fn parse_awk_for_clause(clause: &str) -> Result<Option<Box<AwkAction>>, String> {
+    let clause = clause.trim();
+    if clause.is_empty() {
+        return Ok(None);
+    }
+    let actions = parse_awk_actions(clause)?;
+    match actions.len() {
+        1 => Ok(Some(Box::new(actions.into_iter().next().unwrap()))),
+        _ => Err("unsupported program".to_string()),
+    }
+}
+
+/// Parses the body of a loop whose header is `header_statement` (the part after
+/// the closing `)` is `inline_body`). When `inline_body` is empty the body is
+/// the following statement, which may itself begin an `if`/`for`/`while`
+/// construct. Returns the body actions and the number of *extra* statements
+/// consumed beyond the header statement.
+fn parse_awk_loop_body(
+    statements: &[String],
+    header_index: usize,
+    inline_body: &str,
+) -> Result<(Vec<AwkAction>, usize), String> {
+    let inline_body = inline_body.trim();
+    if !inline_body.is_empty() {
+        return Ok((parse_awk_nested_actions(inline_body)?, 0));
+    }
+    let body_index = header_index + 1;
+    let Some(body) = statements.get(body_index) else {
+        return Err("unsupported program".to_string());
+    };
+    if parse_awk_if_statement(body.trim())?.is_some() {
+        let (action, consumed) = parse_awk_if_chain(statements, body_index)?;
+        return Ok((vec![action], consumed));
+    }
+    Ok((parse_awk_nested_actions(body)?, 1))
+}
+
+/// Parses a C-style `for (init; cond; update) body` loop starting at `start`.
+/// The for-in form is handled earlier by [`parse_awk_for_in_statement`]; this
+/// only matches headers whose parenthesized part contains top-level `;`.
+fn parse_awk_for_statement(
+    statements: &[String],
+    start: usize,
+) -> Result<Option<(AwkAction, usize)>, String> {
+    let statement = statements[start].trim();
+    let Some(rest) = strip_awk_keyword(statement, "for") else {
+        return Ok(None);
+    };
+    let rest = rest.trim_start();
+    if !rest.starts_with('(') {
+        return Ok(None);
+    }
+    let header_end =
+        find_matching_awk_paren(rest, 0).ok_or_else(|| "unsupported program".to_string())?;
+    let header = &rest[1..header_end];
+    let clauses = split_awk_top_level(header, ';');
+    if clauses.len() != 3 {
+        // Not a C-style header (the for-in form has no top-level `;`).
+        return Ok(None);
+    }
+    let init = parse_awk_for_clause(&clauses[0])?;
+    let condition = {
+        let cond = clauses[1].trim();
+        if cond.is_empty() {
+            None
+        } else {
+            Some(parse_awk_expr(cond)?)
+        }
+    };
+    let update = parse_awk_for_clause(&clauses[2])?;
+    let inline_body = &rest[header_end + 1..];
+    let (body, extra) = parse_awk_loop_body(statements, start, inline_body)?;
+    Ok(Some((
+        AwkAction::For {
+            init,
+            condition,
+            update,
+            body,
+        },
+        1 + extra,
+    )))
+}
+
+/// Parses a `while (cond) body` loop starting at `start`.
+fn parse_awk_while_statement(
+    statements: &[String],
+    start: usize,
+) -> Result<Option<(AwkAction, usize)>, String> {
+    let statement = statements[start].trim();
+    let Some(rest) = strip_awk_keyword(statement, "while") else {
+        return Ok(None);
+    };
+    let rest = rest.trim_start();
+    if !rest.starts_with('(') {
+        return Err("unsupported program".to_string());
+    }
+    let header_end =
+        find_matching_awk_paren(rest, 0).ok_or_else(|| "unsupported program".to_string())?;
+    let condition = parse_awk_expr(&rest[1..header_end])?;
+    let inline_body = &rest[header_end + 1..];
+    let (body, extra) = parse_awk_loop_body(statements, start, inline_body)?;
+    Ok(Some((AwkAction::While { condition, body }, 1 + extra)))
 }
 
 /// Splits `lhs <keyword> rhs` on a top-level whole-word keyword, returning the
@@ -8674,7 +8865,56 @@ impl<'a> AwkExprParser<'a> {
     }
 
     fn parse_expression(&mut self) -> Result<AwkExpr, String> {
-        self.parse_ternary()
+        let expression = self.parse_ternary()?;
+        // Assignment is right-associative and the lowest precedence operator.
+        // Recognize `lvalue [+-*/%^]= rhs`; the plain `=` must not be the `==`,
+        // `<=`, `>=`, or `!=` comparison operators (already consumed at higher
+        // precedence by `parse_comparison`).
+        if let Some(op) = self.peek_assign_op() {
+            let Ok(target) = awk_expr_to_target(&expression) else {
+                return Err("unsupported program".to_string());
+            };
+            self.consume_assign_op(op);
+            let value = self.parse_expression()?;
+            return Ok(AwkExpr::Assign {
+                target,
+                op,
+                value: Box::new(value),
+            });
+        }
+        Ok(expression)
+    }
+
+    /// Peeks at the upcoming assignment operator without consuming it. Returns
+    /// `None` when the next token is not a compound/simple assignment.
+    fn peek_assign_op(&mut self) -> Option<AwkAssignOp> {
+        let cursor = skip_awk_whitespace(self.source, self.cursor);
+        let rest = &self.source[cursor..];
+        for (token, op) in [
+            ("+=", AwkAssignOp::Add),
+            ("-=", AwkAssignOp::Sub),
+            ("*=", AwkAssignOp::Mul),
+            ("/=", AwkAssignOp::Div),
+            ("%=", AwkAssignOp::Mod),
+            ("^=", AwkAssignOp::Pow),
+        ] {
+            if rest.starts_with(token) {
+                return Some(op);
+            }
+        }
+        if rest.starts_with('=') && !rest[1..].starts_with('=') {
+            return Some(AwkAssignOp::Assign);
+        }
+        None
+    }
+
+    fn consume_assign_op(&mut self, op: AwkAssignOp) {
+        self.skip_whitespace();
+        let len = match op {
+            AwkAssignOp::Assign => 1,
+            _ => 2,
+        };
+        self.cursor += len;
     }
 
     fn parse_ternary(&mut self) -> Result<AwkExpr, String> {
@@ -8940,7 +9180,16 @@ impl<'a> AwkExprParser<'a> {
             return Ok(AwkExpr::RegexLiteral(pattern));
         }
         if self.consume_char('$') {
-            return Ok(AwkExpr::Field(Box::new(self.parse_primary()?)));
+            // The field operand is normally a primary (e.g. `$1`, `$NF`,
+            // `$(expr)`), but a leading sign is allowed so `$-1`/`$+1` parse as
+            // `$(-1)`/`$(+1)` (out-of-range indices yield an empty field).
+            self.skip_whitespace();
+            let index = if matches!(self.peek_char(), Some('-' | '+')) {
+                self.parse_unary()?
+            } else {
+                self.parse_primary()?
+            };
+            return Ok(AwkExpr::Field(Box::new(index)));
         }
         if let Some(number) = self.take_number() {
             return Ok(AwkExpr::Number(number.to_string()));
@@ -9196,6 +9445,62 @@ fn execute_awk_actions(
                     }
                 }
             }
+            AwkAction::For {
+                init,
+                condition,
+                update,
+                body,
+            } => {
+                if let Some(init) = init {
+                    match execute_awk_actions(std::slice::from_ref(init), context, runtime, stdout)?
+                    {
+                        AwkFlow::Continue => {}
+                        flow => return Ok(flow),
+                    }
+                }
+                let mut iterations = 0usize;
+                loop {
+                    if let Some(condition) = condition {
+                        if !eval_awk_truth(condition, context, runtime)? {
+                            break;
+                        }
+                    }
+                    match execute_awk_actions(body, context, runtime, stdout)? {
+                        AwkFlow::Continue => {}
+                        flow => return Ok(flow),
+                    }
+                    if let Some(update) = update {
+                        match execute_awk_actions(
+                            std::slice::from_ref(update),
+                            context,
+                            runtime,
+                            stdout,
+                        )? {
+                            AwkFlow::Continue => {}
+                            flow => return Ok(flow),
+                        }
+                    }
+                    iterations += 1;
+                    if iterations >= AWK_MAX_LOOP_ITERATIONS {
+                        // Guards against `for (;;)` / runaway loops spinning
+                        // forever; the bound comfortably exceeds the corpus.
+                        return Err("awk loop iteration limit exceeded".to_string());
+                    }
+                }
+            }
+            AwkAction::While { condition, body } => {
+                let mut iterations = 0usize;
+                while eval_awk_truth(condition, context, runtime)? {
+                    match execute_awk_actions(body, context, runtime, stdout)? {
+                        AwkFlow::Continue => {}
+                        flow => return Ok(flow),
+                    }
+                    iterations += 1;
+                    if iterations >= AWK_MAX_LOOP_ITERATIONS {
+                        return Err("awk loop iteration limit exceeded".to_string());
+                    }
+                }
+            }
         }
     }
     Ok(AwkFlow::Continue)
@@ -9266,6 +9571,15 @@ fn eval_awk_expr(
                 .get(array)
                 .is_some_and(|entries| entries.contains_key(&key));
             Ok(awk_bool(present))
+        }
+        AwkExpr::Assign { target, op, value } => {
+            // An assignment used as an expression (e.g. `if (x = 5)`) performs
+            // the assignment and evaluates to the assigned value.
+            let current = get_awk_target_value(target, context, runtime)?;
+            let value = eval_awk_expr(value, context, runtime)?;
+            let assigned = apply_awk_assignment(&current, *op, &value);
+            set_awk_target_value(target, assigned.clone(), context, runtime)?;
+            Ok(assigned)
         }
     }
 }
@@ -9685,6 +9999,10 @@ fn eval_awk_function(
                 eval_awk_expr(args.first().ok_or("unsupported program")?, context, runtime)?;
             let array = match args.get(1) {
                 Some(AwkExpr::Identifier(name)) => name.clone(),
+                // `split(str)` with the destination array argument omitted is a
+                // no-op that yields a count of 0 (matches upstream, which only
+                // requires the call not to fail).
+                None => return Ok("0".to_string()),
                 _ => return Err("unsupported program".to_string()),
             };
             // The optional third argument selects the field separator. When it
@@ -9769,7 +10087,10 @@ fn eval_awk_function(
             set_awk_target_value(&target, value, context, runtime)?;
             Ok(count.to_string())
         }
-        _ => Err("unsupported program".to_string()),
+        // A call to a name that is neither a known builtin nor a user-defined
+        // function evaluates to the empty string (matches upstream just-bash,
+        // which does not abort on undefined function calls).
+        _ => Ok(String::new()),
     }
 }
 
@@ -10067,6 +10388,7 @@ fn format_awk_printf(format: &str, args: &[String]) -> Result<String, String> {
     let mut arg_index = 0usize;
     while cursor < chars.len() {
         let ch = chars[cursor];
+        let spec_start = cursor;
         cursor += 1;
         if ch != '%' {
             output.push(ch);
@@ -10132,9 +10454,23 @@ fn format_awk_printf(format: &str, args: &[String]) -> Result<String, String> {
             cursor += 1;
         }
         let Some(specifier) = chars.get(cursor).copied() else {
-            return Err("invalid printf format".to_string());
+            // Width/precision with no trailing conversion specifier (e.g.
+            // `%10.5`): emit the directive text verbatim and stop, mirroring
+            // upstream's graceful handling (no argument is consumed).
+            output.extend(chars[spec_start..cursor].iter());
+            break;
         };
         cursor += 1;
+        if !matches!(
+            specifier,
+            's' | 'd' | 'i' | 'f' | 'x' | 'X' | 'o' | 'c' | 'e'
+        ) {
+            // Unknown conversion specifier (e.g. `%z`): emit the directive text
+            // verbatim and consume no argument, matching upstream's graceful
+            // pass-through rather than aborting.
+            output.extend(chars[spec_start..cursor].iter());
+            continue;
+        }
         let width = if dynamic_width {
             let value = args.get(arg_index).cloned().unwrap_or_default();
             arg_index += 1;
@@ -10164,7 +10500,9 @@ fn format_awk_printf(format: &str, args: &[String]) -> Result<String, String> {
                 let precision = precision.unwrap_or(6);
                 format!("{:.*e}", precision, awk_to_number(&value))
             }
-            _ => return Err("unsupported printf format".to_string()),
+            // Unsupported specifiers are handled by the pass-through guard above
+            // before any argument is consumed, so this arm is never reached.
+            _ => unreachable!("unknown printf specifier handled earlier"),
         };
         output.push_str(&apply_awk_printf_width(
             &formatted,
