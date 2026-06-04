@@ -2884,6 +2884,24 @@ const jbc34CaseGroups = [
     notes: 'JBC-34 verifies grep preserves multibyte stdin matches through the Rust pipe path.',
   },
   {
+    file: 'packages/just-bash/src/commands/grep/grep.exclude.test.ts',
+    lines: [6, 21, 36, 51, 68, 86, 104, 119, 131, 143, 160],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-search',
+    rustTest: 'text_search_jbc_grep_exclude_files_without_match_and_bracket_rows',
+    notes:
+      'JBC-34 verifies grep --exclude (single/multiple globs, non-recursive explicit paths), --exclude-dir (single/multiple plus combined with --exclude), and -L/--files-without-match (explicit list, exit-code 0/1, recursive -rL, and the long-form flag) over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/grep/grep.basic.test.ts',
+    lines: [636, 644],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-search',
+    rustTest: 'text_search_jbc_grep_exclude_files_without_match_and_bracket_rows',
+    notes:
+      'JBC-34 verifies POSIX bracket edge cases where a leading ] is a literal class member: a[][]b matches ] or [, and a[^]b]c negates ] and b.',
+  },
+  {
     file: 'packages/just-bash/src/commands/rg/rg.patterns.test.ts',
     lines: [
       5, 18, 31, 44, 57, 70, 85, 98, 113, 126, 139, 154, 167, 180, 193,
