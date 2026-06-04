@@ -1008,6 +1008,15 @@ const jbc09CaseGroups = [
     notes:
       'just-bash-command-awk verifies portable awk regex patterns: literal /ana/, ^/$ anchors, [cd] and negated [^a-z] character classes, alternation /red|blue/, expression patterns ($1 ==/!= numeric, string equality, lexicographic comparison), combined NR patterns (NR == 1, NR > 1, range, every Nth via NR % 2), field regex-match patterns ($1 ~/!~ /^a/, $2 ~ /^a/), action-only rule on every record, and pattern-only rule printing matches.',
   },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.getline.test.ts',
+    lines: [5, 21, 37, 54, 74, 88],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_getline_main_input_rows',
+    notes:
+      'just-bash-command-awk verifies plain `getline` and `getline VAR` reading the next record from the main input stream: getline into $0 re-splits fields, getline into a variable leaves $0/fields intact, NR advances on each successful read and getline-at-EOF is a no-op, getline inside a pattern-matched action skips the consumed record from the main loop, and combining adjacent records with getline. Redirected forms (getline < file, cmd | getline) and getline used as a return-valued expression remain pending.',
+  },
 ];
 
 const jbc10CaseGroups = [
@@ -3926,6 +3935,27 @@ const jbpiParserInterpreterCaseGroups = [
     notes:
       'JB-PI verifies the portable `set -u` (nounset) non-error rows through the Rust shell: a set variable and an empty-string value read without error, `+u` / `+o nounset` disable it, the `$?` / `$#` / `$@` special vars never trip it, `${var:-}` / `${var:=}` / `${var:+}` parameter expansion is allowed, and `set -eu` with a set variable runs cleanly. The unbound-variable error rows stay pending until nounset error reporting lands.',
   },
+  {
+    file: 'packages/just-bash/src/syntax/parse-errors.test.ts',
+    lines: [
+      6, 13, 19, 29, 35, 43, 50, 57, 75, 82, 89, 99, 106, 115, 122, 131,
+      139, 156, 165, 188, 197, 204, 210, 216,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_syntax_parse_errors_match_upstream',
+    notes:
+      'JB-PI verifies portable parse-error rows through the Rust parser/interpreter: unclosed/missing-keyword if/for/while/until syntax errors (exit 2 with "syntax error"), the elif-condition selection, else/fi without if, a digit-starting function name accepted, unclosed function body, graceful handling of unclosed quotes / missing redirect target / empty pipe and &&/|| operands, the unknown-command 127 row, and the local-outside-function exit-1 row. The runtime invalid-identifier row (L64) and filesystem-backed redirect/path/cat rows (L147, L172, L179) stay pending.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/set-errexit.test.ts',
+    lines: [6, 18, 29, 43, 56, 73],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_syntax_set_errexit_match_upstream',
+    notes:
+      'JB-PI verifies portable set -e (errexit) rows through the Rust parser/interpreter: `set -e` exits on the first failure, execution continues without it, success does not exit, `set +e` disables and `set -e` re-enables, and `set -o errexit` enables it. The same test also exercises the &&/||, if/elif-condition, while/until-condition and -body, negated-command, and preserve-exit-code exemptions; the unimplemented combined-flag (`-ee`/`-ze`/`-ez`) and `set` help/list/invalid-option rows stay pending.',
+  },
 ];
 
 const jbc35CaseGroups = [
@@ -4936,6 +4966,22 @@ const jbExecOptionsLoggingCaseGroups = [
   },
 ];
 
+const justBashCoreSerializeCaseGroups = [
+  {
+    file: 'packages/just-bash/src/transform/serialize.test.ts',
+    lines: [
+      53, 54, 103, 105, 106, 109, 110, 111, 112, 113, 114, 115, 116, 117,
+      119, 121, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134,
+      176, 177,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::transform::serialize',
+    rustTest: 'just_bash_core_serialize_round_trips_param_op_and_compound_rows',
+    notes:
+      'just-bash-core verifies Rust AST parse/serialize/parse equivalence for the timed-pipeline, parameter-operation (error-if-unset, substring, prefix/suffix removal, pattern replacement, case modification, indirection, prefix listing, transform @Q), and subshell/group-with-redirection serialize rows.',
+  },
+];
+
 function caseOverrideFor(testCase) {
   const group = [
     ...jbSedTestTsCaseGroups,
@@ -4985,6 +5031,7 @@ function caseOverrideFor(testCase) {
     ...jbc44CaseGroups,
     ...jbcXanGroupbyTransformCaseGroups,
     ...jbcYqFixturesCaseGroups,
+    ...justBashCoreSerializeCaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&

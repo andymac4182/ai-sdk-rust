@@ -200,8 +200,32 @@ const jbc45RustRunnerComparisonCaseIds = [
   'comparison:text-processing:e94e9ea341c95519',
 ];
 
+// JBC-46: spec-comparison command-family rows promoted to exact Rust runner
+// proofs after implementing grep -q/--quiet/--silent, head/tail -c byte counts,
+// cut open-ended -c ranges, and ls operand-name directory headers. Each id below
+// is verified by `cargo test -p just-bash --test conformance_corpus`, asserting
+// exact stdout/stderr/exit code against the generated upstream fixture.
+const jbc46RustRunnerComparisonCaseIds = [
+  'comparison:cut:a5a570c75b2011a5',
+  'comparison:grep:426c49b200ec05fc',
+  'comparison:grep:739577ab79356d8c',
+  'comparison:grep:7704b65434a86bb4',
+  'comparison:grep:9e3dd0958d208f3e',
+  'comparison:grep:e082fd2315ac5a21',
+  'comparison:grep:f62342a3de049a90',
+  'comparison:head-tail:216b8a0800cfe5d9',
+  'comparison:head-tail:2b0708aebc130c69',
+  'comparison:head-tail:73aef1fb3909e95e',
+  'comparison:head-tail:76f116b941107f5f',
+  'comparison:head-tail:877e89713050d57e',
+  'comparison:head-tail:8a7264ad93bfe725',
+  'comparison:ls:ad7e0e863a30ec68',
+  'comparison:ls:e1105146143329fe',
+];
+
 const rustRunnerComparisonCaseIds = [
   ...jbc21SmallCommandComparisonCaseIds,
+  ...jbc46RustRunnerComparisonCaseIds,
   'comparison:awk:5fb5a4d01bc7c720',
   'comparison:awk:6264f92b9b03799d',
   'comparison:awk:63976ead5650d0f3',
@@ -430,6 +454,7 @@ const jbc35RustRunnerComparisonCaseIdSet = new Set([
   'comparison:awk:d3e5d71775cfd1e6',
 ]);
 const jbc45RustRunnerComparisonCaseIdSet = new Set(jbc45RustRunnerComparisonCaseIds);
+const jbc46RustRunnerComparisonCaseIdSet = new Set(jbc46RustRunnerComparisonCaseIds);
 
 const unitSourceFiles = [
   'packages/just-bash/src/commands/printf/printf.test.ts',
@@ -610,6 +635,7 @@ function rustRunnerProofFor(testCase) {
   const isJbc29 = jbc29RustRunnerComparisonCaseIdSet.has(testCase.id);
   const isJbc35 = jbc35RustRunnerComparisonCaseIdSet.has(testCase.id);
   const isJbc45 = jbc45RustRunnerComparisonCaseIdSet.has(testCase.id);
+  const isJbc46 = jbc46RustRunnerComparisonCaseIdSet.has(testCase.id);
   const source = isJbc21
     ? 'JBC-21'
     : isJbc29
@@ -618,7 +644,9 @@ function rustRunnerProofFor(testCase) {
         ? 'JBC-35'
         : isJbc45
           ? 'JBC-45'
-          : 'JBC-11';
+          : isJbc46
+            ? 'JBC-46'
+            : 'JBC-11';
   return {
     status: 'portable-verified',
     owner: isJbc21
@@ -629,6 +657,8 @@ function rustRunnerProofFor(testCase) {
       ? 'JBC-21 verifies the portable basename/dirname comparison fixture rows through crate-backed Rust command implementations, without host command fallback.'
       : isJbc45
         ? 'JBC-45 Rust corpus runner exact match for generated comparison fixture stdout, stderr, exit code, and fixture setup; mismatching command-family rows stay pending.'
+      : isJbc46
+        ? 'JBC-46 Rust corpus runner exact match for generated comparison fixture stdout, stderr, exit code, and fixture setup across alias/glob/grep/head-tail/ls/sort/uniq/wc/test/tar/cut/export/pipes/substitution command-family rows; mismatching rows stay pending.'
       : `${source} Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.`,
     source,
   };

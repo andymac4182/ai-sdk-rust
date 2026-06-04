@@ -5448,6 +5448,301 @@ mod tests {
         Interpreter::new(FakeCommands::default())
     }
 
+    /// Mirrors portable `packages/just-bash/src/syntax/parse-errors.test.ts`
+    /// rows 1:1 through the Rust parser/interpreter. Each block asserts the
+    /// upstream `it(...)` expectation on `Bash().exec(...)`: a syntax/parse error
+    /// (non-zero exit, "syntax error" stderr), an accepted construct, or the
+    /// "result is defined" graceful-handling rows. Rows requiring filesystem
+    /// command families (auto-create-dir redirect L147, path-not-found L172,
+    /// cat L179) and the runtime invalid-identifier row (L64) stay pending.
+    #[test]
+    fn jbpi_syntax_parse_errors_match_upstream() {
+        // L6 unclosed if -> non-zero exit, "syntax error".
+        let r = shell().exec("if true; then echo hello");
+        assert_ne!(r.exit_code, 0, "unclosed if");
+        assert!(
+            r.stderr.contains("syntax error"),
+            "unclosed if: {:?}",
+            r.stderr
+        );
+
+        // L13 missing then -> non-zero exit.
+        let r = shell().exec("if true; echo hello; fi");
+        assert_ne!(r.exit_code, 0, "missing then");
+
+        // L19 elif with valid condition selects the matching branch.
+        let r = shell().exec("if false; then echo a; elif true; then echo b; fi");
+        assert_eq!(r.stdout, "b\n", "elif condition");
+
+        // L29 else without if -> syntax error (exit 2).
+        let r = shell().exec("else echo hello; fi");
+        assert_eq!(r.exit_code, 2, "else without if");
+
+        // L35 fi without if -> syntax error (exit 2).
+        let r = shell().exec("fi");
+        assert_eq!(r.exit_code, 2, "fi without if");
+
+        // L43 for missing `in` -> syntax error (exit 2).
+        let r = shell().exec("for x a b c; do echo $x; done");
+        assert_eq!(r.exit_code, 2, "for missing in");
+        assert!(
+            r.stderr.contains("syntax error"),
+            "for missing in: {:?}",
+            r.stderr
+        );
+
+        // L50 for missing `do` -> syntax error (exit 2).
+        let r = shell().exec("for x in a b c; echo $x; done");
+        assert_eq!(r.exit_code, 2, "for missing do");
+        assert!(
+            r.stderr.contains("syntax error"),
+            "for missing do: {:?}",
+            r.stderr
+        );
+
+        // L57 for missing `done` -> syntax error (exit 2).
+        let r = shell().exec("for x in a b c; do echo $x");
+        assert_eq!(r.exit_code, 2, "for missing done");
+        assert!(
+            r.stderr.contains("syntax error"),
+            "for missing done: {:?}",
+            r.stderr
+        );
+
+        // L75 while missing `do` -> syntax error (exit 2).
+        let r = shell().exec("while true; echo loop; done");
+        assert_eq!(r.exit_code, 2, "while missing do");
+        assert!(
+            r.stderr.contains("syntax error"),
+            "while missing do: {:?}",
+            r.stderr
+        );
+
+        // L82 while missing `done` -> syntax error (exit 2).
+        let r = shell().exec("while true; do echo loop");
+        assert_eq!(r.exit_code, 2, "while missing done");
+        assert!(
+            r.stderr.contains("syntax error"),
+            "while missing done: {:?}",
+            r.stderr
+        );
+
+        // L89 `while;` -> syntax error (exit 2).
+        let r = shell().exec("while; do echo loop; done");
+        assert_eq!(r.exit_code, 2, "while semicolon");
+        assert!(
+            r.stderr.contains("syntax error"),
+            "while semicolon: {:?}",
+            r.stderr
+        );
+
+        // L99 until missing `do` -> syntax error (exit 2).
+        let r = shell().exec("until true; echo loop; done");
+        assert_eq!(r.exit_code, 2, "until missing do");
+        assert!(
+            r.stderr.contains("syntax error"),
+            "until missing do: {:?}",
+            r.stderr
+        );
+
+        // L106 until missing `done` -> syntax error (exit 2).
+        let r = shell().exec("until true; do echo loop");
+        assert_eq!(r.exit_code, 2, "until missing done");
+        assert!(
+            r.stderr.contains("syntax error"),
+            "until missing done: {:?}",
+            r.stderr
+        );
+
+        // L115 function name starting with a digit is accepted (exit 0).
+        let r = shell().exec("123func() { echo hello; }");
+        assert_eq!(r.exit_code, 0, "numeric function name");
+
+        // L122 unclosed function body -> syntax error (exit 2).
+        let r = shell().exec("myfunc() { echo hello");
+        assert_eq!(r.exit_code, 2, "unclosed function body");
+        assert!(
+            r.stderr.contains("syntax error"),
+            "unclosed function: {:?}",
+            r.stderr
+        );
+
+        // L131 unclosed double quote is handled (a result is produced).
+        let r = shell().exec("echo \"unclosed");
+        assert_ne!(
+            r.exit_code, 0,
+            "unclosed double quote produces an error result"
+        );
+
+        // L139 unclosed single quote is handled (a result is produced).
+        let r = shell().exec("echo 'unclosed");
+        assert_ne!(
+            r.exit_code, 0,
+            "unclosed single quote produces an error result"
+        );
+
+        // L156 redirect without target is handled (a result is produced).
+        let r = shell().exec("echo test >");
+        assert_ne!(
+            r.exit_code, 0,
+            "redirect without target produces an error result"
+        );
+
+        // L165 unknown command -> exit 127, "command not found".
+        let r = shell().exec("unknowncommand");
+        assert_eq!(r.exit_code, 127, "unknown command");
+        assert!(
+            r.stderr.contains("command not found"),
+            "unknown command: {:?}",
+            r.stderr
+        );
+
+        // L188 `local` outside a function -> exit 1, scoped error message.
+        let r = shell().exec("local x=1");
+        assert_eq!(r.exit_code, 1, "local outside function");
+        assert!(
+            r.stderr.contains("can only be used in a function"),
+            "local outside function: {:?}",
+            r.stderr
+        );
+
+        // L197 empty command before pipe is handled (a result is produced).
+        let r = shell().exec("| cat");
+        assert_ne!(
+            r.exit_code, 0,
+            "empty command before pipe produces an error result"
+        );
+
+        // L204 empty command after pipe is handled (a result is produced).
+        let r = shell().exec("echo test |");
+        assert_ne!(
+            r.exit_code, 0,
+            "empty command after pipe produces an error result"
+        );
+
+        // L210 `&&` with no second command is handled (a result is produced).
+        let r = shell().exec("true &&");
+        assert_ne!(
+            r.exit_code, 0,
+            "&& with no second command produces an error result"
+        );
+
+        // L216 `||` with no second command is handled (a result is produced).
+        let r = shell().exec("false ||");
+        assert_ne!(
+            r.exit_code, 0,
+            "|| with no second command produces an error result"
+        );
+    }
+
+    /// Mirrors portable `packages/just-bash/src/syntax/set-errexit.test.ts`
+    /// rows 1:1 through the Rust parser/interpreter. Each block asserts the
+    /// upstream `it(...)` stdout/exit-code expectation on `Bash().exec(...)`.
+    /// The `set -e`/`set +e`/`set -o errexit` toggles, the `&&`-final-failure,
+    /// the `||`/`&&`-chain, the if/elif-condition, while/until-condition and
+    /// -body, the negated-failed-command, and the preserve-exit-code rows are
+    /// verified. The unimplemented `-ee`/`-ze`/`-ez` combined-flag rows (L270,
+    /// L282, L291), the `false &&` short-circuit row (L100), the `! true` row
+    /// (L147), and the `set` help/list/invalid-option rows (L317-L351) stay
+    /// pending until those behaviors land.
+    #[test]
+    fn jbpi_syntax_set_errexit_match_upstream() {
+        // L6 set -e exits immediately on the first failing command.
+        let r = shell().exec("set -e\necho before\nfalse\necho after");
+        assert_eq!(r.stdout, "before\n", "set -e exit");
+        assert_eq!(r.exit_code, 1, "set -e exit code");
+
+        // L18 without set -e execution continues past a failure.
+        let r = shell().exec("echo before\nfalse\necho after");
+        assert_eq!(r.stdout, "before\nafter\n", "no errexit");
+        assert_eq!(r.exit_code, 0, "no errexit code");
+
+        // L29 set -e does not exit when the command succeeds.
+        let r = shell().exec("set -e\necho one\ntrue\necho two");
+        assert_eq!(r.stdout, "one\ntwo\n", "errexit success");
+        assert_eq!(r.exit_code, 0, "errexit success code");
+
+        // L43 set +e disables errexit.
+        let r = shell().exec("set -e\nset +e\necho before\nfalse\necho after");
+        assert_eq!(r.stdout, "before\nafter\n", "set +e disables");
+        assert_eq!(r.exit_code, 0, "set +e disables code");
+
+        // L56 errexit can be re-enabled after set +e.
+        let r = shell().exec("set -e\nset +e\nfalse\nset -e\necho before\nfalse\necho after");
+        assert_eq!(r.stdout, "before\n", "re-enable errexit");
+        assert_eq!(r.exit_code, 1, "re-enable errexit code");
+
+        // L73 set -o errexit enables errexit.
+        let r = shell().exec("set -o errexit\necho before\nfalse\necho after");
+        assert_eq!(r.stdout, "before\n", "set -o errexit");
+        assert_eq!(r.exit_code, 1, "set -o errexit code");
+
+        // L85 set +o errexit disables errexit.
+        let r = shell().exec("set -o errexit\nset +o errexit\necho before\nfalse\necho after");
+        assert_eq!(r.stdout, "before\nafter\n", "set +o errexit");
+        assert_eq!(r.exit_code, 0, "set +o errexit code");
+
+        // L111 a failed command short-circuited by || does not trigger errexit.
+        let r = shell().exec("set -e\nfalse || echo fallback\necho after");
+        assert_eq!(r.stdout, "fallback\nafter\n", "|| short-circuit");
+        assert_eq!(r.exit_code, 0, "|| short-circuit code");
+
+        // L122 errexit triggers when the final command of an && list fails.
+        let r = shell().exec("set -e\necho before\ntrue && false\necho after");
+        assert_eq!(r.stdout, "before\n", "&& final failure");
+        assert_eq!(r.exit_code, 1, "&& final failure code");
+
+        // L134 a || rescue after a failed && does not trigger errexit.
+        let r = shell().exec("set -e\nfalse && echo skip || echo fallback\necho after");
+        assert_eq!(r.stdout, "fallback\nafter\n", "&& then ||");
+        assert_eq!(r.exit_code, 0, "&& then || code");
+
+        // L158 a negated failing command does not trigger errexit.
+        let r = shell().exec("set -e\n! false\necho after");
+        assert_eq!(r.stdout, "after\n", "negated false");
+        assert_eq!(r.exit_code, 0, "negated false code");
+
+        // L171 a failing command in an if condition does not trigger errexit.
+        let r = shell().exec("set -e\nif false; then echo then; else echo else; fi\necho after");
+        assert_eq!(r.stdout, "else\nafter\n", "if condition");
+        assert_eq!(r.exit_code, 0, "if condition code");
+
+        // L186 a failing command in an if body triggers errexit.
+        let r = shell().exec("set -e\nif true; then echo body; false; echo nr; fi\necho after");
+        assert_eq!(r.stdout, "body\n", "if body");
+        assert_eq!(r.exit_code, 1, "if body code");
+
+        // L201 a failing command in an elif condition does not trigger errexit.
+        let r = shell().exec(
+            "set -e\nif false; then echo one; elif false; then echo two; else echo three; fi\necho after",
+        );
+        assert_eq!(r.stdout, "three\nafter\n", "elif condition");
+        assert_eq!(r.exit_code, 0, "elif condition code");
+
+        // L220 a failing while condition that terminates the loop is exempt.
+        let r = shell()
+            .exec("set -e\nx=0\nwhile [ $x -lt 3 ]; do echo $x; x=$((x + 1)); done\necho after");
+        assert_eq!(r.stdout, "0\n1\n2\nafter\n", "while condition");
+        assert_eq!(r.exit_code, 0, "while condition code");
+
+        // L235 a failing command in a while body triggers errexit.
+        let r = shell().exec(
+            "set -e\nx=0\nwhile [ $x -lt 3 ]; do echo $x; false; x=$((x + 1)); done\necho after",
+        );
+        assert_eq!(r.stdout, "0\n", "while body");
+        assert_eq!(r.exit_code, 1, "while body code");
+
+        // L253 a failing until condition that terminates the loop is exempt.
+        let r = shell()
+            .exec("set -e\nx=0\nuntil [ $x -ge 3 ]; do echo $x; x=$((x + 1)); done\necho after");
+        assert_eq!(r.stdout, "0\n1\n2\nafter\n", "until condition");
+        assert_eq!(r.exit_code, 0, "until condition code");
+
+        // L306 the non-zero exit code from `exit` is preserved.
+        let r = shell().exec("set -e\nexit 42");
+        assert_eq!(r.exit_code, 42, "preserve exit code");
+    }
+
     /// Covers additional portable
     /// `packages/just-bash/src/syntax/control-flow.test.ts` rows: if-body exit
     /// code (L73), `local`-scope isolation/restore/declare-without-value/nested
@@ -6797,6 +7092,61 @@ esac"#,
             "(echo sub)",
             "{ echo group; }",
             "myfunc() { echo hello; }",
+        ] {
+            assert_round_trip(source);
+        }
+    }
+
+    #[test]
+    fn just_bash_core_serialize_round_trips_param_op_and_compound_rows() {
+        fn assert_round_trip(source: &str) {
+            let script = parse(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            let serialized = serialize(&script);
+            let reparsed = parse(&serialized)
+                .unwrap_or_else(|error| panic!("{source} -> {serialized}: {error}"));
+            assert_eq!(reparsed, script, "{source} -> {serialized}");
+        }
+
+        for source in [
+            // pipelines: timed pipelines (serialize.test.ts:53,54)
+            "time sleep 1",
+            "time -p sleep 1",
+            // parameter operations: error-if-unset variants (serialize.test.ts:103,105,106)
+            "echo ${var:?error msg}",
+            "echo ${var:?}",
+            "echo ${var?error}",
+            // substring (serialize.test.ts:109,110)
+            "echo ${var:2}",
+            "echo ${var:0:5}",
+            // prefix/suffix removal (serialize.test.ts:111,112,113,114)
+            "echo ${var#pattern}",
+            "echo ${var##pattern}",
+            "echo ${var%pattern}",
+            "echo ${var%%pattern}",
+            // pattern replacement (serialize.test.ts:115,116,117,119,121)
+            "echo ${var/old/new}",
+            "echo ${var//old/new}",
+            "echo ${var/#old/new}",
+            "echo ${var/%old/new}",
+            "echo ${var/old}",
+            // case modification (serialize.test.ts:123,124,125,126,127)
+            "echo ${var^}",
+            "echo ${var^^}",
+            "echo ${var,}",
+            "echo ${var,,}",
+            "echo ${var^^[a-z]}",
+            // indirection and prefix listing (serialize.test.ts:128,129,130,131,132,133)
+            "echo ${!ref}",
+            "echo ${!var##pattern}",
+            "echo ${!arr[@]}",
+            "echo ${!arr[*]}",
+            "echo ${!MY@}",
+            "echo ${!MY*}",
+            // transform op (serialize.test.ts:134)
+            "echo ${var@Q}",
+            // compound: subshell/group with redirections (serialize.test.ts:176,177)
+            "(echo sub) > out.txt",
+            "{ echo group; } > out.txt",
         ] {
             assert_round_trip(source);
         }
