@@ -11776,6 +11776,180 @@ greet World",
             "oversized stderr={:?}",
             oversized.stderr
         );
+
+        // combined protection ----------------------------------------------
+        // :243 a recursive function whose body contains a loop is bounded by the
+        // call-depth limit (it re-enters itself before the loop can finish).
+        let recurse_with_loop = shell_with(ExecutionLimits {
+            max_call_depth: 20,
+            max_loop_iterations: 100,
+            ..ExecutionLimits::default()
+        })
+        .exec("dangerous() { for i in 1 2 3; do dangerous; done; }; dangerous");
+        expect_protection_triggered("recursive function with loops", &recurse_with_loop);
+
+        // brace/range expansion protection ---------------------------------
+        // These all exit cleanly (0) with bounded output rather than hanging.
+        // :287 a massive numeric range expands without hanging.
+        let massive_brace = shell().exec("echo {1..100000}");
+        assert_eq!(
+            massive_brace.exit_code, 0,
+            "massive brace stderr={:?}",
+            massive_brace.stderr
+        );
+
+        // :296 a wide cartesian brace product completes cleanly.
+        let nested_brace =
+            shell().exec("echo {a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,n}{o,p}{q,r}{s,t}{u,v}{w,x}");
+        assert_eq!(
+            nested_brace.exit_code, 0,
+            "nested brace stderr={:?}",
+            nested_brace.stderr
+        );
+
+        // :308 a deeply nested brace product completes cleanly.
+        let deep_brace =
+            shell().exec("echo {a,b,c,d,e}{1,2,3,4,5}{a,b,c,d,e}{1,2,3,4,5}{a,b,c,d,e}");
+        assert_eq!(
+            deep_brace.exit_code, 0,
+            "deep brace stderr={:?}",
+            deep_brace.stderr
+        );
+
+        // :319 a range with a huge implied step count is bounded, exits cleanly.
+        let huge_range = shell().exec("echo {1..1000000..1}");
+        assert_eq!(
+            huge_range.exit_code, 0,
+            "huge range stderr={:?}",
+            huge_range.stderr
+        );
+
+        // :327 a character range product is bounded, exits cleanly.
+        let char_range = shell().exec("echo {a..z}{a..z}{a..z}{a..z}");
+        assert_eq!(
+            char_range.exit_code, 0,
+            "char range stderr={:?}",
+            char_range.stderr
+        );
+
+        // expansion protection ---------------------------------------------
+        // :337 moderately nested command substitution succeeds (not too deep).
+        let nested_subst =
+            shell_with(limits(50)).exec("echo $(echo $(echo $(echo $(echo $(echo $(echo hi))))))");
+        assert_eq!(
+            nested_subst.exit_code, 0,
+            "nested subst stderr={:?}",
+            nested_subst.stderr
+        );
+        assert_eq!(nested_subst.stdout.trim(), "hi");
+
+        // input size protection --------------------------------------------
+        // :396 many separate arguments (1000 tokens) are handled fine.
+        let many_args = vec!["arg"; 1000].join(" ");
+        let many_args_ok = shell().exec(&format!("echo {many_args}"));
+        assert_eq!(
+            many_args_ok.exit_code, 0,
+            "many args stderr={:?}",
+            many_args_ok.stderr
+        );
+
+        // subshell protection ----------------------------------------------
+        // :418 a subshell spawned inside an infinite loop is bounded.
+        let subshell_in_loop = shell_with(ExecutionLimits {
+            max_loop_iterations: 100,
+            ..ExecutionLimits::default()
+        })
+        .exec("while true; do\n  (echo nested)\ndone\n");
+        expect_protection_triggered("nested subshells in loop", &subshell_in_loop);
+
+        // pipeline protection ----------------------------------------------
+        // :441 a long but finite pipeline (50 stages) completes cleanly.
+        let long_pipe = vec!["cat"; 50].join(" | ");
+        let long_pipe_ok = shell().exec(&format!("echo test | {long_pipe}"));
+        assert_eq!(
+            long_pipe_ok.exit_code, 0,
+            "long pipeline stderr={:?}",
+            long_pipe_ok.stderr
+        );
+        assert_eq!(long_pipe_ok.stdout.trim(), "test");
+
+        // special variable expansion protection ----------------------------
+        // :453 setting PROMPT_COMMAND in non-interactive mode is safe (not run).
+        let prompt_cmd = shell_with(limits(50)).exec("PROMPT_COMMAND='echo prompt'\necho done\n");
+        assert_eq!(
+            prompt_cmd.exit_code, 0,
+            "PROMPT_COMMAND stderr={:?}",
+            prompt_cmd.stderr
+        );
+
+        // :465 a self-referential variable is evaluated once, not recursively.
+        let self_ref = shell().exec("x='$x'\necho \"$x\"\n");
+        assert_eq!(
+            self_ref.exit_code, 0,
+            "self-ref stderr={:?}",
+            self_ref.stderr
+        );
+        assert_eq!(self_ref.stdout.trim(), "$x");
+
+        // configurable limits ----------------------------------------------
+        // :497 a custom maxCommandCount bounds 100 semicolon-separated commands.
+        let custom_cmd_count = shell_with(ExecutionLimits {
+            max_commands: 50,
+            ..ExecutionLimits::default()
+        })
+        .exec(&vec!["echo x"; 100].join("; "));
+        expect_protection_triggered("custom command count", &custom_cmd_count);
+
+        // edge cases --------------------------------------------------------
+        // :536 a loop whose body is only a comment plus `:` is still bounded.
+        let comment_body = shell_with(ExecutionLimits {
+            max_loop_iterations: 100,
+            ..ExecutionLimits::default()
+        })
+        .exec("while true; do\n  # just a comment\n  :\ndone\n");
+        expect_protection_triggered("loop with only comments", &comment_body);
+
+        // :562 a simulated `select` loop (while-true) is bounded.
+        let select_sim = shell_with(ExecutionLimits {
+            max_loop_iterations: 100,
+            ..ExecutionLimits::default()
+        })
+        .exec("PS3='Choose: '\ni=0\nwhile true; do\n  i=$((i+1))\n  echo \"iteration $i\"\ndone\n");
+        expect_protection_triggered("simulated select loop", &select_sim);
+
+        // :577 a trap registered before an infinite loop does not defeat bounding.
+        let trap_loop = shell_with(ExecutionLimits {
+            max_loop_iterations: 100,
+            ..ExecutionLimits::default()
+        })
+        .exec("trap 'echo trapped' EXIT\nwhile true; do echo x; done\n");
+        expect_protection_triggered("trap in infinite loop", &trap_loop);
+
+        // performance — these must also resolve quickly, but we only assert the
+        // protection outcome here (the timing assertion is JS harness-specific).
+        // :589 obvious infinite recursion is rejected.
+        let quick_recurse = shell_with(limits(10)).exec("f() { f; }; f");
+        expect_protection_triggered("quick infinite recursion", &quick_recurse);
+
+        // :598 an infinite loop is rejected.
+        let quick_loop = shell_with(ExecutionLimits {
+            max_loop_iterations: 100,
+            ..ExecutionLimits::default()
+        })
+        .exec("while true; do :; done");
+        expect_protection_triggered("quick infinite loop", &quick_loop);
+
+        // :607 a massive brace expansion resolves cleanly (no hang).
+        let quick_brace = shell().exec("echo {1..100000}");
+        assert_eq!(
+            quick_brace.exit_code, 0,
+            "quick brace stderr={:?}",
+            quick_brace.stderr
+        );
+
+        // :616 deep mutual recursion is rejected.
+        let quick_mutual = shell_with(limits(20)).exec("a() { b; }; b() { c; }; c() { a; }; a");
+        expect_protection_triggered("quick deep mutual recursion", &quick_mutual);
     }
 
     /// Maps `packages/just-bash/src/syntax/parser-protection.test.ts`. The parser
