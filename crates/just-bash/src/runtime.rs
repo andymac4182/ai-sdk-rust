@@ -8625,6 +8625,242 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn text_search_jbc48_grep_perl_mode_rows() {
+        // JBC-48: grep Perl mode (-P) — \K reset-match-start, \Q...\E literal
+        // quoting, and the file-option interactions exercised by
+        // packages/just-bash/src/commands/grep/grep.perl.test.ts.
+        fn check(files: &[(&str, &str)], script: &str, exit_code: i32, stdout: &str) {
+            let result = home_bash(files).exec(script);
+            assert_eq!(result.exit_code, exit_code, "{script}");
+            assert_eq!(result.stdout, stdout, "{script}");
+        }
+
+        // ---- \K reset match start: basic functionality ----
+        // grep.perl.test.ts:10 should extract text after \K with -oP
+        check(
+            &[("/test.txt", "foo=bar\nbaz=qux\n")],
+            "grep -oP '=\\K\\w+' /test.txt",
+            0,
+            "bar\nqux\n",
+        );
+        // grep.perl.test.ts:19 should work with \K in useEffect pattern
+        check(
+            &[(
+                "/app.tsx",
+                "useEffect(() => { }, [count]);\nuseEffect(() => { }, [name, id]);\n",
+            )],
+            "grep -oP \"useEffect\\(.*?\\[\\K[^\\]]+\" /app.tsx",
+            0,
+            "count\nname, id\n",
+        );
+        // grep.perl.test.ts:33 should extract URLs after protocol with \K
+        check(
+            &[(
+                "/test.txt",
+                "http://example.com\nhttps://test.org\nftp://files.net\n",
+            )],
+            "grep -oP 'https?://\\K[^\\s]+' /test.txt",
+            0,
+            "example.com\ntest.org\n",
+        );
+        // ---- \K reset match start: edge cases ----
+        // grep.perl.test.ts:49 should return empty string when \K is at end
+        check(
+            &[("/test.txt", "prefix\n")],
+            "grep -oP 'prefix\\K' /test.txt",
+            0,
+            "\n",
+        );
+        // grep.perl.test.ts:58 should work with \K at start of pattern
+        check(
+            &[("/test.txt", "hello world\n")],
+            "grep -oP '\\K\\w+' /test.txt",
+            0,
+            "hello\nworld\n",
+        );
+        // grep.perl.test.ts:68 should work with \K and capturing groups before
+        check(
+            &[("/test.txt", "foo123bar\n")],
+            "grep -oP '(foo)\\K\\d+' /test.txt",
+            0,
+            "123\n",
+        );
+        // grep.perl.test.ts:77 should work with \K and capturing groups after
+        check(
+            &[("/test.txt", "foo123bar\n")],
+            "grep -oP 'foo\\K(\\d+)' /test.txt",
+            0,
+            "123\n",
+        );
+        // grep.perl.test.ts:86 should work with \K inside alternation
+        check(
+            &[("/test.txt", "foo=1\nbar:2\n")],
+            "grep -oP '(?:foo=|bar:)\\K\\d+' /test.txt",
+            0,
+            "1\n2\n",
+        );
+        // grep.perl.test.ts:97 should work with \K and quantifiers
+        check(
+            &[("/test.txt", "aaabbb\nabbbb\n")],
+            "grep -oP 'a+\\Kb+' /test.txt",
+            0,
+            "bbb\nbbbb\n",
+        );
+        // ---- \K reset match start: with file options ----
+        // grep.perl.test.ts:130 should work with multiple files
+        check(
+            &[("/a.txt", "key=value1\n"), ("/b.txt", "key=value2\n")],
+            "grep -oP 'key=\\K\\w+' /a.txt /b.txt",
+            0,
+            "/a.txt:value1\n/b.txt:value2\n",
+        );
+        // grep.perl.test.ts:142 should work with -h flag to suppress filename
+        check(
+            &[("/a.txt", "x=1\n"), ("/b.txt", "x=2\n")],
+            "grep -ohP 'x=\\K\\d+' /a.txt /b.txt",
+            0,
+            "1\n2\n",
+        );
+        // grep.perl.test.ts:154 should work with -n for line numbers
+        check(
+            &[("/test.txt", "skip\nfoo=bar\nskip\nfoo=baz\n")],
+            "grep -onP 'foo=\\K\\w+' /test.txt",
+            0,
+            "2:bar\n4:baz\n",
+        );
+        // ---- \Q...\E quote metacharacters: basic functionality ----
+        // grep.perl.test.ts:170 should match literal dot
+        check(
+            &[("/test.txt", "foo.bar\nfooxbar\n")],
+            "grep -oP '\\Q.\\E' /test.txt",
+            0,
+            ".\n",
+        );
+        // grep.perl.test.ts:179 should match literal asterisk
+        check(
+            &[("/test.txt", "a*b\naaab\n")],
+            "grep -oP '\\Q*\\E' /test.txt",
+            0,
+            "*\n",
+        );
+        // grep.perl.test.ts:188 should match multiple special characters
+        check(
+            &[("/test.txt", "foo.bar*baz\nfooxbarybaz\n")],
+            "grep -oP '\\Qfoo.bar*\\E' /test.txt",
+            0,
+            "foo.bar*\n",
+        );
+        // grep.perl.test.ts:197 should match regex metacharacters
+        check(
+            &[("/test.txt", "test^$.*+?end\nother\n")],
+            "grep -oP '\\Q^$.*+?\\E' /test.txt",
+            0,
+            "^$.*+?\n",
+        );
+        // ---- \Q...\E quote metacharacters: edge cases ----
+        // grep.perl.test.ts:208 should handle \Q without \E (quotes to end)
+        check(
+            &[("/test.txt", "test[0]++\ntest0\n")],
+            "grep -oP '\\Q[0]++' /test.txt",
+            0,
+            "[0]++\n",
+        );
+        // grep.perl.test.ts:217 should handle empty \Q\E
+        check(
+            &[("/test.txt", "abc\n")],
+            "grep -oP 'a\\Q\\Ebc' /test.txt",
+            0,
+            "abc\n",
+        );
+        // grep.perl.test.ts:226 should handle multiple \Q...\E pairs
+        check(
+            &[("/test.txt", "a+b=c*d\na1b2c3d\n")],
+            "grep -oP '\\Q+\\E.\\Q=\\E.\\Q*\\E' /test.txt",
+            0,
+            "+b=c*\n",
+        );
+        // grep.perl.test.ts:237 should handle \Q...\E at start of pattern
+        check(
+            &[("/test.txt", "^start\nstart\n")],
+            "grep -oP '\\Q^\\Estart' /test.txt",
+            0,
+            "^start\n",
+        );
+        // grep.perl.test.ts:246 should handle \Q...\E at end of pattern
+        check(
+            &[("/test.txt", "end$\nend\n")],
+            "grep -oP 'end\\Q$\\E' /test.txt",
+            0,
+            "end$\n",
+        );
+        // grep.perl.test.ts:255 should not interpret \E without preceding \Q
+        check(
+            &[("/test.txt", "test\\Evalue\nother\n")],
+            "grep -P 'test' /test.txt",
+            0,
+            "test\\Evalue\n",
+        );
+        // ---- \Q...\E combining with regex ----
+        // grep.perl.test.ts:267 should combine \Q...\E with regular regex after
+        check(
+            &[("/test.txt", "price: $100\nprice: $250\n")],
+            "grep -oP '\\Q$\\E\\d+' /test.txt",
+            0,
+            "$100\n$250\n",
+        );
+        // grep.perl.test.ts:276 should combine \Q...\E with regex before
+        check(
+            &[("/test.txt", "file.txt\nfile.doc\n")],
+            "grep -oP '\\w+\\Q.txt\\E' /test.txt",
+            0,
+            "file.txt\n",
+        );
+        // grep.perl.test.ts:285 should combine \Q...\E with \K
+        check(
+            &[("/test.txt", "var=value\nother\n")],
+            "grep -oP '\\Qvar=\\E\\K\\w+' /test.txt",
+            0,
+            "value\n",
+        );
+        // grep.perl.test.ts:294 should combine \Q...\E with character class
+        check(
+            &[("/test.txt", "a+1\na+2\nb+1\n")],
+            "grep -oP '[ab]\\Q+\\E\\d' /test.txt",
+            0,
+            "a+1\na+2\nb+1\n",
+        );
+        // ---- \x{NNNN} Unicode code points: basic functionality ----
+        // grep.perl.test.ts:310 should match ASCII by code point
+        check(
+            &[("/test.txt", "Hello\n")],
+            "grep -oP '\\x{48}' /test.txt",
+            0,
+            "H\n",
+        );
+        // grep.perl.test.ts:319 should match BMP Unicode characters
+        check(
+            &[("/test.txt", "Hello \u{2603} World\n")],
+            "grep -oP '\\x{2603}' /test.txt",
+            0,
+            "\u{2603}\n",
+        );
+        // grep.perl.test.ts:328 should match supplementary plane emoji
+        check(
+            &[("/test.txt", "Test \u{1F600} emoji\n")],
+            "grep -oP '\\x{1F600}' /test.txt",
+            0,
+            "\u{1F600}\n",
+        );
+        // grep.perl.test.ts:337 should match mathematical symbols
+        check(
+            &[("/test.txt", "Sum: \u{2211} Integral: \u{222B}\n")],
+            "grep -oP '\\x{2211}' /test.txt",
+            0,
+            "\u{2211}\n",
+        );
+    }
+
+    #[test]
     fn text_search_jbc_grep_exclude_files_without_match_and_bracket_rows() {
         // grep --exclude: skip files whose basename matches the glob.
         let exclude = Bash::with_options(BashOptions {
