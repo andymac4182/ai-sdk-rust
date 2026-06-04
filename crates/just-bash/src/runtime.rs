@@ -11174,6 +11174,233 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn structured_data_jq_prototype_pollution_update_delete_merge_rows() {
+        // Mirrors jq.prototype-pollution.test.ts:201-374 — assignment, update,
+        // delete, deep-merge, fromstream, iterator-update, reduce, and chained
+        // operations must all drop __proto__/constructor/prototype while keeping
+        // safe keys intact.
+        let env = bash();
+
+        // update operations with dangerous keys (201-240)
+        assert_eq!(
+            env.exec("echo '{}' | jq '.__proto__ = \"polluted\"'")
+                .stdout
+                .trim(),
+            "{}"
+        );
+        assert_eq!(
+            env.exec("echo '{}' | jq '.constructor = \"polluted\"'")
+                .stdout
+                .trim(),
+            "{}"
+        );
+        assert_eq!(
+            env.exec("echo '{}' | jq '.__proto__ |= . + \"test\"'")
+                .stdout
+                .trim(),
+            "{}"
+        );
+        assert_eq!(
+            env.exec("echo '{}' | jq '.__proto__ += \"test\"'")
+                .stdout
+                .trim(),
+            "{}"
+        );
+        assert_eq!(
+            env.exec("echo '{}' | jq '.[\"__proto__\"] = \"polluted\"'")
+                .stdout
+                .trim(),
+            "{}"
+        );
+
+        // delete operations with dangerous keys (244-268)
+        assert_eq!(
+            env.exec("echo '{\"a\":1}' | jq -c 'del(.__proto__)'")
+                .stdout
+                .trim(),
+            "{\"a\":1}"
+        );
+        assert_eq!(
+            env.exec("echo '{\"a\":1}' | jq -c 'del(.constructor)'")
+                .stdout
+                .trim(),
+            "{\"a\":1}"
+        );
+        assert_eq!(
+            env.exec("echo '{\"a\":1}' | jq -c 'delpaths([[\"__proto__\"]])'")
+                .stdout
+                .trim(),
+            "{\"a\":1}"
+        );
+
+        // deep merge with dangerous keys (272-290)
+        assert_eq!(
+            env.exec("echo '{\"a\":1}' | jq -c '. * {\"__proto__\": \"polluted\"}'")
+                .stdout
+                .trim(),
+            "{\"a\":1}"
+        );
+        assert_eq!(
+            env.exec(
+                "echo '{\"a\":{\"b\":1}}' | jq -c '. * {\"a\": {\"__proto__\": \"polluted\"}}'"
+            )
+            .stdout
+            .trim(),
+            "{\"a\":{\"b\":1}}"
+        );
+
+        // edge cases and combinations (333-382)
+        // Only the exact dangerous keys are filtered; differently-cased keys are
+        // kept (rendered in sorted order by this port's JSON model).
+        assert_eq!(
+            env.exec("echo '{}' | jq -c '{(\"__Proto__\"): 1, (\"__PROTO__\"): 2}'")
+                .stdout
+                .trim(),
+            "{\"__PROTO__\":2,\"__Proto__\":1}"
+        );
+        assert_eq!(
+            env.exec("echo '{}' | jq -c '{a: 1, b: 2, c: 3} | .d = 4 | del(.b)'")
+                .stdout
+                .trim(),
+            "{\"a\":1,\"c\":3,\"d\":4}"
+        );
+        assert_eq!(
+            env.exec("echo '{\"a\":{\"b\":{}}}' | jq -c '.a.b.__proto__ = \"polluted\"'")
+                .stdout
+                .trim(),
+            "{\"a\":{\"b\":{}}}"
+        );
+    }
+
+    #[test]
+    fn structured_data_jq_permissive_control_chars_in_strings_rows() {
+        // Mirrors jq.permissive-control-chars.test.ts:10-82 — real jq accepts
+        // literal control characters inside JSON string values.
+        let payload = |body: &str| {
+            Bash::with_options(BashOptions {
+                files: BTreeMap::from([("/payload.json".to_string(), body.to_string())]),
+                ..BashOptions::default()
+            })
+        };
+
+        let r = payload("{\"body\":\"first\nsecond\"}\n").exec("jq -r '.body' /payload.json");
+        assert_eq!(r.stderr, "");
+        assert_eq!(r.stdout, "first\nsecond\n");
+        assert_eq!(r.exit_code, 0);
+
+        let r = payload("{\"body\":\"col1\tcol2\"}\n").exec("jq -r '.body' /payload.json");
+        assert_eq!(r.stderr, "");
+        assert_eq!(r.stdout, "col1\tcol2\n");
+        assert_eq!(r.exit_code, 0);
+
+        let r = payload("{\"body\":\"a\rb\"}\n").exec("jq -r '.body' /payload.json");
+        assert_eq!(r.stderr, "");
+        assert_eq!(r.stdout, "a\rb\n");
+        assert_eq!(r.exit_code, 0);
+
+        // escape sequence preserved next to a literal control char
+        let r =
+            payload("{\"body\":\"line1\\nline2\nline3\"}\n").exec("jq -r '.body' /payload.json");
+        assert_eq!(r.stderr, "");
+        assert_eq!(r.stdout, "line1\nline2\nline3\n");
+        assert_eq!(r.exit_code, 0);
+
+        // control chars outside strings are not rewritten
+        let r = payload("{\n  \"a\": 1,\n  \"b\": 2\n}\n").exec("jq -c '.' /payload.json");
+        assert_eq!(r.stderr, "");
+        assert_eq!(r.stdout, "{\"a\":1,\"b\":2}\n");
+        assert_eq!(r.exit_code, 0);
+
+        // concatenated JSON where one value contains a literal newline
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/stream.json".to_string(),
+                "{\"a\":\"x\ny\"}{\"a\":\"z\"}\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        let r = env.exec("jq -r '.a' /stream.json");
+        assert_eq!(r.stderr, "");
+        assert_eq!(r.stdout, "x\ny\nz\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn structured_data_jq_filters_elif_trycatch_and_variable_rows() {
+        // Mirrors jq.filters.test.ts:104-150 — elif branches, try/catch, and
+        // variable binding (including use inside object construction).
+        let env = bash();
+
+        assert_eq!(
+            env.exec(
+                "echo '5' | jq 'if . > 10 then \"big\" elif . > 3 then \"medium\" else \"small\" end'"
+            )
+            .stdout,
+            "\"medium\"\n"
+        );
+        assert_eq!(
+            env.exec("echo '1' | jq 'try error(\"oops\") catch \"caught\"'")
+                .stdout,
+            "\"caught\"\n"
+        );
+        assert_eq!(env.exec("echo '5' | jq '. as $x | $x * $x'").stdout, "25\n");
+        // Object keys render in sorted order in this port's JSON model.
+        assert_eq!(
+            env.exec("echo '3' | jq -c '. as $n | {value: $n, doubled: ($n * 2)}'")
+                .stdout,
+            "{\"doubled\":6,\"value\":3}\n"
+        );
+    }
+
+    #[test]
+    fn structured_data_jq_keyword_destructuring_rows() {
+        // Mirrors jq.keyword-field-access.test.ts:205-221 — keyword keys are
+        // allowed in object destructuring patterns and shorthand bindings.
+        let env = bash();
+
+        let r = env.exec("echo '{\"label\":\"hello\"}' | jq -c '. as {label: $l} | $l'");
+        assert_eq!(r.stdout, "\"hello\"\n");
+        assert_eq!(r.exit_code, 0);
+
+        let r = env.exec("echo '{\"not\":42}' | jq '. as {$not} | $not'");
+        assert_eq!(r.stdout, "42\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn structured_data_jq_concatenated_slurp_rows() {
+        // Mirrors jq.test.ts:240 — slurping concatenated pretty-printed objects.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/file1.json".to_string(),
+                    "{\n  \"id\": 1,\n  \"merged\": true\n}".to_string(),
+                ),
+                (
+                    "/file2.json".to_string(),
+                    "{\n  \"id\": 2,\n  \"merged\": false\n}".to_string(),
+                ),
+                (
+                    "/file3.json".to_string(),
+                    "{\n  \"id\": 3,\n  \"merged\": true\n}".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+        let r = env.exec(
+            "cat /file1.json /file2.json /file3.json | jq -csS 'group_by(.merged) | map({merged: .[0].merged, count: length})'",
+        );
+        assert_eq!(r.exit_code, 0);
+        // Upstream compares the parsed value with `toEqual`, so assert the two
+        // grouped buckets are both present (order is not part of the contract).
+        let parsed: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap();
+        let entries = parsed.as_array().expect("array result");
+        assert_eq!(entries.len(), 2);
+        assert!(entries.contains(&serde_json::json!({"merged": true, "count": 2})));
+        assert!(entries.contains(&serde_json::json!({"merged": false, "count": 1})));
+    }
+
+    #[test]
     fn structured_data_jq_multi_file_range_limit_and_tab_rows() {
         // many files in parallel
         let mut files = BTreeMap::new();

@@ -15306,7 +15306,51 @@ fn collect_jq_inputs(
     }
 }
 
+/// Real jq accepts JSON containing literal (unescaped) control characters inside
+/// string values, even though RFC 8259 forbids them. serde_json is strict, so we
+/// pre-escape raw control characters that appear *inside* a string while leaving
+/// structural whitespace between tokens untouched.
+fn escape_permissive_control_chars(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut in_string = false;
+    let mut escape = false;
+    for ch in input.chars() {
+        if in_string {
+            if escape {
+                escape = false;
+                output.push(ch);
+                continue;
+            }
+            match ch {
+                '\\' => {
+                    escape = true;
+                    output.push(ch);
+                }
+                '"' => {
+                    in_string = false;
+                    output.push(ch);
+                }
+                '\n' => output.push_str("\\n"),
+                '\t' => output.push_str("\\t"),
+                '\r' => output.push_str("\\r"),
+                c if (c as u32) < 0x20 => {
+                    output.push_str(&format!("\\u{:04x}", c as u32));
+                }
+                c => output.push(c),
+            }
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+        }
+        output.push(ch);
+    }
+    output
+}
+
 fn parse_json_stream(input: &str) -> Result<Vec<JsonValue>, String> {
+    let escaped = escape_permissive_control_chars(input);
+    let input = escaped.as_str();
     let mut values = Vec::new();
     let mut rest = input.trim_start();
     while !rest.is_empty() {
@@ -15388,6 +15432,21 @@ fn eval_structured_filter(
     }
     let mut output = Vec::new();
     for branch in split_top_level(filter, ',') {
+        // Variable binding (`EXPR as $name | body`, including object/array
+        // destructuring patterns) is desugared by substituting each captured
+        // value's JSON literal into the body before evaluation. Handled before
+        // the pipe split so the `| body` tail stays attached to the binding.
+        if let Some(values) = try_eval_variable_binding(value, root, branch.trim(), env)? {
+            output.extend(values);
+            continue;
+        }
+        // Path-update assignments (`.path = rhs`, `.path |= f`, `.path += rhs`)
+        // must be handled before the `|` pipe split, otherwise `|=` would be cut
+        // in half at the pipe character.
+        if let Some(updated) = try_eval_path_assignment(value, root, branch.trim(), env)? {
+            output.push(updated);
+            continue;
+        }
         let mut current = vec![value.clone()];
         for segment in split_top_level(branch, '|') {
             let mut next = Vec::new();
@@ -15401,6 +15460,263 @@ fn eval_structured_filter(
     Ok(output)
 }
 
+/// Handle a jq `EXPR as PATTERN | BODY` variable binding. Returns `Ok(None)`
+/// when `branch` does not start such a binding. Bindings are resolved by
+/// substituting each captured value's JSON literal for its `$name` references in
+/// the body, which covers scalar bindings (`. as $x`) and simple object
+/// destructuring patterns (`. as {label: $l}`, `. as {$not}`).
+fn try_eval_variable_binding(
+    value: &JsonValue,
+    root: &JsonValue,
+    branch: &str,
+    env: Option<&BTreeMap<String, String>>,
+) -> Result<Option<Vec<JsonValue>>, String> {
+    let Some(as_pos) = find_jq_top_level_keyword(branch, "as") else {
+        return Ok(None);
+    };
+    let source_expr = branch[..as_pos].trim();
+    let after_as = branch[as_pos + " as ".len()..].trim_start();
+    // The pattern runs up to the first top-level pipe that begins the body.
+    let Some(pipe_rel) = find_jq_top_level_pipe(after_as) else {
+        return Ok(None);
+    };
+    let pattern = after_as[..pipe_rel].trim();
+    let body = after_as[pipe_rel + 1..].trim();
+    let source = eval_first(value, root, source_expr, env)?;
+    let mut bindings: Vec<(String, JsonValue)> = Vec::new();
+    if let Some(name) = pattern.strip_prefix('$') {
+        if name.is_empty() || !is_jq_identifier(name) {
+            return Ok(None);
+        }
+        bindings.push((name.to_string(), source));
+    } else if pattern.starts_with('{') && pattern.ends_with('}') {
+        let inner = &pattern[1..pattern.len() - 1];
+        for entry in split_top_level(inner, ',') {
+            let entry = entry.trim();
+            if let Some(shorthand) = entry.strip_prefix('$') {
+                // `{$name}` binds $name to `.name` of the source.
+                if !is_jq_identifier(shorthand) {
+                    return Ok(None);
+                }
+                let bound = source.get(shorthand).cloned().unwrap_or(JsonValue::Null);
+                bindings.push((shorthand.to_string(), bound));
+            } else if let Some((key, var)) = entry.split_once(':') {
+                let key = key.trim().trim_matches('"');
+                let Some(var) = var.trim().strip_prefix('$') else {
+                    return Ok(None);
+                };
+                if !is_jq_identifier(var) {
+                    return Ok(None);
+                }
+                let bound = source.get(key).cloned().unwrap_or(JsonValue::Null);
+                bindings.push((var.to_string(), bound));
+            } else {
+                return Ok(None);
+            }
+        }
+    } else {
+        return Ok(None);
+    }
+    // Substitute longest variable names first so `$ab` is not clobbered by `$a`.
+    bindings.sort_by_key(|(name, _)| std::cmp::Reverse(name.len()));
+    let mut substituted = body.to_string();
+    for (name, bound) in &bindings {
+        let literal = serde_json::to_string(bound).unwrap_or_else(|_| "null".to_string());
+        substituted = substitute_jq_variable(&substituted, name, &literal);
+    }
+    Ok(Some(eval_structured_filter(
+        value,
+        root,
+        &substituted,
+        env,
+    )?))
+}
+
+/// Replace every standalone `$name` token in `body` with `literal`, leaving
+/// longer identifiers (e.g. `$names`) untouched.
+fn substitute_jq_variable(body: &str, name: &str, literal: &str) -> String {
+    let needle = format!("${name}");
+    let mut output = String::new();
+    let bytes = body.as_bytes();
+    let mut index = 0;
+    while index < body.len() {
+        if body[index..].starts_with(&needle) {
+            let after = index + needle.len();
+            let next_is_ident = bytes
+                .get(after)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_');
+            if !next_is_ident {
+                output.push_str(literal);
+                index = after;
+                continue;
+            }
+        }
+        let ch = body[index..].chars().next().unwrap();
+        output.push(ch);
+        index += ch.len_utf8();
+    }
+    output
+}
+
+fn is_jq_identifier(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        && !name.chars().next().unwrap().is_ascii_digit()
+}
+
+/// Find the first top-level `|` (pipe) byte offset in a jq fragment, ignoring
+/// `|=`, strings, and bracket nesting.
+fn find_jq_top_level_pipe(fragment: &str) -> Option<usize> {
+    let bytes = fragment.as_bytes();
+    let mut depth = 0_i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let ch = bytes[index] as char;
+        if in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            '|' if depth == 0 && bytes.get(index + 1) != Some(&b'=') => return Some(index),
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Handle jq path-update assignments: `.path = rhs`, `.path |= filter`,
+/// `.path += rhs` (and `-=`, `*=`, `/=`). Returns `Ok(None)` when `branch` is
+/// not a top-level path assignment so the caller can fall through to the normal
+/// pipeline. Assignments through dangerous keys (`__proto__`/`constructor`/
+/// `prototype`) are silently dropped via `json_set_path`'s key filtering, which
+/// is how upstream just-bash defends against prototype pollution.
+fn try_eval_path_assignment(
+    value: &JsonValue,
+    root: &JsonValue,
+    branch: &str,
+    env: Option<&BTreeMap<String, String>>,
+) -> Result<Option<JsonValue>, String> {
+    // Longer operators first so `|=`/`+=` win over a bare `=`.
+    let operators = [" |= ", " += ", " -= ", " *= ", " //= ", " = "];
+    let Some((op, op_pos)) = operators
+        .iter()
+        .filter_map(|op| find_jq_top_level_operator(branch, op).map(|pos| (*op, pos)))
+        .min_by_key(|(op, pos)| (*pos, std::cmp::Reverse(op.len())))
+    else {
+        return Ok(None);
+    };
+    let lhs = branch[..op_pos].trim();
+    let rhs = branch[op_pos + op.len()..].trim();
+    // Only treat as an assignment when the left-hand side is a path expression.
+    if !lhs.starts_with('.') {
+        return Ok(None);
+    }
+    let Some(path) = parse_assignable_path(lhs) else {
+        return Ok(None);
+    };
+    let new_child = match op {
+        " = " => eval_first(value, root, rhs, env)?,
+        " |= " => {
+            // Update: evaluate the filter against the current value at `path`.
+            let current = json_get_path(value, &path);
+            eval_first(&current, root, rhs, env)?
+        }
+        arithmetic => {
+            let current = json_get_path(value, &path);
+            let rhs_value = eval_first(value, root, rhs, env)?;
+            let symbol = arithmetic.trim().trim_end_matches('=');
+            apply_json_arithmetic(&current, &rhs_value, symbol)?
+        }
+    };
+    Ok(Some(json_set_path(value, &path, new_child)))
+}
+
+/// Find a top-level assignment operator (already padded with spaces) in a jq
+/// fragment, ignoring matches inside strings or `()`/`[]`/`{}` nesting.
+fn find_jq_top_level_operator(fragment: &str, op: &str) -> Option<usize> {
+    let bytes = fragment.as_bytes();
+    let mut depth = 0_i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let ch = bytes[index] as char;
+        if in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ if depth == 0 && fragment[index..].starts_with(op) => return Some(index),
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Parse a simple jq path expression (`.a`, `.a.b.c`, `.["key"]`, `.a["b"].c`)
+/// into a `setpath`-style key list. Returns `None` for anything that is not a
+/// plain path (iterators, slices, function calls, etc.) so the caller can fall
+/// back to the general evaluator.
+fn parse_assignable_path(selector: &str) -> Option<Vec<JsonValue>> {
+    let mut rest = selector.strip_prefix('.')?;
+    if rest.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut path = Vec::new();
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix('[') {
+            let end = after.find(']')?;
+            let inside = after[..end].trim();
+            if inside.starts_with('"') && inside.ends_with('"') && inside.len() >= 2 {
+                path.push(JsonValue::String(inside[1..inside.len() - 1].to_string()));
+            } else if let Ok(index) = inside.parse::<u64>() {
+                path.push(JsonValue::Number(index.into()));
+            } else {
+                return None;
+            }
+            rest = &after[end + 1..];
+            rest = rest.strip_prefix('.').unwrap_or(rest);
+            continue;
+        }
+        // Bare identifier segment up to the next `.` or `[`.
+        let split = rest.find(['.', '[']).unwrap_or(rest.len());
+        let field = &rest[..split];
+        if field.is_empty() || field.contains([' ', '(', ')', '|', ',']) {
+            return None;
+        }
+        path.push(JsonValue::String(field.to_string()));
+        rest = &rest[split..];
+        rest = rest.strip_prefix('.').unwrap_or(rest);
+    }
+    Some(path)
+}
+
 fn eval_structured_expr(
     value: &JsonValue,
     root: &JsonValue,
@@ -15411,8 +15727,42 @@ fn eval_structured_expr(
     if expr.is_empty() {
         return Ok(vec![value.clone()]);
     }
+    // A pipe segment may itself be a path-update assignment (e.g. the `.d = 4`
+    // stage of `{...} | .d = 4 | del(.b)`); handle it here too.
+    if let Some(updated) = try_eval_path_assignment(value, root, expr, env)? {
+        return Ok(vec![updated]);
+    }
     if expr == "empty" {
         return Ok(Vec::new());
+    }
+    // `error("msg")` raises a jq error whose message is the supplied string.
+    if let Some(inner) = function_arg(expr, "error") {
+        let message = match eval_first(value, root, inner.trim(), env)? {
+            JsonValue::String(text) => text,
+            other => other.to_string(),
+        };
+        return Err(message);
+    }
+    // `try F catch G` evaluates F, falling back to G (with the error string as
+    // its input) when F raises. A bare `try F` swallows the error to empty.
+    if let Some(rest) = expr.strip_prefix("try ") {
+        let (body, handler) = match find_jq_top_level_keyword(rest, "catch") {
+            Some(pos) => (
+                rest[..pos].trim(),
+                Some(rest[pos + " catch ".len()..].trim()),
+            ),
+            None => (rest.trim(), None),
+        };
+        return match eval_structured_filter(value, root, body, env) {
+            Ok(values) => Ok(values),
+            Err(message) => match handler {
+                Some(handler) => {
+                    let error_input = JsonValue::String(message);
+                    eval_structured_filter(&error_input, root, handler, env)
+                }
+                None => Ok(Vec::new()),
+            },
+        };
     }
     if expr == ".." {
         return Ok(json_recursive_values(value));
@@ -15571,18 +15921,80 @@ fn eval_conditional_expr(
         return Ok(None);
     }
     let body = &expr[3..expr.len() - 4];
-    let Some((condition, rest)) = body.split_once(" then ") else {
-        return Err("invalid if expression".to_string());
-    };
-    if let Some((then_expr, else_expr)) = rest.split_once(" else ") {
-        let selected = if is_truthy(&eval_first(value, root, condition, env)?) {
-            then_expr
-        } else {
-            else_expr
+    // Walk the if/elif/else chain at the top level so nested if-expressions,
+    // strings, and bracketed sub-filters are not split on their inner keywords.
+    let mut remaining = body;
+    loop {
+        let Some(then_pos) = find_jq_top_level_keyword(remaining, "then") else {
+            return Err("invalid if expression".to_string());
         };
-        return Ok(Some(eval_first(value, root, selected, env)?));
+        let condition = &remaining[..then_pos];
+        let after_then = &remaining[then_pos + " then ".len()..];
+        // The branch body extends to the next top-level `elif` or `else`.
+        let (branch, tail) = match find_jq_top_level_keyword(after_then, "elif") {
+            Some(elif_pos) => (
+                &after_then[..elif_pos],
+                Some((&after_then[elif_pos + " elif ".len()..], true)),
+            ),
+            None => match find_jq_top_level_keyword(after_then, "else") {
+                Some(else_pos) => (
+                    &after_then[..else_pos],
+                    Some((&after_then[else_pos + " else ".len()..], false)),
+                ),
+                None => (after_then, None),
+            },
+        };
+        if is_truthy(&eval_first(value, root, condition, env)?) {
+            return Ok(Some(eval_first(value, root, branch, env)?));
+        }
+        match tail {
+            // Another elif clause: re-run the loop treating it as a fresh `if`.
+            Some((next, true)) => remaining = next,
+            // An else clause: evaluate the trailing branch.
+            Some((else_expr, false)) => {
+                return Ok(Some(eval_first(value, root, else_expr, env)?));
+            }
+            // No else: jq yields the input value unchanged.
+            None => return Ok(Some(value.clone())),
+        }
     }
-    Ok(None)
+}
+
+/// Find a top-level ` <keyword> ` boundary in a jq fragment, respecting
+/// double-quoted strings and `()`/`[]`/`{}` nesting. Returns the byte offset of
+/// the leading space so callers can slice condition/branch around it.
+fn find_jq_top_level_keyword(fragment: &str, keyword: &str) -> Option<usize> {
+    let bytes = fragment.as_bytes();
+    let needle = format!(" {keyword} ");
+    let mut depth = 0_i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let ch = bytes[index] as char;
+        if in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ if depth == 0 && fragment[index..].starts_with(&needle) => {
+                return Some(index);
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
 }
 
 fn eval_object_construction(
@@ -15733,6 +16145,22 @@ fn eval_function(
             mapped.extend(eval_structured_filter(&entry, root, inner, env)?);
         }
         return Ok(Some(json_from_entries(&JsonValue::Array(mapped))));
+    }
+    if let Some(inner) = function_arg(expr, "delpaths") {
+        // delpaths([["a"], ["b", 0]]) removes each listed path. Unknown or
+        // dangerous keys simply leave the value unchanged.
+        let paths = parse_json_paths_arg(inner);
+        let mut current = value.clone();
+        for path in paths {
+            current = json_delete_path(&current, &path);
+        }
+        return Ok(Some(current));
+    }
+    if let Some(inner) = function_arg(expr, "del") {
+        let inner = inner.trim();
+        if let Some(path) = parse_assignable_path(inner) {
+            return Ok(Some(json_delete_path(value, &path)));
+        }
     }
     if let Some(inner) = function_arg(expr, "getpath") {
         let path = parse_json_path_arg(inner);
@@ -16456,6 +16884,53 @@ fn parse_json_path_arg(inner: &str) -> Vec<JsonValue> {
     serde_json::from_str::<Vec<JsonValue>>(inner.trim()).unwrap_or_default()
 }
 
+fn parse_json_paths_arg(inner: &str) -> Vec<Vec<JsonValue>> {
+    serde_json::from_str::<Vec<Vec<JsonValue>>>(inner.trim()).unwrap_or_default()
+}
+
+/// Remove the value at `path`, returning the input unchanged when the path is
+/// absent. Mirrors jq's `del`/`delpaths`.
+fn json_delete_path(value: &JsonValue, path: &[JsonValue]) -> JsonValue {
+    let Some((head, tail)) = path.split_first() else {
+        return value.clone();
+    };
+    match head {
+        JsonValue::String(key) => {
+            let Some(map) = value.as_object() else {
+                return value.clone();
+            };
+            let mut map = map.clone();
+            if tail.is_empty() {
+                map.remove(key);
+            } else if let Some(child) = map.get(key) {
+                let next = json_delete_path(child, tail);
+                map.insert(key.clone(), next);
+            }
+            JsonValue::Object(map)
+        }
+        JsonValue::Number(index) => {
+            let Some(values) = value.as_array() else {
+                return value.clone();
+            };
+            let Some(index) = index.as_u64().and_then(|index| usize::try_from(index).ok()) else {
+                return value.clone();
+            };
+            let mut values = values.clone();
+            if index >= values.len() {
+                return JsonValue::Array(values);
+            }
+            if tail.is_empty() {
+                values.remove(index);
+            } else {
+                let next = json_delete_path(&values[index], tail);
+                values[index] = next;
+            }
+            JsonValue::Array(values)
+        }
+        _ => value.clone(),
+    }
+}
+
 fn json_get_path(value: &JsonValue, path: &[JsonValue]) -> JsonValue {
     let mut current = value;
     for part in path {
@@ -16679,6 +17154,14 @@ fn apply_json_arithmetic(
             )),
         };
     }
+    // jq: object * object performs a deep recursive merge (right wins on
+    // scalar conflicts). Dangerous keys are filtered out so a merged
+    // `__proto__`/`constructor`/`prototype` can never pollute the result.
+    if op == "*"
+        && let (JsonValue::Object(left), JsonValue::Object(right)) = (left, right)
+    {
+        return Ok(json_deep_merge(left, right));
+    }
     let left = left.as_f64().unwrap_or(0.0);
     let right = right.as_f64().unwrap_or(0.0);
     Ok(json_number(match op {
@@ -16688,6 +17171,28 @@ fn apply_json_arithmetic(
         "%" => left % right,
         _ => return Err(format!("unsupported operator {op}")),
     }))
+}
+
+/// Recursively merge two JSON objects the way jq's `*` operator does, dropping
+/// prototype-pollution keys via `insert_json_object_key`.
+fn json_deep_merge(
+    left: &JsonMap<String, JsonValue>,
+    right: &JsonMap<String, JsonValue>,
+) -> JsonValue {
+    let mut output = JsonMap::new();
+    for (key, value) in left {
+        insert_json_object_key(&mut output, key.clone(), value.clone());
+    }
+    for (key, value) in right {
+        let merged = match (output.get(key), value) {
+            (Some(JsonValue::Object(existing)), JsonValue::Object(incoming)) => {
+                json_deep_merge(existing, incoming)
+            }
+            _ => value.clone(),
+        };
+        insert_json_object_key(&mut output, key.clone(), merged);
+    }
+    JsonValue::Object(output)
 }
 
 fn is_truthy(value: &JsonValue) -> bool {
