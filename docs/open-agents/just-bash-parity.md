@@ -19,11 +19,11 @@ Rows are intentionally fail-closed: no row is verified until a sibling implement
 | Non-test TS/TSX source files | 423 |
 | Test files | 485 |
 | Test cases | 9936 |
-| Portable pending cases | 1579 |
-| Portable verified cases | 7216 |
+| Portable pending cases | 1549 |
+| Portable verified cases | 7246 |
 | JS-only documented cases | 1141 |
 | Type-system impossible cases | 0 |
-| Strict gate gaps | 1579 |
+| Strict gate gaps | 1549 |
 | Inventory check command | node scripts/just-bash-test-inventory.mjs --check |
 | Strict gate command | node scripts/just-bash-test-inventory.mjs --strict |
 | Conformance plan | docs/open-agents/just-bash-conformance.md |
@@ -380,7 +380,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | pending:just-bash-command-yq | portable-pending | 69 |
 | pending:just-bash-core | portable-pending | 159 |
 | pending:just-bash-fs | portable-pending | 1 |
-| pending:just-bash-parser-interpreter | portable-pending | 429 |
+| pending:just-bash-parser-interpreter | portable-pending | 399 |
 | pending:just-bash-spec-comparison | portable-pending | 98 |
 
 ## Test File Inventory
