@@ -1044,6 +1044,42 @@ const jbc10CaseGroups = [
     notes:
       'JBC-10 verifies imported ripgrep regression rows: rooted/unanchored/nested/trailing-slash/double-star/dot-star gitignore patterns, --files with a path argument, IP-style repeated-group and cyrillic case-folding regex, smart-case bracket sensitivity, -e dash patterns, -q quiet exit, --only-matching, and --quiet --files glob exit codes over the virtual filesystem.',
   },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/feature.test.ts',
+    lines: [965, 966, 967, 968, 969, 970, 1047],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_unsupported_upstream_skip_features_are_rejected_or_classified',
+    notes:
+      'JBC-10 classifies the upstream `it.skip` rg feature rows that ripgrep/just-bash leave unimplemented: alternate text encodings via -E/--encoding (Shift-JIS, UTF-16 auto/explicit, EUC-JP, unknown, replacement) and -M/--max-columns truncation. The Rust rg port rejects these flags as unrecognized options, matching the upstream skip contract; the Rust test asserts the rejection so it fails if support is ever silently added.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/json.test.ts',
+    lines: [186],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_unsupported_upstream_skip_features_are_rejected_or_classified',
+    notes:
+      'JBC-10 classifies the upstream `it.skip` JSON row r1412_look_behind_match_missing, which requires PCRE2 look-behind. The Rust rg port rejects PCRE2/look-around regex rather than matching, which the named Rust test asserts.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
+    lines: [666, 1071, 1074, 1075, 1097, 1098, 1099, 1100, 1101, 1102, 1103, 1104, 1200, 1201],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_unsupported_upstream_skip_features_are_rejected_or_classified',
+    notes:
+      'JBC-10 classifies the upstream `it.skip` misc rg rows for unimplemented features: --no-include-zero count override, --no-column vimgrep output, --pre/--pre-glob file preprocessing, non-gzip compression (bzip2/xz/lz4/lzma/brotli/zstd/uncompress/invalid-gzip via -z/--search-zip), and --sort/--sortr accessed-time ordering that requires real system timestamps. The Rust rg port rejects these flags as unrecognized options, asserted by the named Rust test so it fails if support is ever added.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [1091, 1092, 1095, 1140, 1190, 1378, 1381, 1519],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_unsupported_upstream_skip_features_are_rejected_or_classified',
+    notes:
+      'JBC-10 classifies the upstream `it.skip` regression rg rows that require unimplemented features: PCRE2 look-ahead/look-behind (r1401_x2, r1412, r1573, r3139), --crlf (r1765), --no-unicode (r2574), and --null-data (r2658). The Rust rg port rejects PCRE2/look-around regex and these flags as unrecognized options, asserted by the named Rust test.',
+  },
 ];
 
 const jbc12SourceGroups = [

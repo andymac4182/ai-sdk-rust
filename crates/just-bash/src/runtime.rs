@@ -3476,6 +3476,87 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn rg_unsupported_upstream_skip_features_are_rejected_or_classified() {
+        // JBC-10: the upstream rg suite explicitly `it.skip`s a family of features
+        // that ripgrep itself or the just-bash JS port does not implement (alternate
+        // text encodings, PCRE2 look-around, max-columns, file preprocessing,
+        // non-gzip compression, the --no-include-zero/--no-column/--crlf/--no-unicode/
+        // --null-data flags, and timestamp-based sorting). The Rust rg port matches
+        // that contract by rejecting these features rather than silently mis-handling
+        // them. Each assertion fails if the Rust port ever started accepting the flag,
+        // which would make the upstream skip-classification wrong.
+        let unrecognized = |args: &str, opt: &str| {
+            let r = home_bash(&[("f.txt", "ab\nhello\n")]).exec(args);
+            assert_eq!(r.exit_code, 1, "{args}");
+            assert_eq!(r.stdout, "", "{args}");
+            assert_eq!(
+                r.stderr,
+                format!("rg: unrecognized option '{opt}'\n"),
+                "{args}"
+            );
+        };
+
+        // Alternate text encodings (-E / --encoding): Shift-JIS, UTF-16, EUC-JP, etc.
+        unrecognized("rg -E sjis hello f.txt", "-E");
+        unrecognized("rg --encoding utf-16 hello f.txt", "--encoding");
+
+        // -M / --max-columns truncation.
+        unrecognized("rg -M 10 hello f.txt", "-M");
+
+        // --no-include-zero count override.
+        unrecognized("rg --no-include-zero -c hello f.txt", "--no-include-zero");
+
+        // File preprocessing (--pre / --pre-glob).
+        unrecognized("rg --pre cat hello f.txt", "--pre");
+        unrecognized("rg --pre-glob '*.txt' hello f.txt", "--pre-glob");
+
+        // Non-gzip compression search (-z / --search-zip): only gzip is supported,
+        // and the Rust port does not wire up the -z flag at all.
+        unrecognized("rg -z hello f.txt", "-z");
+        unrecognized("rg --search-zip hello f.txt", "--search-zip");
+
+        // Output/format flags the upstream skip-suite documents as unimplemented.
+        unrecognized("rg --no-column --vimgrep hello f.txt", "--no-column");
+        unrecognized("rg --crlf hello f.txt", "--crlf");
+        unrecognized("rg --no-unicode hello f.txt", "--no-unicode");
+        unrecognized("rg --null-data hello f.txt", "--null-data");
+
+        // Timestamp-based sorting requires real system metadata; --sortr is not wired
+        // up and --sort accessed cannot order by access time deterministically.
+        unrecognized("rg --sortr accessed hello", "--sortr");
+
+        // PCRE2 / look-around (-P, raw look-ahead/look-behind) is rejected by the
+        // standard regex engine rather than silently matching.
+        let pcre = home_bash(&[("f.txt", "ab\nhello\n")]).exec("rg -P '(?<=a)b' f.txt");
+        assert_eq!(pcre.exit_code, 1, "rg -P");
+        assert_eq!(pcre.stdout, "", "rg -P");
+        assert!(
+            pcre.stderr.contains("PCRE2 is not supported"),
+            "rg -P stderr: {:?}",
+            pcre.stderr
+        );
+
+        let look_behind = home_bash(&[("f.txt", "ab\nhello\n")]).exec("rg '(?<=a)b' f.txt");
+        assert_eq!(look_behind.exit_code, 2, "look-behind");
+        assert_eq!(look_behind.stdout, "", "look-behind");
+        assert!(
+            look_behind.stderr.contains("look-around")
+                || look_behind.stderr.contains("look-behind"),
+            "look-behind stderr: {:?}",
+            look_behind.stderr
+        );
+
+        let look_ahead = home_bash(&[("f.txt", "ab\nhello\n")]).exec("rg '(?=a)' f.txt");
+        assert_eq!(look_ahead.exit_code, 2, "look-ahead");
+        assert_eq!(look_ahead.stdout, "", "look-ahead");
+        assert!(
+            look_ahead.stderr.contains("look-around") || look_ahead.stderr.contains("look-ahead"),
+            "look-ahead stderr: {:?}",
+            look_ahead.stderr
+        );
+    }
+
+    #[test]
     fn rg_upstream_basic_rows_are_portable() {
         assert_home_exec(
             &[("file.txt", "hello world\nfoo bar\n")],
