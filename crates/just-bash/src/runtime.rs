@@ -3261,6 +3261,150 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn awk_jbc09_error_handling_and_type_coercion_rows() {
+        // Maps the portable rows of awk.errors.test.ts. Each assertion mirrors
+        // the upstream vitest expectation exactly (strict outputs where the
+        // upstream test pins them, exit-code-only where the upstream only
+        // asserts `toBeDefined()`/`exitCode`).
+        let env = Bash::default();
+
+        // division by zero (awk.errors.test.ts:6,14,20).
+        // Upstream only requires exit 0 / a defined result; Rust prints
+        // IEEE inf/nan deterministically.
+        let div_int = env.exec(r#"echo '1' | awk '{ print 1/0 }'"#);
+        assert_eq!(div_int.exit_code, 0);
+        assert_eq!(div_int.stdout, "inf\n");
+        let div_float = env.exec(r#"echo '1' | awk '{ print 1.0/0.0 }'"#);
+        assert_eq!(div_float.exit_code, 0);
+        assert_eq!(div_float.stdout, "inf\n");
+        let mod_zero = env.exec(r#"echo '1' | awk '{ print 5 % 0 }'"#);
+        assert_eq!(mod_zero.exit_code, 0);
+        assert_eq!(mod_zero.stdout, "nan\n");
+
+        // invalid regex patterns (awk.errors.test.ts:29,38,47). Upstream only
+        // requires the result to be defined; Rust fails closed with a regex
+        // parse diagnostic and a non-zero exit (no crash, no host leak).
+        for prog in [
+            r#"echo 'test' | awk '{ print match($0, "[") }'"#,
+            r#"echo 'test' | awk '{ gsub(/[/, "x"); print }'"#,
+            r#"echo 'test' | awk '{ sub(/[/, "x"); print }'"#,
+        ] {
+            let r = env.exec(prog);
+            assert_ne!(r.exit_code, 0, "{prog}");
+            assert!(
+                r.stderr.contains("regex parse error"),
+                "{prog}: {:?}",
+                r.stderr
+            );
+        }
+
+        // undefined variable access (awk.errors.test.ts:57,64,71,80).
+        assert_eq!(env.exec(r#"echo '1' | awk '{ print x }'"#).stdout, "\n");
+        assert_eq!(
+            env.exec(r#"echo '1' | awk '{ print x + 5 }'"#).stdout,
+            "5\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo '1' | awk '{ arr[1] = "x"; print arr[1] }'"#)
+                .stdout,
+            "x\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo '1' | awk '{ print arr[999] }'"#).stdout,
+            "\n"
+        );
+
+        // type coercion (awk.errors.test.ts:89,96,103,110,119).
+        assert_eq!(
+            env.exec(r#"echo '10abc' | awk '{ print $1 + 5 }'"#).stdout,
+            "15\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo 'abc' | awk '{ print $1 + 5 }'"#).stdout,
+            "5\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo '' | awk '{ print $1 + 10 }'"#).stdout,
+            "10\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo '10' | awk '{ print ($1 == "10") }'"#)
+                .stdout,
+            "1\n"
+        );
+        // Both operands look numeric, so numeric comparison applies: 2 < 10.
+        let numcmp = env.exec(r#"echo '2' | awk '{ print ($1 < "10") }'"#);
+        assert_eq!(numcmp.exit_code, 0);
+        assert_eq!(numcmp.stdout, "1\n");
+
+        // field access edge cases (awk.errors.test.ts:129,136,150,158,170).
+        assert_eq!(
+            env.exec(r#"echo 'hello world' | awk '{ print $0 }'"#)
+                .stdout,
+            "hello world\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo 'a b' | awk '{ print $100 }'"#).stdout,
+            "\n"
+        );
+        // Non-integer field index truncates to $1.
+        assert_eq!(
+            env.exec(r#"echo 'a b c' | awk '{ print $1.5 }'"#).stdout,
+            "a\n"
+        );
+        // Field assignment beyond NF extends the record with empty fields.
+        let extend = env.exec(r#"echo 'a b' | awk '{ $5 = "x"; print $0 }'"#);
+        assert_eq!(extend.exit_code, 0);
+        assert!(extend.stdout.contains('x'), "{:?}", extend.stdout);
+        // substr with only the string argument returns the whole string.
+        assert_eq!(
+            env.exec(r#"echo 'hello' | awk '{ print substr($1) }'"#)
+                .stdout,
+            "hello\n"
+        );
+
+        // sprintf format handling (awk.errors.test.ts:186,195,205).
+        assert_eq!(
+            env.exec(r#"echo '1' | awk '{ print sprintf("hello") }'"#)
+                .stdout,
+            "hello\n"
+        );
+        // Extra args ignored.
+        assert_eq!(
+            env.exec(r#"echo '1' | awk '{ print sprintf("%d", 1, 2, 3) }'"#)
+                .stdout,
+            "1\n"
+        );
+        // Missing arg treated as 0; upstream only pins exit 0.
+        let sprintf_missing = env.exec(r#"echo '1' | awk '{ print sprintf("%d %d", 1) }'"#);
+        assert_eq!(sprintf_missing.exit_code, 0);
+        assert_eq!(sprintf_missing.stdout, "1 0\n");
+
+        // math function edge cases (awk.errors.test.ts:216,223,230,237).
+        for (prog, want) in [
+            (r#"echo '1' | awk '{ print sqrt(-1) }'"#, "nan\n"),
+            (r#"echo '1' | awk '{ print log(0) }'"#, "-inf\n"),
+            (r#"echo '1' | awk '{ print log(-1) }'"#, "nan\n"),
+            (r#"echo '1' | awk '{ print exp(1000) }'"#, "inf\n"),
+        ] {
+            let r = env.exec(prog);
+            assert_eq!(r.exit_code, 0, "{prog}");
+            assert_eq!(r.stdout, want, "{prog}");
+        }
+
+        // syntax + file errors (awk.errors.test.ts:246,252,270).
+        assert_ne!(env.exec(r#"echo '1' | awk '{ print $1'"#).exit_code, 0);
+        assert_ne!(env.exec(r#"echo '1' | awk '{ print ($1 }'"#).exit_code, 0);
+        let missing_file = env.exec("awk '{ print }' /nonexistent/file.txt");
+        assert_ne!(missing_file.exit_code, 0);
+        assert!(
+            missing_file.stderr.contains("No such file"),
+            "{:?}",
+            missing_file.stderr
+        );
+    }
+
+    #[test]
     fn rg_upstream_basic_rows_are_portable() {
         assert_home_exec(
             &[("file.txt", "hello world\nfoo bar\n")],
@@ -4968,6 +5112,157 @@ be, to a very large extent, the result of luck. Sherlock Holmes\n",
             0,
             "a.txt:1:test\nc.txt:1:test\n",
         );
+    }
+
+    #[test]
+    fn rg_imported_binary_edge_case_and_flag_rows_are_portable() {
+        // binary.test.ts:56 - should not detect binary if NUL after 8KB sample
+        let late = format!("pattern\n{}\u{0}end\n", "a".repeat(9000));
+        assert_home_exec(
+            &[("late.txt", late.as_str())],
+            "rg pattern",
+            0,
+            "late.txt:1:pattern\n",
+        );
+        // binary.test.ts:134 - should handle file with only NUL bytes
+        assert_home_exec(
+            &[("nulls.bin", "\u{0}\u{0}\u{0}\u{0}")],
+            "rg anything",
+            1,
+            "",
+        );
+        // binary.test.ts:145 - should handle NUL at start of file
+        assert_home_exec(&[("start.bin", "\u{0}hello world\n")], "rg hello", 1, "");
+        // binary.test.ts:156 - should handle NUL at end of file
+        assert_home_exec(&[("end.bin", "hello world\n\u{0}")], "rg hello", 1, "");
+        // binary.test.ts:167 - should handle multiple NUL bytes
+        assert_home_exec(
+            &[("multi.bin", "a\u{0}b\u{0}c\u{0}d\n")],
+            "rg '[a-d]'",
+            1,
+            "",
+        );
+        // binary.test.ts:180 - should skip files with common binary signatures
+        assert_home_exec(
+            &[
+                ("image.png", "\u{89}PNG\r\n\u{1a}\n\u{0}data"),
+                ("doc.pdf", "%PDF-1.4\n\u{0}binary"),
+                ("archive.zip", "PK\u{3}\u{4}\u{0}\u{0}data"),
+                ("text.txt", "data\n"),
+            ],
+            "rg data",
+            0,
+            "text.txt:1:data\n",
+        );
+        // binary.test.ts:201 - should work with -i flag
+        assert_home_exec(
+            &[
+                ("text.txt", "HELLO world\n"),
+                ("binary.bin", "HELLO\u{0}world\n"),
+            ],
+            "rg -i hello",
+            0,
+            "text.txt:1:HELLO world\n",
+        );
+        // binary.test.ts:214 - should work with -v flag
+        assert_home_exec(
+            &[
+                ("text.txt", "keep\nremove\nkeep\n"),
+                ("binary.bin", "keep\u{0}remove\n"),
+            ],
+            "rg -v remove",
+            0,
+            "text.txt:1:keep\ntext.txt:3:keep\n",
+        );
+        // binary.test.ts:227 - should work with -w flag
+        assert_home_exec(
+            &[
+                ("text.txt", "foo bar\nfoobar\n"),
+                ("binary.bin", "foo bar\u{0}\n"),
+            ],
+            "rg -w foo",
+            0,
+            "text.txt:1:foo bar\n",
+        );
+        // binary.test.ts:240 - should work with context flags
+        assert_home_exec(
+            &[
+                ("text.txt", "before\nmatch\nafter\n"),
+                ("binary.bin", "before\u{0}match\nafter\n"),
+            ],
+            "rg -C1 match",
+            0,
+            "text.txt-1-before\ntext.txt:2:match\ntext.txt-3-after\n",
+        );
+        // binary.test.ts:255 - should work with -m flag
+        assert_home_exec(
+            &[
+                ("text.txt", "match\nmatch\nmatch\n"),
+                ("binary.bin", "match\u{0}match\n"),
+            ],
+            "rg -m1 match",
+            0,
+            "text.txt:1:match\n",
+        );
+        // binary.test.ts:270 - should skip binary files in subdirectories
+        assert_home_exec(
+            &[
+                ("src/code.ts", "export const x = 1;\n"),
+                ("assets/image.bin", "export\u{0}data\n"),
+                ("lib/util.ts", "export function foo() {}\n"),
+            ],
+            "rg --sort path export",
+            0,
+            "lib/util.ts:1:export function foo() {}\nsrc/code.ts:1:export const x = 1;\n",
+        );
+    }
+
+    #[test]
+    fn rg_flags_symlink_unrestricted_and_text_rows_are_portable() {
+        // rg.flags.test.ts:11 - should accept -L/--follow flag without error
+        assert_home_exec(
+            &[("file.txt", "hello world\n")],
+            "rg -L hello",
+            0,
+            "file.txt:1:hello world\n",
+        );
+        // rg.flags.test.ts:23 - should accept --follow flag without error
+        assert_home_exec(
+            &[("file.txt", "hello world\n")],
+            "rg --follow hello",
+            0,
+            "file.txt:1:hello world\n",
+        );
+        // rg.flags.test.ts:35 - should skip symlinks by default in directory search
+        let env = home_bash(&[("real.txt", "hello\n")]);
+        assert_eq!(env.exec("ln -s real.txt /home/user/link.txt").exit_code, 0);
+        let default = env.exec("rg hello");
+        assert_eq!(default.exit_code, 0);
+        assert_eq!(default.stdout, "real.txt:1:hello\n");
+        // rg.flags.test.ts:49 - should follow symlinks with -L in directory search
+        let followed = env.exec("rg -L --sort path hello");
+        assert_eq!(followed.exit_code, 0);
+        assert_eq!(followed.stdout, "link.txt:1:hello\nreal.txt:1:hello\n");
+        // rg.flags.test.ts:122 - -u should be equivalent to --no-ignore
+        let u_env = home_bash(&[(".gitignore", "ignored.txt\n"), ("ignored.txt", "hello\n")]);
+        let result_u = u_env.exec("rg -u hello");
+        let result_no_ignore = u_env.exec("rg --no-ignore hello");
+        assert_eq!(result_u.stdout, result_no_ignore.stdout);
+        assert!(result_u.stdout.contains("ignored.txt:1:hello"));
+        // rg.flags.test.ts:135 - -uu should be equivalent to --no-ignore --hidden
+        let uu_env = home_bash(&[(".hidden", "hello\n")]);
+        let result_uu = uu_env.exec("rg -uu hello");
+        let result_flags = uu_env.exec("rg --no-ignore --hidden hello");
+        assert_eq!(result_uu.stdout, result_flags.stdout);
+        assert!(result_uu.stdout.contains(".hidden:1:hello"));
+        // rg.flags.test.ts:149 - should search binary files as text with -a
+        let bin_env = home_bash(&[("binary.bin", "hello\u{0}world\n")]);
+        let without_a = bin_env.exec("rg hello");
+        assert_eq!(without_a.exit_code, 1);
+        assert_eq!(without_a.stdout, "");
+        let with_a = bin_env.exec("rg -a hello");
+        assert_eq!(with_a.exit_code, 0);
+        assert_eq!(with_a.stdout, "binary.bin:1:hello\u{0}world\n");
     }
 
     #[test]
@@ -8173,6 +8468,115 @@ be, to a very large extent, the result of luck. Sherlock Holmes\n",
         assert_eq!(show_all.exit_code, 0);
         let all_lines: Vec<&str> = show_all.stdout.trim().split('\n').collect();
         assert_eq!(all_lines.len(), 12);
+    }
+
+    #[test]
+    fn structured_data_xan_top_transpose_fixlengths_split_search_rows() {
+        // Ports packages/just-bash/src/commands/xan/xan.filter-sort.test.ts:129,138,149,158,185
+        // and packages/just-bash/src/commands/xan/xan.data.test.ts:85,98,108,147,156,165,176,185,194.
+        let products = "id,name,price,category,in_stock\n1,Widget,19.99,electronics,true\n2,Gadget,29.99,electronics,true\n3,Gizmo,9.99,accessories,false\n4,Doodad,49.99,electronics,true\n5,Thingamajig,14.99,accessories,true\n";
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/products.csv".to_string(), products.to_string()),
+                (
+                    "/search.csv".to_string(),
+                    "h1,h2\nfoobar,x\nabc,y\nbarfoo,z\n".to_string(),
+                ),
+                ("/bad.csv".to_string(), "name\nalice\n".to_string()),
+                (
+                    "/metric.csv".to_string(),
+                    "metric,jan,feb,mar\nsales,100,150,200\ncosts,80,90,100\n".to_string(),
+                ),
+                ("/single.csv".to_string(), "name\nalice\nbob\n".to_string()),
+                ("/emptycols.csv".to_string(), "a,b,c\n".to_string()),
+                (
+                    "/ragged.csv".to_string(),
+                    "a,b,c\n1,2,3\n4,5\n6\n".to_string(),
+                ),
+                (
+                    "/wide.csv".to_string(),
+                    "a,b,c,d\n1,2,3,4\n5,6,7,8\n".to_string(),
+                ),
+                ("/short.csv".to_string(), "a,b,c\n1,2\n3\n".to_string()),
+                ("/six.csv".to_string(), "n\n1\n2\n3\n4\n5\n6\n".to_string()),
+                ("/five.csv".to_string(), "n\n1\n2\n3\n4\n5\n".to_string()),
+                ("/one.csv".to_string(), "n\n1\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // xan top: top N by numeric column (descending)
+        assert_eq!(
+            env.exec("xan top price -l 2 /products.csv").stdout,
+            "id,name,price,category,in_stock\n4,Doodad,49.99,electronics,true\n2,Gadget,29.99,electronics,true\n"
+        );
+        // xan top -R: bottom N (ascending)
+        assert_eq!(
+            env.exec("xan top price -l 2 -R /products.csv").stdout,
+            "id,name,price,category,in_stock\n3,Gizmo,9.99,accessories,false\n5,Thingamajig,14.99,accessories,true\n"
+        );
+
+        // xan search: regex over all columns
+        assert_eq!(
+            env.exec("xan search -r '^foo' /search.csv").stdout,
+            "h1,h2\nfoobar,x\n"
+        );
+        // xan search -v: inverted match
+        assert_eq!(
+            env.exec("xan search -v -r '^foo' /search.csv").stdout,
+            "h1,h2\nabc,y\nbarfoo,z\n"
+        );
+        // xan search: invalid regex pattern reports a precise error
+        let bad = env.exec("xan search '[' /bad.csv");
+        assert_eq!(bad.exit_code, 1);
+        assert_eq!(bad.stderr, "xan search: invalid regex pattern '['\n");
+
+        // xan transpose: swap rows and columns
+        assert_eq!(
+            env.exec("xan transpose /metric.csv").stdout,
+            "metric,sales,costs\njan,100,80\nfeb,150,90\nmar,200,100\n"
+        );
+        // xan transpose: single column (no data rows after transpose)
+        assert_eq!(
+            env.exec("xan transpose /single.csv").stdout,
+            "name,alice,bob\n"
+        );
+        // xan transpose: header-only input
+        assert_eq!(
+            env.exec("xan transpose /emptycols.csv").stdout,
+            "column\na\nb\nc\n"
+        );
+
+        // xan fixlengths: pad short rows
+        assert_eq!(
+            env.exec("xan fixlengths /ragged.csv").stdout,
+            "a,b,c\n1,2,3\n4,5,\n6,,\n"
+        );
+        // xan fixlengths -l: truncate long rows
+        assert_eq!(
+            env.exec("xan fixlengths -l 2 /wide.csv").stdout,
+            "a,b\n1,2\n5,6\n"
+        );
+        // xan fixlengths -d: custom default value
+        assert_eq!(
+            env.exec("xan fixlengths -d 'N/A' /short.csv").stdout,
+            "a,b,c\n1,2,N/A\n3,N/A,N/A\n"
+        );
+
+        // xan split -c: into N chunks
+        assert_eq!(
+            env.exec("xan split -c 3 /six.csv").stdout,
+            "Split into 3 parts\n"
+        );
+        // xan split -S: by chunk size
+        assert_eq!(
+            env.exec("xan split -S 2 /five.csv").stdout,
+            "Split into 3 parts\n"
+        );
+        // xan split: errors without -c or -S
+        let err = env.exec("xan split /one.csv");
+        assert_eq!(err.exit_code, 1);
+        assert_eq!(err.stderr, "xan split: must specify -c or -S\n");
     }
 
     #[test]
