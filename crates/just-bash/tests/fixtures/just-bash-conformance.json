@@ -15,9 +15,9 @@
     "expectedFailures": 0
   },
   "summary": {
-    "totalCases": 355,
+    "totalCases": 375,
     "byKind": {
-      "comparison-fixture": 355
+      "comparison-fixture": 375
     },
     "byDomain": {
       "awk": 12,
@@ -35,7 +35,7 @@
       "pipes-redirections": 10,
       "printf": 35,
       "pwd-cd-env": 8,
-      "sed": 22,
+      "sed": 42,
       "sort": 11,
       "strings-split": 4,
       "test": 1,
@@ -19403,6 +19403,896 @@
       "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_wc_fbae9795c34391b6",
       "runnerProof": {
         "source": "JBC-11",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-227-d1f905ded3c2f302",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.regex.test.ts",
+        "line": 227,
+        "suite": "sed command parity",
+        "testName": "should support & as entire match",
+        "declaration": "it"
+      },
+      "command": "sed 's/hello/[&]/' /test.txt",
+      "script": "sed 's/hello/[&]/' /test.txt",
+      "initialFiles": {
+        "/test.txt": "hello\n"
+      },
+      "cwd": "/",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "[hello]\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.regex.test.ts:227:it:should support & as entire match",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_227_d1f905ded3c2f302",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_227_d1f905ded3c2f302",
+      "runnerProof": {
+        "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-236-a91346fbd69ca9cb",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.regex.test.ts",
+        "line": 236,
+        "suite": "sed command parity",
+        "testName": "should escape & with backslash",
+        "declaration": "it"
+      },
+      "command": "sed 's/hello/\\&/' /test.txt",
+      "script": "sed 's/hello/\\&/' /test.txt",
+      "initialFiles": {
+        "/test.txt": "hello\n"
+      },
+      "cwd": "/",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "&\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.regex.test.ts:236:it:should escape & with backslash",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_236_a91346fbd69ca9cb",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_236_a91346fbd69ca9cb",
+      "runnerProof": {
+        "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-372-0c40b813aa534590",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.regex.test.ts",
+        "line": 372,
+        "suite": "sed command parity",
+        "testName": "should match bracket expression",
+        "declaration": "it"
+      },
+      "command": "sed 's/c[aou]t/X/' /test.txt",
+      "script": "sed 's/c[aou]t/X/' /test.txt",
+      "initialFiles": {
+        "/test.txt": "cat\ncut\ncot\n"
+      },
+      "cwd": "/",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "X\nX\nX\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.regex.test.ts:372:it:should match bracket expression",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_372_0c40b813aa534590",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_372_0c40b813aa534590",
+      "runnerProof": {
+        "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-381-88d464de034537dc",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.regex.test.ts",
+        "line": 381,
+        "suite": "sed command parity",
+        "testName": "should match negated bracket expression",
+        "declaration": "it"
+      },
+      "command": "sed 's/c[^a]t/X/' /test.txt",
+      "script": "sed 's/c[^a]t/X/' /test.txt",
+      "initialFiles": {
+        "/test.txt": "cat\ncbt\ncct\n"
+      },
+      "cwd": "/",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "cat\nX\nX\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.regex.test.ts:381:it:should match negated bracket expression",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_381_88d464de034537dc",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_381_88d464de034537dc",
+      "runnerProof": {
+        "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-390-a5b7b17c060c6e33",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.regex.test.ts",
+        "line": 390,
+        "suite": "sed command parity",
+        "testName": "should match range in bracket expression",
+        "declaration": "it"
+      },
+      "command": "sed 's/a[0-4]b/X/' /test.txt",
+      "script": "sed 's/a[0-4]b/X/' /test.txt",
+      "initialFiles": {
+        "/test.txt": "a1b\na5b\na9b\n"
+      },
+      "cwd": "/",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "X\na5b\na9b\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.regex.test.ts:390:it:should match range in bracket expression",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_390_a5b7b17c060c6e33",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_390_a5b7b17c060c6e33",
+      "runnerProof": {
+        "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-29-e778e167e65bca5f",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.security.test.ts",
+        "line": 29,
+        "suite": "sed command parity",
+        "testName": "should still allow normal sed operations",
+        "declaration": "it"
+      },
+      "command": "echo hello | sed 's/hello/world/'",
+      "script": "echo hello | sed 's/hello/world/'",
+      "initialFiles": {},
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "world\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.security.test.ts:29:it:should still allow normal sed operations",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_29_e778e167e65bca5f",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_29_e778e167e65bca5f",
+      "runnerProof": {
+        "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-5-c20c1b2546103e74",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.binary.test.ts",
+        "line": 5,
+        "suite": "sed command parity",
+        "testName": "should perform substitution on binary file",
+        "declaration": "it"
+      },
+      "command": "sed 's/hello/world/' /data.bin",
+      "script": "sed 's/hello/world/' /data.bin",
+      "initialFiles": {
+        "/data.bin": "hello\n"
+      },
+      "cwd": "/",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "world\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.binary.test.ts:5:it:should perform substitution on binary file",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_5_c20c1b2546103e74",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_5_c20c1b2546103e74",
+      "runnerProof": {
+        "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-40-d7a01e9f6492827b",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.commands.test.ts",
+        "line": 40,
+        "suite": "sed command parity",
+        "testName": "should handle q at last line",
+        "declaration": "it"
+      },
+      "command": "sed '$q' /test/file.txt",
+      "script": "sed '$q' /test/file.txt",
+      "initialFiles": {
+        "/test/file.txt": "line 1\nline 2\nline 3\nline 4\nline 5\n"
+      },
+      "cwd": "/test",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "line 1\nline 2\nline 3\nline 4\nline 5\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.commands.test.ts:40:it:should handle q at last line",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_40_d7a01e9f6492827b",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_40_d7a01e9f6492827b",
+      "runnerProof": {
+        "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-227-8981503544a583bf",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.commands.test.ts",
+        "line": 227,
+        "suite": "sed command parity",
+        "testName": "should match every nth line",
+        "declaration": "it"
+      },
+      "command": "sed -n '1~2p' /test/file.txt",
+      "script": "sed -n '1~2p' /test/file.txt",
+      "initialFiles": {
+        "/test/file.txt": "line 1\nline 2\nline 3\nline 4\nline 5\n"
+      },
+      "cwd": "/test",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "line 1\nline 3\nline 5\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.commands.test.ts:227:it:should match every nth line",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_227_8981503544a583bf",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_227_8981503544a583bf",
+      "runnerProof": {
+        "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-234-7a842cb9af7f6aba",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.commands.test.ts",
+        "line": 234,
+        "suite": "sed command parity",
+        "testName": "should handle step starting from line 2",
+        "declaration": "it"
+      },
+      "command": "sed -n '2~2p' /test/file.txt",
+      "script": "sed -n '2~2p' /test/file.txt",
+      "initialFiles": {
+        "/test/file.txt": "line 1\nline 2\nline 3\nline 4\nline 5\n"
+      },
+      "cwd": "/test",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "line 2\nline 4\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.commands.test.ts:234:it:should handle step starting from line 2",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_234_7a842cb9af7f6aba",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_234_7a842cb9af7f6aba",
+      "runnerProof": {
+        "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-241-1ff52356a5ce243d",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.commands.test.ts",
+        "line": 241,
+        "suite": "sed command parity",
+        "testName": "should handle step of 3",
+        "declaration": "it"
+      },
+      "command": "sed -n '1~3p' /test/file.txt",
+      "script": "sed -n '1~3p' /test/file.txt",
+      "initialFiles": {
+        "/test/file.txt": "line 1\nline 2\nline 3\nline 4\nline 5\n"
+      },
+      "cwd": "/test",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "line 1\nline 4\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.commands.test.ts:241:it:should handle step of 3",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_241_1ff52356a5ce243d",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_241_1ff52356a5ce243d",
+      "runnerProof": {
+        "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-264-594946bb6eceb948",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.commands.test.ts",
+        "line": 264,
+        "suite": "sed command parity",
+        "testName": "should work in ranges",
+        "declaration": "it"
+      },
+      "command": "sed -n '3,$p' /test/file.txt",
+      "script": "sed -n '3,$p' /test/file.txt",
+      "initialFiles": {
+        "/test/file.txt": "line 1\nline 2\nline 3\nline 4\nline 5\n"
+      },
+      "cwd": "/test",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "line 3\nline 4\nline 5\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.commands.test.ts:264:it:should work in ranges",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_264_594946bb6eceb948",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_264_594946bb6eceb948",
+      "runnerProof": {
+        "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-272-d0d5209337000ee3",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.commands.test.ts",
+        "line": 272,
+        "suite": "sed command parity",
+        "testName": "should negate single address",
+        "declaration": "it"
+      },
+      "command": "sed -n '2!p' /test/alpha.txt",
+      "script": "sed -n '2!p' /test/alpha.txt",
+      "initialFiles": {
+        "/test/alpha.txt": "alpha\nbeta\ngamma\ndelta\n"
+      },
+      "cwd": "/test",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "alpha\ngamma\ndelta\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.commands.test.ts:272:it:should negate single address",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_272_d0d5209337000ee3",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_272_d0d5209337000ee3",
+      "runnerProof": {
+        "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-278-4c1c73103814116a",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.commands.test.ts",
+        "line": 278,
+        "suite": "sed command parity",
+        "testName": "should negate address range",
+        "declaration": "it"
+      },
+      "command": "sed -n '2,3!p' /test/alpha.txt",
+      "script": "sed -n '2,3!p' /test/alpha.txt",
+      "initialFiles": {
+        "/test/alpha.txt": "alpha\nbeta\ngamma\ndelta\n"
+      },
+      "cwd": "/test",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "alpha\ndelta\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.commands.test.ts:278:it:should negate address range",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_278_4c1c73103814116a",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_278_4c1c73103814116a",
+      "runnerProof": {
+        "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-59-9d403e1ca7159f4d",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.limits.test.ts",
+        "line": 59,
+        "suite": "sed command parity",
+        "testName": "should handle backreference expansion limits",
+        "declaration": "it"
+      },
+      "command": "echo \"abcdefghij\" | sed 's/\\(.\\)\\(.\\)\\(.\\)\\(.\\)\\(.\\)\\(.\\)\\(.\\)\\(.\\)\\(.\\)\\(.\\)/\\1\\2\\3\\4\\5\\6\\7\\8\\9\\1/'",
+      "script": "echo \"abcdefghij\" | sed 's/\\(.\\)\\(.\\)\\(.\\)\\(.\\)\\(.\\)\\(.\\)\\(.\\)\\(.\\)\\(.\\)\\(.\\)/\\1\\2\\3\\4\\5\\6\\7\\8\\9\\1/'",
+      "initialFiles": {},
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "abcdefghia\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.limits.test.ts:59:it:should handle backreference expansion limits",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_59_9d403e1ca7159f4d",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_59_9d403e1ca7159f4d",
+      "runnerProof": {
+        "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-69-830799776356684a",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.limits.test.ts",
+        "line": 69,
+        "suite": "sed command parity",
+        "testName": "should limit output from repeated substitution",
+        "declaration": "it"
+      },
+      "command": "echo \"x\" | sed 's/./&&/g'",
+      "script": "echo \"x\" | sed 's/./&&/g'",
+      "initialFiles": {},
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "xx\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.limits.test.ts:69:it:should limit output from repeated substitution",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_69_830799776356684a",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_69_830799776356684a",
+      "runnerProof": {
+        "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-144-87701af96ec415bc",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.limits.test.ts",
+        "line": 144,
+        "suite": "sed command parity",
+        "testName": "should handle complex alternation",
+        "declaration": "it"
+      },
+      "command": "echo \"test\" | sed 's/a\\|b\\|c\\|d\\|e\\|f\\|g\\|h\\|i\\|j/X/g'",
+      "script": "echo \"test\" | sed 's/a\\|b\\|c\\|d\\|e\\|f\\|g\\|h\\|i\\|j/X/g'",
+      "initialFiles": {},
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "tXst\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.limits.test.ts:144:it:should handle complex alternation",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_144_87701af96ec415bc",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_144_87701af96ec415bc",
+      "runnerProof": {
+        "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-155-175ca7d597cdba7e",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.limits.test.ts",
+        "line": 155,
+        "suite": "sed command parity",
+        "testName": "should handle large line number addresses",
+        "declaration": "it"
+      },
+      "command": "echo \"test\" | sed '999999999p'",
+      "script": "echo \"test\" | sed '999999999p'",
+      "initialFiles": {},
+      "cwd": "/workspace",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "test\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.limits.test.ts:155:it:should handle large line number addresses",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_155_175ca7d597cdba7e",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_155_175ca7d597cdba7e",
+      "runnerProof": {
+        "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-589-d962dbb331a4fee6",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.test.ts",
+        "line": 589,
+        "suite": "sed command parity",
+        "testName": "should match every 2nd line starting from 0",
+        "declaration": "it"
+      },
+      "command": "sed -n '0~2p' /test.txt",
+      "script": "sed -n '0~2p' /test.txt",
+      "initialFiles": {
+        "/test.txt": "1\n2\n3\n4\n5\n6\n"
+      },
+      "cwd": "/",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "2\n4\n6\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.test.ts:589:it:should match every 2nd line starting from 0",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_589_d962dbb331a4fee6",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_589_d962dbb331a4fee6",
+      "runnerProof": {
+        "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:sed:sed-cmd-598-ca4b9c5889964884",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "sed",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/sed/sed.test.ts",
+        "line": 598,
+        "suite": "sed command parity",
+        "testName": "should match every 3rd line starting from 1",
+        "declaration": "it"
+      },
+      "command": "sed -n '1~3p' /test.txt",
+      "script": "sed -n '1~3p' /test.txt",
+      "initialFiles": {
+        "/test.txt": "1\n2\n3\n4\n5\n6\n"
+      },
+      "cwd": "/",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "1\n4\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/sed/sed.test.ts:598:it:should match every 3rd line starting from 1",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_598_ca4b9c5889964884",
+        "notes": "JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_598_ca4b9c5889964884",
+      "runnerProof": {
+        "source": "JBC-sed",
         "engine": "rust-just-bash",
         "assertion": "stdout-stderr-exit-code-exact"
       }
