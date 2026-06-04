@@ -828,6 +828,18 @@ const jbc09CaseGroups = [
     notes:
       'JBC-09 maps the portable real-Bash comparison rows for field access, -F separators, NR/NF, BEGIN/END, simple pattern filtering, printf, stdin, and string concatenation to deterministic Rust tests.',
   },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.errors.test.ts',
+    lines: [
+      6, 14, 20, 29, 38, 47, 57, 64, 71, 80, 89, 96, 103, 110, 119, 129,
+      136, 150, 158, 170, 186, 195, 205, 216, 223, 230, 237, 246, 252, 270,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc09_error_handling_and_type_coercion_rows',
+    notes:
+      'JBC-09 verifies portable awk error handling: integer/float division by zero (inf), modulo by zero (nan), fail-closed invalid-regex diagnostics for match/gsub/sub, unset scalar/array coercion, string-to-number arithmetic, mixed-type and numeric-string comparison, $0/out-of-bounds/non-integer/extended field access, substr with one argument, sprintf with no/extra/missing format args, sqrt/log/exp math edges (nan/-inf/inf), unmatched-brace and unmatched-paren syntax errors, and the missing-input-file error.',
+  },
 ];
 
 const jbc10CaseGroups = [
