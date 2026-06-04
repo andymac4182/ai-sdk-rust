@@ -14803,130 +14803,734 @@ fn join_lines_with_newline(lines: &[String]) -> String {
 }
 
 fn command_sort(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(SORT_HELP);
+    }
+
     let mut options = SortOptions::default();
     let mut paths = Vec::new();
     let mut index = 0;
     while let Some(arg) = args.get(index) {
-        match arg.as_str() {
-            "--help" => {
-                return stdout_result(
-                    "Usage: sort [OPTION]... [FILE]...\n  -f, --ignore-case\n  -n, --numeric-sort\n  -r, --reverse\n  -u, --unique\n",
-                );
-            }
-            "--ignore-case" => options.ignore_case = true,
-            "-k" => {
-                if let Some(key) = args.get(index + 1) {
-                    options.key_field = parse_sort_key_field(key);
-                    index += 2;
-                    continue;
+        let arg = arg.as_str();
+        if arg == "-r" || arg == "--reverse" {
+            options.reverse = true;
+        } else if arg == "-n" || arg == "--numeric-sort" {
+            options.numeric = true;
+        } else if arg == "-u" || arg == "--unique" {
+            options.unique = true;
+        } else if arg == "-f" || arg == "--ignore-case" {
+            options.ignore_case = true;
+        } else if arg == "-h" || arg == "--human-numeric-sort" {
+            options.human_numeric = true;
+        } else if arg == "-V" || arg == "--version-sort" {
+            options.version_sort = true;
+        } else if arg == "-d" || arg == "--dictionary-order" {
+            options.dictionary_order = true;
+        } else if arg == "-M" || arg == "--month-sort" {
+            options.month_sort = true;
+        } else if arg == "-b" || arg == "--ignore-leading-blanks" {
+            options.ignore_leading_blanks = true;
+        } else if arg == "-s" || arg == "--stable" {
+            options.stable = true;
+        } else if arg == "-c" || arg == "--check" {
+            options.check_only = true;
+        } else if arg == "-o" || arg == "--output" {
+            index += 1;
+            options.output_file = args.get(index).cloned();
+        } else if let Some(rest) = arg.strip_prefix("--output=") {
+            options.output_file = Some(rest.to_string());
+        } else if let Some(rest) = arg.strip_prefix("-o") {
+            options.output_file = Some(rest.to_string());
+        } else if arg == "-t" || arg == "--field-separator" {
+            index += 1;
+            options.field_delimiter = args.get(index).cloned();
+        } else if let Some(rest) = arg.strip_prefix("--field-separator=") {
+            options.field_delimiter = Some(rest.to_string());
+        } else if let Some(rest) = arg.strip_prefix("-t") {
+            options.field_delimiter = Some(rest.to_string());
+        } else if arg == "-k" || arg == "--key" {
+            index += 1;
+            if let Some(key_arg) = args.get(index) {
+                if let Some(spec) = parse_sort_key_spec(key_arg) {
+                    options.keys.push(spec);
                 }
             }
-            _ if arg.starts_with("-k") && arg.len() > 2 => {
-                options.key_field = parse_sort_key_field(&arg[2..]);
+        } else if let Some(rest) = arg.strip_prefix("--key=") {
+            if let Some(spec) = parse_sort_key_spec(rest) {
+                options.keys.push(spec);
             }
-            _ if arg.starts_with('-') && arg.len() > 1 => {
-                for flag in arg[1..].chars() {
-                    match flag {
-                        'r' => options.reverse = true,
-                        'n' => options.numeric = true,
-                        'u' => options.unique = true,
-                        'f' => options.ignore_case = true,
-                        _ => {}
+        } else if let Some(rest) = arg.strip_prefix("-k") {
+            if let Some(spec) = parse_sort_key_spec(rest) {
+                options.keys.push(spec);
+            }
+        } else if let Some(flags) = arg.strip_prefix('-').filter(|rest| !rest.is_empty()) {
+            // Combined short flags like -rn or -bn.
+            let mut unknown = false;
+            for flag in flags.chars() {
+                match flag {
+                    'r' => options.reverse = true,
+                    'n' => options.numeric = true,
+                    'u' => options.unique = true,
+                    'f' => options.ignore_case = true,
+                    'h' => options.human_numeric = true,
+                    'V' => options.version_sort = true,
+                    'd' => options.dictionary_order = true,
+                    'M' => options.month_sort = true,
+                    'b' => options.ignore_leading_blanks = true,
+                    's' => options.stable = true,
+                    'c' => options.check_only = true,
+                    _ => {
+                        unknown = true;
+                        break;
                     }
                 }
             }
-            _ => paths.push(arg.clone()),
+            if unknown {
+                return stderr_result(
+                    2,
+                    format!(
+                        "sort: invalid option -- '{flags}'\nTry 'sort --help' for more information.\n"
+                    ),
+                );
+            }
+        } else {
+            paths.push(arg.to_string());
         }
         index += 1;
     }
+
     let input = match collect_text_inputs(state, &paths, stdin) {
         Ok(input) => input,
         Err(error) => return stderr_result(1, format!("sort: {error}\n")),
     };
-    let mut lines = input.lines().map(ToString::to_string).collect::<Vec<_>>();
+
+    // Split into lines, dropping a single trailing empty element if the
+    // content ended with a newline (mirrors upstream `split("\n")` + pop).
+    let mut lines = input
+        .split('\n')
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+
+    if options.check_only {
+        let check_file = paths.first().map_or("-", String::as_str);
+        for window in 1..lines.len() {
+            if compare_sort_lines(&lines[window - 1], &lines[window], &options)
+                == CmpOrdering::Greater
+            {
+                return stderr_result(
+                    1,
+                    format!(
+                        "sort: {check_file}:{}: disorder: {}\n",
+                        window + 1,
+                        lines[window]
+                    ),
+                );
+            }
+        }
+        return stdout_result("");
+    }
+
     lines.sort_by(|left, right| compare_sort_lines(left, right, &options));
     if options.unique {
-        lines.dedup_by(|left, right| {
-            sort_unique_key(left, &options) == sort_unique_key(right, &options)
-        });
+        lines = sort_filter_unique(lines, &options);
     }
-    stdout_result(join_lines_with_newline(&lines))
+
+    let output = join_lines_with_newline(&lines);
+
+    if let Some(output_file) = &options.output_file {
+        let resolved = resolve_path(&state.cwd, output_file);
+        let mut fs = match state.session.inner.fs.lock() {
+            Ok(fs) => fs,
+            Err(_) => return stderr_result(1, "sort: filesystem lock poisoned\n"),
+        };
+        if fs.write_file(&resolved, output).is_err() {
+            return stderr_result(1, format!("sort: cannot write to {output_file}\n"));
+        }
+        return stdout_result("");
+    }
+
+    stdout_result(output)
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+const SORT_HELP: &str = "Usage: sort [OPTION]... [FILE]...\nsort lines of text files\n\n  -b, --ignore-leading-blanks  ignore leading blanks\n  -d, --dictionary-order  consider only blanks and alphanumeric characters\n  -f, --ignore-case    fold lower case to upper case characters\n  -h, --human-numeric-sort  compare human readable numbers (e.g., 2K 1G)\n  -M, --month-sort     compare (unknown) < 'JAN' < ... < 'DEC'\n  -n, --numeric-sort   compare according to string numerical value\n  -r, --reverse        reverse the result of comparisons\n  -V, --version-sort   natural sort of (version) numbers within text\n  -c, --check          check for sorted input; do not sort\n  -o, --output=FILE    write result to FILE instead of stdout\n  -s, --stable         stabilize sort by disabling last-resort comparison\n  -u, --unique         output only unique lines\n  -k, --key=KEYDEF     sort via a key; KEYDEF gives location and type\n  -t, --field-separator=SEP  use SEP as field separator\n      --help           display this help and exit\n";
+
+#[derive(Clone, Debug, Default)]
+struct SortKeySpec {
+    start_field: usize,
+    start_char: Option<usize>,
+    end_field: Option<usize>,
+    end_char: Option<usize>,
+    numeric: Option<bool>,
+    reverse: Option<bool>,
+    ignore_case: Option<bool>,
+    ignore_leading: bool,
+    human_numeric: Option<bool>,
+    version_sort: Option<bool>,
+    dictionary_order: Option<bool>,
+    month_sort: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default)]
 struct SortOptions {
     reverse: bool,
     numeric: bool,
     unique: bool,
     ignore_case: bool,
-    key_field: Option<usize>,
+    human_numeric: bool,
+    version_sort: bool,
+    dictionary_order: bool,
+    month_sort: bool,
+    ignore_leading_blanks: bool,
+    stable: bool,
+    check_only: bool,
+    output_file: Option<String>,
+    keys: Vec<SortKeySpec>,
+    field_delimiter: Option<String>,
 }
 
-fn parse_sort_key_field(value: &str) -> Option<usize> {
+/// Effective per-comparison mode after merging per-key and global flags.
+#[derive(Clone, Copy, Default)]
+struct SortCompareMode {
+    numeric: bool,
+    ignore_case: bool,
+    human_numeric: bool,
+    version_sort: bool,
+    dictionary_order: bool,
+    month_sort: bool,
+}
+
+fn sort_apply_modifier(spec: &mut SortKeySpec, modifiers: &str) {
+    if modifiers.contains('n') {
+        spec.numeric = Some(true);
+    }
+    if modifiers.contains('r') {
+        spec.reverse = Some(true);
+    }
+    if modifiers.contains('f') {
+        spec.ignore_case = Some(true);
+    }
+    if modifiers.contains('b') {
+        spec.ignore_leading = true;
+    }
+    if modifiers.contains('h') {
+        spec.human_numeric = Some(true);
+    }
+    if modifiers.contains('V') {
+        spec.version_sort = Some(true);
+    }
+    if modifiers.contains('d') {
+        spec.dictionary_order = Some(true);
+    }
+    if modifiers.contains('M') {
+        spec.month_sort = Some(true);
+    }
+}
+
+fn sort_split_trailing_modifiers(part: &str) -> (&str, &str) {
+    let split = part
+        .char_indices()
+        .rev()
+        .take_while(|(_, ch)| matches!(ch, 'b' | 'd' | 'f' | 'h' | 'M' | 'n' | 'r' | 'V'))
+        .last()
+        .map(|(idx, _)| idx);
+    match split {
+        Some(idx) => (&part[..idx], &part[idx..]),
+        None => (part, ""),
+    }
+}
+
+/// Mirrors upstream `parseKeySpec`: FIELD[.CHAR][MODS][,FIELD[.CHAR][MODS]].
+fn parse_sort_key_spec(spec: &str) -> Option<SortKeySpec> {
+    let mut result = SortKeySpec {
+        start_field: 1,
+        ..SortKeySpec::default()
+    };
+
+    let (main_spec, modifier_str) = sort_split_trailing_modifiers(spec);
+    sort_apply_modifier(&mut result, modifier_str);
+
+    let mut parts = main_spec.split(',');
+    let start = parts.next()?;
+    if start.is_empty() {
+        return None;
+    }
+
+    let mut start_parts = start.split('.');
+    let start_field = start_parts.next()?.parse::<usize>().ok()?;
+    if start_field < 1 {
+        return None;
+    }
+    result.start_field = start_field;
+    if let Some(start_char) = start_parts.next().filter(|value| !value.is_empty()) {
+        if let Ok(start_char) = start_char.parse::<usize>() {
+            if start_char >= 1 {
+                result.start_char = Some(start_char);
+            }
+        }
+    }
+
+    if let Some(end) = parts.next().filter(|value| !value.is_empty()) {
+        let (end_part, end_modifiers) = sort_split_trailing_modifiers(end);
+        sort_apply_modifier(&mut result, end_modifiers);
+        let mut end_parts = end_part.split('.');
+        if let Some(end_field) = end_parts.next().filter(|value| !value.is_empty()) {
+            if let Ok(end_field) = end_field.parse::<usize>() {
+                if end_field >= 1 {
+                    result.end_field = Some(end_field);
+                }
+            }
+            if let Some(end_char) = end_parts.next().filter(|value| !value.is_empty()) {
+                if let Ok(end_char) = end_char.parse::<usize>() {
+                    if end_char >= 1 {
+                        result.end_char = Some(end_char);
+                    }
+                }
+            }
+        }
+    }
+
+    Some(result)
+}
+
+fn sort_split_fields<'a>(line: &'a str, delimiter: Option<&str>) -> Vec<&'a str> {
+    match delimiter {
+        Some(delim) => line.split(delim).collect(),
+        None => {
+            // Mirrors JS `line.split(/\s+/)`: a leading run of whitespace
+            // yields an empty leading field, and runs of whitespace are a
+            // single delimiter.
+            let mut fields = Vec::new();
+            let mut search = 0usize;
+            while search <= line.len() {
+                match line[search..].find(char::is_whitespace) {
+                    Some(ws_start) => {
+                        let abs_start = search + ws_start;
+                        let ws_len = line[abs_start..]
+                            .find(|c: char| !c.is_whitespace())
+                            .unwrap_or(line.len() - abs_start);
+                        fields.push(&line[search..abs_start]);
+                        search = abs_start + ws_len;
+                    }
+                    None => {
+                        fields.push(&line[search..]);
+                        break;
+                    }
+                }
+            }
+            fields
+        }
+    }
+}
+
+fn char_slice_from(value: &str, start_char_1based: usize) -> String {
     value
         .chars()
-        .take_while(char::is_ascii_digit)
-        .collect::<String>()
-        .parse()
-        .ok()
+        .skip(start_char_1based.saturating_sub(1))
+        .collect()
 }
 
-fn sort_key<'a>(line: &'a str, options: &SortOptions) -> &'a str {
-    options.key_field.map_or(line, |field| {
-        line.split_whitespace()
-            .nth(field.saturating_sub(1))
-            .unwrap_or("")
-    })
+fn char_slice_to(value: &str, end_char_count: usize) -> String {
+    value.chars().take(end_char_count).collect()
 }
 
-fn compare_sort_lines(left: &str, right: &str, options: &SortOptions) -> CmpOrdering {
-    let left_key = sort_key(left, options);
-    let right_key = sort_key(right, options);
-    let ordering = if options.numeric {
-        let left_number = left_key.parse::<f64>().unwrap_or(0.0);
-        let right_number = right_key.parse::<f64>().unwrap_or(0.0);
-        left_number
-            .partial_cmp(&right_number)
-            .unwrap_or(CmpOrdering::Equal)
-    } else {
-        compare_text_keys(left_key, right_key, options.ignore_case)
+/// Mirrors upstream `extractKeyValue`.
+fn sort_extract_key_value(line: &str, key: &SortKeySpec, delimiter: Option<&str>) -> String {
+    let fields = sort_split_fields(line, delimiter);
+    let start_idx = key.start_field - 1;
+    if start_idx >= fields.len() {
+        return String::new();
+    }
+
+    if key.end_field.is_none() {
+        let mut field = fields[start_idx].to_string();
+        if let Some(start_char) = key.start_char {
+            field = char_slice_from(&field, start_char);
+        }
+        if key.ignore_leading {
+            field = field.trim_start().to_string();
+        }
+        return field;
+    }
+
+    let end_idx = key.end_field.map_or(start_idx, |end| {
+        (end - 1).min(fields.len().saturating_sub(1))
+    });
+    let delim = delimiter.unwrap_or(" ");
+    let mut result = String::new();
+    let mut i = start_idx;
+    while i <= end_idx && i < fields.len() {
+        let mut field = fields[i].to_string();
+        if i == start_idx {
+            if let Some(start_char) = key.start_char {
+                field = char_slice_from(&field, start_char);
+            }
+        }
+        if i == end_idx {
+            if let Some(end_char) = key.end_char {
+                let end_count = match (i == start_idx).then_some(key.start_char).flatten() {
+                    Some(start_char) => end_char - start_char + 1,
+                    None => end_char,
+                };
+                field = char_slice_to(&field, end_count);
+            }
+        }
+        if i > start_idx {
+            result.push_str(delim);
+        }
+        result.push_str(&field);
+        i += 1;
+    }
+    if key.ignore_leading {
+        result = result.trim_start().to_string();
+    }
+    result
+}
+
+fn sort_parse_human_size(value: &str) -> f64 {
+    let trimmed = value.trim();
+    let bytes = trimmed.as_bytes();
+    // Parse optional sign + digits/decimal, then a single size suffix.
+    let mut idx = 0;
+    if idx < bytes.len() && (bytes[idx] == b'+' || bytes[idx] == b'-') {
+        idx += 1;
+    }
+    let num_start = 0;
+    let mut saw_digit = false;
+    while idx < bytes.len() && (bytes[idx].is_ascii_digit() || bytes[idx] == b'.') {
+        if bytes[idx].is_ascii_digit() {
+            saw_digit = true;
+        }
+        idx += 1;
+    }
+    if !saw_digit {
+        return trimmed
+            .split_whitespace()
+            .next()
+            .and_then(|tok| tok.parse::<f64>().ok())
+            .unwrap_or(0.0);
+    }
+    let number: f64 = trimmed[num_start..idx].parse().unwrap_or(0.0);
+    let suffix = trimmed[idx..]
+        .chars()
+        .next()
+        .map(|ch| ch.to_ascii_lowercase());
+    // Validate the trailing portion matches /[kmgtpe]?[i]?[b]?/.
+    let multiplier = match suffix {
+        Some('k') => 1024f64,
+        Some('m') => 1024f64.powi(2),
+        Some('g') => 1024f64.powi(3),
+        Some('t') => 1024f64.powi(4),
+        Some('p') => 1024f64.powi(5),
+        Some('e') => 1024f64.powi(6),
+        Some(other) if other.is_ascii_digit() || other == '.' => 1.0,
+        None => 1.0,
+        _ => 1.0,
     };
-    let ordering = ordering.then_with(|| compare_text_keys(left, right, options.ignore_case));
-    if options.reverse {
-        ordering.reverse()
-    } else {
-        ordering
+    number * multiplier
+}
+
+fn sort_parse_month(value: &str) -> i32 {
+    let lower = value.trim().to_lowercase();
+    let key: String = lower.chars().take(3).collect();
+    match key.as_str() {
+        "jan" => 1,
+        "feb" => 2,
+        "mar" => 3,
+        "apr" => 4,
+        "may" => 5,
+        "jun" => 6,
+        "jul" => 7,
+        "aug" => 8,
+        "sep" => 9,
+        "oct" => 10,
+        "nov" => 11,
+        "dec" => 12,
+        _ => 0,
     }
 }
 
-fn compare_text_keys(left: &str, right: &str, ignore_case: bool) -> CmpOrdering {
-    let left_key = left.to_ascii_lowercase();
-    let right_key = right.to_ascii_lowercase();
-    let ordering = left_key.cmp(&right_key);
-    if ordering != CmpOrdering::Equal {
-        return ordering;
+fn sort_compare_versions(a: &str, b: &str) -> CmpOrdering {
+    let parts_a = sort_split_version(a);
+    let parts_b = sort_split_version(b);
+    let max_len = parts_a.len().max(parts_b.len());
+    for i in 0..max_len {
+        let part_a = parts_a.get(i).map_or("", String::as_str);
+        let part_b = parts_b.get(i).map_or("", String::as_str);
+        let num_a = if !part_a.is_empty() && part_a.bytes().all(|c| c.is_ascii_digit()) {
+            part_a.parse::<u128>().ok()
+        } else {
+            None
+        };
+        let num_b = if !part_b.is_empty() && part_b.bytes().all(|c| c.is_ascii_digit()) {
+            part_b.parse::<u128>().ok()
+        } else {
+            None
+        };
+        match (num_a, num_b) {
+            (Some(x), Some(y)) => {
+                if x != y {
+                    return x.cmp(&y);
+                }
+            }
+            _ => {
+                if part_a != part_b {
+                    return part_a.cmp(part_b);
+                }
+            }
+        }
     }
-    if ignore_case {
+    CmpOrdering::Equal
+}
+
+/// Mirrors JS `s.split(/(\d+)/)`: alternates non-digit and digit runs, with
+/// empty strings between adjacent boundaries.
+fn sort_split_version(value: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_digits = false;
+    let mut started = false;
+    for ch in value.chars() {
+        let is_digit = ch.is_ascii_digit();
+        if !started {
+            in_digits = is_digit;
+            started = true;
+            current.push(ch);
+            continue;
+        }
+        if is_digit == in_digits {
+            current.push(ch);
+        } else {
+            parts.push(std::mem::take(&mut current));
+            // When switching into a digit run, JS inserts the captured group
+            // directly, producing an empty separator between consecutive
+            // boundaries only when runs are adjacent; the take/push above
+            // already captures runs faithfully.
+            in_digits = is_digit;
+            current.push(ch);
+        }
+    }
+    if started {
+        parts.push(current);
+    }
+    parts
+}
+
+fn sort_to_dictionary_order(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || ch.is_whitespace())
+        .collect()
+}
+
+fn sort_compare_values(a: &str, b: &str, mode: SortCompareMode) -> CmpOrdering {
+    let mut val_a = a.to_string();
+    let mut val_b = b.to_string();
+
+    if mode.dictionary_order {
+        val_a = sort_to_dictionary_order(&val_a);
+        val_b = sort_to_dictionary_order(&val_b);
+    }
+    if mode.ignore_case {
+        val_a = val_a.to_lowercase();
+        val_b = val_b.to_lowercase();
+    }
+
+    if mode.month_sort {
+        return sort_parse_month(&val_a).cmp(&sort_parse_month(&val_b));
+    }
+    if mode.human_numeric {
+        return sort_parse_human_size(&val_a)
+            .partial_cmp(&sort_parse_human_size(&val_b))
+            .unwrap_or(CmpOrdering::Equal);
+    }
+    if mode.version_sort {
+        return sort_compare_versions(&val_a, &val_b);
+    }
+    if mode.numeric {
+        let num_a = sort_parse_leading_float(&val_a);
+        let num_b = sort_parse_leading_float(&val_b);
+        return num_a.partial_cmp(&num_b).unwrap_or(CmpOrdering::Equal);
+    }
+    sort_locale_compare(&val_a, &val_b)
+}
+
+/// Approximates JavaScript `String.prototype.localeCompare` for the ASCII and
+/// Latin-1 inputs exercised by upstream sort: compare case-insensitively
+/// first, then place lowercase before uppercase of an otherwise-equal letter
+/// (default-locale collation), falling back to code point order.
+fn sort_locale_compare(left: &str, right: &str) -> CmpOrdering {
+    let mut left_chars = left.chars();
+    let mut right_chars = right.chars();
+    loop {
+        match (left_chars.next(), right_chars.next()) {
+            (Some(lc), Some(rc)) => {
+                let ll = lc.to_lowercase().collect::<String>();
+                let rl = rc.to_lowercase().collect::<String>();
+                match ll.cmp(&rl) {
+                    CmpOrdering::Equal => {}
+                    other => return other,
+                }
+                // Same letter ignoring case: lowercase sorts before uppercase.
+                match (lc.is_lowercase(), rc.is_lowercase()) {
+                    (true, false) => return CmpOrdering::Less,
+                    (false, true) => return CmpOrdering::Greater,
+                    _ => {}
+                }
+            }
+            (Some(_), None) => return CmpOrdering::Greater,
+            (None, Some(_)) => return CmpOrdering::Less,
+            (None, None) => return CmpOrdering::Equal,
+        }
+    }
+}
+
+/// Mirrors JS `parseFloat(x) || 0`: parse a leading numeric prefix, else 0.
+fn sort_parse_leading_float(value: &str) -> f64 {
+    let trimmed = value.trim_start();
+    let bytes = trimmed.as_bytes();
+    let mut idx = 0;
+    if idx < bytes.len() && (bytes[idx] == b'+' || bytes[idx] == b'-') {
+        idx += 1;
+    }
+    let mut saw_dot = false;
+    let mut saw_digit = false;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'0'..=b'9' => {
+                saw_digit = true;
+                idx += 1;
+            }
+            b'.' if !saw_dot => {
+                saw_dot = true;
+                idx += 1;
+            }
+            _ => break,
+        }
+    }
+    if !saw_digit {
+        return 0.0;
+    }
+    trimmed[..idx].parse::<f64>().unwrap_or(0.0)
+}
+
+fn sort_global_mode(options: &SortOptions) -> SortCompareMode {
+    SortCompareMode {
+        numeric: options.numeric,
+        ignore_case: options.ignore_case,
+        human_numeric: options.human_numeric,
+        version_sort: options.version_sort,
+        dictionary_order: options.dictionary_order,
+        month_sort: options.month_sort,
+    }
+}
+
+fn sort_key_mode(key: &SortKeySpec, options: &SortOptions) -> SortCompareMode {
+    SortCompareMode {
+        numeric: key.numeric.unwrap_or(options.numeric),
+        ignore_case: key.ignore_case.unwrap_or(options.ignore_case),
+        human_numeric: key.human_numeric.unwrap_or(options.human_numeric),
+        version_sort: key.version_sort.unwrap_or(options.version_sort),
+        dictionary_order: key.dictionary_order.unwrap_or(options.dictionary_order),
+        month_sort: key.month_sort.unwrap_or(options.month_sort),
+    }
+}
+
+/// Mirrors upstream `createComparator`.
+fn compare_sort_lines(a: &str, b: &str, options: &SortOptions) -> CmpOrdering {
+    let line_a = if options.ignore_leading_blanks {
+        a.trim_start().to_string()
+    } else {
+        a.to_string()
+    };
+    let line_b = if options.ignore_leading_blanks {
+        b.trim_start().to_string()
+    } else {
+        b.to_string()
+    };
+
+    if options.keys.is_empty() {
+        let result = sort_compare_values(&line_a, &line_b, sort_global_mode(options));
+        if result != CmpOrdering::Equal {
+            return if options.reverse {
+                result.reverse()
+            } else {
+                result
+            };
+        }
+        if !options.stable {
+            let tiebreaker = sort_locale_compare(a, b);
+            return if options.reverse {
+                tiebreaker.reverse()
+            } else {
+                tiebreaker
+            };
+        }
         return CmpOrdering::Equal;
     }
-    match (starts_lowercase(left), starts_lowercase(right)) {
-        (true, false) => CmpOrdering::Less,
-        (false, true) => CmpOrdering::Greater,
-        _ => left.cmp(right),
+
+    let delimiter = options.field_delimiter.as_deref();
+    for key in &options.keys {
+        let mut val_a = sort_extract_key_value(&line_a, key, delimiter);
+        let mut val_b = sort_extract_key_value(&line_b, key, delimiter);
+        if key.ignore_leading {
+            val_a = val_a.trim_start().to_string();
+            val_b = val_b.trim_start().to_string();
+        }
+        let mode = sort_key_mode(key, options);
+        let use_reverse = key.reverse.unwrap_or(options.reverse);
+        let result = sort_compare_values(&val_a, &val_b, mode);
+        if result != CmpOrdering::Equal {
+            return if use_reverse {
+                result.reverse()
+            } else {
+                result
+            };
+        }
     }
+
+    if !options.stable {
+        let tiebreaker = sort_locale_compare(a, b);
+        return if options.reverse {
+            tiebreaker.reverse()
+        } else {
+            tiebreaker
+        };
+    }
+    CmpOrdering::Equal
 }
 
-fn starts_lowercase(value: &str) -> bool {
-    value.chars().next().is_some_and(char::is_lowercase)
-}
-
-fn sort_unique_key(line: &str, options: &SortOptions) -> String {
-    let key = sort_key(line, options);
-    if options.ignore_case {
-        key.to_ascii_lowercase()
-    } else {
-        key.to_string()
+/// Mirrors upstream `filterUnique`.
+fn sort_filter_unique(lines: Vec<String>, options: &SortOptions) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    if options.keys.is_empty() {
+        return lines
+            .into_iter()
+            .filter(|line| {
+                let key = if options.ignore_case {
+                    line.to_lowercase()
+                } else {
+                    line.clone()
+                };
+                seen.insert(key)
+            })
+            .collect();
     }
+    let key = &options.keys[0];
+    let delimiter = options.field_delimiter.as_deref();
+    let ignore_case = key.ignore_case.unwrap_or(options.ignore_case);
+    lines
+        .into_iter()
+        .filter(|line| {
+            let mut key_val = sort_extract_key_value(line, key, delimiter);
+            if ignore_case {
+                key_val = key_val.to_lowercase();
+            }
+            seen.insert(key_val)
+        })
+        .collect()
 }
 
 fn command_uniq(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
