@@ -2,3 +2,4 @@
 # These estimates are used only for rows that are still `in-progress` in
 # docs/upstream-parity.md. The generator forces `verified` and
 # `js-only-documented` rows to 100%, and `not-started` rows to 0%.
+ai	99	All portable upstream cases are mapped to named Rust tests (0 portable-unmapped in docs/ai-strict-test-inventory.md); remaining work is final closeout/verification before the ledger row flips to `verified`.

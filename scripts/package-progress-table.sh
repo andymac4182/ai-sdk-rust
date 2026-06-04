@@ -290,7 +290,7 @@ File.readlines(ledger_path, chomp: true).each_with_index do |line, index|
       when "not-started"
         "not started"
       else
-        estimate&.basis || notes[/Remaining work:\s*(.+)\z/, 1] || "in progress"
+        estimate&.basis || notes&.[](/Remaining work:\s*(.+)\z/, 1) || "in progress"
       end
     end
 

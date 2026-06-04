@@ -3144,6 +3144,123 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn awk_jbc_edge_special_chars_numeric_string_and_regex_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                // Binary content here is plain ASCII bytes "1 2\n3 4\n".
+                "/data.bin".to_string(),
+                "1 2\n3 4\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+
+        // Special characters in field data (awk.edge-cases.test.ts:44-87).
+        assert_eq!(
+            env.exec(r#"echo 'he said "hello"' | awk '{ print $3 }'"#)
+                .stdout,
+            "\"hello\"\n"
+        );
+        let backslash = env.exec(r#"echo 'path\\to\\file' | awk '{ print }'"#);
+        assert_eq!(backslash.stdout, "path\\\\to\\\\file\n");
+        assert_eq!(backslash.exit_code, 0);
+        assert_eq!(
+            env.exec(r#"echo "[test]" | awk '{ print $1 }'"#).stdout,
+            "[test]\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo 'price: \$100' | awk '{ print $2 }'"#)
+                .stdout,
+            "\\$100\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "a & b" | awk '{ print $2 }'"#).stdout,
+            "&\n"
+        );
+
+        // Numeric edge cases (awk.edge-cases.test.ts:91-128).
+        let large = env.exec(r#"echo "" | awk 'BEGIN { print 1e308 }'"#);
+        assert_eq!(large.exit_code, 0);
+        assert!(
+            large.stdout.to_lowercase().contains("1e+308")
+                || large.stdout.to_lowercase().contains("1e308"),
+            "expected 1e308 scientific output, got {:?}",
+            large.stdout
+        );
+        let small = env.exec(r#"echo "" | awk 'BEGIN { print 1e-308 }'"#);
+        assert_eq!(small.exit_code, 0);
+        assert!(
+            small.stdout.to_lowercase().contains("1e-308"),
+            "expected 1e-308 scientific output, got {:?}",
+            small.stdout
+        );
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print -0 }'"#).stdout,
+            "0\n"
+        );
+        let precision = env.exec(r#"echo "" | awk 'BEGIN { print 0.1 + 0.2 }'"#);
+        assert_eq!(precision.exit_code, 0);
+        assert!(
+            (precision.stdout.trim().parse::<f64>().unwrap() - 0.3).abs() < 1e-10,
+            "expected 0.1+0.2 close to 0.3, got {:?}",
+            precision.stdout
+        );
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 9999999999999999999999 }'"#)
+                .exit_code,
+            0
+        );
+
+        // String edge cases (awk.edge-cases.test.ts:132-164).
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print ("" == "") }'"#)
+                .stdout,
+            "1\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x = ""; print length(x) }'"#)
+                .stdout,
+            "0\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "     " | awk '{ print NF }'"#).stdout,
+            "0\n"
+        );
+
+        // Regex edge cases (awk.edge-cases.test.ts:168-200).
+        assert_eq!(
+            env.exec(r#"echo "test" | awk '//' | head -1"#).stdout,
+            "test\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "a.b" | awk '/a\.b/ { print "matched" }'"#)
+                .stdout,
+            "matched\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "test" | awk '/^test/ { print "yes" }'"#)
+                .stdout,
+            "yes\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "test" | awk '/test$/ { print "yes" }'"#)
+                .stdout,
+            "yes\n"
+        );
+
+        // Post-increment array element (awk.arrays.test.ts:297).
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { a["x"] = 5; print a["x"]++, a["x"] }'"#)
+                .stdout,
+            "5 6\n"
+        );
+
+        // Binary (ASCII byte) file processed by awk (awk.binary.test.ts:5).
+        let binary = env.exec("awk '{print $1 + $2}' /data.bin");
+        assert_eq!(binary.stdout, "3\n7\n");
+        assert_eq!(binary.exit_code, 0);
+    }
+
+    #[test]
     fn rg_upstream_basic_rows_are_portable() {
         assert_home_exec(
             &[("file.txt", "hello world\nfoo bar\n")],
@@ -3255,6 +3372,221 @@ and exhibited clearly, with a label attached.\n";
             "rg: unrecognized option '--unknown-option'\n"
         );
         assert_home_exec(&[("file.txt", "hello\n")], "rg -t unknowntype hello", 1, "");
+    }
+
+    #[test]
+    fn rg_imported_misc_search_modes_counts_and_context_rows_are_portable() {
+        // packages/just-bash/src/commands/rg/imported-tests/misc.test.ts
+        // 127 - inverted: should invert match with -v
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -v Sherlock sherlock",
+            0,
+            "Holmeses, success in the province of detective work must always\n\
+can extract a clew from a wisp of straw or a flake of cigar ash;\n\
+but Doctor Watson has to have it taken out for him and dusted,\n\
+and exhibited clearly, with a label attached.\n",
+        );
+        // 144 - inverted_line_numbers: should show line numbers with inverted match
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -n -v Sherlock sherlock",
+            0,
+            "2:Holmeses, success in the province of detective work must always\n\
+4:can extract a clew from a wisp of straw or a flake of cigar ash;\n\
+5:but Doctor Watson has to have it taken out for him and dusted,\n\
+6:and exhibited clearly, with a label attached.\n",
+        );
+        // 161 - case_insensitive: should search case-insensitively with -i
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -i sherlock sherlock",
+            0,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 178 - word: should match whole words with -w
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -w as sherlock",
+            0,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\n",
+        );
+        // 212 - line: should match whole lines with -x
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -x 'Watson|and exhibited clearly, with a label attached.' sherlock",
+            0,
+            "and exhibited clearly, with a label attached.\n",
+        );
+        // 231 - literal: should match literal strings with -F
+        assert_home_exec(
+            &[("file", "blib\n()\nblab\n")],
+            "rg -F '()' file",
+            0,
+            "()\n",
+        );
+        // 246 - quiet: should suppress output with -q
+        assert_home_exec(&[("sherlock", SHERLOCK)], "rg -q Sherlock sherlock", 0, "");
+        // 331 - file_types: should filter by type with -t
+        assert_home_exec(
+            &[
+                ("sherlock", SHERLOCK),
+                ("file.py", "Sherlock\n"),
+                ("file.rs", "Sherlock\n"),
+            ],
+            "rg -t rust Sherlock",
+            0,
+            "file.rs:1:Sherlock\n",
+        );
+        // 364 - file_types_negate: should negate type with -T
+        assert_home_exec(
+            &[("file.py", "Sherlock\n"), ("file.rs", "Sherlock\n")],
+            "rg -T rust Sherlock",
+            0,
+            "file.py:1:Sherlock\n",
+        );
+        // 486 - glob: should filter by glob with -g
+        assert_home_exec(
+            &[
+                ("sherlock", SHERLOCK),
+                ("file.py", "Sherlock\n"),
+                ("file.rs", "Sherlock\n"),
+            ],
+            "rg -g '*.rs' Sherlock",
+            0,
+            "file.rs:1:Sherlock\n",
+        );
+        // 503 - glob_negate: should negate glob with -g !
+        assert_home_exec(
+            &[("file.py", "Sherlock\n"), ("file.rs", "Sherlock\n")],
+            "rg -g '!*.rs' Sherlock",
+            0,
+            "file.py:1:Sherlock\n",
+        );
+        // 538 - glob_case_sensitive: should use case-sensitive glob matching
+        assert_home_exec(
+            &[("file1.HTML", "Sherlock\n"), ("file2.html", "Sherlock\n")],
+            "rg --glob '*.html' Sherlock",
+            0,
+            "file2.html:1:Sherlock\n",
+        );
+        // 590 - count: should count matching lines with --count
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg --count Sherlock",
+            0,
+            "sherlock:2\n",
+        );
+        // 605 - count_matches: should count all matches with --count-matches
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg --count-matches the",
+            0,
+            "sherlock:4\n",
+        );
+        // 620 - count_matches_inverted: should count inverted matches
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg --count-matches --invert-match Sherlock",
+            0,
+            "sherlock:4\n",
+        );
+        // 652 - include_zero: should include files with 0 matches with --include-zero
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg --count --include-zero nada",
+            1,
+            "sherlock:0\n",
+        );
+        // 670 - files_with_matches: should list files with --files-with-matches
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg --files-with-matches Sherlock",
+            0,
+            "sherlock\n",
+        );
+        // 685 - files_without_match: should list files without match
+        assert_home_exec(
+            &[("sherlock", SHERLOCK), ("file.py", "foo\n")],
+            "rg --files-without-match Sherlock",
+            0,
+            "file.py\n",
+        );
+        // 701 - after_context: should show after context with -A
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -A 1 Sherlock sherlock",
+            0,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+Holmeses, success in the province of detective work must always\n\
+be, to a very large extent, the result of luck. Sherlock Holmes\n\
+can extract a clew from a wisp of straw or a flake of cigar ash;\n",
+        );
+        // 718 - after_context_line_numbers: should show after context with line numbers
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -A 1 -n Sherlock sherlock",
+            0,
+            "1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+2-Holmeses, success in the province of detective work must always\n\
+3:be, to a very large extent, the result of luck. Sherlock Holmes\n\
+4-can extract a clew from a wisp of straw or a flake of cigar ash;\n",
+        );
+        // 735 - before_context: should show before context with -B
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -B 1 Sherlock sherlock",
+            0,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+Holmeses, success in the province of detective work must always\n\
+be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 752 - before_context_line_numbers: should show before context with line numbers
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -B 1 -n Sherlock sherlock",
+            0,
+            "1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+2-Holmeses, success in the province of detective work must always\n\
+3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 769 - context: should show context with -C
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -C 1 'world|attached' sherlock",
+            0,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+Holmeses, success in the province of detective work must always\n\
+--\n\
+but Doctor Watson has to have it taken out for him and dusted,\n\
+and exhibited clearly, with a label attached.\n",
+        );
+        // 786 - context_line_numbers: should show context with line numbers
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -C 1 -n 'world|attached' sherlock",
+            0,
+            "1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+2-Holmeses, success in the province of detective work must always\n\
+--\n\
+5-but Doctor Watson has to have it taken out for him and dusted,\n\
+6:and exhibited clearly, with a label attached.\n",
+        );
+        // 1150 - files: should list files with --files
+        assert_home_exec(
+            &[("a.txt", "x\n"), ("b.txt", "y\n")],
+            "rg --files",
+            0,
+            "a.txt\nb.txt\n",
+        );
+        // 1181 - sort_path: should sort files by path with --sort path
+        assert_home_exec(
+            &[("z.txt", "Sherlock\n"), ("a.txt", "Sherlock\n")],
+            "rg --sort path Sherlock",
+            0,
+            "a.txt:1:Sherlock\nz.txt:1:Sherlock\n",
+        );
     }
 
     #[test]
@@ -7588,6 +7920,262 @@ be, to a very large extent, the result of luck. Sherlock Holmes\n",
     }
 
     #[test]
+    fn structured_data_xan_agg_aggregations() {
+        // Ports packages/just-bash/src/commands/xan/xan.agg.test.ts:10-188.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/data.csv".to_string(), "n\n1\n2\n3\n4\n".to_string()),
+                (
+                    "/colors.csv".to_string(),
+                    "color\nred\nblue\nyellow\nred\n".to_string(),
+                ),
+                (
+                    "/names.csv".to_string(),
+                    "name\nJohn\nMary\nLucas\n".to_string(),
+                ),
+                (
+                    "/names2.csv".to_string(),
+                    "name\nJohn\nMary\nLucas\nMary\nLucas\n".to_string(),
+                ),
+                (
+                    "/expr.csv".to_string(),
+                    "a,b\n1,2\n2,0\n3,6\n4,2\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // count() counts all rows
+        assert_eq!(
+            env.exec("xan agg 'count() as count' /data.csv").stdout,
+            "count\n4\n"
+        );
+        // count(expr) counts matching rows
+        assert_eq!(
+            env.exec("xan agg 'count(n > 2) as count' /data.csv").stdout,
+            "count\n2\n"
+        );
+        // sum(col) sums values
+        assert_eq!(
+            env.exec("xan agg 'sum(n) as sum' /data.csv").stdout,
+            "sum\n10\n"
+        );
+        // mean(col) computes average
+        assert_eq!(
+            env.exec("xan agg 'mean(n) as mean' /data.csv").stdout,
+            "mean\n2.5\n"
+        );
+        // avg is alias for mean
+        assert_eq!(
+            env.exec("xan agg 'avg(n) as mean' /data.csv").stdout,
+            "mean\n2.5\n"
+        );
+        // min(col) gets minimum
+        assert_eq!(
+            env.exec("xan agg 'min(n) as min' /data.csv").stdout,
+            "min\n1\n"
+        );
+        // max(col) gets maximum
+        assert_eq!(
+            env.exec("xan agg 'max(n) as max' /data.csv").stdout,
+            "max\n4\n"
+        );
+        // first(col) gets first value
+        assert_eq!(
+            env.exec("xan agg 'first(n) as first' /data.csv").stdout,
+            "first\n1\n"
+        );
+        // last(col) gets last value
+        assert_eq!(
+            env.exec("xan agg 'last(n) as last' /data.csv").stdout,
+            "last\n4\n"
+        );
+        // median(col) computes median
+        assert_eq!(
+            env.exec("xan agg 'median(n) as median' /data.csv").stdout,
+            "median\n2.5\n"
+        );
+        // multiple aggregations
+        assert_eq!(
+            env.exec("xan agg 'count() as count, sum(n) as sum' /data.csv")
+                .stdout,
+            "count,sum\n4,10\n"
+        );
+        // all(expr) checks if all rows match
+        assert_eq!(
+            env.exec("xan agg 'all(n >= 1) as all' /data.csv").stdout,
+            "all\ntrue\n"
+        );
+        assert_eq!(
+            env.exec("xan agg 'all(n >= 2) as all' /data.csv").stdout,
+            "all\nfalse\n"
+        );
+        // any(expr) checks if any row matches
+        assert_eq!(
+            env.exec("xan agg 'any(n >= 1) as any' /data.csv").stdout,
+            "any\ntrue\n"
+        );
+        assert_eq!(
+            env.exec("xan agg 'any(n >= 5) as any' /data.csv").stdout,
+            "any\nfalse\n"
+        );
+        // mode finds most common value
+        assert_eq!(
+            env.exec("xan agg 'mode(color) as mode' /colors.csv").stdout,
+            "mode\nred\n"
+        );
+        // cardinality counts unique values
+        assert_eq!(
+            env.exec("xan agg 'cardinality(color) as cardinality' /colors.csv")
+                .stdout,
+            "cardinality\n3\n"
+        );
+        // values concatenates all values
+        assert_eq!(
+            env.exec("xan agg 'values(name) as V' /names.csv").stdout,
+            "V\nJohn|Mary|Lucas\n"
+        );
+        // distinct_values gets unique values
+        assert_eq!(
+            env.exec("xan agg 'distinct_values(name) as V' /names2.csv")
+                .stdout,
+            "V\nJohn|Lucas|Mary\n"
+        );
+        // aggregates computed expressions
+        assert_eq!(
+            env.exec("xan agg 'sum(add(a, b + 1)) as sum' /expr.csv")
+                .stdout,
+            "sum\n24\n"
+        );
+    }
+
+    #[test]
+    fn structured_data_xan_sample_and_flatten_rows() {
+        // Ports packages/just-bash/src/commands/xan/xan.basic.test.ts:222-282
+        // (xan sample positional/seed/error and xan flatten/-l/f alias).
+        let separator = "\u{2500}".repeat(80);
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/big.csv".to_string(),
+                    "n\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n".to_string(),
+                ),
+                ("/three.csv".to_string(), "n\n1\n2\n3\n".to_string()),
+                ("/one.csv".to_string(), "n\n1\n".to_string()),
+                (
+                    "/people.csv".to_string(),
+                    "name,age\nalice,30\nbob,25\n".to_string(),
+                ),
+                ("/single.csv".to_string(), "x\n1\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // xan sample: samples N rows (positional argument), seeded -> 4 lines.
+        let sampled = env.exec("xan sample 3 --seed 42 /big.csv");
+        assert_eq!(sampled.exit_code, 0);
+        let lines: Vec<&str> = sampled.stdout.trim().split('\n').collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "n");
+
+        // xan sample: returns all rows if sample size exceeds data.
+        assert_eq!(env.exec("xan sample 10 /three.csv").stdout, "n\n1\n2\n3\n");
+
+        // xan sample: errors without sample size.
+        let missing = env.exec("xan sample /one.csv");
+        assert_eq!(missing.exit_code, 1);
+        assert!(missing.stderr.contains("usage"));
+
+        // xan flatten: displays records vertically.
+        assert_eq!(
+            env.exec("xan flatten /people.csv").stdout,
+            format!(
+                "Row n\u{b0}0\n{separator}\nname alice\nage  30\n\nRow n\u{b0}1\n{separator}\nname bob\nage  25\n"
+            )
+        );
+
+        // xan flatten: limits rows with -l.
+        assert_eq!(
+            env.exec("xan flatten -l 1 /three.csv").stdout,
+            format!("Row n\u{b0}0\n{separator}\nn 1\n")
+        );
+
+        // xan flatten: works with alias f.
+        assert_eq!(
+            env.exec("xan f /single.csv").stdout,
+            format!("Row n\u{b0}0\n{separator}\nx 1\n")
+        );
+    }
+
+    #[test]
+    fn structured_data_xan_frequency_rows() {
+        // Ports packages/just-bash/src/commands/xan/xan.frequency.test.ts:12-83.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/in.csv".to_string(),
+                    "h1,h2\na,z\na,y\na,y\nb,z\n,z\n".to_string(),
+                ),
+                (
+                    "/data.csv".to_string(),
+                    "a\nx\nx\ny\ny\nz\nz\n".to_string(),
+                ),
+                (
+                    "/group.csv".to_string(),
+                    "name,color\njohn,blue\nmary,red\nmary,red\nmary,red\nmary,purple\njohn,yellow\njohn,blue\n".to_string(),
+                ),
+                (
+                    "/nums.csv".to_string(),
+                    "n\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // computes frequency of all columns
+        let all = env.exec("xan frequency --no-extra -l 0 /in.csv");
+        assert_eq!(all.exit_code, 0);
+        let lines: Vec<&str> = all.stdout.trim().split('\n').collect();
+        assert_eq!(lines[0], "field,value,count");
+        assert!(lines.len() > 1);
+
+        // selects specific column with -s
+        let h2 = env.exec("xan frequency -s h2 --no-extra -l 0 /in.csv");
+        assert_eq!(h2.exit_code, 0);
+        assert!(h2.stdout.contains("field,value,count\n"));
+        assert!(h2.stdout.contains("h2,z,3"));
+        assert!(h2.stdout.contains("h2,y,2"));
+
+        // limits results with -l
+        let limited = env.exec("xan frequency -l 1 --no-extra /in.csv");
+        assert_eq!(limited.exit_code, 0);
+        let limited_lines: Vec<&str> = limited.stdout.trim().split('\n').collect();
+        assert_eq!(limited_lines[0], "field,value,count");
+
+        // includes empty values
+        let empty = env.exec("xan frequency -s h1 -l 0 /in.csv");
+        assert_eq!(empty.exit_code, 0);
+        assert!(empty.stdout.contains("<empty>"));
+
+        // shows stability with equal counts
+        assert_eq!(
+            env.exec("xan frequency /data.csv").stdout,
+            "field,value,count\na,x,2\na,y,2\na,z,2\n"
+        );
+
+        // groups frequency by column with -g
+        let grouped = env.exec("xan frequency -g name /group.csv");
+        assert_eq!(grouped.exit_code, 0);
+        assert!(grouped.stdout.contains("field,name,value,count\n"));
+
+        // shows all values with -A
+        let show_all = env.exec("xan frequency -A /nums.csv");
+        assert_eq!(show_all.exit_code, 0);
+        let all_lines: Vec<&str> = show_all.stdout.trim().split('\n').collect();
+        assert_eq!(all_lines.len(), 12);
+    }
+
+    #[test]
     fn structured_data_sqlite3_options_errors_and_simple_select_rows() {
         let env = bash();
 
@@ -8812,5 +9400,132 @@ be, to a very large extent, the result of luck. Sherlock Holmes\n",
 
         let exit_log = logger.find("exit").expect("exit log defined");
         assert_eq!(exit_log.data, BashLogData::ExitCode(2));
+    }
+
+    #[test]
+    fn structured_data_yq_prototype_pollution_defense_rows() {
+        // packages/just-bash/src/commands/yq/yq.prototype-pollution.test.ts:21,34,46,58,67,76,87,97,109,120
+        let env = Bash::with_options(BashOptions {
+            env: BTreeMap::from([
+                ("constructor".to_string(), "ctor_value".to_string()),
+                ("prototype".to_string(), "proto_value".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // YAML input with dangerous keys (DANGEROUS_KEYWORDS.slice(0, 3)).
+        for keyword in ["constructor", "__proto__", "prototype"] {
+            let result = env.exec(&format!("echo '{keyword}: value' | yq '.{keyword}'"));
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(result.stdout.trim_end(), "value");
+        }
+
+        // JSON input with dangerous keys.
+        for keyword in ["constructor", "__proto__", "prototype"] {
+            let result = env.exec(&format!(
+                "echo '{{\"{keyword}\": \"value\"}}' | yq -p json '.{keyword}'"
+            ));
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(result.stdout.trim_end(), "value");
+        }
+
+        // keys lists dangerous keys.
+        let keys = env.exec("printf '__proto__: a\\nconstructor: b\\nnormal: c\\n' | yq 'keys'");
+        assert_eq!(keys.exit_code, 0);
+        assert!(keys.stdout.contains("__proto__"));
+        assert!(keys.stdout.contains("constructor"));
+
+        // to_entries preserves dangerous key.
+        let entries = env.exec("echo 'constructor: val' | yq 'to_entries | .[0].key'");
+        assert_eq!(entries.exit_code, 0);
+        assert_eq!(entries.stdout.trim_end(), "constructor");
+
+        // has() with dangerous key.
+        let has_true = env.exec("echo 'constructor: value' | yq 'has(\"constructor\")'");
+        assert_eq!(has_true.exit_code, 0);
+        assert_eq!(has_true.stdout.trim_end(), "true");
+        let has_false = env.exec("echo 'other: value' | yq 'has(\"__proto__\")'");
+        assert_eq!(has_false.exit_code, 0);
+        assert_eq!(has_false.stdout.trim_end(), "false");
+
+        // $ENV access with dangerous keyword names.
+        let env_ctor = env.exec("echo 'null' | yq '$ENV.constructor'");
+        assert_eq!(env_ctor.exit_code, 0);
+        assert_eq!(env_ctor.stdout.trim_end(), "ctor_value");
+        let env_proto = env.exec("echo 'null' | yq '$ENV.prototype'");
+        assert_eq!(env_proto.exit_code, 0);
+        assert_eq!(env_proto.stdout.trim_end(), "proto_value");
+
+        // add merges objects with a dangerous key.
+        let added = env
+            .exec("echo '[{\"constructor\": \"a\"}, {\"normal\": \"b\"}]' | yq -p json 'add | .constructor'");
+        assert_eq!(added.exit_code, 0);
+        assert_eq!(added.stdout.trim_end(), "a");
+
+        // getpath with dangerous key.
+        let path = env.exec("echo 'constructor: value' | yq 'getpath([\"constructor\"])'");
+        assert_eq!(path.exit_code, 0);
+        assert_eq!(path.stdout.trim_end(), "value");
+    }
+
+    #[test]
+    fn structured_data_yq_json_stdin_and_jq_filter_rows() {
+        // packages/just-bash/src/commands/yq/yq.test.ts:89,194,201,210,232,251,269
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.yaml".to_string(),
+                "name: test\nvalue: 42\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+
+        // should output as JSON with -o json
+        let json_out = env.exec("yq -o json '.' /data.yaml");
+        assert_eq!(json_out.exit_code, 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json_out.stdout).unwrap(),
+            serde_json::json!({"name": "test", "value": 42})
+        );
+
+        // should read from stdin
+        let stdin = env.exec("echo 'name: test' | yq '.name'");
+        assert_eq!(stdin.exit_code, 0);
+        assert_eq!(stdin.stdout, "test\n");
+
+        // should accept - for stdin
+        let dash = env.exec("echo 'value: 42' | yq '.value' -");
+        assert_eq!(dash.exit_code, 0);
+        assert_eq!(dash.stdout, "42\n");
+
+        // should support -n for null input with object construction
+        let null_input = env.exec("yq -n '{name: \"created\"}' -o json");
+        assert_eq!(null_input.exit_code, 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&null_input.stdout).unwrap(),
+            serde_json::json!({"name": "created"})
+        );
+
+        // should support map filter
+        let mapped =
+            env.exec("printf 'numbers:\\n  - 1\\n  - 2\\n  - 3\\n' | yq '.numbers | map(. * 2)'");
+        assert_eq!(mapped.exit_code, 0);
+        let map_lines: Vec<&str> = mapped.stdout.trim().split('\n').collect();
+        assert!(map_lines.contains(&"- 2"));
+        assert!(map_lines.contains(&"- 4"));
+        assert!(map_lines.contains(&"- 6"));
+
+        // should support keys filter
+        let keys = env.exec(
+            "printf 'config:\\n  host: localhost\\n  port: 8080\\n  debug: true\\n' | yq '.config | keys'",
+        );
+        assert_eq!(keys.exit_code, 0);
+        assert!(keys.stdout.contains("debug"));
+        assert!(keys.stdout.contains("host"));
+        assert!(keys.stdout.contains("port"));
+
+        // should support length filter
+        let length = env.exec("printf 'items:\\n  - a\\n  - b\\n  - c\\n' | yq '.items | length'");
+        assert_eq!(length.exit_code, 0);
+        assert_eq!(length.stdout, "3\n");
     }
 }

@@ -948,6 +948,18 @@ const jbc10CaseGroups = [
     notes:
       'JBC-10 verifies imported rg binary-detection rows: NUL-containing files are skipped in directory and explicit-file search, in -c counts, in -l file lists, and in mixed-content directories.',
   },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
+    lines: [
+      127, 144, 161, 178, 212, 231, 246, 331, 364, 486, 503, 538, 590,
+      605, 620, 652, 670, 685, 701, 718, 735, 752, 769, 786, 1150, 1181,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_misc_search_modes_counts_and_context_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported rg misc rows: -v/-n inverted, -i case-insensitive, -w word, -x whole-line, -F literal, -q quiet, -t/-T file-type filter, -g/--glob filters, --count/--count-matches/--include-zero counts, --files-with-matches/--files-without-match, -A/-B/-C context with line numbers, --files listing, and --sort path over the virtual filesystem.',
+  },
 ];
 
 const jbc12SourceGroups = [
@@ -3329,6 +3341,36 @@ const jbc42CaseGroups = [
   },
 ];
 
+const jbcAwkEdgeCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.edge-cases.test.ts',
+    lines: [44, 53, 64, 71, 82, 91, 98, 105, 112, 122, 132, 141, 159, 168, 175, 184, 193],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_edge_special_chars_numeric_string_and_regex_rows',
+    notes:
+      'JBC-AWK-EDGE verifies portable AWK handling of literal quotes/backslashes/brackets/dollar/ampersand field data, very large and very small numeric magnitudes formatted with JS-compatible scientific notation, negative zero, floating-point precision, integer overflow, empty-string comparison, length() of empty and space-only records, and anchored/escaped/empty regex matches. The for-loop string-builder row (line 150) remains pending because C-style for is not yet implemented.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.arrays.test.ts',
+    lines: [297],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_edge_special_chars_numeric_string_and_regex_rows',
+    notes:
+      'JBC-AWK-EDGE verifies portable AWK post-increment of an array element yields the pre-increment value while updating the stored entry.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.binary.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_edge_special_chars_numeric_string_and_regex_rows',
+    notes:
+      'JBC-AWK-EDGE verifies portable AWK arithmetic over a file whose bytes are processed as text records ("1 2\\n3 4\\n" -> 3, 7).',
+  },
+];
+
 const jbc37CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/html-to-markdown/html-to-markdown.test.ts',
@@ -3465,6 +3507,63 @@ const jbc37CaseGroups = [
     rustTest: 'structured_data_jbc37_xan_utf8_stdin_row',
     notes:
       'JBC-37 verifies xan preserves multibyte UTF-8 CSV fields through the Rust virtual pipe path.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.agg.test.ts',
+    lines: [
+      10, 19, 28, 37, 46, 55, 64, 73, 82, 91, 100, 111, 124, 137, 146, 157,
+      166, 179,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_agg_aggregations',
+    notes:
+      'JBC verifies portable xan agg count/count(expr)/sum/mean/avg/min/max/first/last/median/multiple/all/any/mode/cardinality/values/distinct_values and computed-expression aggregation over in-memory CSV.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.basic.test.ts',
+    lines: [222, 233, 242, 255, 266, 275],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_sample_and_flatten_rows',
+    notes:
+      'JBC verifies portable xan sample positional/seeded/error-without-size and xan flatten vertical record display, -l limit, and f alias over in-memory CSV.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.frequency.test.ts',
+    lines: [12, 22, 34, 43, 50, 61],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_frequency_rows',
+    notes:
+      'JBC verifies portable xan frequency all-columns, -s column select, -l limit, empty-value <empty> display, equal-count stability ordering, and -g groupby header over in-memory CSV.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.prototype-pollution.test.ts',
+    lines: [21, 34, 46, 58, 67, 76, 87, 97, 109, 120],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_yq_prototype_pollution_defense_rows',
+    notes:
+      'JBC-yq verifies the Rust yq engine reads dangerous YAML/JSON keys (constructor, __proto__, prototype) as ordinary data, lists them via keys/to_entries, answers has() correctly, resolves $ENV entries named after the keywords, merges objects with add, and reads them through getpath without prototype pollution.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.prototype-pollution.test.ts',
+    lines: [131, 145],
+    status: 'js-only-documented',
+    owner: 'docs/just-bash::yq-host-prototype-isolation',
+    rustTest: 'js-only-documented',
+    notes:
+      'JBC-yq documents these rows as JavaScript host assertions: they probe whether the Node Object.prototype was mutated after yq parsed dangerous YAML/JSON keys. Rust serde_json has no shared global prototype object, so the host-pollution observation is not expressible; the portable parsing behavior is covered by structured_data_yq_prototype_pollution_defense_rows.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.test.ts',
+    lines: [89, 194, 201, 210, 232, 251, 269],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_yq_json_stdin_and_jq_filter_rows',
+    notes:
+      'JBC-yq verifies yq JSON output with -o json, reading from stdin (implicit and via -), -n null-input object construction, and the jq-style map/keys/length filters over in-memory YAML.',
   },
 ];
 
@@ -4014,6 +4113,7 @@ function caseOverrideFor(testCase) {
     ...jbc25CaseGroups,
     ...jbc35CaseGroups,
     ...jbc42CaseGroups,
+    ...jbcAwkEdgeCaseGroups,
     ...jbc38CaseGroups,
     ...jbc41CaseGroups,
     ...jbc43CaseGroups,
