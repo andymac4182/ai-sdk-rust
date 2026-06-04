@@ -5234,8 +5234,57 @@ const justBashEncodingPipelineByteEmitCaseGroups = [
   },
 ];
 
+const r10jbCommandAwkCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.parsing.test.ts',
+    lines: [401, 410, 419, 428, 472, 487, 495, 504, 515, 522, 528],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_r10jb_command_awk_parsing_block_and_expression_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk parsing of for/while/do-while/for-in blocks, unary-minus negative literals, chained field access $($1), arithmetic array indices, nested ternary, and the missing-program/invalid-option/missing-file error cases. The "--5" double-negative row remains pending unary-minus operand parsing.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.output.test.ts',
+    lines: [144, 153, 164],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_r10jb_command_awk_output_file_redirection_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk file-output redirection: print > FILE truncates then keeps the stream open so multiple records append in order, and print >> FILE appends to existing virtual file content.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.utf8-stdin.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_r10jb_command_awk_utf8_stdin_row',
+    notes:
+      'just-bash-command-awk verifies portable awk splits multibyte UTF-8 fields correctly when reading through a pipe (the second whitespace field of "한글 café 漢字" is "café").',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.prototype-pollution.test.ts',
+    lines: [51, 61, 78, 88, 104, 117, 134, 146, 153, 160, 169],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_r10jb_command_awk_prototype_pollution_dangerous_key_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk treats JavaScript-dangerous keywords (__proto__, constructor, prototype, hasOwnProperty, ...) as ordinary identifiers: as scalar variable names, array keys (round-trip, for-in iteration, the in operator, delete), -v assignments, raw field input, -F CSV splitting, and array keys built from field data. The ENVIRON-from-export rows (29, 39) and the JS-prototype-non-pollution rows (292, 305) remain pending/JS-only.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.prototype-pollution.test.ts',
+    lines: [181, 190, 203, 214],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_r10jb_command_awk_prototype_pollution_string_function_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk string/regex builtins operate on dangerous-keyword values normally: gsub global replacement, split into array elements, match locating the pattern, and printf %s of dangerous-keyword string arguments.',
+  },
+];
+
 function caseOverrideFor(testCase) {
   const group = [
+    ...r10jbCommandAwkCaseGroups,
     ...jbSedTestTsCaseGroups,
     ...jbAliasCaseGroups,
     ...jbInterpreterBuiltinsCaseGroups,
