@@ -15,9 +15,9 @@
     "expectedFailures": 0
   },
   "summary": {
-    "totalCases": 405,
+    "totalCases": 417,
     "byKind": {
-      "comparison-fixture": 405
+      "comparison-fixture": 417
     },
     "byDomain": {
       "awk": 12,
@@ -41,10 +41,11 @@
       "tar": 30,
       "test": 1,
       "tr": 14,
-      "uniq": 10
+      "uniq": 10,
+      "yq": 12
     },
     "byStatus": {
-      "portable-verified": 405
+      "portable-verified": 417
     }
   },
   "cases": [
@@ -21651,6 +21652,546 @@
       "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_598_ca4b9c5889964884",
       "runnerProof": {
         "source": "JBC-sed",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:fx_yaml_active",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts",
+        "line": 112,
+        "suite": "yq command",
+        "testName": "should filter active users from users.yaml",
+        "declaration": "it"
+      },
+      "command": "yq '[.users[] | select(.active)] | length' /fixtures/yaml/users.yaml",
+      "script": "yq '[.users[] | select(.active)] | length' /fixtures/yaml/users.yaml",
+      "initialFiles": {
+        "/fixtures/yaml/users.yaml": "users:\n  - name: alice\n    age: 30\n    email: alice@example.com\n    active: true\n  - name: bob\n    age: 25\n    email: bob@example.com\n    active: false\n  - name: charlie\n    age: 35\n    email: charlie@example.com\n    active: true\nmetadata:\n  version: 1.0\n  generated: \"2024-01-01\"\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "2\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts:112:it:should filter active users from users.yaml",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_fx_yaml_active",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_fx_yaml_active",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:fx_yaml_ver",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts",
+        "line": 121,
+        "suite": "yq command",
+        "testName": "should get metadata version from users.yaml",
+        "declaration": "it"
+      },
+      "command": "yq '.metadata.version' /fixtures/yaml/users.yaml",
+      "script": "yq '.metadata.version' /fixtures/yaml/users.yaml",
+      "initialFiles": {
+        "/fixtures/yaml/users.yaml": "users:\n  - name: alice\n    age: 30\n    email: alice@example.com\n    active: true\n  - name: bob\n    age: 25\n    email: bob@example.com\n    active: false\n  - name: charlie\n    age: 35\n    email: charlie@example.com\n    active: true\nmetadata:\n  version: 1.0\n  generated: \"2024-01-01\"\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "1\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts:121:it:should get metadata version from users.yaml",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_fx_yaml_ver",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_fx_yaml_ver",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:fx_yaml_tags",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts",
+        "line": 130,
+        "suite": "yq command",
+        "testName": "should extract tags from simple.yaml",
+        "declaration": "it"
+      },
+      "command": "yq '.tags[]' /fixtures/yaml/simple.yaml",
+      "script": "yq '.tags[]' /fixtures/yaml/simple.yaml",
+      "initialFiles": {
+        "/fixtures/yaml/simple.yaml": "title: Simple Document\ncount: 42\nenabled: true\ntags:\n  - important\n  - featured\n  - new\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "important\nfeatured\nnew\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts:130:it:should extract tags from simple.yaml",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_fx_yaml_tags",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_fx_yaml_tags",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:auto_json",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.test.ts",
+        "line": 886,
+        "suite": "yq command",
+        "testName": "should auto-detect JSON from .json extension",
+        "declaration": "it"
+      },
+      "command": "yq '.name' /data.json",
+      "script": "yq '.name' /data.json",
+      "initialFiles": {
+        "/data.json": "{\"name\": \"test\", \"value\": 42}"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "test\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.test.ts:886:it:should auto-detect JSON from .json extension",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_auto_json",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_auto_json",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:nav_select",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.navigation.test.ts",
+        "line": 179,
+        "suite": "yq command",
+        "testName": "parent after select",
+        "declaration": "it"
+      },
+      "command": "yq -o json '.items[] | select(.active == true) | .name' /data.yaml",
+      "script": "yq -o json '.items[] | select(.active == true) | .name' /data.yaml",
+      "initialFiles": {
+        "/data.yaml": "items:\n  - name: foo\n    active: true\n  - name: bar\n    active: false\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "\"foo\"\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.navigation.test.ts:179:it:parent after select",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_nav_select",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_nav_select",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:prefer_p",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.test.ts",
+        "line": 931,
+        "suite": "yq command",
+        "testName": "should prefer explicit -p over auto-detection",
+        "declaration": "it"
+      },
+      "command": "yq -p yaml '.name' /data.json",
+      "script": "yq -p yaml '.name' /data.json",
+      "initialFiles": {
+        "/data.json": "name: yaml-content\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "yaml-content\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.test.ts:931:it:should prefer explicit -p over auto-detection",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_prefer_p",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_prefer_p",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:conv_y2j",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts",
+        "line": 436,
+        "suite": "yq command",
+        "testName": "should convert YAML to JSON",
+        "declaration": "it"
+      },
+      "command": "yq '.title' /fixtures/yaml/simple.yaml -o json -r",
+      "script": "yq '.title' /fixtures/yaml/simple.yaml -o json -r",
+      "initialFiles": {
+        "/fixtures/yaml/simple.yaml": "title: Simple Document\ncount: 42\nenabled: true\ntags:\n  - important\n  - featured\n  - new\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "Simple Document\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts:436:it:should convert YAML to JSON",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_conv_y2j",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_conv_y2j",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:conv_j2y",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts",
+        "line": 445,
+        "suite": "yq command",
+        "testName": "should convert JSON to YAML",
+        "declaration": "it"
+      },
+      "command": "yq -p json '.company.name' /fixtures/json/nested.json",
+      "script": "yq -p json '.company.name' /fixtures/json/nested.json",
+      "initialFiles": {
+        "/fixtures/json/nested.json": "{\n  \"company\": {\n    \"name\": \"Acme Corp\",\n    \"departments\": [\n      {\n        \"name\": \"Engineering\",\n        \"employees\": 50,\n        \"budget\": 500000\n      },\n      {\n        \"name\": \"Sales\",\n        \"employees\": 30,\n        \"budget\": 300000\n      },\n      {\n        \"name\": \"Marketing\",\n        \"employees\": 20,\n        \"budget\": 200000\n      }\n    ]\n  }\n}\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "Acme Corp\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts:445:it:should convert JSON to YAML",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_conv_j2y",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_conv_j2y",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:sj_deep",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts",
+        "line": 573,
+        "suite": "yq command",
+        "testName": "should handle deeply nested structures",
+        "declaration": "it"
+      },
+      "command": "yq -p json '.deeply.nested.structure.value' /fixtures/json/special.json",
+      "script": "yq -p json '.deeply.nested.structure.value' /fixtures/json/special.json",
+      "initialFiles": {
+        "/fixtures/json/special.json": "{\n  \"empty_string\": \"\",\n  \"null_value\": null,\n  \"unicode\": \"Hello \\u4e16\\u754c\",\n  \"escaped\": \"quotes: \\\"nested\\\" and backslash: \\\\path\",\n  \"numbers\": {\n    \"integer\": 42,\n    \"float\": 3.14159,\n    \"negative\": -17,\n    \"scientific\": 1.5e10,\n    \"zero\": 0,\n    \"max_safe\": 9007199254740991\n  },\n  \"booleans\": {\n    \"true_val\": true,\n    \"false_val\": false\n  },\n  \"arrays\": {\n    \"empty\": [],\n    \"mixed\": [1, \"two\", true, null, { \"nested\": \"object\" }],\n    \"nested\": [[1, 2], [3, 4], [5, 6]]\n  },\n  \"objects\": {\n    \"empty\": {},\n    \"with-dash\": \"value\",\n    \"with.dot\": \"value\",\n    \"with space\": \"value\",\n    \"123numeric\": \"starts with number\"\n  },\n  \"deeply\": {\n    \"nested\": {\n      \"structure\": {\n        \"value\": \"found it\"\n      }\n    }\n  }\n}\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "found it\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts:573:it:should handle deeply nested structures",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_sj_deep",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_sj_deep",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:sj_dash",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts",
+        "line": 582,
+        "suite": "yq command",
+        "testName": "should handle keys with special characters",
+        "declaration": "it"
+      },
+      "command": "yq -p json '.objects[\"with-dash\"]' /fixtures/json/special.json",
+      "script": "yq -p json '.objects[\"with-dash\"]' /fixtures/json/special.json",
+      "initialFiles": {
+        "/fixtures/json/special.json": "{\n  \"empty_string\": \"\",\n  \"null_value\": null,\n  \"unicode\": \"Hello \\u4e16\\u754c\",\n  \"escaped\": \"quotes: \\\"nested\\\" and backslash: \\\\path\",\n  \"numbers\": {\n    \"integer\": 42,\n    \"float\": 3.14159,\n    \"negative\": -17,\n    \"scientific\": 1.5e10,\n    \"zero\": 0,\n    \"max_safe\": 9007199254740991\n  },\n  \"booleans\": {\n    \"true_val\": true,\n    \"false_val\": false\n  },\n  \"arrays\": {\n    \"empty\": [],\n    \"mixed\": [1, \"two\", true, null, { \"nested\": \"object\" }],\n    \"nested\": [[1, 2], [3, 4], [5, 6]]\n  },\n  \"objects\": {\n    \"empty\": {},\n    \"with-dash\": \"value\",\n    \"with.dot\": \"value\",\n    \"with space\": \"value\",\n    \"123numeric\": \"starts with number\"\n  },\n  \"deeply\": {\n    \"nested\": {\n      \"structure\": {\n        \"value\": \"found it\"\n      }\n    }\n  }\n}\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "value\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts:582:it:should handle keys with special characters",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_sj_dash",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_sj_dash",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:sj_mixed",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts",
+        "line": 591,
+        "suite": "yq command",
+        "testName": "should handle mixed arrays",
+        "declaration": "it"
+      },
+      "command": "yq -p json '.arrays.mixed | length' /fixtures/json/special.json",
+      "script": "yq -p json '.arrays.mixed | length' /fixtures/json/special.json",
+      "initialFiles": {
+        "/fixtures/json/special.json": "{\n  \"empty_string\": \"\",\n  \"null_value\": null,\n  \"unicode\": \"Hello \\u4e16\\u754c\",\n  \"escaped\": \"quotes: \\\"nested\\\" and backslash: \\\\path\",\n  \"numbers\": {\n    \"integer\": 42,\n    \"float\": 3.14159,\n    \"negative\": -17,\n    \"scientific\": 1.5e10,\n    \"zero\": 0,\n    \"max_safe\": 9007199254740991\n  },\n  \"booleans\": {\n    \"true_val\": true,\n    \"false_val\": false\n  },\n  \"arrays\": {\n    \"empty\": [],\n    \"mixed\": [1, \"two\", true, null, { \"nested\": \"object\" }],\n    \"nested\": [[1, 2], [3, 4], [5, 6]]\n  },\n  \"objects\": {\n    \"empty\": {},\n    \"with-dash\": \"value\",\n    \"with.dot\": \"value\",\n    \"with space\": \"value\",\n    \"123numeric\": \"starts with number\"\n  },\n  \"deeply\": {\n    \"nested\": {\n      \"structure\": {\n        \"value\": \"found it\"\n      }\n    }\n  }\n}\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "5\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts:591:it:should handle mixed arrays",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_sj_mixed",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_sj_mixed",
+      "runnerProof": {
+        "source": "JBC-yq",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "command:yq:an_max",
+      "kind": "comparison-fixture",
+      "classification": "command-golden",
+      "domain": "yq",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts",
+        "line": 738,
+        "suite": "yq command",
+        "testName": "should find highest budget department from nested.json",
+        "declaration": "it"
+      },
+      "command": "yq -p json '[.company.departments[] | {name, budget}] | max_by(.budget) | .name' /fixtures/json/nested.json",
+      "script": "yq -p json '[.company.departments[] | {name, budget}] | max_by(.budget) | .name' /fixtures/json/nested.json",
+      "initialFiles": {
+        "/fixtures/json/nested.json": "{\n  \"company\": {\n    \"name\": \"Acme Corp\",\n    \"departments\": [\n      {\n        \"name\": \"Engineering\",\n        \"employees\": 50,\n        \"budget\": 500000\n      },\n      {\n        \"name\": \"Sales\",\n        \"employees\": 30,\n        \"budget\": 300000\n      },\n      {\n        \"name\": \"Marketing\",\n        \"employees\": 20,\n        \"budget\": 200000\n      }\n    ]\n  }\n}\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "Engineering\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/yq/yq.fixtures.test.ts:738:it:should find highest budget department from nested.json",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::yq_command_an_max",
+        "notes": "JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::yq_command_an_max",
+      "runnerProof": {
+        "source": "JBC-yq",
         "engine": "rust-just-bash",
         "assertion": "stdout-stderr-exit-code-exact"
       }
