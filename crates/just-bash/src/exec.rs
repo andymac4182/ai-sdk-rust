@@ -7306,11 +7306,17 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
             }
             SedCommand::Quit { line, print_line } => {
                 // `Nq` auto-prints lines up to and including line N then quits.
-                // `NQ` quits before printing line N.
-                let keep = if print_line {
-                    line.min(lines.len())
+                // `NQ` quits before printing line N. `$q`/`$Q` (line == usize::MAX)
+                // address the last line.
+                let target = if line == usize::MAX {
+                    lines.len()
                 } else {
-                    line.saturating_sub(1).min(lines.len())
+                    line
+                };
+                let keep = if print_line {
+                    target.min(lines.len())
+                } else {
+                    target.saturating_sub(1).min(lines.len())
                 };
                 lines.truncate(keep);
             }
@@ -7672,7 +7678,16 @@ enum SedAddress {
     Line(usize),
     Last,
     Range(usize, usize),
+    /// `N,$` — from line N through the last line.
+    RangeToLast(usize),
+    /// `first~step` — line `first` and every `step`-th line thereafter (GNU sed).
+    Step {
+        first: usize,
+        step: usize,
+    },
     Pattern(String),
+    /// `addr!` — matches lines that the inner address does NOT match.
+    Negated(Box<SedAddress>),
 }
 
 #[derive(Clone, Debug)]
@@ -7695,6 +7710,24 @@ enum SedCommand {
 
 fn parse_sed_command(script: &str) -> Result<SedCommand, String> {
     let script = script.trim();
+    // `$q` / `$Q` quit at the last line. `$q` prints every line (auto-print then
+    // quits at EOF); `$Q` quits before printing the last line.
+    if let Some(prefix) = script.strip_suffix('q')
+        && prefix.trim() == "$"
+    {
+        return Ok(SedCommand::Quit {
+            line: usize::MAX,
+            print_line: true,
+        });
+    }
+    if let Some(prefix) = script.strip_suffix('Q')
+        && prefix.trim() == "$"
+    {
+        return Ok(SedCommand::Quit {
+            line: usize::MAX,
+            print_line: false,
+        });
+    }
     // `Nq` / `NQ` quit commands: N is a required leading line number.
     if let Some(line) = script.strip_suffix('q').and_then(|n| n.trim().parse().ok()) {
         return Ok(SedCommand::Quit {
@@ -7853,14 +7886,29 @@ fn parse_sed_address(value: &str) -> Option<SedAddress> {
     if value.is_empty() {
         return None;
     }
+    // `addr!` negates the address (matches lines the inner address does NOT match).
+    if let Some(inner) = value.strip_suffix('!') {
+        let inner = parse_sed_address(inner.trim())?;
+        return Some(SedAddress::Negated(Box::new(inner)));
+    }
     if value == "$" {
         return Some(SedAddress::Last);
     }
+    // `first~step` step address (GNU sed).
+    if let Some((first, step)) = value.split_once('~') {
+        return Some(SedAddress::Step {
+            first: first.trim().parse().ok()?,
+            step: step.trim().parse().ok()?,
+        });
+    }
     if let Some((start, end)) = value.split_once(',') {
-        return Some(SedAddress::Range(
-            start.trim().parse().ok()?,
-            end.trim().parse().ok()?,
-        ));
+        let start = start.trim();
+        let end = end.trim();
+        let start_line = start.parse::<usize>().ok()?;
+        if end == "$" {
+            return Some(SedAddress::RangeToLast(start_line));
+        }
+        return Some(SedAddress::Range(start_line, end.parse().ok()?));
     }
     if value.starts_with('/') && value.ends_with('/') && value.len() >= 2 {
         return Some(SedAddress::Pattern(value[1..value.len() - 1].to_string()));
@@ -7892,9 +7940,23 @@ fn sed_address_matches(
         Some(SedAddress::Line(target)) => line_number == *target,
         Some(SedAddress::Last) => line_number == line_count,
         Some(SedAddress::Range(start, end)) => line_number >= *start && line_number <= *end,
+        Some(SedAddress::RangeToLast(start)) => line_number >= *start,
+        Some(SedAddress::Step { first, step }) => {
+            if *step == 0 {
+                // GNU sed: `first~0` matches `first` and every line after it.
+                line_number >= (*first).max(1)
+            } else {
+                // `first~step` matches lines first, first+step, first+2*step, ...
+                // `first` may be 0 (e.g. `0~2` matches lines 2, 4, 6, ...).
+                line_number >= *first && (line_number - *first) % *step == 0
+            }
+        }
         Some(SedAddress::Pattern(pattern)) => Regex::new(pattern)
             .map(|regex| regex.is_match(line))
             .unwrap_or(false),
+        Some(SedAddress::Negated(inner)) => {
+            !sed_address_matches(Some(inner), line_index, line, line_count)
+        }
     }
 }
 
