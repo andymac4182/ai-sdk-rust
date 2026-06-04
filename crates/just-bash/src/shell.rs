@@ -10630,4 +10630,302 @@ greet World",
             assert_eq!(result.exit_code, 0, "{line} exit {source:?}");
         }
     }
+
+    /// JBC-50 closes the upstream `local` builtin rows
+    /// (packages/just-bash/src/interpreter/builtins/local.test.ts) against the
+    /// portable Rust shell interpreter. Each row exercises function-scoped
+    /// declaration, shadowing, restoration after return, multiple/mixed
+    /// declarations, nested and recursive scoping, special values, variable
+    /// expansion on the RHS, and the outside-function / subshell error paths.
+    /// Every assertion fails if the dynamic-scope semantics of `local` regress.
+    #[test]
+    fn jbpi_local_builtin_function_scoping_rows_match_upstream() {
+        // basic local variables.
+        // local.test.ts:6 declare local variable with value.
+        let mut sh = shell();
+        assert_eq!(
+            sh.exec("test_func() { local x=hello; echo $x; }; test_func")
+                .stdout,
+            "hello\n"
+        );
+        // local.test.ts:14 should not affect outer scope.
+        let mut sh = shell().with_env([("x", "outer")]);
+        assert_eq!(
+            sh.exec("test_func() { local x=inner; echo $x; }; test_func; echo $x")
+                .stdout,
+            "inner\nouter\n"
+        );
+        // local.test.ts:22 should shadow outer variable.
+        let mut sh = shell().with_env([("x", "outer")]);
+        assert_eq!(
+            sh.exec("test_func() { local x=inner; echo $x; }; test_func")
+                .stdout,
+            "inner\n"
+        );
+        // local.test.ts:30 should restore undefined variable after function.
+        let mut sh = shell();
+        assert_eq!(
+            sh.exec(
+                "test_func() { local newvar=value; echo $newvar; }; test_func; echo \"[$newvar]\""
+            )
+            .stdout,
+            "value\n[]\n"
+        );
+        // local.test.ts:38 should declare local without value.
+        let mut sh = shell();
+        assert_eq!(
+            sh.exec("test_func() { local x; x=assigned; echo $x; }; test_func")
+                .stdout,
+            "assigned\n"
+        );
+
+        // multiple local declarations.
+        // local.test.ts:48 multiple local declarations.
+        let mut sh = shell();
+        assert_eq!(
+            sh.exec("test_func() { local a=1 b=2 c=3; echo $a $b $c; }; test_func")
+                .stdout,
+            "1 2 3\n"
+        );
+        // local.test.ts:56 mixed declarations with and without values.
+        let mut sh = shell();
+        assert_eq!(
+            sh.exec("test_func() { local a=1 b c=3; b=2; echo $a $b $c; }; test_func")
+                .stdout,
+            "1 2 3\n"
+        );
+
+        // nested functions.
+        // local.test.ts:66 nested function calls.
+        let mut sh = shell();
+        assert_eq!(
+            sh.exec("inner() { local x=inner; echo $x; }; outer() { local x=outer; inner; echo $x; }; outer")
+                .stdout,
+            "inner\nouter\n"
+        );
+        // local.test.ts:74 keep local changes within same scope.
+        let mut sh = shell();
+        assert_eq!(
+            sh.exec("test_func() { local x=first; x=second; echo $x; }; test_func")
+                .stdout,
+            "second\n"
+        );
+        // local.test.ts:82 not leak local from inner to outer function.
+        let mut sh = shell();
+        assert_eq!(
+            sh.exec(
+                "\
+                inner() { local y=inner; }\n\
+                outer() {\n\
+                  local x=outer\n\
+                  inner\n\
+                  echo \"x=$x y=$y\"\n\
+                }\n\
+                outer\n"
+            )
+            .stdout,
+            "x=outer y=\n"
+        );
+
+        // error cases.
+        // local.test.ts:98 error when used outside function.
+        let mut sh = shell();
+        let outside = sh.exec("local x=value");
+        assert_eq!(outside.exit_code, 1, "outside-function exit");
+        assert!(
+            outside.stderr.contains("can only be used in a function"),
+            "stderr was: {}",
+            outside.stderr
+        );
+        // local.test.ts:105 error when used in subshell outside function.
+        let mut sh = shell();
+        assert_ne!(sh.exec("(local x=value)").exit_code, 0);
+
+        // local with special values.
+        // local.test.ts:113 local with empty value.
+        let mut sh = shell();
+        assert_eq!(
+            sh.exec("test_func() { local x=; echo \"x is $x end\"; }; test_func")
+                .stdout,
+            "x is  end\n"
+        );
+        // local.test.ts:121 local with spaces in value (quoted).
+        let mut sh = shell();
+        assert_eq!(
+            sh.exec("test_func() { local x=\"hello world\"; echo \"$x\"; }; test_func")
+                .stdout,
+            "hello world\n"
+        );
+        // local.test.ts:129 local with variable expansion.
+        let mut sh = shell().with_env([("OUTER", "expanded")]);
+        assert_eq!(
+            sh.exec("test_func() { local x=$OUTER; echo \"$x\"; }; test_func")
+                .stdout,
+            "expanded\n"
+        );
+
+        // local scope restoration.
+        // local.test.ts:139 restore original value after function returns.
+        let mut sh = shell();
+        assert_eq!(
+            sh.exec(
+                "\
+                x=global\n\
+                test_func() {\n\
+                  local x=local\n\
+                  echo \"inside: $x\"\n\
+                }\n\
+                echo \"before: $x\"\n\
+                test_func\n\
+                echo \"after: $x\"\n"
+            )
+            .stdout,
+            "before: global\ninside: local\nafter: global\n"
+        );
+        // local.test.ts:156 recursive functions with local.
+        let mut sh = shell();
+        assert_eq!(
+            sh.exec(
+                "\
+                countdown() {\n\
+                  local n=$1\n\
+                  if [ $n -le 0 ]; then\n\
+                    echo \"done\"\n\
+                    return\n\
+                  fi\n\
+                  echo $n\n\
+                  countdown $((n - 1))\n\
+                }\n\
+                countdown 3\n"
+            )
+            .stdout,
+            "3\n2\n1\ndone\n"
+        );
+    }
+
+    /// JBC-50 closes additional portable parser/interpreter rows across the
+    /// `return`, `continue`, `eval`, and function/control-flow suites that run
+    /// in the FakeCommands harness:
+    ///   - return.test.ts:121,141,161,175 (innermost-only return, propagation
+    ///     through loops/if, stdout/stderr preserved before return).
+    ///   - continue.test.ts:197,208 (continue in / update-after-continue for a
+    ///     C-style for loop).
+    ///   - eval.test.ts:154 (escaped characters within eval).
+    ///   - control-flow.test.ts:202 (functions do not persist across exec).
+    /// Each assertion fails if the corresponding control-flow semantics regress.
+    #[test]
+    fn jbpi_return_continue_eval_and_function_persistence_rows_match_upstream() {
+        // return.test.ts:121 only return from innermost function.
+        let mut sh = shell();
+        assert_eq!(
+            sh.exec(
+                "\
+                outer() {\n\
+                  echo outer-start\n\
+                  inner() {\n\
+                    echo inner\n\
+                    return 5\n\
+                  }\n\
+                  inner\n\
+                  echo \"inner returned $?\"\n\
+                }\n\
+                outer\n\
+                echo \"outer returned $?\"\n"
+            )
+            .stdout,
+            "outer-start\ninner\ninner returned 5\nouter returned 0\n"
+        );
+
+        // return.test.ts:141 propagate return through control flow.
+        let mut sh = shell();
+        assert_eq!(
+            sh.exec(
+                "\
+                myfunc() {\n\
+                  for i in 1 2 3; do\n\
+                    if [ $i -eq 2 ]; then\n\
+                      return 42\n\
+                    fi\n\
+                    echo $i\n\
+                  done\n\
+                  echo \"never\"\n\
+                }\n\
+                myfunc\n\
+                echo $?\n"
+            )
+            .stdout,
+            "1\n42\n"
+        );
+
+        // return.test.ts:161 preserve stdout before return.
+        let mut sh = shell();
+        assert_eq!(
+            sh.exec(
+                "\
+                myfunc() {\n\
+                  echo line1\n\
+                  echo line2\n\
+                  return 3\n\
+                }\n\
+                myfunc\n\
+                echo \"exit: $?\"\n"
+            )
+            .stdout,
+            "line1\nline2\nexit: 3\n"
+        );
+
+        // return.test.ts:175 preserve stderr/exit before return (command not found).
+        let mut sh = shell();
+        let r = sh.exec(
+            "\
+            myfunc() {\n\
+              nonexistent_cmd_xyz 2>/dev/null || true\n\
+              return 5\n\
+            }\n\
+            myfunc\n",
+        );
+        assert_eq!(r.exit_code, 5);
+
+        // continue.test.ts:197 continue in C-style for loop.
+        let mut sh = shell();
+        assert_eq!(
+            sh.exec(
+                "\
+                for ((i=1; i<=5; i++)); do\n\
+                  if [ $i -eq 3 ]; then continue; fi\n\
+                  echo $i\n\
+                done\n"
+            )
+            .stdout,
+            "1\n2\n4\n5\n"
+        );
+
+        // continue.test.ts:208 update expression runs after continue.
+        let mut sh = shell();
+        assert_eq!(
+            sh.exec(
+                "\
+                for ((i=0; i<5; i++)); do\n\
+                  if [ $i -lt 3 ]; then continue; fi\n\
+                  echo $i\n\
+                done\n"
+            )
+            .stdout,
+            "3\n4\n"
+        );
+
+        // eval.test.ts:154 escaped characters within eval (output contains hello).
+        let mut sh = shell();
+        let eval_escape = sh.exec("eval \"echo hello\\\\nworld\"");
+        assert!(
+            eval_escape.stdout.contains("hello"),
+            "eval escape stdout: {:?}",
+            eval_escape.stdout
+        );
+
+        // control-flow.test.ts:202 function definitions do not persist across exec.
+        let mut sh = shell();
+        sh.exec("greet() { echo hello; }");
+        assert_eq!(sh.exec("greet").exit_code, 127);
+    }
 }
