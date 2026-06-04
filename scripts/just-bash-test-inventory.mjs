@@ -3276,6 +3276,29 @@ const r12jbR3RgCaseGroups = [
   },
 ];
 
+const r12jbR4SearchEngineCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/search-engine/matcher.test.ts',
+    lines: [6, 15, 24, 36, 51, 61, 70, 79, 90, 99, 124, 109, 140],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::search_engine',
+    rustTest:
+      'search_engine_matcher_prefilter_skips_lines_without_needle_case_sensitive; search_engine_matcher_prefilter_lowercases_needle_and_line_when_ignore_case; search_engine_matcher_prefilter_or_logic_across_multiple_needles; search_engine_matcher_prefilter_invert_outputs_non_needle_lines; search_engine_matcher_no_fast_path_skip_when_prefilter_absent; search_engine_matcher_replacement_full_match_token; search_engine_matcher_replacement_numbered_capture_groups; search_engine_matcher_replacement_named_capture_groups; search_engine_matcher_replacement_missing_capture_group_is_empty; search_engine_matcher_replacement_inline_on_full_line; search_engine_matcher_multiline_finds_matches_with_line_numbers; search_engine_matcher_multiline_empty_when_no_needle_in_content; search_engine_matcher_multiline_invert_does_not_skip_when_needle_absent',
+    notes:
+      'r12jb-r4 ports the search-engine matcher core (crates/just-bash/src/search_engine.rs): the substring pre-filter fast-path (case-sensitive skip, ignore-case lowercasing, OR across multiple needles, invert-match output, absent-pre-filter scan), $&/$1/$2/$<name>/missing-group replacement substitution in only-matching and inline modes, and the multiline file-level pre-filter (empty result when no needle, line-numbered match grouping with the -- separator, and invert-match not skipping when the needle is absent).',
+  },
+  {
+    file: 'packages/just-bash/src/commands/search-engine/regex.test.ts',
+    lines: [16, 23, 29, 35, 41, 47, 55, 63, 70, 77, 84, 91, 98, 104, 113, 117, 121],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::search_engine',
+    rustTest:
+      'search_engine_regex_prefilter_bare_literal_basic; search_engine_regex_prefilter_strips_w_wrapper_single_literal; search_engine_regex_prefilter_strips_w_wrapper_around_alternation; search_engine_regex_prefilter_splits_top_level_alternation_extended; search_engine_regex_prefilter_lowercases_needles_when_ignore_case; search_engine_regex_prefilter_fixed_strings_are_literal_needles; search_engine_regex_prefilter_decodes_meta_escaped_by_fixed; search_engine_regex_prefilter_decodes_n_t_r_escapes; search_engine_regex_prefilter_leading_anchored_literal; search_engine_regex_prefilter_trailing_anchored_literal; search_engine_regex_prefilter_fully_anchored_literal; search_engine_regex_prefilter_anchored_alternation_issue_case; search_engine_regex_prefilter_mixed_anchored_unanchored_alternation; search_engine_regex_prefilter_preserves_escaped_dollar; search_engine_regex_prefilter_rejects_quantifier_plus; search_engine_regex_prefilter_rejects_quantifier_star; search_engine_regex_prefilter_rejects_quantifier_question',
+    notes:
+      'r12jb-r4 ports buildRegex pre-filter extraction (crates/just-bash/src/search_engine.rs): bare/-w-wrapped/alternation/anchored literal needle extraction with -i lowercasing, -F fixed-string decoding (including regex-meta and \\n/\\t/\\r escapes), the canonical anchored-alternation issue case, escaped-$ preservation, and the safety rejections for +/*/? quantifiers. Remaining regex.test.ts safety/structural rows stay pending for a later round.',
+  },
+];
+
 const jbc24CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/jq/jq.functions.test.ts',
@@ -5642,6 +5665,7 @@ function caseOverrideFor(testCase) {
     ...jbR11JbGrepGlobBinaryCaseGroups,
     ...r11jbR2RgCaseGroups,
     ...r12jbR3RgCaseGroups,
+    ...r12jbR4SearchEngineCaseGroups,
     ...jbc36CaseGroups,
     ...jbc24CaseGroups,
     ...r11jbSqlite3CaseGroups,

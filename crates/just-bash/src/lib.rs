@@ -16,6 +16,7 @@ mod glob;
 mod path;
 mod runtime;
 mod sanitize;
+mod search_engine;
 pub mod security;
 mod session;
 mod shell;
