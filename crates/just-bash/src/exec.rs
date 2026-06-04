@@ -21739,8 +21739,8 @@ fn compare_csv_cell(left: &str, right: &str, numeric: bool) -> CmpOrdering {
     }
 }
 
-fn command_sqlite3(_state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
-    sqlite3_minimal(args, stdin)
+fn command_sqlite3(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    sqlite3_minimal(state, args, stdin)
 }
 
 #[derive(Clone, Debug)]
@@ -21752,6 +21752,7 @@ struct SqliteOptions {
     null_value: String,
     echo: bool,
     bail: bool,
+    readonly: bool,
     pre_commands: Vec<String>,
 }
 
@@ -21765,6 +21766,7 @@ impl Default for SqliteOptions {
             null_value: String::new(),
             echo: false,
             bail: false,
+            readonly: false,
             pre_commands: Vec::new(),
         }
     }
@@ -21800,9 +21802,17 @@ struct SqlResultSet {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct MiniSqlDb {
     tables: BTreeMap<String, SqlResultSet>,
+    user_version: i64,
 }
 
-fn sqlite3_minimal(args: &[String], stdin: &str) -> CommandResult {
+/// Magic header that identifies a database file written by this portable
+/// sqlite3 backend. The on-disk representation is an internal serialization of
+/// `MiniSqlDb`; it is not the real SQLite binary format (the portable Rust
+/// backend has no WASM/sql.js runtime), but it round-trips through the virtual
+/// filesystem so file-backed persistence behaves identically to upstream.
+const SQLITE_DB_MAGIC: &str = "JBSQLITE1\n";
+
+fn sqlite3_minimal(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
     let (options, database, sql) = match parse_sqlite_args(args, stdin) {
         Ok(parsed) => parsed,
         Err(result) => return result,
@@ -21813,7 +21823,24 @@ fn sqlite3_minimal(args: &[String], stdin: &str) -> CommandResult {
     if database == "__help__" {
         return stdout_result("Usage: sqlite3 [OPTIONS] DATABASE [SQL]\n");
     }
+
+    let is_memory = database == ":memory:" || database.is_empty();
+    let db_path = if is_memory {
+        None
+    } else {
+        Some(resolve_path(&state.cwd, &database))
+    };
+
+    // Load any persisted database from the virtual filesystem.
     let mut db = MiniSqlDb::default();
+    if let Some(path) = &db_path
+        && let Ok(fs) = state.session.inner.fs.lock()
+        && fs.exists(path)
+        && let Ok(content) = fs.read_file(path)
+    {
+        db = deserialize_mini_db(&content);
+    }
+
     let full_sql = options
         .pre_commands
         .iter()
@@ -21823,16 +21850,26 @@ fn sqlite3_minimal(args: &[String], stdin: &str) -> CommandResult {
         .join(";");
     let statements = split_sql_statements(&full_sql);
     let mut stdout = String::new();
+    let mut modified = false;
     if options.echo && !sql.trim().is_empty() {
         stdout.push_str(sql.trim());
         stdout.push('\n');
     }
     for statement in statements {
+        let mutates = statement_mutates(&statement);
         match execute_sql_statement(&mut db, &statement) {
             Ok(Some(result_set)) => stdout.push_str(&format_sql_result(&result_set, &options)),
-            Ok(None) => {}
+            Ok(None) => {
+                if mutates {
+                    modified = true;
+                }
+            }
             Err(error) => {
                 if options.bail {
+                    // Persist any mutations applied before the failing statement.
+                    if modified && !options.readonly {
+                        persist_mini_db(state, db_path.as_deref(), &db);
+                    }
                     return CommandResult {
                         stdout,
                         stderr: format!("Error: {error}\n"),
@@ -21844,7 +21881,191 @@ fn sqlite3_minimal(args: &[String], stdin: &str) -> CommandResult {
             }
         }
     }
+
+    // Write the database back to disk if it was mutated and not read-only.
+    if modified && !options.readonly {
+        persist_mini_db(state, db_path.as_deref(), &db);
+    }
+
     stdout_result(stdout)
+}
+
+/// Persist the in-memory database to the virtual filesystem (no-op for
+/// `:memory:` databases, which never have a path).
+fn persist_mini_db(state: &ExecState<'_>, db_path: Option<&str>, db: &MiniSqlDb) {
+    let Some(path) = db_path else { return };
+    if let Ok(mut fs) = state.session.inner.fs.lock() {
+        let _ = fs.write_file(path, serialize_mini_db(db));
+    }
+}
+
+/// Returns true when a statement mutates database state and must trigger a
+/// writeback. This intentionally inspects the *effective* leading keyword after
+/// stripping CTE (`WITH ...`) prefixes and SQL comments, so non-prefixed writes
+/// (`WITH ... INSERT`, `/* c */ UPDATE`, `PRAGMA user_version = N`) are not
+/// silently dropped — mirroring the upstream writeback-edge-cases regression.
+fn statement_mutates(statement: &str) -> bool {
+    let effective = strip_sql_comments_and_cte(statement);
+    let upper = effective.trim().to_ascii_uppercase();
+    for keyword in [
+        "INSERT ", "UPDATE ", "DELETE ", "CREATE ", "DROP ", "ALTER ", "REPLACE ", "VACUUM",
+    ] {
+        if upper.starts_with(keyword) {
+            return true;
+        }
+    }
+    // A `PRAGMA name = value` assignment mutates; a bare `PRAGMA name` read does not.
+    if upper.starts_with("PRAGMA ") {
+        return effective.contains('=');
+    }
+    false
+}
+
+/// Strip leading SQL line/block comments and a leading top-level `WITH <cte>`
+/// clause so the effective statement keyword can be classified.
+fn strip_sql_comments_and_cte(statement: &str) -> String {
+    let mut text = statement.trim();
+    loop {
+        if let Some(rest) = text.strip_prefix("--") {
+            // Drop the rest of the line.
+            text = match rest.find('\n') {
+                Some(pos) => rest[pos + 1..].trim_start(),
+                None => "",
+            };
+            continue;
+        }
+        if let Some(rest) = text.strip_prefix("/*") {
+            text = match rest.find("*/") {
+                Some(pos) => rest[pos + 2..].trim_start(),
+                None => "",
+            };
+            continue;
+        }
+        break;
+    }
+    if text.len() >= 5 && text[..5].eq_ignore_ascii_case("WITH ") {
+        // Find the top-level keyword that follows the CTE definition list.
+        for keyword in ["INSERT", "UPDATE", "DELETE", "SELECT", "REPLACE"] {
+            if let Some(pos) = find_keyword_at_top_level(text, keyword) {
+                return text[pos..].to_string();
+            }
+        }
+    }
+    text.to_string()
+}
+
+fn serialize_mini_db(db: &MiniSqlDb) -> String {
+    let mut out = String::from(SQLITE_DB_MAGIC);
+    out.push_str(&format!("user_version\t{}\n", db.user_version));
+    for (name, table) in &db.tables {
+        out.push_str("table\t");
+        out.push_str(&encode_sql_field(name));
+        out.push('\t');
+        out.push_str(
+            &table
+                .columns
+                .iter()
+                .map(|column| encode_sql_field(column))
+                .collect::<Vec<_>>()
+                .join("\x1f"),
+        );
+        out.push('\n');
+        for row in &table.rows {
+            out.push_str("row\t");
+            out.push_str(
+                &row.iter()
+                    .map(|value| match &value.raw {
+                        Some(raw) => format!("S{}", encode_sql_field(raw)),
+                        None => "N".to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\x1f"),
+            );
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn deserialize_mini_db(content: &str) -> MiniSqlDb {
+    let mut db = MiniSqlDb::default();
+    let Some(body) = content.strip_prefix(SQLITE_DB_MAGIC) else {
+        // Not one of our database files; treat as empty.
+        return db;
+    };
+    let mut current: Option<String> = None;
+    for line in body.lines() {
+        if let Some(rest) = line.strip_prefix("user_version\t") {
+            db.user_version = rest.parse().unwrap_or(0);
+        } else if let Some(rest) = line.strip_prefix("table\t") {
+            let mut parts = rest.splitn(2, '\t');
+            let name = decode_sql_field(parts.next().unwrap_or(""));
+            let columns_raw = parts.next().unwrap_or("");
+            let columns = if columns_raw.is_empty() {
+                Vec::new()
+            } else {
+                columns_raw.split('\x1f').map(decode_sql_field).collect()
+            };
+            db.tables.insert(
+                name.clone(),
+                SqlResultSet {
+                    columns,
+                    rows: Vec::new(),
+                },
+            );
+            current = Some(name);
+        } else if let Some(rest) = line.strip_prefix("row\t") {
+            if let Some(name) = &current
+                && let Some(table) = db.tables.get_mut(name)
+            {
+                let row = if rest.is_empty() {
+                    Vec::new()
+                } else {
+                    rest.split('\x1f')
+                        .map(|cell| {
+                            if cell == "N" {
+                                SqlValue { raw: None }
+                            } else {
+                                SqlValue {
+                                    raw: Some(decode_sql_field(&cell[1..])),
+                                }
+                            }
+                        })
+                        .collect()
+                };
+                table.rows.push(row);
+            }
+        }
+    }
+    db
+}
+
+fn encode_sql_field(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+        .replace('\x1f', "\\u")
+}
+
+fn decode_sql_field(value: &str) -> String {
+    let mut out = String::new();
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('\\') => out.push('\\'),
+                Some('t') => out.push('\t'),
+                Some('n') => out.push('\n'),
+                Some('u') => out.push('\x1f'),
+                Some(other) => out.push(other),
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn parse_sqlite_args(
@@ -21887,6 +22108,7 @@ fn parse_sqlite_args(
             "-noheader" => options.header = false,
             "-echo" => options.echo = true,
             "-bail" => options.bail = true,
+            "-readonly" => options.readonly = true,
             "-separator" | "-newline" | "-nullvalue" | "-cmd" => {
                 let Some(value) = args.get(index + 1) else {
                     return Err(stderr_result(
@@ -21983,16 +22205,122 @@ fn execute_sql_statement(
     if upper.contains("LOAD_EXTENSION") {
         return Err("not authorized".to_string());
     }
-    if upper.starts_with("CREATE TABLE ") {
-        create_sql_table(db, statement)?;
+
+    // Register any leading common table expressions (`WITH name AS (...), ...`)
+    // as temporary tables so the inner statement (INSERT/UPDATE/DELETE/SELECT)
+    // can reference them, then remove them afterward.
+    let stripped_comments = strip_leading_sql_comments(statement);
+    let mut temp_ctes: Vec<String> = Vec::new();
+    if stripped_comments.len() >= 5 && stripped_comments[..5].eq_ignore_ascii_case("WITH ") {
+        let cte_names = register_sql_ctes(db, &stripped_comments)?;
+        temp_ctes = cte_names;
+    }
+
+    let result = execute_sql_effective(db, statement);
+
+    for name in temp_ctes {
+        db.tables.remove(&name);
+    }
+    result
+}
+
+/// Strip only leading SQL comments (line/block), preserving any `WITH` prefix.
+fn strip_leading_sql_comments(statement: &str) -> String {
+    let mut text = statement.trim();
+    loop {
+        if let Some(rest) = text.strip_prefix("--") {
+            text = match rest.find('\n') {
+                Some(pos) => rest[pos + 1..].trim_start(),
+                None => "",
+            };
+            continue;
+        }
+        if let Some(rest) = text.strip_prefix("/*") {
+            text = match rest.find("*/") {
+                Some(pos) => rest[pos + 2..].trim_start(),
+                None => "",
+            };
+            continue;
+        }
+        break;
+    }
+    text.to_string()
+}
+
+/// Parse the `WITH <name> AS (<subquery>), ...` definitions, evaluate each
+/// subquery, and insert the result as a temporary table. Returns the temp table
+/// names that were registered (for later cleanup).
+fn register_sql_ctes(db: &mut MiniSqlDb, with_statement: &str) -> Result<Vec<String>, String> {
+    let after_with = with_statement[5..].trim();
+    // Find where the CTE list ends and the main statement begins.
+    let main_pos = ["INSERT", "UPDATE", "DELETE", "SELECT", "REPLACE"]
+        .iter()
+        .filter_map(|keyword| find_keyword_at_top_level(after_with, keyword))
+        .min();
+    let cte_section = match main_pos {
+        Some(pos) => after_with[..pos].trim(),
+        None => after_with,
+    };
+    let mut names = Vec::new();
+    for definition in split_top_level(cte_section, ',') {
+        let definition = definition.trim();
+        let Some(as_pos) = find_keyword_at_top_level(definition, "AS") else {
+            continue;
+        };
+        let name = definition[..as_pos].trim().trim_matches('"').to_string();
+        let body = definition[as_pos + "AS".len()..].trim();
+        if !body.starts_with('(') {
+            continue;
+        }
+        let inner = match_parenthesised_subquery(body)?;
+        let result = select_sql(db, inner)?;
+        db.tables.insert(name.clone(), result);
+        names.push(name);
+    }
+    Ok(names)
+}
+
+fn execute_sql_effective(
+    db: &mut MiniSqlDb,
+    statement: &str,
+) -> Result<Option<SqlResultSet>, String> {
+    // Strip leading comments / CTE prefix to find the effective statement, but
+    // keep the original text for handlers that need the full SQL.
+    let effective = strip_sql_comments_and_cte(statement);
+    let effective_upper = effective.trim().to_ascii_uppercase();
+    if effective_upper.starts_with("CREATE TABLE ") {
+        create_sql_table(db, effective.trim())?;
         return Ok(None);
     }
-    if upper.starts_with("INSERT INTO ") {
-        insert_sql_rows(db, statement)?;
+    if effective_upper.starts_with("INSERT INTO ") {
+        insert_sql_rows(db, effective.trim())?;
         return Ok(None);
     }
-    if upper.starts_with("SELECT ") {
-        return select_sql(db, statement).map(Some);
+    if effective_upper.starts_with("REPLACE INTO ") {
+        replace_sql_rows(db, effective.trim())?;
+        return Ok(None);
+    }
+    if effective_upper.starts_with("UPDATE ") {
+        update_sql_rows(db, effective.trim())?;
+        return Ok(None);
+    }
+    if effective_upper.starts_with("DELETE FROM ") {
+        delete_sql_rows(db, effective.trim())?;
+        return Ok(None);
+    }
+    if effective_upper.starts_with("DROP TABLE ") {
+        drop_sql_table(db, effective.trim())?;
+        return Ok(None);
+    }
+    if effective_upper.starts_with("ALTER TABLE ") {
+        alter_sql_table(db, effective.trim())?;
+        return Ok(None);
+    }
+    if effective_upper.starts_with("PRAGMA ") {
+        return pragma_sql(db, effective.trim());
+    }
+    if effective_upper.starts_with("SELECT ") {
+        return select_sql(db, effective.trim()).map(Some);
     }
     Err(format!(
         "near \"{}\": syntax error",
@@ -22023,17 +22351,357 @@ fn create_sql_table(db: &mut MiniSqlDb, statement: &str) -> Result<(), String> {
 
 fn insert_sql_rows(db: &mut MiniSqlDb, statement: &str) -> Result<(), String> {
     let rest = statement["INSERT INTO ".len()..].trim();
+    insert_into_table(db, rest, false)
+}
+
+fn replace_sql_rows(db: &mut MiniSqlDb, statement: &str) -> Result<(), String> {
+    let rest = statement["REPLACE INTO ".len()..].trim();
+    insert_into_table(db, rest, true)
+}
+
+/// Shared INSERT/REPLACE implementation. `replace` enables conflict resolution
+/// on the table's INTEGER PRIMARY KEY (first column) — matching the `REPLACE
+/// INTO` upsert tests.
+fn insert_into_table(db: &mut MiniSqlDb, rest: &str, replace: bool) -> Result<(), String> {
+    // `INSERT INTO t VALUES(...)` or `INSERT INTO t SELECT ...`.
+    if let Some(select_pos) = find_keyword_at_top_level(rest, "SELECT") {
+        let table = rest[..select_pos]
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim();
+        let select_clause = rest[select_pos..].trim();
+        let result = select_sql(db, select_clause)?;
+        let Some(result_set) = db.tables.get_mut(table) else {
+            return Err(format!("no such table: {table}"));
+        };
+        for row in result.rows {
+            result_set.rows.push(row);
+        }
+        return Ok(());
+    }
+
     let Some((table, values)) = rest.split_once("VALUES") else {
         return Err("invalid INSERT".to_string());
     };
     let table = table.split_whitespace().next().unwrap_or(table).trim();
+    let new_rows = parse_sql_value_groups(values);
     let Some(result_set) = db.tables.get_mut(table) else {
         return Err(format!("no such table: {table}"));
     };
-    for row in parse_sql_value_groups(values) {
+    for row in new_rows {
+        if replace && !result_set.columns.is_empty() {
+            // Conflict on the first column (primary key) replaces the row.
+            if let Some(key) = row.first() {
+                result_set
+                    .rows
+                    .retain(|existing| existing.first() != Some(key));
+            }
+        }
         result_set.rows.push(row);
     }
     Ok(())
+}
+
+fn update_sql_rows(db: &mut MiniSqlDb, statement: &str) -> Result<(), String> {
+    let rest = statement["UPDATE ".len()..].trim();
+    let Some(set_pos) = find_keyword_at_top_level(rest, "SET") else {
+        return Err("invalid UPDATE".to_string());
+    };
+    let table = rest[..set_pos]
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim();
+    let after_set = rest[set_pos + "SET".len()..].trim();
+    let (assignments, where_clause) = match find_keyword_at_top_level(after_set, "WHERE") {
+        Some(pos) => (
+            after_set[..pos].trim(),
+            Some(after_set[pos + "WHERE".len()..].trim()),
+        ),
+        None => (after_set, None),
+    };
+    let columns = db
+        .tables
+        .get(table)
+        .map(|set| set.columns.clone())
+        .ok_or_else(|| format!("no such table: {table}"))?;
+    let matcher = compile_where_matcher(db, &columns, where_clause)?;
+    let result_set = db.tables.get_mut(table).unwrap();
+    let updates: Vec<(usize, SqlValue)> = split_top_level(assignments, ',')
+        .into_iter()
+        .filter_map(|pair| {
+            let (col, val) = pair.split_once('=')?;
+            let col = col.trim().trim_matches('"');
+            let index = columns.iter().position(|existing| existing == col)?;
+            Some((index, parse_sql_value(val.trim())))
+        })
+        .collect();
+    for row in &mut result_set.rows {
+        if matcher.matches(&columns, row) {
+            for (index, value) in &updates {
+                if let Some(cell) = row.get_mut(*index) {
+                    *cell = value.clone();
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn delete_sql_rows(db: &mut MiniSqlDb, statement: &str) -> Result<(), String> {
+    let rest = statement["DELETE FROM ".len()..].trim();
+    let (table_part, where_clause) = match find_keyword_at_top_level(rest, "WHERE") {
+        Some(pos) => (rest[..pos].trim(), Some(rest[pos + "WHERE".len()..].trim())),
+        None => (rest, None),
+    };
+    let table = table_part.split_whitespace().next().unwrap_or("").trim();
+    let columns = db
+        .tables
+        .get(table)
+        .map(|set| set.columns.clone())
+        .ok_or_else(|| format!("no such table: {table}"))?;
+    let matcher = compile_where_matcher(db, &columns, where_clause)?;
+    let result_set = db.tables.get_mut(table).unwrap();
+    let columns2 = columns.clone();
+    result_set
+        .rows
+        .retain(|row| !matcher.matches(&columns2, row));
+    Ok(())
+}
+
+/// A precompiled WHERE predicate. IN-subqueries are resolved against `db` up
+/// front (before the target table is borrowed mutably).
+enum WhereMatcher {
+    All,
+    In {
+        index: usize,
+        values: Vec<Option<String>>,
+    },
+    Comparison {
+        clause: String,
+    },
+}
+
+impl WhereMatcher {
+    fn matches(&self, columns: &[String], row: &[SqlValue]) -> bool {
+        match self {
+            WhereMatcher::All => true,
+            WhereMatcher::In { index, values } => {
+                let cell = row.get(*index).and_then(|value| value.raw.clone());
+                values.iter().any(|value| value == &cell)
+            }
+            WhereMatcher::Comparison { clause } => {
+                row_matches_where(columns, row, Some(clause.as_str()))
+            }
+        }
+    }
+}
+
+fn compile_where_matcher(
+    db: &MiniSqlDb,
+    columns: &[String],
+    where_clause: Option<&str>,
+) -> Result<WhereMatcher, String> {
+    let Some(clause) = where_clause else {
+        return Ok(WhereMatcher::All);
+    };
+    let clause = clause.trim();
+    // `<column> IN (<subquery>)`.
+    if let Some(in_pos) = find_keyword_at_top_level(clause, "IN") {
+        let column = clause[..in_pos].trim().trim_matches('"');
+        let after_in = clause[in_pos + "IN".len()..].trim();
+        if after_in.starts_with('(') {
+            let inner = match_parenthesised_subquery(after_in)?;
+            let Some(index) = columns.iter().position(|existing| existing == column) else {
+                return Ok(WhereMatcher::Comparison {
+                    clause: clause.to_string(),
+                });
+            };
+            let result = select_sql(db, inner)?;
+            let values = result
+                .rows
+                .iter()
+                .map(|row| row.first().and_then(|value| value.raw.clone()))
+                .collect();
+            return Ok(WhereMatcher::In { index, values });
+        }
+    }
+    Ok(WhereMatcher::Comparison {
+        clause: clause.to_string(),
+    })
+}
+
+fn drop_sql_table(db: &mut MiniSqlDb, statement: &str) -> Result<(), String> {
+    let rest = statement["DROP TABLE ".len()..].trim();
+    let rest = rest
+        .strip_prefix("IF EXISTS ")
+        .or_else(|| rest.strip_prefix("if exists "))
+        .unwrap_or(rest);
+    let table = rest.split_whitespace().next().unwrap_or(rest).trim();
+    db.tables.remove(table);
+    Ok(())
+}
+
+fn alter_sql_table(db: &mut MiniSqlDb, statement: &str) -> Result<(), String> {
+    let rest = statement["ALTER TABLE ".len()..].trim();
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let table = parts.next().unwrap_or("").trim().to_string();
+    let action = parts.next().unwrap_or("").trim();
+    let action_upper = action.to_ascii_uppercase();
+    if action_upper.starts_with("RENAME TO ") {
+        let new_name = action["RENAME TO ".len()..].trim().to_string();
+        let Some(existing) = db.tables.remove(&table) else {
+            return Err(format!("no such table: {table}"));
+        };
+        db.tables.insert(new_name, existing);
+        return Ok(());
+    }
+    if action_upper.starts_with("ADD COLUMN ") || action_upper.starts_with("ADD ") {
+        let column_spec = if action_upper.starts_with("ADD COLUMN ") {
+            action["ADD COLUMN ".len()..].trim()
+        } else {
+            action["ADD ".len()..].trim()
+        };
+        // Determine a DEFAULT value for existing rows, if any.
+        let default_value = match find_keyword_at_top_level(column_spec, "DEFAULT") {
+            Some(pos) => parse_sql_value(column_spec[pos + "DEFAULT".len()..].trim()),
+            None => SqlValue { raw: None },
+        };
+        let column_name = column_spec
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches('"')
+            .to_string();
+        let Some(result_set) = db.tables.get_mut(&table) else {
+            return Err(format!("no such table: {table}"));
+        };
+        result_set.columns.push(column_name);
+        for row in &mut result_set.rows {
+            row.push(default_value.clone());
+        }
+        return Ok(());
+    }
+    Err(format!("near \"{action}\": syntax error"))
+}
+
+fn pragma_sql(db: &mut MiniSqlDb, statement: &str) -> Result<Option<SqlResultSet>, String> {
+    let rest = statement["PRAGMA ".len()..].trim();
+    if let Some((name, value)) = rest.split_once('=') {
+        let name = name.trim().to_ascii_lowercase();
+        if name == "user_version" {
+            db.user_version = value.trim().parse().unwrap_or(0);
+            return Ok(None);
+        }
+        // Other PRAGMA assignments are accepted as no-ops.
+        return Ok(None);
+    }
+    let name = rest.trim().trim_end_matches(';').to_ascii_lowercase();
+    let bare = name.split('(').next().unwrap_or(&name).trim();
+    if bare == "user_version" {
+        return Ok(Some(SqlResultSet {
+            columns: vec!["user_version".to_string()],
+            rows: vec![vec![SqlValue {
+                raw: Some(db.user_version.to_string()),
+            }]],
+        }));
+    }
+    if bare == "table_info" {
+        // PRAGMA table_info(<table>) — emit cid/name/type rows.
+        let table = name
+            .split_once('(')
+            .and_then(|(_, rest)| rest.split(')').next())
+            .unwrap_or("")
+            .trim();
+        if let Some(result_set) = db.tables.get(table) {
+            let rows = result_set
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(cid, column)| {
+                    let ty = if column == "id" { "INTEGER" } else { "TEXT" };
+                    vec![
+                        SqlValue {
+                            raw: Some(cid.to_string()),
+                        },
+                        SqlValue {
+                            raw: Some(column.clone()),
+                        },
+                        SqlValue {
+                            raw: Some(ty.to_string()),
+                        },
+                        SqlValue {
+                            raw: Some("0".to_string()),
+                        },
+                        SqlValue { raw: None },
+                        SqlValue {
+                            raw: Some("0".to_string()),
+                        },
+                    ]
+                })
+                .collect();
+            return Ok(Some(SqlResultSet {
+                columns: vec![
+                    "cid".to_string(),
+                    "name".to_string(),
+                    "type".to_string(),
+                    "notnull".to_string(),
+                    "dflt_value".to_string(),
+                    "pk".to_string(),
+                ],
+                rows,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// Evaluate a simple `column <op> literal` WHERE clause against a row. Supports
+/// `=`, `!=`/`<>`, `<`, `>`, `<=`, `>=`. An absent clause matches every row.
+fn row_matches_where(columns: &[String], row: &[SqlValue], where_clause: Option<&str>) -> bool {
+    let Some(clause) = where_clause else {
+        return true;
+    };
+    let clause = clause.trim();
+    for (operator, kind) in [
+        ("<=", WhereOp::Le),
+        (">=", WhereOp::Ge),
+        ("<>", WhereOp::Ne),
+        ("!=", WhereOp::Ne),
+        ("=", WhereOp::Eq),
+        ("<", WhereOp::Lt),
+        (">", WhereOp::Gt),
+    ] {
+        if let Some((left, right)) = clause.split_once(operator) {
+            let column = left.trim().trim_matches('"');
+            let Some(index) = columns.iter().position(|existing| existing == column) else {
+                return false;
+            };
+            let cell = row.get(index).and_then(|value| value.raw.clone());
+            let expected = parse_sql_value(right.trim());
+            let order = compare_sql_values(cell.as_deref(), expected.raw.as_deref());
+            return match kind {
+                WhereOp::Eq => order == std::cmp::Ordering::Equal,
+                WhereOp::Ne => order != std::cmp::Ordering::Equal,
+                WhereOp::Lt => order == std::cmp::Ordering::Less,
+                WhereOp::Gt => order == std::cmp::Ordering::Greater,
+                WhereOp::Le => order != std::cmp::Ordering::Greater,
+                WhereOp::Ge => order != std::cmp::Ordering::Less,
+            };
+        }
+    }
+    false
+}
+
+#[derive(Clone, Copy)]
+enum WhereOp {
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
 }
 
 fn parse_sql_value_groups(values: &str) -> Vec<Vec<SqlValue>> {
@@ -22224,16 +22892,49 @@ fn compare_sql_values(left: Option<&str>, right: Option<&str>) -> std::cmp::Orde
     }
 }
 
+/// Build a `sqlite_master`-style result set listing the user tables. Only the
+/// `type` and `name` columns are modeled (all entries are tables).
+fn sqlite_master_table(db: &MiniSqlDb) -> SqlResultSet {
+    SqlResultSet {
+        columns: vec!["type".to_string(), "name".to_string()],
+        rows: db
+            .tables
+            .keys()
+            .map(|name| {
+                vec![
+                    SqlValue {
+                        raw: Some("table".to_string()),
+                    },
+                    SqlValue {
+                        raw: Some(name.clone()),
+                    },
+                ]
+            })
+            .collect(),
+    }
+}
+
 fn select_sql_core(db: &MiniSqlDb, body: &str) -> Result<SqlResultSet, String> {
     let body = body.trim();
     if let Some(from_pos) = find_top_level_keyword(body, "FROM") {
         let projection = &body[..from_pos];
-        let table = body[from_pos + " FROM ".len() - 1..].trim();
+        let table_and_where = body[from_pos + " FROM ".len() - 1..].trim();
+        // Peel a trailing top-level WHERE clause.
+        let (table, where_clause) = match find_top_level_keyword(table_and_where, "WHERE") {
+            Some(pos) => (
+                table_and_where[..pos].trim(),
+                Some(table_and_where[pos + " WHERE ".len() - 1..].trim()),
+            ),
+            None => (table_and_where, None),
+        };
         // A parenthesised sub-query stands in for a real table.
         let owned_source;
         let source = if table.starts_with('(') {
             let inner = match_parenthesised_subquery(table)?;
             owned_source = select_sql_body(db, inner)?;
+            &owned_source
+        } else if table.eq_ignore_ascii_case("sqlite_master") {
+            owned_source = sqlite_master_table(db);
             &owned_source
         } else {
             let Some(source) = db.tables.get(table) else {
@@ -22241,7 +22942,35 @@ fn select_sql_core(db: &MiniSqlDb, body: &str) -> Result<SqlResultSet, String> {
             };
             source
         };
-        if projection.trim() == "*" {
+        // Apply the WHERE filter, producing a filtered source.
+        let filtered;
+        let source = if where_clause.is_some() {
+            filtered = SqlResultSet {
+                columns: source.columns.clone(),
+                rows: source
+                    .rows
+                    .iter()
+                    .filter(|row| row_matches_where(&source.columns, row, where_clause))
+                    .cloned()
+                    .collect(),
+            };
+            &filtered
+        } else {
+            source
+        };
+        // Aggregate: COUNT(*).
+        let projection_trim = projection.trim();
+        let (count_expr, count_alias) = split_sql_alias(projection_trim);
+        if count_expr.trim().eq_ignore_ascii_case("COUNT(*)") {
+            let column = count_alias.unwrap_or_else(|| "COUNT(*)".to_string());
+            return Ok(SqlResultSet {
+                columns: vec![column],
+                rows: vec![vec![SqlValue {
+                    raw: Some(source.rows.len().to_string()),
+                }]],
+            });
+        }
+        if projection_trim == "*" {
             return Ok(source.clone());
         }
         let columns = projection
