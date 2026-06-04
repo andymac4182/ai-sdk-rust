@@ -1008,6 +1008,15 @@ const jbc09CaseGroups = [
     notes:
       'just-bash-command-awk verifies portable awk regex patterns: literal /ana/, ^/$ anchors, [cd] and negated [^a-z] character classes, alternation /red|blue/, expression patterns ($1 ==/!= numeric, string equality, lexicographic comparison), combined NR patterns (NR == 1, NR > 1, range, every Nth via NR % 2), field regex-match patterns ($1 ~/!~ /^a/, $2 ~ /^a/), action-only rule on every record, and pattern-only rule printing matches.',
   },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.getline.test.ts',
+    lines: [5, 21, 37, 54, 74, 88],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_getline_main_input_rows',
+    notes:
+      'just-bash-command-awk verifies plain `getline` and `getline VAR` reading the next record from the main input stream: getline into $0 re-splits fields, getline into a variable leaves $0/fields intact, NR advances on each successful read and getline-at-EOF is a no-op, getline inside a pattern-matched action skips the consumed record from the main loop, and combining adjacent records with getline. Redirected forms (getline < file, cmd | getline) and getline used as a return-valued expression remain pending.',
+  },
 ];
 
 const jbc10CaseGroups = [
