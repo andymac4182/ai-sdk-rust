@@ -5746,8 +5746,43 @@ const r10jbCommandAwkCaseGroups = [
   },
 ];
 
+const r13jbCommandAwkCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.test.ts',
+    lines: [
+      378, 387, 396, 407, 418, 429, 440, 449, 473, 497, 557, 565, 576, 589,
+      600, 613, 622, 631, 640,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_r13jb_command_awk_compound_condition_and_format_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk compound conditions (&& / ||), field-vs-variable comparisons, running max/min tracking, NF comparisons, CSV numeric filtering, match() returning 0/RSTART 0/RLENGTH -1 on no match, gensub Nth-occurrence replacement, exit N propagation, next, do-while, for-loop break/continue, and printf %x/%o/%c/%.2e formatting.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.parsing.test.ts',
+    lines: [479],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_r13jb_command_awk_double_negative_literal_row',
+    notes:
+      'just-bash-command-awk verifies portable awk parses `--5` as -(-5) = 5 (double unary minus on a literal, not a pre-decrement of a non-lvalue).',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.prototype-pollution.test.ts',
+    lines: [29, 39, 223, 237, 249, 263, 272, 281, 292, 305],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest:
+      'awk_r13jb_command_awk_prototype_pollution_environ_and_special_var_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk ENVIRON["<dangerous-keyword>"] reflects the exported environment, sprintf/user-function-name/function-argument handling of dangerous keywords, FS/RS/OFS holding a dangerous keyword, and ENVIRON/array assignment of dangerous keys staying isolated to plain maps (no host pollution is possible by construction in Rust).',
+  },
+];
+
 function caseOverrideFor(testCase) {
   const group = [
+    ...r13jbCommandAwkCaseGroups,
     ...r10jbCommandAwkCaseGroups,
     ...jbSedTestTsCaseGroups,
     ...r12jbSedCaseGroups,
