@@ -8251,6 +8251,140 @@ esac"#,
         }
     }
 
+    /// Closes the just-bash-core `serialize.test.ts` round-trip rows for the
+    /// remaining arithmetic-command edge cases, the `[[ ... ]]` conditional
+    /// command grammar, and the complex-script rows (pipeline-with-redirections,
+    /// function bodies containing compound commands, and pipeline loop bodies).
+    /// Each source is parsed, serialized, and reparsed; the reparsed AST must be
+    /// structurally identical to the original, so a serializer regression on
+    /// single-quoted arithmetic operands, `$`-prefixed arithmetic variables,
+    /// compound arithmetic assignment, arithmetic-command redirections, any
+    /// `[[ ... ]]` test operator/grouping/regex node, or the nested
+    /// compound/pipeline complex-script shapes fails the assertion.
+    #[test]
+    fn just_bash_core_serialize_round_trips_conditional_and_complex_script_rows() {
+        fn assert_round_trip(source: &str) {
+            let script = parse(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            let serialized = serialize(&script);
+            let reparsed = parse(&serialized)
+                .unwrap_or_else(|error| panic!("{source} -> {serialized}: {error}"));
+            assert_eq!(reparsed, script, "{source} -> {serialized}");
+        }
+
+        for source in [
+            // arithmetic command edge rows (serialize.test.ts:196,197,198,200)
+            "(( '1' ))",
+            "echo $(($x + 1))",
+            "((x += 5))",
+            "((x = 1)) > /dev/null",
+            // conditional command `[[ ... ]]` grammar (serialize.test.ts:204..211)
+            "[[ $a == \"foo\" ]]",
+            "[[ -f file.txt ]]",
+            "[[ -f a && -f b ]]",
+            "[[ -f a || -f b ]]",
+            "[[ ! -f a ]]",
+            "[[ ( -f a || -f b ) && -d c ]]",
+            "[[ $x =~ ^[0-9]+$ ]]",
+            "[[ \"nonempty\" ]]",
+            // complex scripts (serialize.test.ts:421,429,432,435)
+            "cmd1 2>&1 | cmd2 > out.txt",
+            "f() { if true; then echo yes; fi; }",
+            "for i in 1 2 3; do echo $i | cat; done",
+            "f() { echo hello; } > out.txt",
+        ] {
+            assert_round_trip(source);
+        }
+    }
+
+    /// Closes the just-bash-core `serialize.test.ts` execution-equivalence rows
+    /// and the matching `tee-plugin.test.ts` `assertSameSemantics` rows for
+    /// scripts the portable Rust interpreter reproduces with the deterministic
+    /// command fakes (echo / cat / printf / sort / grep / test). Upstream runs
+    /// `parse -> serialize` and asserts the serialized program executes with
+    /// byte-identical stdout/stderr/exitCode to the original (catching escaping
+    /// edge cases that a pure AST round-trip cannot). The Rust equivalent runs
+    /// the original through the real interpreter, serializes the parsed AST, and
+    /// re-runs the serialized form; the two executions must match exactly, and
+    /// each case also asserts the upstream-correct output so the test fails on
+    /// either a serializer or an interpreter regression.
+    #[test]
+    fn just_bash_core_serialize_and_tee_execution_equivalence_rows() {
+        // (source, expected stdout, expected stderr, expected exit code).
+        let cases = [
+            // serialize.test.ts:299 nested command sub with inner quotes
+            ("echo \"$(echo \"$(echo deep)\")\"", "deep\n", "", 0),
+            // serialize.test.ts:362 multiple statements
+            ("echo first; echo second", "first\nsecond\n", "", 0),
+            // serialize.test.ts:363 conditional and logic
+            ("true && echo yes || echo no", "yes\n", "", 0),
+            // serialize.test.ts:367 case statement
+            (
+                "x=hello; case $x in hello) echo matched;; *) echo nope;; esac",
+                "matched\n",
+                "",
+                0,
+            ),
+            // serialize.test.ts:396 array in subshell
+            ("(arr=(x y z); echo ${arr[1]})", "y\n", "", 0),
+            // tee-plugin.test.ts:451 function definition and call with pipe
+            (
+                "greet() { echo \"hello $1\"; }; greet world | cat",
+                "hello world\n",
+                "",
+                0,
+            ),
+            // tee-plugin.test.ts:509 heredoc into pipeline
+            (
+                "cat <<EOF | sort\nbanana\napple\ncherry\nEOF",
+                "apple\nbanana\ncherry\n",
+                "",
+                0,
+            ),
+            // tee-plugin.test.ts:515 deeply nested command substitution
+            ("echo $(echo $(echo $(echo deep)))", "deep\n", "", 0),
+            // tee-plugin.test.ts:641 word splitting (quoted vs unquoted)
+            (
+                "X=\"a   b   c\"; echo $X; echo \"$X\"",
+                "a b c\na   b   c\n",
+                "",
+                0,
+            ),
+            // tee-plugin.test.ts:649 multiple here-docs in sequence
+            (
+                "cat <<A\nfirst\nA\ncat <<B\nsecond\nB",
+                "first\nsecond\n",
+                "",
+                0,
+            ),
+        ];
+
+        for (source, stdout, stderr, exit_code) in cases {
+            // 1. The interpreter must reproduce the upstream-correct semantics.
+            let plain = shell().exec(source);
+            assert_eq!(plain.stdout, stdout, "plain stdout for: {source}");
+            assert_eq!(plain.stderr, stderr, "plain stderr for: {source}");
+            assert_eq!(plain.exit_code, exit_code, "plain exit for: {source}");
+
+            // 2. parse -> serialize must be execution-faithful (the upstream
+            //    `execEquiv` / `assertSameSemantics` contract).
+            let script = parse(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            let serialized = serialize(&script);
+            let round = shell().exec(&serialized);
+            assert_eq!(
+                round.stdout, plain.stdout,
+                "round stdout: {source} -> {serialized}"
+            );
+            assert_eq!(
+                round.stderr, plain.stderr,
+                "round stderr: {source} -> {serialized}"
+            );
+            assert_eq!(
+                round.exit_code, plain.exit_code,
+                "round exit: {source} -> {serialized}"
+            );
+        }
+    }
+
     #[test]
     fn jbc12_transform_command_collector_walks_upstream_ast_shapes() {
         let cases = [

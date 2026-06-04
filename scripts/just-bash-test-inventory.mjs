@@ -5166,6 +5166,25 @@ const justBashCoreSerializeCaseGroups = [
     notes:
       'just-bash-core verifies Rust AST parse/serialize/parse equivalence for c-style/fallthrough/empty case compound commands, compound-with-redirection (if/for/while/case > file), arithmetic command rows (assignment, comparison, ternary, increment/decrement, nested parens, array element get/set/assoc, nested and command-substitution arithmetic, dynamic base/octal), and nested-command-substitution / group-in-pipeline complex scripts.',
   },
+  {
+    file: 'packages/just-bash/src/transform/serialize.test.ts',
+    lines: [196, 197, 198, 199, 204, 205, 206, 207, 208, 209, 210, 211, 421, 429, 432, 435],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::transform::serialize',
+    rustTest:
+      'just_bash_core_serialize_round_trips_conditional_and_complex_script_rows',
+    notes:
+      'just-bash-core verifies Rust AST parse/serialize/parse equivalence for the remaining arithmetic-command edge rows (single-quoted operand, $-prefixed variable, compound += assignment, arithmetic command with redirection), the full [[ ... ]] conditional-command grammar (string/file tests, &&/||, negation, grouping, regex match, bare-word truthiness), and the complex-script rows (pipeline with redirections, function body with compound command, pipeline loop body, function with redirections).',
+  },
+  {
+    file: 'packages/just-bash/src/transform/serialize.test.ts',
+    lines: [299, 362, 363, 367, 396],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell',
+    rustTest: 'just_bash_core_serialize_and_tee_execution_equivalence_rows',
+    notes:
+      'just-bash-core verifies the serialize.test.ts execution-equivalence rows (nested command substitution with inner quotes, multiple statements, conditional &&/|| logic, case statement, array-in-subshell): the original runs through the real Rust interpreter, the parsed AST is serialized, and the serialized program re-executes to byte-identical stdout/stderr/exit code, also asserting the upstream-correct output.',
+  },
 ];
 
 const justBashTransformPluginsTeeCaseGroups = [
@@ -5191,6 +5210,15 @@ const justBashTransformPluginsTeeCaseGroups = [
       'just_bash_core_tee_semantics_preservation_pipeline_rows_match_plain_exec',
     notes:
       'just-bash-core verifies the TeePlugin semantics-preservation rows whose scripts the real-command Rust interpreter reproduces verbatim (the Rust port has no tee transform, so equivalence means the plain exec yields the documented bytes): cat|grep|sort pipeline, ls stderr redirected through ||/| chains, command substitution into a pipeline, printf|grep|sort|wc -l count, mixed &&/||/| chains, and tr|sed|cat string manipulation.',
+  },
+  {
+    file: 'packages/just-bash/src/transform/plugins/tee-plugin.test.ts',
+    lines: [451, 509, 515, 641, 649],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell',
+    rustTest: 'just_bash_core_serialize_and_tee_execution_equivalence_rows',
+    notes:
+      'just-bash-core verifies the TeePlugin assertSameSemantics rows the real Rust interpreter reproduces with deterministic command fakes: function definition piped to cat, heredoc piped to sort, deeply nested command substitution, quoted-vs-unquoted word splitting, and two sequential here-docs. Each runs the original, serializes the parsed AST, re-executes the serialized form, and asserts both runs match the upstream-correct bytes/exit code.',
   },
 ];
 
