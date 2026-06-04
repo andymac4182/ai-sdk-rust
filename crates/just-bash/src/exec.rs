@@ -44,6 +44,11 @@ pub const JUST_BASH_DEFAULT_TIMEOUT_MS: u64 = 30_000;
 /// Default maximum captured stdout or stderr length.
 pub const JUST_BASH_DEFAULT_MAX_OUTPUT_LENGTH: usize = 50_000;
 
+/// Default cap on the number of sed command executions per run. Matches the
+/// upstream `DEFAULT_MAX_ITERATIONS` in just-bash's sed executor and bounds
+/// pathological branch/test loops so they cannot hang.
+const SED_MAX_ITERATIONS: usize = 10_000;
+
 /// Cancellation handle used by [`JustBashExecOptions`].
 #[derive(Clone, Default)]
 pub struct JustBashCancelToken {
@@ -8952,6 +8957,10 @@ fn parse_sed_op(rest: &str, address: Option<&SedAddress>, ere: bool) -> Result<S
         'b' => Ok(SedOp::Branch(chars.as_str().trim().to_string())),
         't' => Ok(SedOp::BranchIfSub(chars.as_str().trim().to_string())),
         'T' => Ok(SedOp::BranchIfNoSub(chars.as_str().trim().to_string())),
+        // `e` (shell execution) is blocked in the sandboxed environment: it would
+        // run an arbitrary host command. GNU sed accepts `e command` and a bare
+        // `e` (execute the pattern space); both are rejected here.
+        'e' => Err("e command (shell execution) is not supported".to_string()),
         'z' => Ok(SedOp::Transliterate {
             // `z` (zap) clears the pattern space; model as transliterate-nothing
             // plus a sentinel handled in the engine. Simpler: treat via Change of
@@ -9010,6 +9019,11 @@ fn run_sed_program(program: &[SedInstruction], lines: Vec<String>, quiet: bool) 
     let mut range_state: Vec<RangeStatus> = vec![RangeStatus::Inactive; program.len()];
     let mut line_no = 0usize; // 1-based current input line number
     let mut idx = 0usize; // index into `lines`
+    // Runaway-protection: GNU sed (and the upstream executor) cap the total number
+    // of command executions across the whole run so pathological branch/test loops
+    // (`:loop; b loop`, `:loop; s/./&/; t loop`) cannot hang. Exceeding the cap is a
+    // fatal execution-limit error with the dedicated exit code 126.
+    let mut total_iterations: usize = 0;
 
     'outer: while idx < total {
         let mut pattern = lines[idx].clone();
@@ -9025,6 +9039,15 @@ fn run_sed_program(program: &[SedInstruction], lines: Vec<String>, quiet: bool) 
         'prog: loop {
             if pc >= program.len() {
                 break;
+            }
+            total_iterations += 1;
+            if total_iterations > SED_MAX_ITERATIONS {
+                return stderr_result(
+                    126,
+                    format!(
+                        "sed: command execution exceeded maximum iterations ({SED_MAX_ITERATIONS})\n"
+                    ),
+                );
             }
             let instr = &program[pc];
             // Handle block delimiters.
@@ -9873,18 +9896,40 @@ fn sed_pattern_to_regex(pattern: &str, ere: bool) -> String {
     while let Some(ch) = chars.next() {
         match ch {
             '[' => {
-                // Copy the whole bracket expression verbatim.
+                // Copy the whole bracket expression. POSIX/BRE/ERE treat a `]`
+                // that appears first (immediately after `[` or `[^`) as a literal
+                // class member rather than the closing bracket. The Rust `regex`
+                // (RE2) engine does NOT honour that rule, so emit such a leading
+                // `]` as the escaped `\]` to preserve the literal semantics.
                 output.push('[');
                 if matches!(chars.peek(), Some('^')) {
                     output.push(chars.next().unwrap());
                 }
                 if matches!(chars.peek(), Some(']')) {
-                    output.push(chars.next().unwrap());
+                    chars.next();
+                    output.push('\\');
+                    output.push(']');
                 }
-                for inner in chars.by_ref() {
-                    output.push(inner);
+                while let Some(&inner) = chars.peek() {
+                    chars.next();
                     if inner == ']' {
+                        output.push(']');
                         break;
+                    }
+                    if inner == '[' {
+                        // A `[` that introduces a POSIX subexpression (`[:class:]`,
+                        // `[.collating.]`, `[=equiv=]`) must pass through verbatim so
+                        // RE2 still recognises it. A bare literal `[` (e.g. the
+                        // POSIX `[][]` class) is escaped so RE2 does not treat the
+                        // following `]` as the closing bracket.
+                        if matches!(chars.peek(), Some(':') | Some('.') | Some('=')) {
+                            output.push('[');
+                        } else {
+                            output.push('\\');
+                            output.push('[');
+                        }
+                    } else {
+                        output.push(inner);
                     }
                 }
             }
