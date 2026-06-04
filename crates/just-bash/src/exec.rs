@@ -9382,7 +9382,7 @@ impl<'a> AwkExprParser<'a> {
     }
 
     fn parse_mul_div(&mut self) -> Result<AwkExpr, String> {
-        let mut expression = self.parse_power()?;
+        let mut expression = self.parse_unary()?;
         loop {
             let op = if self.consume_token("*") {
                 if self.consume_token("*") {
@@ -9412,9 +9412,13 @@ impl<'a> AwkExprParser<'a> {
     }
 
     fn parse_power(&mut self) -> Result<AwkExpr, String> {
-        let expression = self.parse_unary()?;
+        // POSIX awk: exponentiation binds tighter than unary minus/plus, so the
+        // left operand of `^`/`**` is a postfix expression (not a unary one);
+        // e.g. `-2 ^ 2` parses as `-(2 ^ 2)`. The right operand is a unary
+        // expression so `2 ^ -3` still works.
+        let expression = self.parse_postfix()?;
         if self.consume_token("**") || self.consume_token("^") {
-            let right = self.parse_power()?;
+            let right = self.parse_unary()?;
             return Ok(AwkExpr::Binary {
                 left: Box::new(expression),
                 op: AwkBinaryOp::Pow,
@@ -9457,7 +9461,7 @@ impl<'a> AwkExprParser<'a> {
                 expr: Box::new(self.parse_unary()?),
             });
         }
-        self.parse_postfix()
+        self.parse_power()
     }
 
     fn parse_postfix(&mut self) -> Result<AwkExpr, String> {

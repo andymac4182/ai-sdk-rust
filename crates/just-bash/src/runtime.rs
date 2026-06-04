@@ -11594,4 +11594,131 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
             "1\n2\n3\n"
         );
     }
+
+    // JBC-awk: operator semantics — division-by-zero exit code, the remaining
+    // comparison operators, short-circuit evaluation of && and ||, regex match
+    // operators in conditions and on fields, ternary expressions, chained
+    // increments, and operator precedence.
+    // Upstream: packages/just-bash/src/commands/awk/awk.operators.test.ts
+    #[test]
+    fn awk_jbc_command_awk_operator_precedence_and_logic_rows() {
+        let env = Bash::default();
+
+        // :80 division by zero exits 0 (inf/0 result tolerated)
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 10 / 0 }'"#)
+                .exit_code,
+            0
+        );
+        // :116 compare with <=
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print (3 <= 5), (5 <= 5), (6 <= 5) }'"#)
+                .stdout,
+            "1 1 0\n"
+        );
+        // :125 compare with >
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print (5 > 3), (3 > 5) }'"#)
+                .stdout,
+            "1 0\n"
+        );
+        // :172 short-circuit && (RHS assignment not evaluated)
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x=0; (0 && (x=1)); print x }'"#)
+                .stdout,
+            "0\n"
+        );
+        // :181 short-circuit || (RHS assignment not evaluated)
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x=0; (1 || (x=1)); print x }'"#)
+                .stdout,
+            "0\n"
+        );
+
+        let files = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "apple\nbanana\napricot\ncherry\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        // :219 use ~ in condition
+        assert_eq!(
+            files.exec(r#"awk '$0 ~ /^a/ { print }' /data.txt"#).stdout,
+            "apple\napricot\n"
+        );
+        // :228 use !~ in condition
+        assert_eq!(
+            files.exec(r#"awk '$0 !~ /^a/ { print }' /data.txt"#).stdout,
+            "banana\ncherry\n"
+        );
+
+        // :237 match field with regex
+        assert_eq!(
+            env.exec(r#"echo "123 abc 456" | awk '{ print ($2 ~ /[a-z]+/) }'"#)
+                .stdout,
+            "1\n"
+        );
+        // :266 ternary works with expressions
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x=5; print (x > 3 ? "big" : "small") }'"#)
+                .stdout,
+            "big\n"
+        );
+        // :275 nest ternary operators
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN { x=5; print (x<3 ? "low" : (x<7 ? "mid" : "high")) }'"#
+            )
+            .stdout,
+            "mid\n"
+        );
+        // :295 ternary in print arguments
+        assert_eq!(
+            env.exec(r#"echo "5" | awk '{ print "Value is " ($1 % 2 == 0 ? "even" : "odd") }'"#)
+                .stdout,
+            "Value is odd\n"
+        );
+        // :407 chain increments in expression
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x = 1; y = x++ + ++x; print y, x }'"#)
+                .stdout,
+            "4 3\n"
+        );
+        // :420 multiplication before addition
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 2 + 3 * 4 }'"#)
+                .stdout,
+            "14\n"
+        );
+        // :429 parentheses for grouping
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print (2 + 3) * 4 }'"#)
+                .stdout,
+            "20\n"
+        );
+        // :438 exponent before multiplication
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 2 * 3 ^ 2 }'"#)
+                .stdout,
+            "18\n"
+        );
+        // :447 comparison before logical
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 1 < 2 && 3 < 4 }'"#)
+                .stdout,
+            "1\n"
+        );
+        // :456 complex precedence
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 2 + 3 * 4 ^ 2 - 10 / 2 }'"#)
+                .stdout,
+            "45\n"
+        );
+        // :466 unary minus precedence: -2^2 == -(2^2) == -4
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print -2 ^ 2 }'"#).stdout,
+            "-4\n"
+        );
+    }
 }

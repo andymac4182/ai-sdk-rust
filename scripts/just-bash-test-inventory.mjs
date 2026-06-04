@@ -951,6 +951,15 @@ const jbc09CaseGroups = [
     notes:
       'just-bash-command-awk verifies portable awk do-while loops execute the body at least once and re-test the condition after each iteration.',
   },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.operators.test.ts',
+    lines: [80, 116, 125, 172, 181, 219, 228, 237, 266, 275, 295, 407, 420, 429, 438, 447, 456, 466],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_operator_precedence_and_logic_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk operator semantics: division-by-zero exit code, the <= and > comparisons, short-circuit && and ||, ~/!~ regex match in conditions and on fields, ternary with expressions/nesting/in print arguments, chained increments, and operator precedence including POSIX unary-minus vs exponent binding (-2^2 == -4).',
+  },
 ];
 
 const jbc10CaseGroups = [
