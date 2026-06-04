@@ -7565,7 +7565,7 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
                     ..CommandResult::default()
                 };
             }
-            Ok(AwkFlow::Return(_)) => {
+            Ok(AwkFlow::Return(_)) | Ok(AwkFlow::Break) | Ok(AwkFlow::LoopContinue) => {
                 return stderr_result(1, "awk: unsupported program\n");
             }
             Err(error) => return stderr_result(1, format!("awk: {error}\n")),
@@ -7616,7 +7616,7 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
                                 ..CommandResult::default()
                             };
                         }
-                        Ok(AwkFlow::Return(_)) => {
+                        Ok(AwkFlow::Return(_)) | Ok(AwkFlow::Break) | Ok(AwkFlow::LoopContinue) => {
                             return stderr_result(1, "awk: unsupported program\n");
                         }
                         Err(error) => return stderr_result(1, format!("awk: {error}\n")),
@@ -7646,7 +7646,7 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
                     ..CommandResult::default()
                 };
             }
-            Ok(AwkFlow::Return(_)) => {
+            Ok(AwkFlow::Return(_)) | Ok(AwkFlow::Break) | Ok(AwkFlow::LoopContinue) => {
                 return stderr_result(1, "awk: unsupported program\n");
             }
             Err(error) => return stderr_result(1, format!("awk: {error}\n")),
@@ -8310,6 +8310,10 @@ enum AwkFlow {
     Next,
     Exit(i32),
     Return(String),
+    /// `break` out of the innermost enclosing loop.
+    Break,
+    /// `continue` to the next iteration of the innermost enclosing loop.
+    LoopContinue,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -8363,6 +8367,12 @@ enum AwkAction {
         condition: AwkExpr,
         body: Vec<AwkAction>,
     },
+    DoWhile {
+        body: Vec<AwkAction>,
+        condition: AwkExpr,
+    },
+    Break,
+    Continue,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -8599,6 +8609,21 @@ fn parse_awk_actions(body: &str) -> Result<Vec<AwkAction>, String> {
         if statement == "next" {
             actions.push(AwkAction::Next);
             index += 1;
+            continue;
+        }
+        if statement == "break" {
+            actions.push(AwkAction::Break);
+            index += 1;
+            continue;
+        }
+        if statement == "continue" {
+            actions.push(AwkAction::Continue);
+            index += 1;
+            continue;
+        }
+        if let Some((action, consumed)) = parse_awk_do_while_statement(&statements, index)? {
+            actions.push(action);
+            index += consumed;
             continue;
         }
         if let Some((variable, array, body_source)) = parse_awk_for_in_statement(statement)? {
@@ -8935,6 +8960,71 @@ fn parse_awk_while_statement(
     let inline_body = &rest[header_end + 1..];
     let (body, extra) = parse_awk_loop_body(statements, start, inline_body)?;
     Ok(Some((AwkAction::While { condition, body }, 1 + extra)))
+}
+
+/// Parses a `do body while (cond)` loop starting at `start`.
+///
+/// Two surface forms are supported. Either the whole construct is one statement
+/// (`do { ... } while (cond)`, kept together because the `do`/`while` keywords
+/// continue across the embedded newline), or the `do` keyword is on its own
+/// statement and the body block / `while (cond)` follow as the next statement.
+fn parse_awk_do_while_statement(
+    statements: &[String],
+    start: usize,
+) -> Result<Option<(AwkAction, usize)>, String> {
+    let statement = statements[start].trim();
+    let Some(rest) = strip_awk_keyword(statement, "do") else {
+        return Ok(None);
+    };
+    let rest = rest.trim_start();
+    // Locate the trailing `while (cond)`. The body is everything before it.
+    let (body_source, while_source, extra) = if rest.is_empty() {
+        // `do` stands alone; the body block and trailing while are the next
+        // statement string (joined together because the embedded newline does
+        // not split a brace-balanced statement).
+        let next = statements
+            .get(start + 1)
+            .ok_or_else(|| "unsupported program".to_string())?
+            .trim();
+        let (body, tail) = split_awk_do_body(next)?;
+        (body, tail, 1)
+    } else {
+        let (body, tail) = split_awk_do_body(rest)?;
+        (body, tail, 0)
+    };
+    let while_source = while_source.trim_start();
+    let while_rest = strip_awk_keyword(while_source, "while")
+        .ok_or_else(|| "unsupported program".to_string())?;
+    let while_rest = while_rest.trim_start();
+    if !while_rest.starts_with('(') {
+        return Err("unsupported program".to_string());
+    }
+    let header_end =
+        find_matching_awk_paren(while_rest, 0).ok_or_else(|| "unsupported program".to_string())?;
+    if !while_rest[header_end + 1..].trim().is_empty() {
+        return Err("unsupported program".to_string());
+    }
+    let condition = parse_awk_expr(&while_rest[1..header_end])?;
+    let body = parse_awk_nested_actions(body_source)?;
+    Ok(Some((AwkAction::DoWhile { body, condition }, 1 + extra)))
+}
+
+/// Splits a `do` body from its trailing `while (...)`. The body is either a
+/// `{ ... }` block or a single statement; returns `(body, "while (...)")`.
+fn split_awk_do_body(source: &str) -> Result<(&str, &str), String> {
+    let source = source.trim_start();
+    if source.starts_with('{') {
+        let end = find_matching_awk_brace(source, 0)
+            .ok_or_else(|| "unterminated action block".to_string())?;
+        return Ok((&source[..=end], source[end + 1..].trim_start()));
+    }
+    // Single-statement body: split on the trailing top-level `while` keyword.
+    let (body, _tail) = strip_awk_keyword_value(source, "while")
+        .ok_or_else(|| "unsupported program".to_string())?;
+    // Rebuild a `while ...` slice from the original source so the caller can
+    // re-parse the keyword uniformly.
+    let while_offset = body.len();
+    Ok((body, &source[while_offset..]))
 }
 
 /// Splits `lhs <keyword> rhs` on a top-level whole-word keyword, returning the
@@ -9644,6 +9734,8 @@ fn execute_awk_actions(
                 }
             }
             AwkAction::Next => return Ok(AwkFlow::Next),
+            AwkAction::Break => return Ok(AwkFlow::Break),
+            AwkAction::Continue => return Ok(AwkFlow::LoopContinue),
             AwkAction::Exit(code) => {
                 let code = match code {
                     Some(code) => awk_to_number(&eval_awk_expr(code, context, runtime)?) as i32,
@@ -9685,7 +9777,8 @@ fn execute_awk_actions(
                 for key in keys {
                     runtime.variables.insert(variable.clone(), key);
                     match execute_awk_actions(body, context, runtime, stdout)? {
-                        AwkFlow::Continue => {}
+                        AwkFlow::Continue | AwkFlow::LoopContinue => {}
+                        AwkFlow::Break => break,
                         flow => return Ok(flow),
                     }
                 }
@@ -9711,7 +9804,8 @@ fn execute_awk_actions(
                         }
                     }
                     match execute_awk_actions(body, context, runtime, stdout)? {
-                        AwkFlow::Continue => {}
+                        AwkFlow::Continue | AwkFlow::LoopContinue => {}
+                        AwkFlow::Break => break,
                         flow => return Ok(flow),
                     }
                     if let Some(update) = update {
@@ -9737,12 +9831,30 @@ fn execute_awk_actions(
                 let mut iterations = 0usize;
                 while eval_awk_truth(condition, context, runtime)? {
                     match execute_awk_actions(body, context, runtime, stdout)? {
-                        AwkFlow::Continue => {}
+                        AwkFlow::Continue | AwkFlow::LoopContinue => {}
+                        AwkFlow::Break => break,
                         flow => return Ok(flow),
                     }
                     iterations += 1;
                     if iterations >= AWK_MAX_LOOP_ITERATIONS {
                         return Err("awk loop iteration limit exceeded".to_string());
+                    }
+                }
+            }
+            AwkAction::DoWhile { body, condition } => {
+                let mut iterations = 0usize;
+                loop {
+                    match execute_awk_actions(body, context, runtime, stdout)? {
+                        AwkFlow::Continue | AwkFlow::LoopContinue => {}
+                        AwkFlow::Break => break,
+                        flow => return Ok(flow),
+                    }
+                    iterations += 1;
+                    if iterations >= AWK_MAX_LOOP_ITERATIONS {
+                        return Err("awk loop iteration limit exceeded".to_string());
+                    }
+                    if !eval_awk_truth(condition, context, runtime)? {
+                        break;
                     }
                 }
             }
@@ -10370,7 +10482,10 @@ fn eval_awk_user_function(
     ) {
         Ok(AwkFlow::Return(value)) => Ok(value),
         Ok(AwkFlow::Continue) => Ok(String::new()),
-        Ok(AwkFlow::Next) | Ok(AwkFlow::Exit(_)) => Err("unsupported program".to_string()),
+        Ok(AwkFlow::Next)
+        | Ok(AwkFlow::Exit(_))
+        | Ok(AwkFlow::Break)
+        | Ok(AwkFlow::LoopContinue) => Err("unsupported program".to_string()),
         Err(error) => Err(error),
     };
 

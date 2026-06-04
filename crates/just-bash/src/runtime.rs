@@ -11449,4 +11449,149 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
             "a b c d\n"
         );
     }
+
+    // JBC-awk: C-style loop control flow in BEGIN/END blocks — nested
+    // for/while, break and continue (including inner-loop-only scoping), and the
+    // fibonacci/string-reversal idioms the upstream expression suite exercises.
+    // Upstream files:
+    //   awk.expressions.test.ts :114 for-while nesting, :132 break in inner
+    //     loop only, :149 continue in inner loop, :460 fibonacci, :498 reverse
+    //     string.
+    //   awk.functions.test.ts :247 break out of for loop, :256 continue to next
+    //     iteration, :265 break out of while loop, :274 continue in while loop.
+    #[test]
+    fn awk_jbc_command_awk_loop_break_continue_rows() {
+        let env = Bash::default();
+
+        // expressions :114 for-while nesting
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN {
+          for (i=1; i<=2; i++) {
+            j = 1
+            while (j <= 2) {
+              printf "%d%d ", i, j
+              j++
+            }
+          }
+          print ""
+        }'"#
+            )
+            .stdout,
+            "11 12 21 22 \n"
+        );
+        // expressions :132 break in inner loop only
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN {
+          for (i=1; i<=3; i++) {
+            for (j=1; j<=3; j++) {
+              if (j == 2) break
+              printf "%d%d ", i, j
+            }
+          }
+          print ""
+        }'"#
+            )
+            .stdout,
+            "11 21 31 \n"
+        );
+        // expressions :149 continue in inner loop
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN {
+          for (i=1; i<=2; i++) {
+            for (j=1; j<=3; j++) {
+              if (j == 2) continue
+              printf "%d%d ", i, j
+            }
+          }
+          print ""
+        }'"#
+            )
+            .stdout,
+            "11 13 21 23 \n"
+        );
+        // expressions :460 fibonacci
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN {
+          a = 0; b = 1
+          for (i = 0; i < 10; i++) {
+            printf "%d ", a
+            t = a; a = b; b = t + b
+          }
+          print ""
+        }'"#
+            )
+            .stdout,
+            "0 1 1 2 3 5 8 13 21 34 \n"
+        );
+        // expressions :498 reverse string
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN {
+          s = "hello"
+          r = ""
+          for (i = length(s); i > 0; i--) r = r substr(s, i, 1)
+          print r
+        }'"#
+            )
+            .stdout,
+            "olleh\n"
+        );
+
+        // functions :247 break out of for loop
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN { for(i=1; i<=10; i++) { if(i>5) break; print i } }'"#
+            )
+            .stdout,
+            "1\n2\n3\n4\n5\n"
+        );
+        // functions :256 continue to next iteration
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN { for(i=1; i<=5; i++) { if(i==3) continue; print i } }'"#
+            )
+            .stdout,
+            "1\n2\n4\n5\n"
+        );
+        // functions :265 break out of while loop
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { i=0; while(1) { i++; if(i>3) break; print i } }'"#)
+                .stdout,
+            "1\n2\n3\n"
+        );
+        // functions :274 continue in while loop
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN { i=0; while(i<5) { i++; if(i==3) continue; print i } }'"#
+            )
+            .stdout,
+            "1\n2\n4\n5\n"
+        );
+    }
+
+    // JBC-awk: do-while loops execute their body at least once and re-test the
+    // condition after each iteration.
+    // Upstream: packages/just-bash/src/commands/awk/awk.functions.test.ts
+    //   :285 execute body at least once, :294 loop while condition is true.
+    #[test]
+    fn awk_jbc_command_awk_do_while_rows() {
+        let env = Bash::default();
+
+        // :285 should execute body at least once (condition false up front)
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { i=10; do { print i; i++ } while(i<10) }'"#)
+                .stdout,
+            "10\n"
+        );
+        // :294 should loop while condition is true
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { i=1; do { print i; i++ } while(i<=3) }'"#)
+                .stdout,
+            "1\n2\n3\n"
+        );
+    }
 }
