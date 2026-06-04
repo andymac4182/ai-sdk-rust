@@ -9977,12 +9977,26 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
             });
         }
     }
+    // Seed the special `ENVIRON` array from the effective environment so
+    // `ENVIRON["VAR"]` reflects the exported shell environment (POSIX awk).
+    // Keys whose names collide with JavaScript-dangerous keywords (e.g.
+    // `__proto__`, `constructor`) are ordinary map entries here: the array is a
+    // plain `BTreeMap`, so there is no prototype to pollute.
+    let mut arrays: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    arrays.insert(
+        "ENVIRON".to_string(),
+        state
+            .env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    );
     let mut runtime = AwkRuntime {
         separator,
         ofs: " ".to_string(),
         ors: "\n".to_string(),
         variables,
-        arrays: BTreeMap::new(),
+        arrays,
         range_active: BTreeMap::new(),
         functions: program.functions.clone(),
         main_input,
@@ -12244,17 +12258,43 @@ impl<'a> AwkExprParser<'a> {
 
     fn parse_unary(&mut self) -> Result<AwkExpr, String> {
         if self.consume_token("++") {
-            return Ok(AwkExpr::Increment {
-                target: self.parse_target_from_cursor()?,
-                delta: 1,
-                prefix: true,
+            // `++x` is a pre-increment on an lvalue; when the operand is not an
+            // lvalue (e.g. `++5`) POSIX awk reads it as two unary plus signs.
+            let before_target = self.cursor;
+            if let Ok(target) = self.parse_target_from_cursor() {
+                return Ok(AwkExpr::Increment {
+                    target,
+                    delta: 1,
+                    prefix: true,
+                });
+            }
+            self.cursor = before_target;
+            return Ok(AwkExpr::Unary {
+                op: AwkUnaryOp::Plus,
+                expr: Box::new(AwkExpr::Unary {
+                    op: AwkUnaryOp::Plus,
+                    expr: Box::new(self.parse_unary()?),
+                }),
             });
         }
         if self.consume_token("--") {
-            return Ok(AwkExpr::Increment {
-                target: self.parse_target_from_cursor()?,
-                delta: -1,
-                prefix: true,
+            // `--x` is a pre-decrement on an lvalue; when the operand is not an
+            // lvalue (e.g. `--5`) POSIX awk reads it as `-(-5)` = 5.
+            let before_target = self.cursor;
+            if let Ok(target) = self.parse_target_from_cursor() {
+                return Ok(AwkExpr::Increment {
+                    target,
+                    delta: -1,
+                    prefix: true,
+                });
+            }
+            self.cursor = before_target;
+            return Ok(AwkExpr::Unary {
+                op: AwkUnaryOp::Minus,
+                expr: Box::new(AwkExpr::Unary {
+                    op: AwkUnaryOp::Minus,
+                    expr: Box::new(self.parse_unary()?),
+                }),
             });
         }
         if self.consume_token("+") {

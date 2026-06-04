@@ -16173,6 +16173,268 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn awk_r13jb_command_awk_compound_condition_and_format_rows() {
+        // Mirrors packages/just-bash/src/commands/awk/awk.test.ts compound
+        // condition, variable-comparison, FILENAME/FNR exit-next, do-while,
+        // break/continue, and printf-format rows.
+        let nums = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "1 10\n2 20\n3 30\n4 40\n5 50\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        // :378 && (AND) condition keeps records 2..4.
+        assert_eq!(
+            nums.exec(r#"awk '$1>=2 && $1<=4{print}' /data.txt"#).stdout,
+            "2 20\n3 30\n4 40\n"
+        );
+
+        let letters = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "1 a\n2 b\n3 c\n4 d\n5 e\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        // :387 || (OR) condition keeps records 1 and 5.
+        assert_eq!(
+            letters
+                .exec(r#"awk '$1==1 || $1==5{print}' /data.txt"#)
+                .stdout,
+            "1 a\n5 e\n"
+        );
+
+        let lines = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "line1\nline2\nline3\nline4\nline5\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        // :396 NR range with && keeps records 2..4.
+        assert_eq!(
+            lines
+                .exec(r#"awk 'NR>=2 && NR<=4{print}' /data.txt"#)
+                .stdout,
+            "line2\nline3\nline4\n"
+        );
+
+        let scores = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "10\n25\n15\n30\n5\n".to_string())]),
+            ..BashOptions::default()
+        });
+        // :407 compare field to a -v user variable.
+        assert_eq!(
+            scores
+                .exec(r#"awk -v threshold=20 '$1>threshold{print}' /data.txt"#)
+                .stdout,
+            "25\n30\n"
+        );
+        // :418 track the running maximum across records.
+        assert_eq!(
+            scores
+                .exec(r#"awk 'BEGIN{max=0}$1>max{max=$1}END{print max}' /data.txt"#)
+                .stdout,
+            "30\n"
+        );
+        // :429 track the running minimum across records.
+        assert_eq!(
+            scores
+                .exec(r#"awk 'BEGIN{min=9999}$1<min{min=$1}END{print min}' /data.txt"#)
+                .stdout,
+            "5\n"
+        );
+
+        let words = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "one\ntwo words\nthree word line\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        // :440 NF comparison keeps multi-field records.
+        assert_eq!(
+            words.exec(r#"awk 'NF>1{print}' /data.txt"#).stdout,
+            "two words\nthree word line\n"
+        );
+
+        let prices = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/prices.csv".to_string(),
+                "apple,1.50\nbanana,0.75\norange,2.00\ngrape,3.50\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        // :449 filter CSV by a numeric field comparison and print field 1.
+        assert_eq!(
+            prices
+                .exec(r#"awk -F, '$2>=2{print $1}' /prices.csv"#)
+                .stdout,
+            "orange\ngrape\n"
+        );
+
+        let world = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "hello world\n".to_string())]),
+            ..BashOptions::default()
+        });
+        // :473 match() returns 0 and sets RSTART 0 / RLENGTH -1 when no match.
+        assert_eq!(
+            world
+                .exec(r#"awk '{print match($0, /foo/), RSTART, RLENGTH}' /data.txt"#)
+                .stdout,
+            "0 0 -1\n"
+        );
+
+        let foos = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "foo bar foo baz foo\n".to_string())]),
+            ..BashOptions::default()
+        });
+        // :497 gensub replaces only the Nth occurrence.
+        assert_eq!(
+            foos.exec(r#"awk '{print gensub(/foo/, "XXX", 2)}' /data.txt"#)
+                .stdout,
+            "foo bar XXX baz foo\n"
+        );
+
+        let three = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "line1\nline2\nline3\n".to_string())]),
+            ..BashOptions::default()
+        });
+        // :557 exit N propagates the exit code.
+        assert_eq!(three.exec(r#"awk 'NR==2{exit 5}' /data.txt"#).exit_code, 5);
+
+        let abc = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "a\nb\nc\n".to_string())]),
+            ..BashOptions::default()
+        });
+        // :565 next skips the remaining rules for the current record.
+        assert_eq!(
+            abc.exec(r#"awk '/b/{next}{print}' /data.txt"#).stdout,
+            "a\nc\n"
+        );
+
+        let env = Bash::default();
+        // :576 do-while executes the body at least once.
+        let do_while = env.exec(r#"awk 'BEGIN{i=0; do{i++}while(i<3); print i}'"#);
+        assert_eq!(do_while.exit_code, 0);
+        assert_eq!(do_while.stdout, "3\n");
+        // :589 break exits the loop.
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN{for(i=1;i<=10;i++){if(i==5)break; print i}}'"#)
+                .stdout,
+            "1\n2\n3\n4\n"
+        );
+        // :600 continue skips to the next iteration.
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN{for(i=1;i<=5;i++){if(i==3)continue; print i}}'"#)
+                .stdout,
+            "1\n2\n4\n5\n"
+        );
+        // :613 printf %x formats hexadecimal.
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN{printf "%x\n", 255}'"#).stdout,
+            "ff\n"
+        );
+        // :622 printf %o formats octal.
+        assert_eq!(env.exec(r#"awk 'BEGIN{printf "%o\n", 8}'"#).stdout, "10\n");
+        // :631 printf %c formats a character from a code point.
+        assert_eq!(env.exec(r#"awk 'BEGIN{printf "%c\n", 65}'"#).stdout, "A\n");
+        // :640 printf %.2e formats scientific notation (JS toExponential form).
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN{printf "%.2e\n", 1234}'"#).stdout,
+            "1.23e+3\n"
+        );
+    }
+
+    #[test]
+    fn awk_r13jb_command_awk_double_negative_literal_row() {
+        // Mirrors packages/just-bash/src/commands/awk/awk.parsing.test.ts:479 —
+        // `--5` parses as -(-5) = 5 (double unary minus, not a decrement).
+        let env = Bash::default();
+        let result = env.exec(r#"echo "" | awk 'BEGIN { print --5 }'"#);
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "5\n");
+    }
+
+    #[test]
+    fn awk_r13jb_command_awk_prototype_pollution_environ_and_special_var_rows() {
+        // Mirrors packages/just-bash/src/commands/awk/awk.prototype-pollution.test.ts —
+        // ENVIRON access, sprintf/function names, and FS/RS/OFS holding
+        // JavaScript-dangerous keywords must behave like ordinary AWK strings,
+        // and AWK arrays/ENVIRON never pollute host data structures.
+        let env = Bash::default();
+
+        // :29 ENVIRON["<keyword>"] reflects the exported environment value for
+        // the first four dangerous keywords (the upstream loop body).
+        for keyword in ["constructor", "__proto__", "prototype", "hasOwnProperty"] {
+            let program = format!(
+                "export {keyword}=env_value; echo | awk 'BEGIN {{ print ENVIRON[\"{keyword}\"] }}'"
+            );
+            let result = env.exec(&program);
+            assert_eq!(result.exit_code, 0, "ENVIRON[{keyword}] exit");
+            assert_eq!(result.stdout, "env_value\n", "ENVIRON[{keyword}] output");
+        }
+        // :39 ENVIRON["constructor"] reads the exported value.
+        let ctor = env.exec(
+            "export constructor=ctor_val; echo | awk 'BEGIN { print ENVIRON[\"constructor\"] }'",
+        );
+        assert_eq!(ctor.exit_code, 0);
+        assert_eq!(ctor.stdout, "ctor_val\n");
+
+        // :223 sprintf with a dangerous-keyword argument round-trips verbatim.
+        let sprintf =
+            env.exec("echo | awk 'BEGIN {\n  s = sprintf(\"%s\", \"__proto__\")\n  print s\n}'");
+        assert_eq!(sprintf.exit_code, 0);
+        assert_eq!(sprintf.stdout, "__proto__\n");
+
+        // :237 a user function whose name is a prefix of a dangerous keyword runs.
+        let proto_func = env.exec(
+            "echo | awk '\n  function proto_func() { return \"__proto__\" }\n  BEGIN { print proto_func() }\n'",
+        );
+        assert_eq!(proto_func.exit_code, 0);
+        assert_eq!(proto_func.stdout, "__proto__\n");
+
+        // :249 a dangerous keyword passed as a function argument round-trips.
+        let echo_val = env.exec(
+            "echo | awk '\n  function echo_val(v) { return v }\n  BEGIN { print echo_val(\"__proto__\") }\n'",
+        );
+        assert_eq!(echo_val.exit_code, 0);
+        assert_eq!(echo_val.stdout, "__proto__\n");
+
+        // :263 FS set to a dangerous keyword splits ordinary fields.
+        let fs = env.exec("echo 'a__proto__b' | awk -F '__proto__' '{ print $1, $2 }'");
+        assert_eq!(fs.exit_code, 0);
+        assert_eq!(fs.stdout, "a b\n");
+
+        // :272 RS containing a dangerous keyword still yields the record.
+        let rs = env.exec("echo 'a b' | awk 'BEGIN { RS=\"__proto__\" } { print $0 }'");
+        assert_eq!(rs.exit_code, 0);
+        assert!(rs.stdout.contains("a b"), "RS output: {:?}", rs.stdout);
+
+        // :281 OFS set to a dangerous keyword joins fields with that literal.
+        let ofs = env.exec("echo 'a b' | awk 'BEGIN { OFS=\"__proto__\" } { print $1, $2 }'");
+        assert_eq!(ofs.exit_code, 0);
+        assert_eq!(ofs.stdout, "a__proto__b\n");
+
+        // :292 ENVIRON access with a dangerous key returns the exported value
+        // without affecting any host data structure (Rust arrays are plain maps,
+        // so there is no prototype to pollute).
+        let environ_print = env
+            .exec("export __proto__=polluted\necho | awk 'BEGIN { print ENVIRON[\"__proto__\"] }'");
+        assert_eq!(environ_print.exit_code, 0);
+        assert_eq!(environ_print.stdout, "polluted\n");
+
+        // :305 assigning dangerous keys into an AWK array succeeds and stays
+        // isolated to that array (no host pollution possible by construction).
+        let array_assign = env.exec(
+            "echo | awk 'BEGIN {\n  arr[\"__proto__\"] = \"polluted\"\n  arr[\"constructor\"] = \"hacked\"\n  print arr[\"__proto__\"], arr[\"constructor\"]\n}'",
+        );
+        assert_eq!(array_assign.exit_code, 0);
+        assert_eq!(array_assign.stdout, "polluted hacked\n");
+    }
+
+    #[test]
     fn awk_r10jb_command_awk_parsing_block_and_expression_rows() {
         // Mirrors packages/just-bash/src/commands/awk/awk.parsing.test.ts
         // block-structure parsing and expression-parsing edge cases.
