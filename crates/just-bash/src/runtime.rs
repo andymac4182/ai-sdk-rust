@@ -13377,6 +13377,263 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn structured_data_jbc49_sqlite3_write_ops_and_file_persistence_rows() {
+        // JBC-49: sqlite3 write operations (UPDATE/DELETE/DROP/ALTER/REPLACE),
+        // file-backed persistence, readonly overlay semantics, non-prefixed
+        // mutation writeback (CTE/PRAGMA/comment-led), and parsing edge cases.
+
+        // --- write-ops: UPDATE ---
+        let env = bash();
+        assert_eq!(
+            env.exec(
+                "sqlite3 :memory: \"CREATE TABLE t(id INT, val TEXT); INSERT INTO t VALUES(1,'a'),(2,'b'); UPDATE t SET val='x' WHERE id=1; SELECT * FROM t ORDER BY id\""
+            )
+            .stdout,
+            "1|x\n2|b\n"
+        );
+        assert_eq!(
+            env.exec(
+                "sqlite3 :memory: \"CREATE TABLE t(x INT); INSERT INTO t VALUES(1),(2),(3); UPDATE t SET x=0; SELECT * FROM t\""
+            )
+            .stdout,
+            "0\n0\n0\n"
+        );
+
+        // --- write-ops: DELETE ---
+        assert_eq!(
+            env.exec(
+                "sqlite3 :memory: \"CREATE TABLE t(x INT); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t WHERE x=2; SELECT * FROM t ORDER BY x\""
+            )
+            .stdout,
+            "1\n3\n"
+        );
+        assert_eq!(
+            env.exec(
+                "sqlite3 :memory: \"CREATE TABLE t(x INT); INSERT INTO t VALUES(1),(2); DELETE FROM t; SELECT COUNT(*) FROM t\""
+            )
+            .stdout,
+            "0\n"
+        );
+
+        // --- write-ops: DROP TABLE ---
+        assert_eq!(
+            env.exec(
+                "sqlite3 :memory: \"CREATE TABLE t(x); DROP TABLE t; SELECT name FROM sqlite_master WHERE type='table'\""
+            )
+            .stdout,
+            ""
+        );
+        let dropped =
+            env.exec("sqlite3 :memory: \"CREATE TABLE t(x); DROP TABLE t; SELECT * FROM t\"");
+        assert!(dropped.stdout.contains("no such table"));
+        assert_eq!(dropped.exit_code, 0);
+
+        // --- write-ops: ALTER TABLE ---
+        assert_eq!(
+            env.exec(
+                "sqlite3 :memory: \"CREATE TABLE old(x); ALTER TABLE old RENAME TO new; SELECT name FROM sqlite_master WHERE type='table'\""
+            )
+            .stdout,
+            "new\n"
+        );
+        assert_eq!(
+            env.exec(
+                "sqlite3 :memory: \"CREATE TABLE t(a INT); INSERT INTO t VALUES(1); ALTER TABLE t ADD COLUMN b TEXT DEFAULT 'x'; SELECT * FROM t\""
+            )
+            .stdout,
+            "1|x\n"
+        );
+
+        // --- write-ops: REPLACE INTO ---
+        assert_eq!(
+            env.exec(
+                "sqlite3 :memory: \"CREATE TABLE t(id INTEGER PRIMARY KEY, val TEXT); INSERT INTO t VALUES(1,'a'); REPLACE INTO t VALUES(1,'b'); SELECT * FROM t\""
+            )
+            .stdout,
+            "1|b\n"
+        );
+        assert_eq!(
+            env.exec(
+                "sqlite3 :memory: \"CREATE TABLE t(id INTEGER PRIMARY KEY, val TEXT); INSERT INTO t VALUES(1,'a'); REPLACE INTO t VALUES(2,'b'); SELECT * FROM t ORDER BY id\""
+            )
+            .stdout,
+            "1|a\n2|b\n"
+        );
+
+        // --- write-ops: persistence to file (same session, fresh exec) ---
+        let env = bash();
+        env.exec("sqlite3 /test.db \"CREATE TABLE t(x INT); INSERT INTO t VALUES(1)\"");
+        env.exec("sqlite3 /test.db \"UPDATE t SET x=99\"");
+        assert_eq!(
+            env.exec("sqlite3 /test.db \"SELECT * FROM t\"").stdout,
+            "99\n"
+        );
+
+        let env = bash();
+        env.exec("sqlite3 /test.db \"CREATE TABLE t(x INT); INSERT INTO t VALUES(1),(2),(3)\"");
+        env.exec("sqlite3 /test.db \"DELETE FROM t WHERE x=2\"");
+        assert_eq!(
+            env.exec("sqlite3 /test.db \"SELECT * FROM t ORDER BY x\"")
+                .stdout,
+            "1\n3\n"
+        );
+
+        let env = bash();
+        env.exec("sqlite3 /test.db \"CREATE TABLE t1(x); CREATE TABLE t2(y)\"");
+        env.exec("sqlite3 /test.db \"DROP TABLE t1\"");
+        assert_eq!(
+            env.exec(
+                "sqlite3 /test.db \"SELECT name FROM sqlite_master WHERE type='table' ORDER BY name\""
+            )
+            .stdout,
+            "t2\n"
+        );
+
+        let env = bash();
+        env.exec("sqlite3 /newdb.db \"CREATE TABLE t(x); INSERT INTO t VALUES(42)\"");
+        let created = env.exec("sqlite3 /newdb.db \"SELECT * FROM t\"");
+        assert_eq!(created.stdout, "42\n");
+        assert_eq!(created.exit_code, 0);
+
+        // --- test.ts: file operations ---
+        let env = bash();
+        env.exec(
+            "sqlite3 /test.db \"CREATE TABLE users(id INT, name TEXT); INSERT INTO users VALUES(1,'alice')\"",
+        );
+        assert_eq!(
+            env.exec("sqlite3 /test.db \"SELECT * FROM users\"").stdout,
+            "1|alice\n"
+        );
+
+        let env = bash();
+        env.exec("sqlite3 /data.db \"CREATE TABLE t(x INT)\"");
+        env.exec("sqlite3 /data.db \"INSERT INTO t VALUES(1)\"");
+        env.exec("sqlite3 /data.db \"INSERT INTO t VALUES(2)\"");
+        assert_eq!(
+            env.exec("sqlite3 /data.db \"SELECT * FROM t\"").stdout,
+            "1\n2\n"
+        );
+
+        // --- options.test.ts: -readonly does not persist ---
+        let env = bash();
+        env.exec("sqlite3 /ro.db \"CREATE TABLE t(x INT); INSERT INTO t VALUES(1)\"");
+        env.exec("sqlite3 -readonly /ro.db \"INSERT INTO t VALUES(2)\"");
+        assert_eq!(env.exec("sqlite3 /ro.db \"SELECT * FROM t\"").stdout, "1\n");
+
+        // --- parsing.test.ts: semicolon inside double-quoted identifier ---
+        // The sqlite3 statement splitter must keep a `;` that appears inside a
+        // double-quoted identifier as part of that identifier rather than
+        // treating it as a statement terminator (otherwise `CREATE TABLE
+        // t("col;name" ...)` would be split mid-identifier). A single-quoted
+        // shell argument delivers the SQL verbatim so the splitter behavior is
+        // exercised directly.
+        let env = bash();
+        let parsed = env.exec(
+            "sqlite3 :memory: 'CREATE TABLE t(\"col;name\" INT); INSERT INTO t VALUES(7); SELECT * FROM t'",
+        );
+        assert_eq!(parsed.stdout, "7\n");
+        assert_eq!(parsed.exit_code, 0);
+
+        // --- writeback-edge-cases: non-prefixed mutation writeback ---
+        // CTE-prefixed INSERT
+        let env = bash();
+        let setup =
+            env.exec("sqlite3 /tmp/db.sqlite \"CREATE TABLE t(x INT); INSERT INTO t VALUES(1)\"");
+        assert_eq!(setup.exit_code, 0);
+        assert_eq!(setup.stderr, "");
+        let write = env.exec(
+            "sqlite3 /tmp/db.sqlite \"WITH cte AS (SELECT 2 AS v) INSERT INTO t SELECT v FROM cte\"",
+        );
+        assert_eq!(write.exit_code, 0);
+        assert_eq!(write.stderr, "");
+        assert_eq!(
+            env.exec("sqlite3 /tmp/db.sqlite \"SELECT x FROM t ORDER BY x\"")
+                .stdout,
+            "1\n2\n"
+        );
+
+        // CTE-prefixed UPDATE
+        let env = bash();
+        env.exec(
+            "sqlite3 /tmp/db.sqlite \"CREATE TABLE t(id INT, val TEXT); INSERT INTO t VALUES(1,'a'),(2,'b')\"",
+        );
+        let write = env.exec(
+            "sqlite3 /tmp/db.sqlite \"WITH ids AS (SELECT 1 AS id) UPDATE t SET val='changed' WHERE id IN (SELECT id FROM ids)\"",
+        );
+        assert_eq!(write.exit_code, 0);
+        assert_eq!(write.stderr, "");
+        assert_eq!(
+            env.exec("sqlite3 /tmp/db.sqlite \"SELECT id, val FROM t ORDER BY id\"")
+                .stdout,
+            "1|changed\n2|b\n"
+        );
+
+        // CTE-prefixed DELETE
+        let env = bash();
+        env.exec(
+            "sqlite3 /tmp/db.sqlite \"CREATE TABLE t(x INT); INSERT INTO t VALUES(1),(2),(3)\"",
+        );
+        let write = env.exec(
+            "sqlite3 /tmp/db.sqlite \"WITH ids AS (SELECT 2 AS x) DELETE FROM t WHERE x IN (SELECT x FROM ids)\"",
+        );
+        assert_eq!(write.exit_code, 0);
+        assert_eq!(write.stderr, "");
+        assert_eq!(
+            env.exec("sqlite3 /tmp/db.sqlite \"SELECT x FROM t ORDER BY x\"")
+                .stdout,
+            "1\n3\n"
+        );
+
+        // Mutating PRAGMA (user_version)
+        let env = bash();
+        env.exec("sqlite3 /tmp/db.sqlite \"CREATE TABLE t(x INT)\"");
+        let write = env.exec("sqlite3 /tmp/db.sqlite \"PRAGMA user_version = 42\"");
+        assert_eq!(write.exit_code, 0);
+        assert_eq!(write.stderr, "");
+        assert_eq!(
+            env.exec("sqlite3 /tmp/db.sqlite \"PRAGMA user_version\"")
+                .stdout,
+            "42\n"
+        );
+
+        // Comment-led INSERT (line comment via stdin)
+        let env = bash();
+        env.exec("sqlite3 /tmp/db.sqlite \"CREATE TABLE t(x INT)\"");
+        let write = env.exec(
+            "printf '%s\\n%s' '-- adding a row' 'INSERT INTO t VALUES(7);' | sqlite3 /tmp/db.sqlite",
+        );
+        assert_eq!(write.exit_code, 0);
+        assert_eq!(write.stderr, "");
+        assert_eq!(
+            env.exec("sqlite3 /tmp/db.sqlite \"SELECT x FROM t\"")
+                .stdout,
+            "7\n"
+        );
+
+        // Comment-led UPDATE (block comment)
+        let env = bash();
+        env.exec(
+            "sqlite3 /tmp/db.sqlite \"CREATE TABLE t(id INT, val TEXT); INSERT INTO t VALUES(1,'a')\"",
+        );
+        let write =
+            env.exec("sqlite3 /tmp/db.sqlite \"/* note */ UPDATE t SET val='b' WHERE id=1\"");
+        assert_eq!(write.exit_code, 0);
+        assert_eq!(write.stderr, "");
+        assert_eq!(
+            env.exec("sqlite3 /tmp/db.sqlite \"SELECT id, val FROM t\"")
+                .stdout,
+            "1|b\n"
+        );
+
+        // Negative control: plain SELECT not marked modified
+        let env = bash();
+        env.exec("sqlite3 /tmp/db.sqlite \"CREATE TABLE t(x INT); INSERT INTO t VALUES(5)\"");
+        let read = env.exec("sqlite3 /tmp/db.sqlite \"SELECT x FROM t\"");
+        assert_eq!(read.exit_code, 0);
+        assert_eq!(read.stdout, "5\n");
+    }
+
+    #[test]
     fn structured_data_jbc37_sqlite3_formatter_and_utf8_rows() {
         let env = Bash::with_options(BashOptions {
             files: BTreeMap::from([(
