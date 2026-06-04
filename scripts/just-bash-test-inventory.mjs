@@ -5071,6 +5071,54 @@ const jbSedTestTsCaseGroups = [
   },
 ];
 
+const r12jbSedCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/sed/sed.test.ts',
+    lines: [696, 707, 866, 875, 884, 895, 904, 915, 924, 933, 958],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sed',
+    rustTest: 'sed_test_ts_zap_list_range_and_branch_rows',
+    notes:
+      'R12JB verifies portable sed cycle-engine rows from sed.test.ts: the z (zap pattern space) command addressed and unaddressed, the l (list with escapes) command (tab/backslash escaping and the end-of-line `$` marker), pattern-range `/START/,/END/d` tracking across lines including multiple independent ranges and an unclosed range deleting through EOF, and the T (branch-if-no-substitution) command. Each assertion mirrors the upstream expectation verbatim.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sed/sed.regex.test.ts',
+    lines: [399],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sed',
+    rustTest: 'sed_jbc_pattern_bracket_literal_close_row',
+    notes:
+      'R12JB verifies the POSIX bracket rule that a `]` appearing first inside a bracket expression is a literal class member, so `s/a[][]b/X/` matches both `a]b` and `a[b`. The regex translation emits the leading `]` as `\\]` for the RE2 engine while preserving POSIX subclass introducers.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sed/sed.errors.test.ts',
+    lines: [202, 211, 218],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sed',
+    rustTest: 'sed_errors_address_command_and_step_rows',
+    notes:
+      'R12JB verifies portable sed address/step-address diagnostics: an `a` command with text runs without error, a step-0 address `1~0d` is handled gracefully (GNU `first~0` matches first-through-EOF), and a negative step address `1~-1d` is rejected with exit code 1.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sed/sed.security.test.ts',
+    lines: [11, 20],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sed',
+    rustTest: 'sed_security_rejects_e_shell_execution_command',
+    notes:
+      'R12JB verifies the sandbox blocks the sed `e` command (shell execution) in both the `e command` and bare `e` (execute pattern space) forms with the "e command (shell execution) is not supported" diagnostic and a non-zero exit, while leaving ordinary substitution working.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sed/sed.limits.test.ts',
+    lines: [16, 26, 37, 47, 79, 90, 163, 175, 183, 193],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sed',
+    rustTest: 'sed_limits_iteration_and_resource_rows',
+    notes:
+      'R12JB verifies sed runaway-compute protection and bounded large-input handling: branch-loop (`:loop; b loop`) and test-loop (`:loop; s/./&/; t loop`) infinite loops hit the 10000-iteration cap and fail with exit code 126 and an "exceeded maximum iterations" message, an unconditional `b; p` completes, and 100k-char global substitution, 1000-line hold-space append, 10k-char buffer exchange, 10k-line step addressing, 100 chained commands, deeply nested `{ { { p } } }` blocks, and `:a; N; ba` accumulation all complete with exit 0. The two execution-limit-option rows (L100, L115) remain pending without runtime executionLimits wiring.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -5493,6 +5541,7 @@ function caseOverrideFor(testCase) {
   const group = [
     ...r10jbCommandAwkCaseGroups,
     ...jbSedTestTsCaseGroups,
+    ...r12jbSedCaseGroups,
     ...jbAliasCaseGroups,
     ...jbInterpreterBuiltinsCaseGroups,
     ...jbR5ParserInterpreterCaseGroups,
