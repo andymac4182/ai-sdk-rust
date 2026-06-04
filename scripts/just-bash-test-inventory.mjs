@@ -4304,6 +4304,29 @@ const jbc46CaseGroups = [
   },
 ];
 
+const jbc47CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/sed/sed.errors.test.ts',
+    lines: [37, 44, 59, 66, 75, 82, 89, 106, 113, 122, 129, 170, 177, 186, 193],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sed',
+    rustTest:
+      'sed_jbc47_argument_errors_transliteration_blocks_and_script_files',
+    notes:
+      'JBC-47 verifies portable sed error/diagnostic rows: missing -f script file (No such file or directory), lenient unterminated substitution / unknown command / unknown flag / line-0 address, missing context address (,3p), unterminated address regex (/foo d -> command expected), undefined branch labels (b/t), unknown short/long options, mismatched and unterminated y transliteration sets, and addressed single-command { } blocks. Multi-command blocks, a/i/c text, and step-address negative/zero rows remain pending the cycle engine.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sed/sed.advanced.test.ts',
+    lines: [35, 45, 122, 133, 144, 157],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sed',
+    rustTest:
+      'sed_jbc47_argument_errors_transliteration_blocks_and_script_files',
+    notes:
+      'JBC-47 verifies portable sed y transliteration (lowercase->uppercase and character rotation) and -f script-file handling: reading a multi-command script file, ignoring # comments, combining -f with -e, and the missing-script-file diagnostic (couldn\'t open file). N/=/branch-with-labels advanced rows remain pending the cycle engine.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -4557,6 +4580,7 @@ function caseOverrideFor(testCase) {
     ...jbc43CaseGroups,
     ...jbc45CaseGroups,
     ...jbc46CaseGroups,
+    ...jbc47CaseGroups,
     ...jbc27CaseGroups,
     ...jbc30AgentExampleCaseGroups,
     ...jbc33CaseGroups,

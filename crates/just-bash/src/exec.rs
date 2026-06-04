@@ -7261,10 +7261,13 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
     let mut ere = false;
     let mut scripts = Vec::new();
     let mut paths = Vec::new();
+    // Tracks whether a script was supplied via `-e`/`-f`. When true, the first
+    // bare operand is a file path rather than the script.
+    let mut script_from_option = false;
     let mut index = 0;
     while let Some(arg) = args.get(index) {
         match arg.as_str() {
-            "-n" => {
+            "-n" | "--quiet" | "--silent" => {
                 quiet = true;
                 index += 1;
             }
@@ -7272,15 +7275,51 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
                 ere = true;
                 index += 1;
             }
-            "-e" => {
+            "-e" | "--expression" => {
                 if let Some(script) = args.get(index + 1) {
                     scripts.push(script.clone());
+                    script_from_option = true;
                     index += 2;
                 } else {
-                    return stderr_result(1, "sed: option requires an argument -- e\n");
+                    return stderr_result(1, "sed: -e: option requires an argument\n");
                 }
             }
-            _ if scripts.is_empty() => {
+            "-f" | "--file" => {
+                let Some(path) = args.get(index + 1) else {
+                    return stderr_result(1, "sed: -f: option requires an argument\n");
+                };
+                match sed_read_script_file(state, path) {
+                    Ok(contents) => {
+                        // GNU sed treats each line of a script file as a separate
+                        // command. Blank lines and `#` comments are ignored.
+                        for line in contents.lines() {
+                            let trimmed = line.trim();
+                            if trimmed.is_empty() || trimmed.starts_with('#') {
+                                continue;
+                            }
+                            scripts.push(trimmed.to_string());
+                        }
+                        script_from_option = true;
+                        index += 2;
+                    }
+                    Err(_) => {
+                        return stderr_result(
+                            1,
+                            format!("sed: couldn't open file {path}: No such file or directory\n"),
+                        );
+                    }
+                }
+            }
+            // Long options we do not implement are reported the way GNU sed does.
+            _ if arg.starts_with("--") => {
+                return stderr_result(1, format!("sed: unrecognized option '{arg}'\n"));
+            }
+            // Unknown single-dash options (e.g. `-z`) are invalid.
+            _ if arg.starts_with('-') && arg.len() > 1 && *arg != "-" => {
+                let flag = arg.chars().nth(1).unwrap_or('-');
+                return stderr_result(1, format!("sed: invalid option -- '{flag}'\n"));
+            }
+            _ if scripts.is_empty() && !script_from_option => {
                 scripts.push(arg.clone());
                 index += 1;
             }
@@ -7291,7 +7330,7 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
         }
     }
     if scripts.is_empty() {
-        return stderr_result(1, "sed: missing script\n");
+        return stderr_result(1, "sed: no script specified\n");
     };
     let input = match collect_text_inputs(state, &paths, stdin) {
         Ok(input) => input,
@@ -7348,6 +7387,22 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
                             .then_some(line)
                     })
                     .collect();
+            }
+            SedCommand::Transliterate { address, from, to } => {
+                let line_count = lines.len();
+                for (line_index, line) in lines.iter_mut().enumerate() {
+                    if !sed_address_matches(address.as_ref(), line_index, line, line_count) {
+                        continue;
+                    }
+                    *line = line
+                        .chars()
+                        .map(|ch| {
+                            from.iter()
+                                .position(|candidate| *candidate == ch)
+                                .map_or(ch, |position| to[position])
+                        })
+                        .collect();
+                }
             }
             SedCommand::Quit { line, print_line } => {
                 // `Nq` auto-prints lines up to and including line N then quits.
@@ -7751,10 +7806,35 @@ enum SedCommand {
         line: usize,
         print_line: bool,
     },
+    /// `y/src/dst/` transliterates each `src[i]` to `dst[i]`.
+    Transliterate {
+        address: Option<SedAddress>,
+        from: Vec<char>,
+        to: Vec<char>,
+    },
 }
 
 fn parse_sed_command(script: &str) -> Result<SedCommand, String> {
     let script = script.trim();
+    // `addr { command }` blocks: when the block body is a single command we
+    // can unwrap it and apply the block address to that command.
+    if let Some(command) = parse_sed_block(script)? {
+        return Ok(command);
+    }
+    // Branch commands `b label` / `t label` / `T label`. Every label referenced
+    // by these commands must be defined by a `:label` somewhere in the script;
+    // a single-command script never defines one, so any label is undefined.
+    if let Some(label) = sed_branch_label(script) {
+        if label.is_empty() {
+            // A bare `b`/`t`/`T` branches to end-of-script and is a no-op here.
+        } else {
+            return Err(format!("undefined label '{label}'"));
+        }
+    }
+    // `y/abc/xyz/` transliteration.
+    if let Some(command) = parse_sed_transliterate(script)? {
+        return Ok(command);
+    }
     // `$q` / `$Q` quit at the last line. `$q` prints every line (auto-print then
     // quits at EOF); `$Q` quits before printing the last line.
     if let Some(prefix) = script.strip_suffix('q')
@@ -7786,11 +7866,17 @@ fn parse_sed_command(script: &str) -> Result<SedCommand, String> {
             print_line: false,
         });
     }
-    if let Some(address) = script.strip_suffix('p').and_then(parse_sed_address) {
-        return Ok(SedCommand::Print(address));
+    if let Some(prefix) = script.strip_suffix('p') {
+        if let Some(address) = parse_sed_address(prefix) {
+            return Ok(SedCommand::Print(address));
+        }
+        sed_address_parse_error(prefix)?;
     }
-    if let Some(address) = script.strip_suffix('d').and_then(parse_sed_address) {
-        return Ok(SedCommand::Delete(address));
+    if let Some(prefix) = script.strip_suffix('d') {
+        if let Some(address) = parse_sed_address(prefix) {
+            return Ok(SedCommand::Delete(address));
+        }
+        sed_address_parse_error(prefix)?;
     }
     let (address, substitution) = split_sed_address_and_command(script);
     let Some((pattern, replacement, flags)) = parse_sed_substitution_parts(&substitution) else {
@@ -7813,6 +7899,120 @@ fn parse_sed_command(script: &str) -> Result<SedCommand, String> {
         ignore_case: flags.contains('i') || flags.contains('I'),
         occurrence,
     })
+}
+
+/// Parse a single-command `addr { command }` block. Returns `Ok(Some(cmd))`
+/// when the script is such a block, `Ok(None)` when it is not a block, and an
+/// error for malformed blocks. The block address is applied to the inner
+/// command (which must be one of the addressable commands we support).
+fn parse_sed_block(script: &str) -> Result<Option<SedCommand>, String> {
+    let Some(open) = script.find('{') else {
+        return Ok(None);
+    };
+    let Some(close_rel) = script.rfind('}') else {
+        return Err("unexpected `,'".to_string());
+    };
+    let address_part = script[..open].trim();
+    let body = script[open + 1..close_rel].trim();
+    // Drop a single trailing `;` that GNU sed allows before the closing brace.
+    let body = body.strip_suffix(';').map_or(body, str::trim);
+    if body.contains(';') || body.contains('{') {
+        // Multi-command blocks need the full cycle engine; not yet supported.
+        return Ok(None);
+    }
+    if address_part.is_empty() || parse_sed_address(address_part).is_none() {
+        return Ok(None);
+    }
+    // Re-attach the address to the inner command and parse it normally.
+    let inner = format!("{address_part}{body}");
+    Ok(parse_sed_command(&inner).ok())
+}
+
+/// Extract the label argument of a `b`/`t`/`T` branch command, if the script is
+/// exactly such a command. Returns `None` for any other command.
+fn sed_branch_label(script: &str) -> Option<String> {
+    let trimmed = script.trim();
+    let mut chars = trimmed.chars();
+    let first = chars.next()?;
+    if !matches!(first, 'b' | 't' | 'T') {
+        return None;
+    }
+    let rest = chars.as_str().trim();
+    // Reject things like `bc/...` substitution-looking scripts: a branch command
+    // is the whole script and the remainder is a bare label token.
+    if rest.contains('/') || rest.contains(';') {
+        return None;
+    }
+    Some(rest.to_string())
+}
+
+/// Parse a `y/from/to/` transliteration command (optionally address-prefixed).
+fn parse_sed_transliterate(script: &str) -> Result<Option<SedCommand>, String> {
+    let trimmed = script.trim();
+    // The `y` command is `[addr]y<delim>src<delim>dst<delim>`. The command
+    // character is `y` either at the very start of the script or immediately
+    // after a parseable address. A bare `y` elsewhere (e.g. inside a
+    // substitution's pattern/replacement) must NOT be treated as the command.
+    let (address_part, rest): (&str, &str) = if trimmed.starts_with('y') {
+        ("", trimmed)
+    } else {
+        let mut split = None;
+        for (idx, ch) in trimmed.char_indices() {
+            if ch == 'y' && parse_sed_address(&trimmed[..idx]).is_some() {
+                split = Some(idx);
+                break;
+            }
+        }
+        match split {
+            Some(idx) => (&trimmed[..idx], &trimmed[idx..]),
+            None => return Ok(None),
+        }
+    };
+    let mut chars = rest.chars();
+    if chars.next() != Some('y') {
+        return Ok(None);
+    }
+    // The character after `y` must be a non-alphanumeric delimiter; otherwise
+    // this is not a transliteration command.
+    let Some(delim) = chars.next() else {
+        return Ok(None);
+    };
+    if delim.is_alphanumeric() {
+        return Ok(None);
+    }
+    let remainder = chars.as_str();
+    // Split on unescaped delimiters into exactly two segments plus trailing.
+    let parts: Vec<&str> = remainder.splitn(3, delim).collect();
+    if parts.len() < 3 {
+        return Err("unterminated transliteration source".to_string());
+    }
+    let from: Vec<char> = parts[0].chars().collect();
+    let to: Vec<char> = parts[1].chars().collect();
+    if from.len() != to.len() {
+        return Err("transliteration sets must have same length".to_string());
+    }
+    let address = if address_part.trim().is_empty() {
+        None
+    } else {
+        Some(parse_sed_address(address_part).ok_or_else(|| "command expected".to_string())?)
+    };
+    Ok(Some(SedCommand::Transliterate { address, from, to }))
+}
+
+/// Map a failed address parse to the appropriate GNU sed diagnostic. A leading
+/// comma (e.g. `,3`) means a context address with a missing start; anything
+/// else that looks like an unterminated pattern means a command was expected.
+fn sed_address_parse_error(prefix: &str) -> Result<(), String> {
+    let trimmed = prefix.trim();
+    if trimmed.starts_with(',') {
+        return Err("expected context address".to_string());
+    }
+    if trimmed.starts_with('/') && !trimmed.ends_with('/') {
+        // e.g. `/foo d` — the address regex is unterminated, so sed never finds
+        // the command character.
+        return Err("command expected".to_string());
+    }
+    Ok(())
 }
 
 fn sed_replacement_to_regex(replacement: &str) -> String {
@@ -20075,6 +20275,14 @@ fn collect_named_text_inputs(
         inputs.push(NamedTextInput { label: path, text });
     }
     Ok(inputs)
+}
+
+/// Read a `-f` sed script file from the virtual filesystem, resolving it
+/// relative to the current working directory.
+fn sed_read_script_file(state: &ExecState<'_>, path: &str) -> Result<String, ()> {
+    let resolved = resolve_path(&state.cwd, path);
+    let fs = state.session.inner.fs.lock().map_err(|_| ())?;
+    fs.read_file(&resolved).map_err(|_| ())
 }
 
 fn collect_text_inputs(
