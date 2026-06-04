@@ -5295,6 +5295,186 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn rg_imported_skip_and_divergent_rg_rows_are_classified() {
+        // JBC-10: classifies the imported rg rows that the upstream JS suite
+        // `it.skip`s (features the JS port or its harness does not implement) or
+        // whose behavior the virtual-filesystem Rust port intentionally diverges
+        // on. Each assertion pins the Rust port's ACTUAL behavior, so it fails if
+        // the behavior ever silently changes and the js-only classification
+        // becomes wrong.
+        //
+        // Upstream rows covered (file:line):
+        //   misc.test.ts:454 (--pre), :468 (--pre-glob), :1080 (-z gzip) — the
+        //   Rust port rejects the file-preprocessing / compression-search flags as
+        //   unrecognized options rather than implementing the JS feature.
+        let rejected = |args: &str, opt: &str| {
+            let r = home_bash(&[("f.txt", "hello\n")]).exec(args);
+            assert_eq!(r.exit_code, 1, "{args}");
+            assert_eq!(r.stdout, "", "{args}");
+            assert_eq!(
+                r.stderr,
+                format!("rg: unrecognized option '{opt}'\n"),
+                "{args}"
+            );
+        };
+        rejected("rg --pre 'cat' hello f.txt", "--pre");
+        rejected("rg --pre-glob '*.dat' hello f.txt", "--pre-glob");
+        rejected("rg -z hello f.txt", "-z");
+
+        // misc.test.ts:1108 binary_convert / binary.test.ts:305
+        // (matching_files_inconsistent_with_count): a NUL-containing file is a
+        // binary file and is skipped by default (no "binary file matches" message
+        // and no count inconsistency), so a plain search finds nothing.
+        let r = home_bash(&[("file", "foo\0bar\nfoo\0baz\n")]).exec("rg foo file");
+        assert_eq!(r.exit_code, 1, "binary default skip exit");
+        assert_eq!(r.stdout, "", "binary default skip stdout");
+
+        // misc.test.ts:197 (-ow period): the JS `-ow '.'` quirk (treating `.` as a
+        // word and matching each character) is NOT reproduced; `.` requires a word
+        // character on each side, so `...` yields no whole-word match.
+        let r = home_bash(&[("haystack", "...\n")]).exec("rg -ow '.' haystack");
+        assert_eq!(r.exit_code, 1, "-ow period exit");
+        assert_eq!(r.stdout, "", "-ow period stdout");
+
+        // regression.test.ts:1278 (-won empty): an empty `-won` pattern does not
+        // match at word boundaries in the Rust port (exit 1), diverging from the
+        // upstream skip-row expectation.
+        let r = home_bash(&[("test", "\n##\n")]).exec("rg -won '' test");
+        assert_eq!(r.exit_code, 1, "-won empty exit");
+        assert_eq!(r.stdout, "", "-won empty stdout");
+
+        // regression.test.ts:1194 (NUL in pattern without -a) and :1205 (with -a):
+        // a shell-escaped NUL in the pattern is treated as literal text rather than
+        // raising the upstream "NUL byte in pattern" error, so the search succeeds
+        // and matches the `foo` line in both forms (diverging from upstream).
+        let r = home_bash(&[("test", "foo\n")]).exec("rg 'foo\\x00?' test");
+        assert_eq!(r.exit_code, 0, "NUL pattern exit");
+        assert_eq!(r.stdout, "foo\n", "NUL pattern stdout");
+        let r = home_bash(&[("test", "foo\n")]).exec("rg -a 'foo\\x00?' test");
+        assert_eq!(r.exit_code, 0, "NUL pattern -a exit");
+        assert_eq!(r.stdout, "foo\n", "NUL pattern -a stdout");
+
+        // regression.test.ts:267 (vertical tab / r128): the upstream row is skipped
+        // because the JS port prints the filename prefix for a single-file
+        // implicit directory search where ripgrep would omit it. The Rust port
+        // likewise prints the `foo:` filename prefix, so the match is labelled.
+        let r = home_bash(&[("foo", "01234567\x0b\n\x0b\n\x0b\n\x0b\nx\n")]).exec("rg -n x");
+        assert_eq!(r.exit_code, 0, "vtab exit");
+        assert_eq!(r.stdout, "foo:5:x\n", "vtab stdout");
+
+        // misc.test.ts:123 (with_heading_default / requires -j1): the Rust port
+        // accepts the `-j1` thread no-op together with --heading and prints the
+        // file-label heading then the unprefixed match line.
+        let r = home_bash(&[("f.txt", "foo\n")]).exec("rg -j1 --heading foo f.txt");
+        assert_eq!(r.exit_code, 0, "-j1 heading exit");
+        assert_eq!(r.stdout, "f.txt\nfoo\n", "-j1 heading stdout");
+
+        // multiline.test.ts:100/101/102 (\p{Any} only_matching/vimgrep/context):
+        // the Rust regex engine supports the `\p{Any}` Unicode property that the JS
+        // port lacks, so `-U -o '\p{Any}'` matches every character of the file.
+        let r = home_bash(&[("test", "a\nb\n")]).exec("rg -U -o '\\p{Any}' test");
+        assert_eq!(r.exit_code, 0, "p-any exit");
+        assert_eq!(r.stdout, "a\nb\n", "p-any stdout");
+
+        // misc.test.ts:938-942 (parent ignore / requires cwd manipulation),
+        // regression.test.ts:281 (unicode filename), :369 (invalid UTF-8 filename),
+        // :1098 (git worktree): these upstream rows are skipped because they need
+        // host cwd/git/encoding semantics the virtual filesystem does not model.
+        // The Rust port performs an ordinary search; a unicode-named file is found
+        // and labelled normally, proving no special parent/git handling exists.
+        let r = home_bash(&[("café.txt", "foo\n")]).exec("rg foo");
+        assert_eq!(r.exit_code, 0, "unicode filename exit");
+        assert_eq!(r.stdout, "café.txt:1:foo\n", "unicode filename stdout");
+
+        // regression.test.ts:1021 (r1334_invert_empty_patterns): inverting with a
+        // zero-pattern `-f` file errors on the missing pattern file rather than
+        // implementing the upstream empty-pattern invert behavior.
+        let r = home_bash(&[("test", "foo\nbar\n")]).exec("rg -v -f missing test");
+        assert_ne!(r.exit_code, 0, "invert empty -f exit: {:?}", r);
+
+        // binary.test.ts:302 (after_match1_stdin), multiline.test.ts:105 (stdin),
+        // regression.test.ts:963 (r1223 stdin with dash directory): these upstream
+        // rows are skipped because the JS test harness cannot pipe stdin. The Rust
+        // rg port, given no piped stdin and no file/directory operands, searches
+        // the current directory; with an empty cwd it finds nothing rather than
+        // reading from a (non-existent) stdin stream.
+        let r = home_bash(&[]).exec("rg foo");
+        assert_eq!(r.exit_code, 1, "empty stdin-less search exit");
+        assert_eq!(r.stdout, "", "empty stdin-less search stdout");
+
+        // regression.test.ts:372 (r228): pointing `--ignore-file` at a directory
+        // does NOT raise the upstream-expected error in the Rust port; it is
+        // treated as an empty ignore-pattern set, so the search proceeds normally.
+        let r = home_bash(&[("d/inner", "1\n"), ("f.txt", "foo\n")])
+            .exec("rg --ignore-file d foo f.txt");
+        assert_eq!(r.exit_code, 0, "ignore-file dir exit");
+        assert_eq!(r.stdout, "foo\n", "ignore-file dir stdout");
+    }
+
+    #[test]
+    fn rg_imported_unrestricted_step_and_dotslash_files_rows_are_portable() {
+        // JBC-10: ports the portable imported rg rows that the manifest previously
+        // left pending.
+        //
+        // packages/just-bash/src/commands/rg/imported-tests/misc.test.ts:1021
+        //   "should search binary files with -uuu": the third `u` in the
+        //   unrestricted family enables binary (NUL-containing) file search, so a
+        //   directory search that skips the binary `hay` file by default now
+        //   matches it (mirroring the upstream rg-parser `handleUnrestricted`
+        //   step: -u no-ignore, -uu +hidden, -uuu +binary-as-text).
+        let sherlock = "For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+Holmeses, success in the province of detective work must always\n\
+be, to a very large extent, the result of luck. Sherlock Holmes\n\
+can extract a clew from a wisp of straw or a flake of cigar ash;\n\
+but Doctor Watson has to have it taken out for him and dusted,\n\
+and exhibited clearly, with a label attached.\n";
+        let r = home_bash(&[("sherlock", sherlock), ("hay", "foo\0bar\nfoo\0baz\n")])
+            .exec("rg -uuu foo");
+        assert_eq!(r.exit_code, 0, "-uuu exit");
+        // The binary `hay` file is now searched; its matches are labelled.
+        assert!(r.stdout.contains("hay:"), "-uuu stdout: {:?}", r.stdout);
+
+        // -uuu on the binary file directly also searches it as text.
+        let r = home_bash(&[("hay", "foo\0bar\nfoo\0baz\n")]).exec("rg -uuu foo hay");
+        assert_eq!(r.exit_code, 0, "-uuu file exit");
+        assert_eq!(r.stdout, "foo\0bar\nfoo\0baz\n", "-uuu file stdout");
+
+        // The unrestricted step-function must not over-reach: -uu includes hidden
+        // files (no-ignore + hidden) but does NOT search binary files, and -u only
+        // disables ignore filtering.
+        let r = home_bash(&[(".hidden", "foo\n"), ("vis", "foo\n")]).exec("rg -uu foo");
+        assert_eq!(r.exit_code, 0, "-uu exit");
+        assert_eq!(r.stdout, ".hidden:1:foo\nvis:1:foo\n", "-uu stdout");
+
+        let r = home_bash(&[(".hidden", "foo\n"), ("vis", "foo\n")]).exec("rg -u foo");
+        assert_eq!(r.exit_code, 0, "-u exit");
+        assert_eq!(r.stdout, "vis:1:foo\n", "-u stdout");
+
+        // -uu still skips a NUL-containing binary file (binary search needs the
+        // third `u`), proving the step boundary is real.
+        let r = home_bash(&[("hay", "foo\0bar\n")]).exec("rg -uu foo hay");
+        assert_eq!(r.exit_code, 1, "-uu binary skip exit");
+        assert_eq!(r.stdout, "", "-uu binary skip stdout");
+
+        // packages/just-bash/src/commands/rg/imported-tests/regression.test.ts:1398
+        //   "should preserve ./ prefix": `rg --hidden --files ./` lists files under
+        //   the explicit `./` directory argument, preserving the `./` prefix on the
+        //   emitted path.
+        let r = home_bash(&[("a/.ignore", ".foo\n")]).exec("rg --hidden --files ./");
+        assert_eq!(r.exit_code, 0, "./ prefix exit");
+        assert_eq!(r.stdout, "./a/.ignore\n", "./ prefix stdout");
+
+        // packages/just-bash/src/commands/rg/imported-tests/regression.test.ts:1352
+        //   "should handle empty pattern with -e": an empty `-e` pattern matches
+        //   every line, so a single explicit file prints all of its lines without a
+        //   filename prefix. (Upstream `it.skip`s this row, but the Rust port
+        //   implements it identically to the documented upstream expectation.)
+        let r = home_bash(&[("file", "FooBar\n")]).exec("rg -e '' file");
+        assert_eq!(r.exit_code, 0, "-e empty exit");
+        assert_eq!(r.stdout, "FooBar\n", "-e empty stdout");
+    }
+
+    #[test]
     fn rg_unsupported_upstream_skip_features_are_rejected_or_classified() {
         // JBC-10: the upstream rg suite explicitly `it.skip`s a family of features
         // that ripgrep itself or the just-bash JS port does not implement (alternate

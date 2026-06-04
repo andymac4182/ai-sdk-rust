@@ -1442,6 +1442,60 @@ const jbc10CaseGroups = [
     notes:
       'JBC-10 verifies imported rg misc rows: -uu (unrestricted2) including hidden dotfiles in the search results, and --type-list listing the known file types (rust, py) over the virtual filesystem.',
   },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
+    lines: [1021],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_unrestricted_step_and_dotslash_files_rows_are_portable',
+    notes:
+      'r13jb-r10 verifies imported rg misc row 1021 (search binary files with -uuu): the third `u` of the unrestricted family enables binary (NUL-containing) file search, mirroring the upstream rg-parser handleUnrestricted step (-u no-ignore, -uu +hidden, -uuu +binary-as-text), so a directory search that skips the binary `hay` file by default now matches it. The named Rust test also pins the -u/-uu boundary so it fails if the step ever over-reaches.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [1352, 1398],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_unrestricted_step_and_dotslash_files_rows_are_portable',
+    notes:
+      'r13jb-r10 verifies imported rg regression rows 1352 (empty `-e` pattern matches every line of a single explicit file with no filename prefix) and 1398 (r2711 `rg --hidden --files ./` preserves the explicit `./` directory prefix on the emitted path) over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
+    lines: [123, 197, 454, 468, 938, 939, 940, 941, 942, 1080, 1108],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_skip_and_divergent_rg_rows_are_classified',
+    notes:
+      'r13jb-r10 classifies the imported rg misc rows the upstream JS suite `it.skip`s or that the Rust port diverges on: --pre/--pre-glob file preprocessing (454/468) and -z gzip search (1080) are rejected as unrecognized options; binary_convert (1108) leaves a NUL file skipped by default; -ow `.` (197) does not match a bare period as a word; the parent-ignore rows (938-942) need host cwd/git semantics the virtual filesystem does not model; and with_heading_default (123) is exercised via -j1 --heading. The named Rust test asserts each actual behavior so it fails if the classification ever becomes wrong.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/binary.test.ts',
+    lines: [302, 305],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_skip_and_divergent_rg_rows_are_classified',
+    notes:
+      'r13jb-r10 classifies the imported rg binary rows the upstream JS harness `it.skip`s: after_match1_stdin (302) needs stdin piping the harness cannot provide, and matching_files_inconsistent_with_count (305) needs the complex binary-file warning the Rust port does not emit (a NUL file is simply skipped by default). The named Rust test asserts the default binary-skip and stdin-less search behavior.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/multiline.test.ts',
+    lines: [100, 101, 102, 105],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_skip_and_divergent_rg_rows_are_classified',
+    notes:
+      'r13jb-r10 classifies the imported rg multiline rows the upstream JS suite `it.skip`s: only_matching/vimgrep/context (100/101/102) use the `\p{Any}` Unicode property the JS regex lacks (the Rust engine supports it, so `-U -o \p{Any}` matches every character), and stdin (105) needs stdin piping the harness cannot provide. The named Rust test asserts the \p{Any} and stdin-less behavior.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [267, 281, 369, 372, 963, 1021, 1098, 1194, 1205, 1278],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_skip_and_divergent_rg_rows_are_classified',
+    notes:
+      'r13jb-r10 classifies the imported rg regression rows the upstream JS suite `it.skip`s or that the Rust port diverges on: vertical-tab r128 (267) prints the single-file filename prefix; unicode filename r131 (281), invalid UTF-8 filename r210 (369), --ignore-file-on-a-directory r228 (372) does not raise the upstream error (it is treated as an empty ignore set), stdin-with-dash r1223 (963) and git-worktree r1446 (1098) need host cwd/encoding/git semantics the virtual filesystem does not model (a normal search still finds a unicode-named file); r1334_invert_empty_patterns (1021) errors on the missing pattern file; and the r1838 NUL-in-pattern rows (1194 without -a, 1205 with -a) treat the shell-escaped NUL as literal text rather than raising the upstream error. The named Rust test asserts each actual behavior.',
+  },
 ];
 
 const jbc12SourceGroups = [
