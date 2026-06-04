@@ -15402,4 +15402,168 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
             "__proto__ constructor\n"
         );
     }
+
+    /// Closes the portable `sqlite3.parsing.test.ts` rows. Upstream exercises the
+    /// SQL statement splitter (semicolons inside quotes / doubled-quote escapes),
+    /// quoted-value handling, set-op + subquery edge cases, and result-set
+    /// shaping over the in-memory engine. Each assertion fails if the parser,
+    /// `''` unescaping, UNION/subquery/ORDER BY, or CASE evaluation regresses.
+    #[test]
+    fn structured_data_sqlite3_sql_parsing_and_result_set_rows() {
+        let env = bash();
+
+        // statement splitting :6,:26 — semicolons inside single-quoted strings
+        // must not split the statement.
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"CREATE TABLE t(x); INSERT INTO t VALUES('a;b'); SELECT * FROM t\"")
+                .stdout,
+            "a;b\n"
+        );
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"CREATE TABLE t(x); INSERT INTO t VALUES('a;b;c;d'); SELECT * FROM t\"")
+                .stdout,
+            "a;b;c;d\n"
+        );
+        // :35 statement without trailing semicolon
+        assert_eq!(env.exec("sqlite3 :memory: \"SELECT 1\"").stdout, "1\n");
+        // :42 empty statements (multiple semicolons)
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"SELECT 1;;; SELECT 2\"").stdout,
+            "1\n2\n"
+        );
+        // :49 whitespace-only (incl. newline) between statements
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"SELECT 1;   \n   SELECT 2\"")
+                .stdout,
+            "1\n2\n"
+        );
+        // :58 SQL doubled-quote escaping with embedded semicolon
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"CREATE TABLE t(x); INSERT INTO t VALUES('it''s;weird'); SELECT * FROM t\"")
+                .stdout,
+            "it's;weird\n"
+        );
+        // :68 multiple doubled quotes with semicolon inside
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"CREATE TABLE t(x); INSERT INTO t VALUES('a''b;c''d'); SELECT * FROM t\"")
+                .stdout,
+            "a'b;c'd\n"
+        );
+        // :78 doubled quote at end of string followed by semicolon
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"CREATE TABLE t(x); INSERT INTO t VALUES('test'''); SELECT * FROM t\"")
+                .stdout,
+            "test'\n"
+        );
+        // :90 escaped single quotes in SQLite style
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"CREATE TABLE t(x); INSERT INTO t VALUES('it''s'); SELECT * FROM t\"")
+                .stdout,
+            "it's\n"
+        );
+        // :99 empty string value
+        assert_eq!(
+            env.exec(
+                "sqlite3 :memory: \"CREATE TABLE t(x); INSERT INTO t VALUES(''); SELECT * FROM t\""
+            )
+            .stdout,
+            "\n"
+        );
+        // :108 string value containing newlines
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"CREATE TABLE t(x); INSERT INTO t VALUES('line1\nline2'); SELECT * FROM t\"")
+                .stdout,
+            "line1\nline2\n"
+        );
+        // :119 single statement
+        assert_eq!(env.exec("sqlite3 :memory: \"SELECT 42\"").stdout, "42\n");
+        // :126 many statements
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"SELECT 1; SELECT 2; SELECT 3; SELECT 4; SELECT 5\"")
+                .stdout,
+            "1\n2\n3\n4\n5\n"
+        );
+        // :135 complex query with subquery in FROM, UNION dedupe and ORDER BY
+        assert_eq!(
+            env.exec(
+                "sqlite3 :memory: \"SELECT * FROM (SELECT 1 as x UNION SELECT 2) ORDER BY x\""
+            )
+            .stdout,
+            "1\n2\n"
+        );
+        // :144 constant CASE expression
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"SELECT CASE WHEN 1=1 THEN 'yes' ELSE 'no' END\"")
+                .stdout,
+            "yes\n"
+        );
+        // :155 empty result set prints nothing
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"CREATE TABLE t(x); SELECT * FROM t\"")
+                .stdout,
+            ""
+        );
+        // :164 -header still prints the header row for an empty result set
+        assert_eq!(
+            env.exec("sqlite3 -header :memory: \"CREATE TABLE t(a INT, b TEXT); SELECT * FROM t\"")
+                .stdout,
+            "a|b\n"
+        );
+        // :173 single-column projection
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"CREATE TABLE t(x); INSERT INTO t VALUES(1),(2); SELECT x FROM t\"")
+                .stdout,
+            "1\n2\n"
+        );
+        // :182 many columns joined by the list separator
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"SELECT 1,2,3,4,5,6,7,8,9,10\"")
+                .stdout,
+            "1|2|3|4|5|6|7|8|9|10\n"
+        );
+        // :191 single aliased row
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"SELECT 42 as answer\"").stdout,
+            "42\n"
+        );
+    }
+
+    /// Closes the portable `sqlite3.test.ts` unknown-option and REAL-precision
+    /// rows plus the matching `sqlite3.formatters.test.ts` line-mode rows.
+    #[test]
+    fn structured_data_sqlite3_unknown_option_real_precision_and_line_mode_rows() {
+        let env = bash();
+
+        // sqlite3.test.ts:98 unknown option emits the exact diagnostic + exit 1.
+        let unknown = env.exec("sqlite3 -unknown :memory: \"SELECT 1\"");
+        assert_eq!(
+            unknown.stderr,
+            "sqlite3: Error: unknown option: -unknown\nUse -help for a list of options.\n"
+        );
+        assert_eq!(unknown.exit_code, 1);
+
+        // sqlite3.test.ts:127 REAL values render with full IEEE-754 precision in
+        // -json (3.14 -> 3.1400000000000001), integers stay integral.
+        assert_eq!(
+            env.exec("sqlite3 -json :memory: \"CREATE TABLE t(i INT, f REAL); INSERT INTO t VALUES(42, 3.14); SELECT * FROM t\"")
+                .stdout,
+            "[{\"i\":42,\"f\":3.1400000000000001}]\n"
+        );
+
+        // sqlite3.formatters.test.ts:126 line mode right-aligns column names to a
+        // minimum width of 5 with the "=" at a constant offset.
+        let aligned = env.exec("sqlite3 -line :memory: \"SELECT 1 as aa, 2 as bbbb\"");
+        let lines: Vec<&str> = aligned.stdout.lines().filter(|l| !l.is_empty()).collect();
+        assert!(aligned.stdout.contains("aa = 1"));
+        assert!(aligned.stdout.contains("bbbb = 2"));
+        assert_eq!(lines[0].find('='), lines[1].find('='));
+
+        // sqlite3.formatters.test.ts:143 multiple rows in line mode are separated
+        // by a blank line.
+        assert_eq!(
+            env.exec("sqlite3 -line :memory: \"SELECT 1 as x UNION SELECT 2\"")
+                .stdout,
+            "    x = 1\n\n    x = 2\n"
+        );
+    }
 }

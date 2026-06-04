@@ -3346,6 +3346,38 @@ const jbc24CaseGroups = [
   },
 ];
 
+const r11jbSqlite3CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.parsing.test.ts',
+    lines: [
+      6, 26, 35, 42, 49, 58, 68, 78, 90, 99, 108, 119, 126, 135, 144, 155, 164, 173, 182, 191,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_sqlite3_sql_parsing_and_result_set_rows',
+    notes:
+      'R11-JB verifies the portable sqlite3 SQL statement splitter (semicolons inside single quotes and doubled-quote escapes), quoted/empty/newline values, set-op + subquery-in-FROM + ORDER BY, constant CASE evaluation, and result-set shaping over the in-memory engine.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.test.ts',
+    lines: [98, 127],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_sqlite3_unknown_option_real_precision_and_line_mode_rows',
+    notes:
+      'R11-JB verifies the portable sqlite3 unknown-option diagnostic with exit 1 and full IEEE-754 REAL precision in -json output (3.14 -> 3.1400000000000001).',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.formatters.test.ts',
+    lines: [126, 143],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_sqlite3_unknown_option_real_precision_and_line_mode_rows',
+    notes:
+      'R11-JB verifies portable sqlite3 line-mode column-name right-alignment (minimum width 5) and the blank-line row separator across multiple result rows.',
+  },
+];
+
 const jbc25CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/awk/awk.test.ts',
@@ -5364,6 +5396,7 @@ function caseOverrideFor(testCase) {
     ...jbR11JbGrepGlobBinaryCaseGroups,
     ...jbc36CaseGroups,
     ...jbc24CaseGroups,
+    ...r11jbSqlite3CaseGroups,
     ...jbc25CaseGroups,
     ...jbc35CaseGroups,
     ...jbc42CaseGroups,
