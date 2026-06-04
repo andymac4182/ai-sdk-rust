@@ -3505,6 +3505,54 @@ const r11jbSqlite3CaseGroups = [
   },
 ];
 
+const r13jbSqlite3WriteOpsCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.write-ops.test.ts',
+    lines: [6, 15, 26, 35, 46, 55, 66, 75, 86, 95, 106, 116, 128, 140],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sqlite3',
+    rustTest: 'structured_data_jbc49_sqlite3_write_ops_and_file_persistence_rows',
+    notes:
+      'JBC-49 verifies the portable sqlite3 in-memory SQL engine for UPDATE (with/without WHERE), DELETE (specific/all rows), DROP TABLE (and post-drop no-such-table error), ALTER TABLE RENAME/ADD COLUMN with DEFAULT, REPLACE INTO upsert on the primary key, and file-backed persistence of UPDATE/DELETE/DROP plus first-write database creation through the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.writeback-edge-cases.test.ts',
+    lines: [26, 45, 65, 85, 100, 117, 137],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sqlite3',
+    rustTest: 'structured_data_jbc49_sqlite3_write_ops_and_file_persistence_rows',
+    notes:
+      'JBC-49 verifies the portable sqlite3 writeback gate classifies non-prefixed mutations as writes so they persist: CTE-prefixed INSERT/UPDATE/DELETE (WITH ... resolved against temporary tables and IN-subquery WHERE), a mutating PRAGMA user_version assignment, comment-led INSERT (line comment via stdin) and UPDATE (block comment), while a plain SELECT stays read-only and is not written back.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.test.ts',
+    lines: [51, 61],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sqlite3',
+    rustTest: 'structured_data_jbc49_sqlite3_write_ops_and_file_persistence_rows',
+    notes:
+      'JBC-49 verifies portable sqlite3 file operations create and read a database file and persist multiple INSERTs across separate invocations through the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.options.test.ts',
+    lines: [101],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sqlite3',
+    rustTest: 'structured_data_jbc49_sqlite3_write_ops_and_file_persistence_rows',
+    notes:
+      'JBC-49 verifies portable sqlite3 -readonly suppresses writeback so mutations applied under -readonly are not persisted to the database file.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.parsing.test.ts',
+    lines: [15],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sqlite3',
+    rustTest: 'structured_data_jbc49_sqlite3_write_ops_and_file_persistence_rows',
+    notes:
+      'JBC-49 verifies the portable sqlite3 statement splitter keeps a semicolon inside a double-quoted identifier as part of that identifier rather than treating it as a statement terminator.',
+  },
+];
+
 const jbc25CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/awk/awk.test.ts',
@@ -5832,6 +5880,7 @@ function caseOverrideFor(testCase) {
     ...jbc36CaseGroups,
     ...jbc24CaseGroups,
     ...r11jbSqlite3CaseGroups,
+    ...r13jbSqlite3WriteOpsCaseGroups,
     ...jbc25CaseGroups,
     ...jbc35CaseGroups,
     ...jbc42CaseGroups,
