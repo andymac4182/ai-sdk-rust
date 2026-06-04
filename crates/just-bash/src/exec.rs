@@ -2601,6 +2601,31 @@ impl LineMatcher {
             } => fixed_line_matches(line, pattern, *ignore_case, *word_regexp, *line_regexp),
         }
     }
+
+    /// Match spans within `line` as `(start_char, end_char, text)` triples. The
+    /// offsets are character indices (matching the JS `match.index`/`match[0]`
+    /// semantics upstream uses for `--json` submatches).
+    fn match_ranges(&self, line: &str) -> Vec<(usize, usize, String)> {
+        let byte_to_char = |byte: usize| line[..byte].chars().count();
+        match self {
+            Self::Regex(regex) => regex
+                .find_iter(line)
+                .map(|matched| {
+                    (
+                        byte_to_char(matched.start()),
+                        byte_to_char(matched.end()),
+                        matched.as_str().to_string(),
+                    )
+                })
+                .collect(),
+            Self::Fixed {
+                pattern,
+                ignore_case,
+                word_regexp,
+                line_regexp,
+            } => fixed_line_match_ranges(line, pattern, *ignore_case, *word_regexp, *line_regexp),
+        }
+    }
 }
 
 fn normalize_grep_regex(pattern: &str, mode: GrepMode) -> String {
@@ -2869,6 +2894,61 @@ fn fixed_line_matches(
                     .is_none_or(|ch| !is_word_char(ch)))
         {
             matches.push(line[start..end].to_string());
+        }
+        offset = end;
+    }
+    matches
+}
+
+/// Like `fixed_line_matches` but returns each match span as
+/// `(start_char, end_char, text)` for `--json` submatch reporting.
+fn fixed_line_match_ranges(
+    line: &str,
+    pattern: &str,
+    ignore_case: bool,
+    word_regexp: bool,
+    line_regexp: bool,
+) -> Vec<(usize, usize, String)> {
+    if !fixed_line_match(line, pattern, ignore_case, word_regexp, line_regexp) {
+        return Vec::new();
+    }
+    if line_regexp {
+        return vec![(0, line.chars().count(), line.to_string())];
+    }
+    let haystack = if ignore_case {
+        line.to_ascii_lowercase()
+    } else {
+        line.to_string()
+    };
+    let needle = if ignore_case {
+        pattern.to_ascii_lowercase()
+    } else {
+        pattern.to_string()
+    };
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let byte_to_char = |byte: usize| line[..byte].chars().count();
+    let mut matches = Vec::new();
+    let mut offset = 0;
+    while let Some(index) = haystack[offset..].find(&needle) {
+        let start = offset + index;
+        let end = start + needle.len();
+        if !word_regexp
+            || (line[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !is_word_char(ch))
+                && line[end..]
+                    .chars()
+                    .next()
+                    .is_none_or(|ch| !is_word_char(ch)))
+        {
+            matches.push((
+                byte_to_char(start),
+                byte_to_char(end),
+                line[start..end].to_string(),
+            ));
         }
         offset = end;
     }
@@ -6326,6 +6406,10 @@ fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
         Err(result) => return result,
     };
 
+    if let Some(error) = rg_validate_globs(&request.options.globs) {
+        return stderr_result(1, error);
+    }
+
     if request.options.files {
         return command_rg_files(state, &request);
     }
@@ -6389,6 +6473,10 @@ fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
         }
     };
 
+    if request.options.json {
+        return rg_render_json(&request, &matchers, &inputs);
+    }
+
     rg_render_search(&request, &matchers, &inputs)
 }
 
@@ -6436,6 +6524,7 @@ struct RgOptions {
     type_adds: Vec<String>,
     ignore_files: Vec<String>,
     stats: bool,
+    json: bool,
     explicit_after: Option<usize>,
     explicit_before: Option<usize>,
     explicit_context: Option<usize>,
@@ -6478,6 +6567,7 @@ impl Default for RgOptions {
             type_adds: Vec::new(),
             ignore_files: Vec::new(),
             stats: false,
+            json: false,
             explicit_after: None,
             explicit_before: None,
             explicit_context: None,
@@ -6600,6 +6690,7 @@ fn parse_rg_option(
         "--follow" => options.follow_symlinks = true,
         "--include-zero" => options.include_zero = true,
         "--heading" => options.heading = true,
+        "--json" => options.json = true,
         "--stats" => options.stats = true,
         "--ignore-file" => {
             options
@@ -6787,7 +6878,9 @@ fn parse_rg_option(
         _ if arg.starts_with("-T") && arg.len() > 2 => {
             options.type_excludes.push(arg[2..].to_string());
         }
-        _ if arg.starts_with('-') => parse_rg_short_flags(args, index, options)?,
+        _ if arg.starts_with('-') => {
+            parse_rg_short_flags(args, index, options, patterns, pattern_files)?
+        }
         _ => {}
     }
     *index += 1;
@@ -6798,11 +6891,31 @@ fn parse_rg_short_flags(
     args: &[String],
     index: &mut usize,
     options: &mut RgOptions,
+    patterns: &mut Vec<String>,
+    pattern_files: &mut Vec<String>,
 ) -> Result<(), CommandResult> {
     let arg = args[*index].clone();
     let mut unrestricted = 0;
     let mut chars = arg[1..].chars().peekable();
     while let Some(flag) = chars.next() {
+        // Value-taking flags inside a bundled group (e.g. `-Ff patterns`,
+        // `-Ne pat`, `-ng glob`). ripgrep treats the remaining characters as the
+        // attached value, or consumes the next positional argument when the flag
+        // is the last char of the group.
+        if matches!(flag, 'f' | 'e' | 'g') {
+            let value: String = if chars.peek().is_some() {
+                chars.collect()
+            } else {
+                rg_option_value(args, index, &format!("-{flag}"))?
+            };
+            match flag {
+                'f' => pattern_files.push(value),
+                'e' => patterns.push(value),
+                'g' => options.globs.push(value),
+                _ => unreachable!(),
+            }
+            break;
+        }
         // `-j`/threads is a ripgrep compatibility flag: it consumes a value but
         // is intentionally ignored. When bundled (e.g. `-Iij 4`) it must be the
         // last flag in the group, taking the following positional as its value.
@@ -6993,17 +7106,39 @@ fn rg_inputs(state: &ExecState<'_>, request: &RgRequest) -> Result<Vec<RgInput>,
                     root: &root,
                     path: &root,
                     explicit_file: true,
+                    display_override: None,
                 },
             );
             continue;
         }
+        // When the search root itself is a symlink to a directory, ripgrep under
+        // -L/--follow walks the symlink target but labels every hit beneath the
+        // symlink path the user supplied (regression r256). Resolve the target so
+        // its stored files are enumerable, and remember the prefix to relabel.
+        let mut real_root = root.clone();
+        if request.options.follow_symlinks {
+            if let Ok(link_stat) = fs.lstat(&root) {
+                if link_stat.is_symbolic_link {
+                    if let Ok(resolved) = fs.realpath(&root) {
+                        real_root = resolved;
+                    }
+                }
+            }
+        }
         let mut paths = fs
             .get_all_paths()
             .into_iter()
-            .filter(|path| path.starts_with(&format!("{root}/")))
+            .filter(|path| path.starts_with(&format!("{real_root}/")))
             .collect::<Vec<_>>();
         paths.sort();
-        for path in paths {
+        for path in &paths {
+            // Relabel a symlinked-root walk back under the user-supplied root.
+            let display_override = if real_root != root {
+                path.strip_prefix(&real_root)
+                    .map(|rest| relative_display_path(&state.cwd, &format!("{root}{rest}")))
+            } else {
+                None
+            };
             rg_push_input(
                 &state.cwd,
                 &fs,
@@ -7012,10 +7147,60 @@ fn rg_inputs(state: &ExecState<'_>, request: &RgRequest) -> Result<Vec<RgInput>,
                 &mut inputs,
                 RgCandidate {
                     root: &root,
-                    path: &path,
+                    path,
                     explicit_file: false,
+                    display_override,
                 },
             );
+        }
+        // Expand symlinked subdirectories discovered while walking the (real)
+        // root: under -L their target files are searched and labelled beneath the
+        // symlink path, surfacing the same content through both paths (r256,
+        // rg.flags symlink-to-directory).
+        if request.options.follow_symlinks {
+            let mut symlink_dirs = fs
+                .get_all_paths()
+                .into_iter()
+                .filter(|path| path.starts_with(&format!("{real_root}/")))
+                .filter(|path| {
+                    fs.lstat(path)
+                        .map(|stat| stat.is_symbolic_link)
+                        .unwrap_or(false)
+                        && fs.stat(path).map(|stat| !stat.is_file).unwrap_or(false)
+                })
+                .collect::<Vec<_>>();
+            symlink_dirs.sort();
+            for link_dir in symlink_dirs {
+                let Ok(target_dir) = fs.realpath(&link_dir) else {
+                    continue;
+                };
+                let mut target_paths = fs
+                    .get_all_paths()
+                    .into_iter()
+                    .filter(|path| path.starts_with(&format!("{target_dir}/")))
+                    .collect::<Vec<_>>();
+                target_paths.sort();
+                for path in &target_paths {
+                    let Some(rest) = path.strip_prefix(&target_dir) else {
+                        continue;
+                    };
+                    let display_label =
+                        relative_display_path(&state.cwd, &format!("{link_dir}{rest}"));
+                    rg_push_input(
+                        &state.cwd,
+                        &fs,
+                        request,
+                        &ignore_rules,
+                        &mut inputs,
+                        RgCandidate {
+                            root: &real_root,
+                            path,
+                            explicit_file: false,
+                            display_override: Some(display_label),
+                        },
+                    );
+                }
+            }
         }
     }
     inputs.sort_by(|left, right| left.label.cmp(&right.label));
@@ -7026,6 +7211,7 @@ struct RgCandidate<'a> {
     root: &'a str,
     path: &'a str,
     explicit_file: bool,
+    display_override: Option<String>,
 }
 
 fn rg_push_input(
@@ -7038,8 +7224,12 @@ fn rg_push_input(
 ) {
     // Upstream rg skips symlinks during directory traversal unless -L/--follow
     // is set (rg-search.ts followSymlinks). Explicit file arguments are always
-    // dereferenced.
-    if !candidate.explicit_file && !request.options.follow_symlinks {
+    // dereferenced. A candidate carrying a `display_override` is an already
+    // resolved symlink-target file, so the symlink guard does not apply.
+    if candidate.display_override.is_none()
+        && !candidate.explicit_file
+        && !request.options.follow_symlinks
+    {
         if let Ok(link_stat) = fs.lstat(candidate.path) {
             if link_stat.is_symbolic_link {
                 return;
@@ -7052,7 +7242,10 @@ fn rg_push_input(
     if !stat.is_file {
         return;
     }
-    let label = relative_display_path(cwd, candidate.path);
+    let label = candidate
+        .display_override
+        .clone()
+        .unwrap_or_else(|| relative_display_path(cwd, candidate.path));
     if !rg_file_passes_filters(
         candidate.path,
         &label,
@@ -7066,6 +7259,15 @@ fn rg_push_input(
     let Ok(text) = fs.read_file(candidate.path) else {
         return;
     };
+    // ripgrep transparently strips a leading UTF-8 BOM before searching, so an
+    // anchored pattern (`^test`) still matches the first line and column indexes
+    // start after the BOM (regression r1163/r1638). Upstream just-bash relies on
+    // its TextDecoder dropping the BOM at read time; the Rust VFS stores the raw
+    // bytes, so strip it here.
+    let text = text
+        .strip_prefix('\u{FEFF}')
+        .map(str::to_string)
+        .unwrap_or(text);
     // Upstream rg samples only the first 8192 chars when detecting binary
     // files (rg-search.ts: `content.slice(0, 8192)`), so a NUL byte that
     // appears after the sample window does not mark the file as binary.
@@ -7094,7 +7296,11 @@ fn rg_file_passes_filters(
         return false;
     }
     if !request.options.hidden && rg_path_is_hidden(label) {
-        return false;
+        // ripgrep still searches a hidden file when a gitignore negation pattern
+        // explicitly whitelists it (regression r90: `!.foo` un-hides `.foo`).
+        if explicit_file || !rg_is_whitelisted(path, ignore_rules) {
+            return false;
+        }
     }
     if !ignore_rules.is_empty() && rg_is_ignored(path, ignore_rules) {
         return false;
@@ -7221,20 +7427,56 @@ fn rg_path_matches_type(
         .any(|glob| rg_glob_matches_path(glob, label))
 }
 
+/// Reject a glob with an unclosed `[` character class, mirroring upstream
+/// rg-search.ts validateGlob (regression r3127: `rg --files -g '[abc'` errors).
+/// The leading `!` negation marker is stripped before validation and the error
+/// message reports the stripped glob, matching ripgrep's exit-status-1 failure.
+fn rg_validate_globs(globs: &[String]) -> Option<String> {
+    for glob in globs {
+        let candidate = glob.strip_prefix('!').unwrap_or(glob);
+        let mut in_class = false;
+        for ch in candidate.chars() {
+            match ch {
+                '[' if !in_class => in_class = true,
+                ']' if in_class => in_class = false,
+                _ => {}
+            }
+        }
+        if in_class {
+            return Some(format!(
+                "rg: glob '{candidate}' has an unclosed character class\n"
+            ));
+        }
+    }
+    None
+}
+
 fn rg_globs_match(label: &str, globs: &[String]) -> bool {
+    // Mirror upstream rg-search.ts shouldIncludeFile glob handling: a glob is
+    // tested against both the file basename and the root-relative path. A
+    // negated glob with a leading `/` is anchored to the search root, so the `/`
+    // is stripped and the remainder is matched against the relative path only
+    // (regression r405: `-g '!/foo/**'` excludes only the top-level `foo/`).
+    let basename = label.rsplit('/').next().unwrap_or(label);
     let mut saw_positive = false;
     let mut positive_match = false;
     for glob in globs {
         let (negated, pattern) = glob
             .strip_prefix('!')
             .map_or((false, glob.as_str()), |pattern| (true, pattern));
-        let matched = rg_glob_matches_path(pattern, label);
-        if negated && matched {
-            return false;
-        }
-        if !negated {
+        if negated {
+            let excluded = if let Some(rooted) = pattern.strip_prefix('/') {
+                rg_glob_matches_path(rooted, label)
+            } else {
+                rg_glob_match(pattern, basename) || rg_glob_matches_path(pattern, label)
+            };
+            if excluded {
+                return false;
+            }
+        } else {
             saw_positive = true;
-            positive_match |= matched;
+            positive_match |=
+                rg_glob_match(pattern, basename) || rg_glob_matches_path(pattern, label);
         }
     }
     !saw_positive || positive_match
@@ -7309,6 +7551,19 @@ fn rg_is_ignored(path: &str, rules: &[RgIgnoreRule]) -> bool {
         }
     }
     ignored
+}
+
+/// True when a gitignore negation pattern (`!pattern`) explicitly whitelists
+/// `path`. ripgrep uses this to un-hide an otherwise-hidden file (regression
+/// r90: `!.foo` makes the dotfile `.foo` searchable).
+fn rg_is_whitelisted(path: &str, rules: &[RgIgnoreRule]) -> bool {
+    let mut whitelisted = false;
+    for rule in rules {
+        if rg_ignore_rule_matches(rule, path) {
+            whitelisted = rule.negated;
+        }
+    }
+    whitelisted
 }
 
 fn rg_ignore_rule_matches(rule: &RgIgnoreRule, path: &str) -> bool {
@@ -7507,6 +7762,126 @@ fn rg_render_search(
     }
     CommandResult {
         exit_code: if total_matches == 0 { 1 } else { 0 },
+        stdout,
+        ..CommandResult::default()
+    }
+}
+
+/// Render `rg --json` JSON Lines output, mirroring upstream rg-search.ts
+/// searchFiles JSON mode: a `begin`/`match`*/`end` group per matching file
+/// followed by a final `summary` message. `--quiet --json` suppresses the
+/// per-file groups and emits only the summary. Offsets are character indices
+/// (the JS `match.index`/string-length semantics upstream relies on).
+fn rg_render_json(
+    request: &RgRequest,
+    matchers: &[LineMatcher],
+    inputs: &[RgInput],
+) -> CommandResult {
+    use serde_json::json;
+    let mut messages: Vec<String> = Vec::new();
+    let mut files_with_match = 0usize;
+    let mut total_matches = 0usize;
+    let mut bytes_searched = 0usize;
+    let quiet = request.options.quiet;
+
+    for input in inputs {
+        bytes_searched += input.text.chars().count();
+        let line_matches = rg_line_matches(input, matchers, &request.options);
+        if line_matches.is_empty() {
+            continue;
+        }
+        files_with_match += 1;
+        let file_matches: usize = line_matches
+            .iter()
+            .map(|line_match| line_match.only_matches.len().max(1))
+            .sum();
+        total_matches += file_matches;
+        if quiet {
+            continue;
+        }
+
+        messages.push(
+            json!({ "type": "begin", "data": { "path": { "text": input.label } } }).to_string(),
+        );
+
+        // Upstream walks `content.split("\n")` (which yields a trailing empty
+        // segment after the final newline) and accumulates a per-line absolute
+        // character offset.
+        let lines: Vec<&str> = input.text.split('\n').collect();
+        let mut line_offset = 0usize;
+        for (line_index, line) in lines.iter().enumerate() {
+            let mut submatches: Vec<JsonValue> = Vec::new();
+            for matcher in matchers {
+                for (start, end, text) in matcher.match_ranges(line) {
+                    submatches.push(json!({
+                        "match": { "text": text },
+                        "start": start,
+                        "end": end,
+                    }));
+                }
+            }
+            if !submatches.is_empty() {
+                messages.push(
+                    json!({
+                        "type": "match",
+                        "data": {
+                            "path": { "text": input.label },
+                            "lines": { "text": format!("{line}\n") },
+                            "line_number": line_index + 1,
+                            "absolute_offset": line_offset,
+                            "submatches": submatches,
+                        },
+                    })
+                    .to_string(),
+                );
+            }
+            line_offset += line.chars().count() + 1;
+        }
+
+        messages.push(
+            json!({
+                "type": "end",
+                "data": {
+                    "path": { "text": input.label },
+                    "binary_offset": JsonValue::Null,
+                    "stats": {
+                        "elapsed": { "secs": 0, "nanos": 0, "human": "0s" },
+                        "searches": 1,
+                        "searches_with_match": 1,
+                        "bytes_searched": input.text.chars().count(),
+                        "bytes_printed": 0,
+                        "matched_lines": file_matches,
+                        "matches": file_matches,
+                    },
+                },
+            })
+            .to_string(),
+        );
+    }
+
+    messages.push(
+        json!({
+            "type": "summary",
+            "data": {
+                "elapsed_total": { "secs": 0, "nanos": 0, "human": "0s" },
+                "stats": {
+                    "elapsed": { "secs": 0, "nanos": 0, "human": "0s" },
+                    "searches": inputs.len(),
+                    "searches_with_match": files_with_match,
+                    "bytes_searched": bytes_searched,
+                    "bytes_printed": 0,
+                    "matched_lines": total_matches,
+                    "matches": total_matches,
+                },
+            },
+        })
+        .to_string(),
+    );
+
+    let mut stdout = messages.join("\n");
+    stdout.push('\n');
+    CommandResult {
+        exit_code: if files_with_match == 0 { 1 } else { 0 },
         stdout,
         ..CommandResult::default()
     }

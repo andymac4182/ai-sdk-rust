@@ -3172,6 +3172,38 @@ const jbR11JbGrepGlobBinaryCaseGroups = [
   },
 ];
 
+const r11jbR2RgCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/json.test.ts',
+    lines: [37, 103, 124, 157, 189, 207],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest:
+      'rg_json_basic_output_structure_matches_ripgrep; rg_json_quiet_emits_only_summary; rg_json_reports_all_submatches_on_a_line; rg_json_emits_begin_end_per_file; rg_json_outputs_summary_with_no_matches; rg_json_handles_empty_file_with_summary',
+    notes:
+      'r11jb-r2 implements `rg --json` JSON Lines output: a begin/match*/end group per matching file plus a final summary message. Verifies the basic structure (path, line_number, absolute_offset, submatch start/end/text), --quiet emitting only the summary, all per-line submatches reported, begin/end emitted per file, and summaries reporting searches_with_match/bytes_searched for the no-match and empty-file cases.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [171, 203, 405, 420, 489, 866, 1040, 1505],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest:
+      'rg_gitignore_negation_unhides_dotfile; rg_heading_groups_matches_under_file_path; rg_follow_symlinked_directory_root_with_dash_l; rg_follow_symlinked_directory_root_with_dash_l_and_single_thread; rg_negated_glob_with_leading_slash_is_root_anchored; rg_strips_leading_utf8_bom_before_anchored_match; rg_fixed_strings_from_file_match_many_duplicate_literals; rg_files_errors_on_glob_with_unclosed_character_class',
+    notes:
+      'r11jb-r2 closes ripgrep regression rows: r90 (`!.foo` gitignore negation un-hides the dotfile), r99 (--heading groups matches under the file label), r256 (-L and -L -j1 follow a symlinked directory root), r405 (`-g !/foo/**` is root-anchored), r1163 (a leading UTF-8 BOM is stripped so `^` still anchors line 1), r1334 (40 duplicate `-Ff` literal patterns match), and r3127 (`-g [abc` errors on an unclosed glob character class).',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/rg.flags.test.ts',
+    lines: [63],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_follow_symlinked_subdirectory_surfaces_content_through_both_paths',
+    notes:
+      'r11jb-r2 verifies that with -L a symlinked subdirectory discovered while walking the cwd is searched and its content surfaced through both the real and symlinked paths (`linkdir/file.txt` and `subdir/file.txt`), while without -L only the real directory is searched.',
+  },
+];
+
 const jbc24CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/jq/jq.functions.test.ts',
@@ -5394,6 +5426,7 @@ function caseOverrideFor(testCase) {
     ...jbc23CaseGroups,
     ...jbc34CaseGroups,
     ...jbR11JbGrepGlobBinaryCaseGroups,
+    ...r11jbR2RgCaseGroups,
     ...jbc36CaseGroups,
     ...jbc24CaseGroups,
     ...r11jbSqlite3CaseGroups,
