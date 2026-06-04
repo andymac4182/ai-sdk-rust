@@ -998,12 +998,15 @@ const jbc09CaseGroups = [
   },
   {
     file: 'packages/just-bash/src/commands/awk/awk.patterns.test.ts',
-    lines: [6, 15, 24, 33, 42],
+    lines: [
+      6, 15, 24, 33, 42, 51, 71, 80, 107, 116, 165, 174, 183, 192, 203, 212,
+      221, 232, 243,
+    ],
     status: 'portable-verified',
     owner: 'crates/just-bash::runtime::awk',
     rustTest: 'awk_jbc_command_awk_regex_pattern_rows',
     notes:
-      'just-bash-command-awk verifies portable awk regex patterns: a literal /ana/ match, ^ and $ anchors, a [cd] character class, and a negated [^a-z] character class selecting digit records.',
+      'just-bash-command-awk verifies portable awk regex patterns: literal /ana/, ^/$ anchors, [cd] and negated [^a-z] character classes, alternation /red|blue/, expression patterns ($1 ==/!= numeric, string equality, lexicographic comparison), combined NR patterns (NR == 1, NR > 1, range, every Nth via NR % 2), field regex-match patterns ($1 ~/!~ /^a/, $2 ~ /^a/), action-only rule on every record, and pattern-only rule printing matches.',
   },
 ];
 
@@ -1192,6 +1195,24 @@ const jbc10CaseGroups = [
       'rg_imported_regression_negation_symlink_anchored_and_exit_code_rows_are_portable',
     notes:
       'JBC-10 verifies the imported rg misc -a (text) row searches binary (NUL-containing) file content literally and prints the matching lines over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/gitignore.test.ts',
+    lines: [63],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_gitignore_anchoring_and_exit_code_rows_are_portable',
+    notes:
+      'JBC-10 verifies a non-rooted gitignore pattern that contains a slash (`doc/frotz`) is rooted at the gitignore base: it hides `doc/frotz` but not `a/doc/frotz`.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [137, 355, 659, 677, 702, 757, 1174, 1447, 1465],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_gitignore_anchoring_and_exit_code_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported ripgrep regression rows for base-anchored gitignore semantics (slash-containing or rooted patterns match a path or any descendant, never a free-floating substring deeper in the tree: `/*`+`!/dir` negation, `.a/b`, `/a/b`, `/a/*/b`, `rust/target`, `foobar/debug`), interspersed `-g` glob flags after the positional pattern, an empty `-f` pattern file exiting 1 (no matches) rather than 2 (no pattern given), and `--files-without-match` exit codes plus `-q` quiet suppression over the virtual filesystem.',
   },
   {
     file: 'packages/just-bash/src/commands/rg/imported-tests/feature.test.ts',
@@ -3945,13 +3966,14 @@ const jbc42CaseGroups = [
     file: 'packages/just-bash/src/commands/awk/awk.parsing.test.ts',
     lines: [
       6, 13, 22, 33, 50, 60, 71, 81, 91, 101, 112, 125, 143, 152, 161,
-      170, 179, 186, 193, 200, 207, 272, 282, 383, 392,
+      170, 179, 186, 193, 200, 207, 216, 225, 234, 243, 252, 261, 272, 282,
+      294, 303, 313, 322, 331, 342, 349, 358, 367, 374, 383, 392,
     ],
     status: 'portable-verified',
     owner: 'crates/just-bash::runtime::awk',
     rustTest: 'awk_jbc42_parser_comment_numeric_and_if_rows',
     notes:
-      'JBC-42 verifies portable AWK whitespace and newline continuation parsing, string escapes, scientific and leading-decimal numeric literals, line comments, and simple if/else actions; loops, for-in, getline, output redirection, and parser error edges remain pending.',
+      'JBC-42 verifies portable AWK whitespace and newline continuation parsing, string escapes, scientific and leading-decimal numeric literals, line comments, simple if/else actions, regex-literal parsing (special chars, brackets, anchors, quantifiers, regex-vs-division disambiguation), two-character/compound-assignment/increment-decrement/logical/regex operator parsing, and block-structure parsing (empty blocks, multiple rules, BEGIN+END, pattern-without-action, action-without-pattern); loops, for-in, getline, output redirection, and parser error edges remain pending.',
   },
   {
     file: 'packages/just-bash/src/commands/awk/awk.parsing.test.ts',
@@ -4226,6 +4248,45 @@ const jbc37CaseGroups = [
   },
 ];
 
+const jbcXanGroupbyTransformCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.groupby.test.ts',
+    lines: [13, 22, 29, 38, 47, 58, 77, 91],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_groupby_rows',
+    notes:
+      'JBC verifies portable xan groupby sum/count()/nested-add/mean/multi-max aggregations, multi-column grouping with first-seen order, the --sorted no-op flag, and header-only empty data over in-memory CSV.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.data.test.ts',
+    lines: [119, 133],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_shuffle_rows',
+    notes:
+      'JBC verifies portable xan shuffle reproducibility with --seed (Fisher-Yates over the shared seeded LCG) and that distinct seeds produce distinct orderings over in-memory CSV.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.data.test.ts',
+    lines: [205, 214, 225, 280, 332],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_partition_rows',
+    notes:
+      'JBC verifies portable xan partition by column value, the missing-column error, and the collision-safe filename allocator (FNV-1a hash suffix plus counter disambiguation) that prevents distinct values sanitizing to the same name from silently overwriting one another, with deterministic filenames across runs.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.transform.test.ts',
+    lines: [12, 19, 28, 35, 42, 51, 58, 65, 73],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_transform_rows',
+    notes:
+      'JBC verifies portable xan transform in-place column rewriting with add/mul/upper expressions, the `_` current-column variable, single and comma-separated multi-column targets, -r rename (single and multi), and the missing-column/missing-argument/missing-expression usage errors over in-memory CSV.',
+  },
+];
+
 const jbcYqFixturesCaseGroups = [
   {
     file: 'packages/just-bash/src/commands/yq/yq.fixtures.test.ts',
@@ -4235,6 +4296,29 @@ const jbcYqFixturesCaseGroups = [
     rustTest: 'structured_data_yq_fixtures_yaml_json_ini_csv_rows',
     notes:
       'JBC-yq verifies portable yq fixture queries over YAML and JSON input (postfix `[]` projection, select/add aggregation), plus the Rust INI and CSV input parsers (section nesting, true/false coercion, papaparse-style dynamic typing) exercised by the fixtures suite.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.test.ts',
+    lines: [
+      354, 365, 377, 395, 407, 424, 438, 449, 460, 506, 686, 712, 729,
+      743, 756, 770, 781, 808, 817, 839, 856, 873, 898, 909, 920,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest:
+      'structured_data_yq_format_conversion_frontmatter_and_autodetect_rows',
+    notes:
+      'JBC-yq verifies portable yq format validation, INI/CSV/TOML/TSV input and INI/CSV/TOML output conversion, --no-csv-header and --csv-delimiter handling, in-place error reporting, YAML/TOML front-matter extraction, and extension-based format auto-detection.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.fixtures.test.ts',
+    lines: [178, 189, 199, 211, 497],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest:
+      'structured_data_yq_format_conversion_frontmatter_and_autodetect_rows',
+    notes:
+      'JBC-yq verifies the portable yq XML input parser over fixture documents: element/array projection, attribute extraction with the +@ prefix, attribute-based select filtering, and XML-to-JSON scalar conversion.',
   },
 ];
 
@@ -4899,6 +4983,7 @@ function caseOverrideFor(testCase) {
     ...jbpiParserInterpreterCaseGroups,
     ...jbc37CaseGroups,
     ...jbc44CaseGroups,
+    ...jbcXanGroupbyTransformCaseGroups,
     ...jbcYqFixturesCaseGroups,
   ].find(
     (entry) =>

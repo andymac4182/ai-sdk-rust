@@ -3778,6 +3778,92 @@ and exhibited clearly, with a label attached.\n";
                 .stdout,
             "no\n"
         );
+
+        // regex parsing (awk.parsing.test.ts :216..:261)
+        assert_eq!(
+            env.exec(r#"echo "hello" | awk '/hello/ { print "matched" }'"#)
+                .stdout,
+            "matched\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "a.b" | awk '/a\.b/ { print "matched" }'"#)
+                .stdout,
+            "matched\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "abc" | awk '/[abc]+/ { print "matched" }'"#)
+                .stdout,
+            "matched\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "hello" | awk '/^hello$/ { print "matched" }'"#)
+                .stdout,
+            "matched\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "aaa" | awk '/a+/ { print "matched" }'"#)
+                .stdout,
+            "matched\n"
+        );
+        // division is distinguished from a regex literal in expression position.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x = 10 / 2; print x }'"#)
+                .stdout,
+            "5\n"
+        );
+
+        // operator parsing (awk.parsing.test.ts :294..:331)
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print (1 <= 2), (2 >= 1), (1 == 1), (1 != 2) }'"#)
+                .stdout,
+            "1 1 1 1\n"
+        );
+        // ((10+5)-3)*2/4 = 6 through compound assignment operators.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x=10; x+=5; x-=3; x*=2; x/=4; print x }'"#)
+                .stdout,
+            "6\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x=5; print ++x, x++, x }'"#)
+                .stdout,
+            "6 6 7\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print (1 && 1), (1 || 0), !0 }'"#)
+                .stdout,
+            "1 1 1\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "hello" | awk '{ print ($0 ~ /hello/), ($0 !~ /world/) }'"#)
+                .stdout,
+            "1 1\n"
+        );
+
+        // block structure parsing (awk.parsing.test.ts :342..:374)
+        assert_eq!(
+            env.exec(r#"echo "test" | awk '{ } { print "ok" }'"#).stdout,
+            "ok\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "test" | awk '/test/ { print "1" } /test/ { print "2" }'"#)
+                .stdout,
+            "1\n2\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "x" | awk 'BEGIN { print "B" } END { print "E" }'"#)
+                .stdout,
+            "B\nE\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "hello" | awk '/hello/'"#).stdout,
+            "hello\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "hello" | awk '{ print "matched" }'"#)
+                .stdout,
+            "matched\n"
+        );
     }
 
     #[test]
@@ -4402,6 +4488,158 @@ and exhibited clearly, with a label attached.\n";
             combined.stdout, "1:hello\n1:hello\n1:hello\n",
             "rg -Iij 4 should ignore -j and keep default depth: {:?}",
             combined.stdout
+        );
+    }
+
+    #[test]
+    fn rg_imported_gitignore_anchoring_and_exit_code_rows_are_portable() {
+        // JBC-10: closes a cluster of imported ripgrep regression/gitignore/feature
+        // rows that exercise base-anchored gitignore patterns (slash-containing or
+        // rooted patterns match a path or any descendant, never a free-floating
+        // substring deeper in the tree), interspersed flags after the positional
+        // pattern, empty pattern-file exit semantics, and --files-without-match
+        // exit codes / quiet suppression. Each assertion fails if the rg port
+        // regresses the upstream behaviour.
+
+        // gitignore.test.ts:63 + regression r2747 family: a non-rooted pattern that
+        // contains a slash (`doc/frotz`) is rooted at the gitignore base. It hides
+        // `doc/frotz` but NOT `a/doc/frotz`.
+        assert_eq!(
+            home_bash(&[
+                (".git/.gitkeep", ""),
+                (".gitignore", "doc/frotz\n"),
+                ("doc/frotz", "x\n"),
+            ])
+            .exec("rg x")
+            .exit_code,
+            1,
+            "doc/frotz should be ignored at the root",
+        );
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "doc/frotz\n"),
+                ("a/doc/frotz", "x\n"),
+            ],
+            "rg x",
+            0,
+            "a/doc/frotz:1:x\n",
+        );
+
+        // regression.test.ts:137 - negation of root with include (`/*` then `!/dir`):
+        // only the whitelisted directory survives.
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "/*\n!/dir\n"),
+                ("foo/bar", "test\n"),
+                ("dir/bar", "test\n"),
+            ],
+            "rg test",
+            0,
+            "dir/bar:1:test\n",
+        );
+
+        // regression.test.ts:355 - a `-g` glob supplied AFTER the positional pattern
+        // is still parsed as an option (interspersed flags), not as a path root.
+        assert_home_exec(
+            &[("foo/bar.txt", "test\n")],
+            "rg test -g '*.txt'",
+            0,
+            "foo/bar.txt:1:test\n",
+        );
+
+        // regression.test.ts:659 - gitignore for a hidden subdirectory (`.a/b`):
+        // hides `.a/b/**` but not `.a/c/**` under `--hidden`.
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", ".a/b\n"),
+                (".a/b/file", "test\n"),
+                (".a/c/file", "test\n"),
+            ],
+            "rg --hidden test",
+            0,
+            ".a/c/file:1:test\n",
+        );
+
+        // regression.test.ts:677 - r829 anchored `/a/b`: excludes `a/b/**`.
+        assert_eq!(
+            home_bash(&[(".ignore", "/a/b\n"), ("a/b/test.txt", "Sample text\n")])
+                .exec("rg Sample")
+                .exit_code,
+            1,
+            "/a/b should ignore a/b/test.txt",
+        );
+
+        // regression.test.ts:702 - r829 `/a/*/b`: only the path matching the rooted
+        // single-segment wildcard is excluded.
+        assert_home_exec(
+            &[
+                (".ignore", "/a/*/b\n"),
+                ("a/c/b/foo", ""),
+                ("a/src/f/b/foo", ""),
+            ],
+            "rg --files",
+            0,
+            "a/src/f/b/foo\n",
+        );
+
+        // regression.test.ts:757 - an empty `-f` pattern file matches nothing and
+        // exits 1 (no matches), NOT 2 (no pattern given).
+        let empty_pat =
+            home_bash(&[("sherlock", SHERLOCK), ("pat", "")]).exec("rg -f pat sherlock");
+        assert_eq!(empty_pat.exit_code, 1, "empty pattern file exit");
+        assert_eq!(empty_pat.stdout, "", "empty pattern file stdout");
+        assert_eq!(empty_pat.stderr, "", "empty pattern file stderr");
+
+        // regression.test.ts:1174 - `.ignore` with a path prefix (`rust/target`):
+        // only the source file outside the ignored directory is listed.
+        assert_home_exec(
+            &[
+                (".ignore", "rust/target\n"),
+                ("rust/source.rs", "needle\n"),
+                ("rust/target/rustdoc-output.html", "needle\n"),
+            ],
+            "rg --files-with-matches needle rust",
+            0,
+            "rust/source.rs\n",
+        );
+
+        // regression.test.ts:1447 + r3067 - gitignore `foobar/debug` hides
+        // `foobar/debug/**` but not the unrelated `foobar/some/debug/**`.
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                (".gitignore", "foobar/debug\n"),
+                ("foobar/some/debug/flag", "baz\n"),
+                ("foobar/debug/flag2", "baz\n"),
+            ],
+            "rg baz",
+            0,
+            "foobar/some/debug/flag:1:baz\n",
+        );
+
+        // regression.test.ts:1465 - --files-without-match exit codes and quiet mode.
+        assert_home_exec(
+            &[("yes-match", "abc\n"), ("non-match", "xyz\n")],
+            "rg --files-without-match abc non-match",
+            0,
+            "non-match\n",
+        );
+        assert_eq!(
+            home_bash(&[("yes-match", "abc\n"), ("non-match", "xyz\n")])
+                .exec("rg --files-without-match abc yes-match")
+                .exit_code,
+            1,
+            "files-without-match against a matching file exits 1",
+        );
+        let fwm_q = home_bash(&[("yes-match", "abc\n"), ("non-match", "xyz\n")])
+            .exec("rg --files-without-match -q abc non-match");
+        assert_eq!(fwm_q.exit_code, 0, "quiet files-without-match exit");
+        assert_eq!(
+            fwm_q.stdout, "",
+            "quiet files-without-match suppresses output"
         );
     }
 
@@ -10586,6 +10824,340 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn structured_data_xan_groupby_rows() {
+        // Ports packages/just-bash/src/commands/xan/xan.groupby.test.ts:13,22,29,38,47,58,77,91.
+        let data =
+            "id,value_A,value_B,value_C\nx,1,2,3\ny,2,3,4\nz,3,4,5\ny,1,2,3\nz,2,3,5\nz,3,6,7\n";
+        let multi = "name,color,count\njohn,blue,1\nmary,orange,3\nmary,orange,2\njohn,yellow,9\njohn,blue,2\n";
+        let sorted =
+            "id,value_A,value_B,value_C\nx,1,2,3\ny,2,3,4\ny,1,2,3\nz,2,3,5\nz,3,6,7\nz,3,4,5\n";
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/data.csv".to_string(), data.to_string()),
+                ("/multi.csv".to_string(), multi.to_string()),
+                ("/sorted.csv".to_string(), sorted.to_string()),
+                (
+                    "/empty.csv".to_string(),
+                    "id,value_A,value_B,value_C\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // groups and sums
+        assert_eq!(
+            env.exec("xan groupby id 'sum(value_A) as sumA' /data.csv")
+                .stdout,
+            "id,sumA\nx,1\ny,3\nz,8\n"
+        );
+        // groups and counts (alias defaults to count())
+        assert_eq!(
+            env.exec("xan groupby id 'count()' /data.csv").stdout,
+            "id,count()\nx,1\ny,2\nz,3\n"
+        );
+        // groups with complex nested add() expression
+        assert_eq!(
+            env.exec("xan groupby id 'sum(add(value_A,add(value_B,value_C))) as sum' /data.csv")
+                .stdout,
+            "id,sum\nx,6\ny,15\nz,38\n"
+        );
+        // computes mean per group (JS float formatting preserved)
+        assert_eq!(
+            env.exec("xan groupby id 'mean(value_A) as meanA' /data.csv")
+                .stdout,
+            "id,meanA\nx,1\ny,1.5\nz,2.6666666666666665\n"
+        );
+        // computes max per group across multiple specs
+        assert_eq!(
+            env.exec(
+                "xan groupby id 'max(value_A) as maxA, max(value_B) as maxB,max(value_C) as maxC' /data.csv"
+            )
+            .stdout,
+            "id,maxA,maxB,maxC\nx,1,2,3\ny,2,3,4\nz,3,6,7\n"
+        );
+        // groups by multiple columns preserving first-seen order
+        assert_eq!(
+            env.exec("xan groupby name,color 'sum(count) as sum' /multi.csv")
+                .stdout,
+            "name,color,sum\njohn,blue,3\nmary,orange,5\njohn,yellow,9\n"
+        );
+        // --sorted is accepted (no-op) and still groups correctly
+        assert_eq!(
+            env.exec("xan groupby id 'sum(value_A) as sumA' --sorted /sorted.csv")
+                .stdout,
+            "id,sumA\nx,1\ny,3\nz,8\n"
+        );
+        // empty data yields just the header row
+        assert_eq!(
+            env.exec("xan groupby id 'sum(value_A) as sumA' --sorted /empty.csv")
+                .stdout,
+            "id,sumA\n"
+        );
+    }
+
+    #[test]
+    fn structured_data_xan_shuffle_rows() {
+        // Ports packages/just-bash/src/commands/xan/xan.data.test.ts:119,133.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/data.csv".to_string(), "n\n1\n2\n3\n4\n5\n".to_string()),
+                (
+                    "/ten.csv".to_string(),
+                    "n\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // shuffles rows with seed for reproducibility: header preserved,
+        // all five values present, six total lines.
+        let result = env.exec("xan shuffle --seed 42 /data.csv");
+        assert_eq!(result.exit_code, 0);
+        let lines: Vec<&str> = result.stdout.trim().split('\n').collect();
+        assert_eq!(lines[0], "n");
+        assert_eq!(lines.len(), 6);
+        let mut values: Vec<i64> = lines[1..]
+            .iter()
+            .map(|l| l.parse::<i64>().unwrap())
+            .collect();
+        values.sort_unstable();
+        assert_eq!(values, vec![1, 2, 3, 4, 5]);
+        // Deterministic for a given seed.
+        assert_eq!(
+            env.exec("xan shuffle --seed 42 /data.csv").stdout,
+            result.stdout
+        );
+
+        // produces different order with different seeds
+        let r1 = env.exec("xan shuffle --seed 1 /ten.csv");
+        let r2 = env.exec("xan shuffle --seed 2 /ten.csv");
+        assert_eq!(r1.exit_code, 0);
+        assert_eq!(r2.exit_code, 0);
+        assert_ne!(r1.stdout, r2.stdout);
+    }
+
+    #[test]
+    fn structured_data_xan_partition_rows() {
+        // Ports packages/just-bash/src/commands/xan/xan.data.test.ts:205,214,225,280,332.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.csv".to_string(),
+                "region,value\nnorth,10\nsouth,20\nnorth,30\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        // partitions by column value
+        assert_eq!(
+            env.exec("xan partition region /data.csv").stdout,
+            "Partitioned into 2 files by 'region'\n"
+        );
+        assert_eq!(
+            env.exec("cat /north.csv").stdout,
+            "region,value\nnorth,10\nnorth,30\n"
+        );
+        assert_eq!(
+            env.exec("cat /south.csv").stdout,
+            "region,value\nsouth,20\n"
+        );
+
+        // errors on missing column
+        let missing = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/m.csv".to_string(), "a,b\n1,2\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let err = missing.exec("xan partition nonexistent /m.csv");
+        assert_eq!(err.exit_code, 1);
+        assert_eq!(
+            err.stderr,
+            "xan partition: column 'nonexistent' not found\n"
+        );
+
+        // does not silently overwrite when distinct values share a sanitized name:
+        // a/b, a:b, a b all sanitize to a_b -> distinct hashed files.
+        let collide = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.csv".to_string(),
+                "key,value\na/b,1\na:b,2\na b,3\nplain,4\na/b,11\na:b,22\na b,33\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            collide.exec("xan partition key /data.csv").stdout,
+            "Partitioned into 4 files by 'key'\n"
+        );
+        let ls = collide.exec("ls /");
+        let files: Vec<&str> = ls
+            .stdout
+            .split('\n')
+            .filter(|f| f.ends_with(".csv") && *f != "data.csv")
+            .collect();
+        assert_eq!(files.len(), 4);
+        assert!(files.contains(&"plain.csv"));
+        // The colliding files together contain exactly the six colliding rows.
+        let mut all_values: Vec<String> = Vec::new();
+        for f in files.iter().filter(|f| f.starts_with("a_b")) {
+            let content = collide.exec(&format!("cat /{f}")).stdout;
+            for line in content.split('\n').skip(1).filter(|l| !l.is_empty()) {
+                all_values.push(line.to_string());
+            }
+        }
+        all_values.sort();
+        assert_eq!(
+            all_values,
+            vec!["a b,3", "a b,33", "a/b,1", "a/b,11", "a:b,2", "a:b,22"]
+        );
+
+        // disambiguates a hash-suffixed colliding name vs a literal value
+        // with the same sanitized form (FNV-1a of "a/b"), computed here
+        // with the same FNV-1a base36 logic the implementation uses.
+        let hash = {
+            let mut h: u32 = 2166136261;
+            for byte in "a/b".encode_utf16() {
+                h = (h ^ (byte as u32)).wrapping_mul(16777619);
+            }
+            let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
+            let mut value = h as u64;
+            let mut out = Vec::new();
+            if value == 0 {
+                out.push(b'0');
+            }
+            while value > 0 {
+                out.push(digits[(value % 36) as usize]);
+                value /= 36;
+            }
+            out.reverse();
+            let mut base36 = String::from_utf8(out).unwrap();
+            while base36.len() < 6 {
+                base36.insert(0, '0');
+            }
+            base36.chars().take(6).collect::<String>()
+        };
+        let literal_like = format!("a_b_{hash}");
+        let disambig = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.csv".to_string(),
+                format!("key,value\na/b,1\na:b,2\n{literal_like},3\n"),
+            )]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            disambig.exec("xan partition key /data.csv").stdout,
+            "Partitioned into 3 files by 'key'\n"
+        );
+        let ls = disambig.exec("ls /");
+        let files: Vec<&str> = ls
+            .stdout
+            .split('\n')
+            .filter(|f| f.ends_with(".csv") && *f != "data.csv")
+            .collect();
+        assert_eq!(files.len(), 3);
+        let unique: std::collections::HashSet<&&str> = files.iter().collect();
+        assert_eq!(unique.len(), 3);
+        let mut rows: Vec<String> = Vec::new();
+        for f in &files {
+            let content = disambig.exec(&format!("cat /{f}")).stdout;
+            for line in content.split('\n').skip(1).filter(|l| !l.is_empty()) {
+                rows.push(line.to_string());
+            }
+        }
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                "a/b,1".to_string(),
+                "a:b,2".to_string(),
+                format!("{literal_like},3")
+            ]
+        );
+
+        // deterministic suffix across repeated runs (same input = same filenames).
+        let run = || {
+            let b = Bash::with_options(BashOptions {
+                files: BTreeMap::from([(
+                    "/data.csv".to_string(),
+                    "k,v\na/b,1\na:b,2\n".to_string(),
+                )]),
+                ..BashOptions::default()
+            });
+            b.exec("xan partition k /data.csv");
+            let mut names: Vec<String> = b
+                .exec("ls /")
+                .stdout
+                .split('\n')
+                .filter(|f| f.ends_with(".csv") && *f != "data.csv")
+                .map(|f| f.to_string())
+                .collect();
+            names.sort();
+            names
+        };
+        let ls1 = run();
+        let ls2 = run();
+        assert_eq!(ls1, ls2);
+        assert_eq!(ls1.len(), 2);
+    }
+
+    #[test]
+    fn structured_data_xan_transform_rows() {
+        // Ports packages/just-bash/src/commands/xan/xan.transform.test.ts:12,19,28,35,42,51,58,65,73.
+        let data = "a,b,c\n1,2,3\n4,5,6\n";
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/data.csv".to_string(), data.to_string()),
+                (
+                    "/names.csv".to_string(),
+                    "name,value\nhello,1\nworld,2\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // transforms a column with expression
+        assert_eq!(
+            env.exec("xan transform b 'add(a, b)' /data.csv").stdout,
+            "a,b,c\n1,3,3\n4,9,6\n"
+        );
+        // transforms with rename
+        assert_eq!(
+            env.exec("xan transform b 'add(a, b)' -r sum /data.csv")
+                .stdout,
+            "a,sum,c\n1,3,3\n4,9,6\n"
+        );
+        // transforms with underscore reference
+        assert_eq!(
+            env.exec("xan transform b 'mul(_, 2)' /data.csv").stdout,
+            "a,b,c\n1,4,3\n4,10,6\n"
+        );
+        // transforms multiple columns
+        assert_eq!(
+            env.exec("xan transform a,b 'mul(_, 10)' /data.csv").stdout,
+            "a,b,c\n10,20,3\n40,50,6\n"
+        );
+        // transforms multiple columns with rename
+        assert_eq!(
+            env.exec("xan transform a,b 'mul(_, 10)' -r x,y /data.csv")
+                .stdout,
+            "x,y,c\n10,20,3\n40,50,6\n"
+        );
+        // errors on missing column
+        let err = env.exec("xan transform z 'add(a, b)' /data.csv");
+        assert_eq!(err.exit_code, 1);
+        assert!(err.stderr.contains("column 'z' not found"));
+        // errors on missing arguments (no positional args at all)
+        let err = env.exec("xan transform");
+        assert_eq!(err.exit_code, 1);
+        assert!(err.stderr.contains("usage"));
+        // errors on missing expression (only the column positional supplied)
+        let err = env.exec("echo '' | xan transform a");
+        assert_eq!(err.exit_code, 1);
+        assert!(err.stderr.contains("usage"));
+        // transforms with string function upper(_)
+        assert_eq!(
+            env.exec("xan transform name 'upper(_)' /names.csv").stdout,
+            "name,value\nHELLO,1\nWORLD,2\n"
+        );
+    }
+
+    #[test]
     fn structured_data_sqlite3_options_errors_and_simple_select_rows() {
         let env = bash();
 
@@ -12129,6 +12701,237 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn structured_data_yq_format_conversion_frontmatter_and_autodetect_rows() {
+        // packages/just-bash/src/commands/yq/yq.test.ts
+        //   :354 :365 (format validation), :377 :395 :407 :424 (INI),
+        //   :438 :449 :460 :474 :492 :506 (CSV), :686 (--no-csv-header),
+        //   :712 :729 :743 :756 (TOML), :770 :781 (TSV), :808 (inplace error),
+        //   :817 :839 :856 :873 (front-matter), :898 :909 :920 (auto-detect).
+        // packages/just-bash/src/commands/yq/yq.fixtures.test.ts
+        //   :211 (XML user names), :497 (XML -> JSON).
+        // Each assertion mirrors the upstream vitest expectation exactly.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/data.yaml".to_string(),
+                    "database:\n  host: localhost\n  port: 5432\n".to_string(),
+                ),
+                (
+                    "/kv.yaml".to_string(),
+                    "name: test\nversion: 1\n".to_string(),
+                ),
+                (
+                    "/config.ini".to_string(),
+                    "[database]\nhost=localhost\nport=5432\n\n[server]\ndebug=true\n".to_string(),
+                ),
+                (
+                    "/data.csv".to_string(),
+                    "name,age,city\nalice,30,NYC\nbob,25,LA\ncharlie,35,NYC\n".to_string(),
+                ),
+                (
+                    "/rows.yaml".to_string(),
+                    "- name: alice\n  age: 30\n- name: bob\n  age: 25\n".to_string(),
+                ),
+                (
+                    "/scores.json".to_string(),
+                    "[{\"name\":\"alice\",\"score\":95},{\"name\":\"bob\",\"score\":87}]".to_string(),
+                ),
+                (
+                    "/headerless.csv".to_string(),
+                    "alice,30\nbob,25\n".to_string(),
+                ),
+                (
+                    "/Cargo.toml".to_string(),
+                    "[package]\nname = \"my-app\"\nversion = \"1.0.0\"\n\n[dependencies]\nserde = \"1.0\"\n".to_string(),
+                ),
+                (
+                    "/config.toml".to_string(),
+                    "[server]\nhost = \"localhost\"\nport = 8080\n".to_string(),
+                ),
+                (
+                    "/server.yaml".to_string(),
+                    "server:\n  host: localhost\n  port: 8080\n".to_string(),
+                ),
+                (
+                    "/app.json".to_string(),
+                    "{\"app\": {\"name\": \"test\", \"version\": \"2.0\"}}".to_string(),
+                ),
+                (
+                    "/data.tsv".to_string(),
+                    "name\tage\tcity\nalice\t30\tNYC\nbob\t25\tLA\n".to_string(),
+                ),
+                (
+                    "/rows.tsv".to_string(),
+                    "name\tvalue\na\t1\nb\t2\n".to_string(),
+                ),
+                (
+                    "/post.md".to_string(),
+                    "---\ntitle: My Post\ndate: 2024-01-01\ntags:\n  - tech\n  - web\n---\n\n# Content here\n".to_string(),
+                ),
+                (
+                    "/tags.md".to_string(),
+                    "---\ntitle: Test\ntags:\n  - a\n  - b\n---\nContent".to_string(),
+                ),
+                (
+                    "/hugo.md".to_string(),
+                    "+++\ntitle = \"Hugo Post\"\ndate = \"2024-01-01\"\n+++\n\nContent here.\n".to_string(),
+                ),
+                (
+                    "/plain.md".to_string(),
+                    "# Just a heading\n\nNo front-matter here.".to_string(),
+                ),
+                (
+                    "/data.xml".to_string(),
+                    "<root><name>test</name></root>".to_string(),
+                ),
+                (
+                    "/auto.csv".to_string(),
+                    "name,age\nalice,30\nbob,25\n".to_string(),
+                ),
+                (
+                    "/auto.ini".to_string(),
+                    "[database]\nhost=localhost\n".to_string(),
+                ),
+                (
+                    "/users.xml".to_string(),
+                    "<root><users><user><name>alice</name></user><user><name>bob</name></user><user><name>charlie</name></user></users></root>".to_string(),
+                ),
+                (
+                    "/books.xml".to_string(),
+                    concat!(
+                        "<library>\n",
+                        "  <book id=\"1\" genre=\"fiction\">\n    <title>The Great Adventure</title>\n    <author>Jane Smith</author>\n  </book>\n",
+                        "  <book id=\"2\" genre=\"non-fiction\">\n    <title>Learning TypeScript</title>\n    <author>John Doe</author>\n  </book>\n",
+                        "  <book id=\"3\" genre=\"fiction\">\n    <title>Mystery Manor</title>\n    <author>Alice Johnson</author>\n  </book>\n",
+                        "</library>\n",
+                    )
+                    .to_string(),
+                ),
+                (
+                    "/conv.toml".to_string(),
+                    "[server]\nhost = \"localhost\"\nport = 8080\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // --- format validation (:354/:365) ---
+        for format in ["yaml", "json"] {
+            let result = env.exec(&format!(
+                "echo '{{}}' | yq --input-format={format} --output-format=json"
+            ));
+            assert_eq!(result.exit_code, 0, "input format {format}");
+        }
+        for format in ["yaml", "json", "xml", "ini", "csv", "toml"] {
+            let result = env.exec(&format!("echo '{{}}' | yq --output-format={format}"));
+            assert_eq!(result.exit_code, 0, "output format {format}");
+        }
+
+        // --- INI (:377/:395/:407/:424) ---
+        let ini_host = env.exec("yq -p ini '.database.host' /config.ini");
+        assert_eq!(ini_host.stdout, "localhost\n");
+        let ini_port = env.exec("yq -p ini '.database.port' /config.ini");
+        assert!(ini_port.stdout.trim().contains("5432"));
+        let ini_out = env.exec("yq -o ini '.' /data.yaml");
+        assert!(ini_out.stdout.contains("[database]"));
+        assert!(ini_out.stdout.contains("host=localhost"));
+        assert!(ini_out.stdout.contains("port=5432"));
+        let ini_conv = env.exec("yq -o ini '.' /kv.yaml");
+        assert!(ini_conv.stdout.contains("name=test"));
+        assert!(ini_conv.stdout.contains("version=1"));
+
+        // --- CSV (:438/:449/:460/:474/:492/:506) ---
+        assert_eq!(
+            env.exec("yq -p csv '.[0].name' /data.csv").stdout,
+            "alice\n"
+        );
+        assert_eq!(
+            env.exec("yq -p csv '.[].name' /data.csv").stdout,
+            "alice\nbob\ncharlie\n"
+        );
+        let filtered =
+            env.exec("yq -p csv '[.[] | select(.city == \"NYC\") | .name]' /data.csv -o json");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&filtered.stdout).unwrap(),
+            serde_json::json!(["alice", "charlie"])
+        );
+        let tsv_delim = env.exec("yq -p csv --csv-delimiter='\\t' '.[0].name' /data.tsv");
+        assert_eq!(tsv_delim.stdout, "alice\n");
+
+        // --- --no-csv-header (:686) ---
+        let no_header = env.exec("yq -p csv --no-csv-header '.[0][0]' /headerless.csv");
+        assert_eq!(no_header.stdout, "alice\n");
+
+        // --- TOML (:712/:729/:743/:756) ---
+        assert_eq!(
+            env.exec("yq '.package.name' /Cargo.toml").stdout,
+            "my-app\n"
+        );
+        assert_eq!(env.exec("yq '.server.port' /config.toml").stdout, "8080\n");
+        let toml_out = env.exec("yq -o toml '.' /server.yaml");
+        assert!(toml_out.stdout.contains("[server]"));
+        assert!(toml_out.stdout.contains("host = \"localhost\""));
+        assert!(toml_out.stdout.contains("port = 8080"));
+        let json_toml = env.exec("yq -p json -o toml '.' /app.json");
+        assert!(json_toml.stdout.contains("[app]"));
+        assert!(json_toml.stdout.contains("name = \"test\""));
+
+        // --- TSV (:770/:781) ---
+        assert_eq!(env.exec("yq '.[0].name' /data.tsv").stdout, "alice\n");
+        assert_eq!(env.exec("yq '.[].name' /rows.tsv").stdout, "a\nb\n");
+
+        // --- inplace error (:808) ---
+        let inplace_err = env.exec("echo 'x: 1' | yq -i '.x'");
+        assert_eq!(inplace_err.exit_code, 1);
+        assert!(inplace_err.stderr.contains("requires a file"));
+
+        // --- front-matter (:817/:839/:856/:873) ---
+        assert_eq!(
+            env.exec("yq --front-matter '.title' /post.md").stdout,
+            "My Post\n"
+        );
+        assert_eq!(
+            env.exec("yq --front-matter '.tags[]' /tags.md").stdout,
+            "a\nb\n"
+        );
+        assert_eq!(env.exec("yq -f '.title' /hugo.md").stdout, "Hugo Post\n");
+        let no_fm = env.exec("yq --front-matter '.title' /plain.md");
+        assert_eq!(no_fm.exit_code, 1);
+        assert!(no_fm.stderr.contains("no front-matter found"));
+
+        // --- auto-detect (:898/:909/:920) ---
+        assert_eq!(env.exec("yq '.root.name' /data.xml").stdout, "test\n");
+        assert_eq!(env.exec("yq '.[0].name' /auto.csv").stdout, "alice\n");
+        assert_eq!(
+            env.exec("yq '.database.host' /auto.ini").stdout,
+            "localhost\n"
+        );
+
+        // --- XML fixtures (:178 titles, :189 id attr, :199 filter fiction,
+        //     :211 user names, :497 XML -> JSON title) ---
+        let titles = env.exec("yq -p xml '.library.book[].title' /books.xml");
+        assert!(titles.stdout.contains("The Great Adventure"));
+        assert!(titles.stdout.contains("Learning TypeScript"));
+        assert!(titles.stdout.contains("Mystery Manor"));
+        let by_id = env.exec("yq -p xml '.library.book[0][\"+@id\"]' /books.xml -o json");
+        assert_eq!(by_id.stdout, "\"1\"\n");
+        let fiction = env.exec(
+            "yq -p xml '[.library.book[] | select(.[\"+@genre\"] == \"fiction\") | .title]' /books.xml -o json",
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&fiction.stdout).unwrap(),
+            serde_json::json!(["The Great Adventure", "Mystery Manor"])
+        );
+        assert_eq!(
+            env.exec("yq -p xml '.root.users.user[].name' /users.xml")
+                .stdout,
+            "alice\nbob\ncharlie\n"
+        );
+        let xml_to_json = env.exec("yq -p xml '.library.book[0].title' /books.xml -o json -r");
+        assert_eq!(xml_to_json.stdout, "The Great Adventure\n");
+    }
+
+    #[test]
     fn awk_jbc_command_awk_expression_edge_and_error_rows() {
         // Maps the portable pending rows of awk.expressions.test.ts,
         // awk.edge-cases.test.ts, and awk.errors.test.ts that the Rust awk
@@ -13064,5 +13867,128 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         );
         // :42 negated character class [^a-z] matches only the digit record.
         assert_eq!(mixed.exec(r#"awk '/[^a-z]/' /data.txt"#).stdout, "123\n");
+
+        // :51 alternation /red|blue/ matches either branch.
+        let colors = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "red\ngreen\nblue\nyellow\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            colors.exec(r#"awk '/red|blue/' /data.txt"#).stdout,
+            "red\nblue\n"
+        );
+
+        // Expression patterns operating over numeric/string field values.
+        let nums = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "1\n2\n3\n".to_string())]),
+            ..BashOptions::default()
+        });
+        // :71 numeric equality keeps only the matching record.
+        assert_eq!(nums.exec(r#"awk '$1 == 2' /data.txt"#).stdout, "2\n");
+        // :80 numeric inequality keeps every non-matching record.
+        assert_eq!(nums.exec(r#"awk '$1 != 2' /data.txt"#).stdout, "1\n3\n");
+        let names = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "alice\nbob\ncharlie\n".to_string())]),
+            ..BashOptions::default()
+        });
+        // :107 string equality against a quoted literal.
+        assert_eq!(names.exec(r#"awk '$1 == "bob"' /data.txt"#).stdout, "bob\n");
+        let fruit3 = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "apple\nbanana\ncherry\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        // :116 lexicographic comparison against a string literal.
+        assert_eq!(
+            fruit3.exec(r#"awk '$1 < "c"' /data.txt"#).stdout,
+            "apple\nbanana\n"
+        );
+
+        // Combined patterns over NR and field values.
+        let header = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "header\nline1\nline2\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        // :165 NR == 1 matches the first record.
+        assert_eq!(header.exec(r#"awk 'NR == 1' /data.txt"#).stdout, "header\n");
+        // :174 NR > 1 skips the first record.
+        assert_eq!(
+            header.exec(r#"awk 'NR > 1' /data.txt"#).stdout,
+            "line1\nline2\n"
+        );
+        let five = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "1\n2\n3\n4\n5\n".to_string())]),
+            ..BashOptions::default()
+        });
+        // :183 compound NR range expression.
+        assert_eq!(
+            five.exec(r#"awk 'NR >= 2 && NR <= 4' /data.txt"#).stdout,
+            "2\n3\n4\n"
+        );
+        let six = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "a\nb\nc\nd\ne\nf\n".to_string())]),
+            ..BashOptions::default()
+        });
+        // :192 every Nth record via NR % 2 == 1.
+        assert_eq!(
+            six.exec(r#"awk 'NR % 2 == 1' /data.txt"#).stdout,
+            "a\nc\ne\n"
+        );
+
+        // Field regex-match patterns using ~ and !~.
+        let labeled = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "apple red\nbanana yellow\napricot orange\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        // :203 $1 ~ /^a/ keeps records whose first field starts with a.
+        assert_eq!(
+            labeled.exec(r#"awk '$1 ~ /^a/' /data.txt"#).stdout,
+            "apple red\napricot orange\n"
+        );
+        // :212 $1 !~ /^a/ keeps the inverse set.
+        assert_eq!(
+            labeled.exec(r#"awk '$1 !~ /^a/' /data.txt"#).stdout,
+            "banana yellow\n"
+        );
+        let twofield = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "fruit apple\nveg carrot\nfruit banana\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        // :221 $2 ~ /^a/ matches on the second field.
+        assert_eq!(
+            twofield.exec(r#"awk '$2 ~ /^a/' /data.txt"#).stdout,
+            "fruit apple\n"
+        );
+
+        // :232 action-only rule with no pattern runs on every record.
+        let abc = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "a\nb\nc\n".to_string())]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            abc.exec(r#"awk '{ print "line:", $0 }' /data.txt"#).stdout,
+            "line: a\nline: b\nline: c\n"
+        );
+
+        // :243 pattern-only rule prints every matching record.
+        let yesno = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "yes\nno\nyes\n".to_string())]),
+            ..BashOptions::default()
+        });
+        assert_eq!(yesno.exec(r#"awk '/yes/' /data.txt"#).stdout, "yes\nyes\n");
     }
 }

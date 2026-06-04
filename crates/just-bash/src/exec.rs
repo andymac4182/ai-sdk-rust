@@ -6232,7 +6232,17 @@ fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
         return result;
     }
     if patterns.is_empty() {
-        return stderr_result(2, "rg: no pattern given\n");
+        // A `-f`/`--file` pattern source that yields zero patterns (e.g. an empty
+        // pattern file) is a valid invocation that simply matches nothing, so it
+        // exits 1 (no matches) rather than 2 (no pattern given). The hard error is
+        // reserved for the case where no pattern source was supplied at all.
+        if request.pattern_files.is_empty() {
+            return stderr_result(2, "rg: no pattern given\n");
+        }
+        return CommandResult {
+            exit_code: 1,
+            ..CommandResult::default()
+        };
     }
 
     let ignore_case = request.options.ignore_case.unwrap_or_else(|| {
@@ -6408,7 +6418,6 @@ fn parse_rg_args(args: &[String]) -> Result<RgParseResult, CommandResult> {
         } else {
             patterns.push(arg.clone());
         }
-        parsing_roots = true;
         index += 1;
     }
 
@@ -7220,15 +7229,41 @@ fn rg_ignore_rule_matches(rule: &RgIgnoreRule, path: &str) -> bool {
             || rg_glob_matches_path(&rule.pattern, directories);
     }
     if rule.rooted {
-        return rg_glob_match(&rule.pattern, relative);
+        // A rooted pattern (leading `/`) is anchored to the gitignore base.
+        // It matches the path itself or any descendant under that path, so
+        // `/a/b` excludes `a/b` and everything inside `a/b/`.
+        return rg_path_or_ancestor_match(&rule.pattern, relative);
     }
     if rule.pattern.contains('/') {
-        return rg_glob_matches_path(&rule.pattern, relative)
-            || relative.ends_with(&format!("/{}", rule.pattern));
+        // A non-rooted pattern that contains a slash (e.g. `foobar/debug`,
+        // `rust/target`, `.a/b`) is, per gitignore semantics, anchored to the
+        // gitignore base just like a rooted pattern: it matches the path or any
+        // descendant, but is NOT matched as a free-floating substring deeper in
+        // the tree. It may also still match when it appears as a trailing path
+        // segment sequence under a `**/`-style prefix via `rg_glob_matches_path`.
+        return rg_path_or_ancestor_match(&rule.pattern, relative)
+            || rg_glob_matches_path(&rule.pattern, relative);
     }
     relative
         .split('/')
         .any(|part| rg_glob_match(&rule.pattern, part))
+}
+
+/// True when `pattern` (a slash-containing, base-anchored gitignore glob)
+/// matches `relative` exactly or matches one of its ancestor directories, so a
+/// directory exclusion also excludes everything beneath it.
+fn rg_path_or_ancestor_match(pattern: &str, relative: &str) -> bool {
+    if rg_glob_match(pattern, relative) {
+        return true;
+    }
+    let mut prefix = relative;
+    while let Some((parent, _)) = prefix.rsplit_once('/') {
+        if rg_glob_match(pattern, parent) {
+            return true;
+        }
+        prefix = parent;
+    }
+    false
 }
 
 fn rg_glob_matches_path(pattern: &str, path: &str) -> bool {
@@ -7318,8 +7353,13 @@ fn rg_render_search(
         } else {
             line_matches.len()
         };
-        total_matches += file_match_count;
-        if request.options.quiet && file_match_count > 0 {
+        // In `--files-without-match` mode the exit status reflects whether any
+        // file *without* a match was listed, not the raw line-match count, so the
+        // per-line tally must not leak into `total_matches` here.
+        if !request.options.files_without_match {
+            total_matches += file_match_count;
+        }
+        if request.options.quiet && file_match_count > 0 && !request.options.files_without_match {
             return CommandResult {
                 exit_code: 0,
                 ..CommandResult::default()
@@ -7352,6 +7392,14 @@ fn rg_render_search(
 {files_with_match} files contained matches\n{} files searched\n{bytes_searched} bytes searched\n",
             inputs.len()
         ));
+    }
+    // Under `-q`/--quiet ripgrep suppresses all stdout and only signals success
+    // through the exit code. The match-found early-return above covers ordinary
+    // search; this keeps quiet output suppressed for the list-style modes
+    // (e.g. `--files-without-match -q`, which exits 0 when at least one file
+    // without a match is found but prints nothing).
+    if request.options.quiet {
+        stdout.clear();
     }
     CommandResult {
         exit_code: if total_matches == 0 { 1 } else { 0 },
@@ -14973,6 +15021,11 @@ struct YqOptions {
     exit_status: bool,
     join_output: bool,
     indent: usize,
+    in_place: bool,
+    front_matter: bool,
+    csv_header: bool,
+    csv_delimiter: Option<char>,
+    xml_attribute_prefix: String,
 }
 
 impl Default for YqOptions {
@@ -14988,6 +15041,11 @@ impl Default for YqOptions {
             exit_status: false,
             join_output: false,
             indent: 2,
+            in_place: false,
+            front_matter: false,
+            csv_header: true,
+            csv_delimiter: None,
+            xml_attribute_prefix: "+@".to_string(),
         }
     }
 }
@@ -15000,13 +15058,14 @@ fn command_yq(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
     if options.filter == "__help__" {
         return stdout_result("yq - YAML/JSON processor\nUsage: yq [options] <filter> [file]\n");
     }
-    let inputs = match collect_yq_inputs(state, &options, stdin) {
+    let inputs = match collect_yq_inputs_full(state, &options, stdin) {
         Ok(inputs) => inputs,
         Err(result) => return result,
     };
     let mut stdout = String::new();
     let mut saw_value = false;
     let mut last_value = JsonValue::Null;
+    let mut last_rendered = JsonValue::Null;
     for input in inputs {
         let selected =
             match eval_structured_filter(&input, &input, &options.filter, Some(&state.env)) {
@@ -15016,17 +15075,114 @@ fn command_yq(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
         for value in selected {
             saw_value = true;
             last_value = value.clone();
+            last_rendered = value.clone();
             stdout.push_str(&render_yq_output(&value, &options));
             if !options.join_output {
                 stdout.push('\n');
             }
         }
     }
+    if options.in_place {
+        if options
+            .paths
+            .first()
+            .map(String::as_str)
+            .is_none_or(|p| p == "-")
+        {
+            return stderr_result(1, "yq: in-place editing (-i) requires a file\n");
+        }
+        let path = resolve_path(&state.cwd, &options.paths[0]);
+        if let Err(result) = write_yq_file(state, &path, &last_rendered, &options) {
+            return result;
+        }
+        let mut result = stdout_result(String::new());
+        if options.exit_status && (!saw_value || !is_truthy(&last_value)) {
+            result.exit_code = 1;
+        }
+        return result;
+    }
     let mut result = stdout_result(stdout);
     if options.exit_status && (!saw_value || !is_truthy(&last_value)) {
         result.exit_code = 1;
     }
     result
+}
+
+/// Collect inputs, applying front-matter extraction when `--front-matter`/`-f`
+/// is set. Front-matter mode reads the raw file/stdin, extracts the leading
+/// `---`/`+++`/`{{{` block, and parses it as YAML/TOML/JSON respectively.
+fn collect_yq_inputs_full(
+    state: &ExecState<'_>,
+    options: &YqOptions,
+    stdin: &str,
+) -> Result<Vec<JsonValue>, CommandResult> {
+    if !options.front_matter {
+        return collect_yq_inputs(state, options, stdin);
+    }
+    if options.null_input {
+        return Ok(vec![JsonValue::Null]);
+    }
+    let (input, _) = read_yq_input(state, options, stdin)?;
+    match extract_front_matter(&input) {
+        Some(value) => Ok(vec![value]),
+        None => Err(stderr_result(1, "yq: no front-matter found\n")),
+    }
+}
+
+/// Extract leading front-matter, mirroring upstream `extractFrontMatter`:
+/// `---`-delimited YAML, `+++`-delimited TOML, and `{{{`-delimited JSON.
+fn extract_front_matter(input: &str) -> Option<JsonValue> {
+    let trimmed = input.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("---") {
+        if let Some(end) = find_front_matter_end(rest, "\n---") {
+            return parse_simple_yaml(&rest[..end]).ok();
+        }
+    }
+    if let Some(rest) = trimmed.strip_prefix("+++") {
+        if let Some(end) = find_front_matter_end(rest, "\n+++") {
+            return parse_toml_input(&rest[..end]).ok();
+        }
+    }
+    if let Some(rest) = trimmed.strip_prefix("{{{") {
+        if let Some(end) = find_front_matter_end(rest, "\n}}}") {
+            return serde_json::from_str(&rest[..end]).ok();
+        }
+    }
+    None
+}
+
+fn find_front_matter_end(rest: &str, marker: &str) -> Option<usize> {
+    let mut search = 0;
+    while let Some(idx) = rest[search..].find(marker) {
+        let abs = search + idx;
+        let after = abs + marker.len();
+        // The closing marker must be followed by a newline or end of input.
+        if rest[after..].is_empty() || rest[after..].starts_with('\n') {
+            return Some(abs);
+        }
+        search = after;
+    }
+    None
+}
+
+fn write_yq_file(
+    state: &ExecState<'_>,
+    path: &str,
+    value: &JsonValue,
+    options: &YqOptions,
+) -> Result<(), CommandResult> {
+    let mut content = render_yq_output(value, options);
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    state
+        .session
+        .inner
+        .fs
+        .lock()
+        .map_err(|_| stderr_result(1, "yq: filesystem lock poisoned\n"))?
+        .write_file(path, content.as_str())
+        .map_err(|_| stderr_result(1, format!("yq: {path}: write failed\n")))
 }
 
 fn parse_yq_options(args: &[String]) -> Result<YqOptions, CommandResult> {
@@ -15046,6 +15202,56 @@ fn parse_yq_options(args: &[String]) -> Result<YqOptions, CommandResult> {
             options.output_format = validate_yq_format(format, "output")?;
             index += 1;
             continue;
+        }
+        if let Some(delimiter) = arg.strip_prefix("--csv-delimiter=") {
+            options.csv_delimiter = unescape_yq_delimiter(delimiter);
+            index += 1;
+            continue;
+        }
+        if let Some(prefix) = arg.strip_prefix("--xml-attribute-prefix=") {
+            options.xml_attribute_prefix = prefix.to_string();
+            index += 1;
+            continue;
+        }
+        match arg.as_str() {
+            "--front-matter" | "-f" => {
+                options.front_matter = true;
+                index += 1;
+                continue;
+            }
+            "--no-csv-header" => {
+                options.csv_header = false;
+                index += 1;
+                continue;
+            }
+            "-i" | "--in-place" => {
+                options.in_place = true;
+                index += 1;
+                continue;
+            }
+            "--csv-delimiter" => {
+                let Some(delimiter) = args.get(index + 1) else {
+                    return Err(stderr_result(
+                        1,
+                        "yq: missing argument to --csv-delimiter\n",
+                    ));
+                };
+                options.csv_delimiter = unescape_yq_delimiter(delimiter);
+                index += 2;
+                continue;
+            }
+            "--xml-attribute-prefix" => {
+                let Some(prefix) = args.get(index + 1) else {
+                    return Err(stderr_result(
+                        1,
+                        "yq: missing argument to --xml-attribute-prefix\n",
+                    ));
+                };
+                options.xml_attribute_prefix = prefix.clone();
+                index += 2;
+                continue;
+            }
+            _ => {}
         }
         match arg.as_str() {
             "-p" | "--input-format" => {
@@ -15084,6 +15290,8 @@ fn parse_yq_options(args: &[String]) -> Result<YqOptions, CommandResult> {
                         'n' => options.null_input = true,
                         'e' => options.exit_status = true,
                         'j' => options.join_output = true,
+                        'i' => options.in_place = true,
+                        'f' => options.front_matter = true,
                         _ => {
                             return Err(stderr_result(1, format!("yq: unknown option: -{flag}\n")));
                         }
@@ -15099,9 +15307,24 @@ fn parse_yq_options(args: &[String]) -> Result<YqOptions, CommandResult> {
         index += 1;
     }
     if options.filter.is_empty() {
-        return Err(stderr_result(1, "yq: missing filter\n"));
+        // yq defaults to the identity filter `.` when none is supplied.
+        options.filter = ".".to_string();
     }
     Ok(options)
+}
+
+/// Interpret a yq CSV delimiter argument. The shell passes the literal token
+/// (single quotes are literal in just-bash), so escape sequences such as `\t`
+/// arrive verbatim and must be decoded into the real control character that
+/// papaparse would split on.
+fn unescape_yq_delimiter(raw: &str) -> Option<char> {
+    let decoded = match raw {
+        "\\t" => "\t".to_string(),
+        "\\n" => "\n".to_string(),
+        "\\r" => "\r".to_string(),
+        other => other.to_string(),
+    };
+    decoded.chars().next()
 }
 
 fn validate_yq_format(format: &str, kind: &str) -> Result<String, CommandResult> {
@@ -15115,21 +15338,20 @@ fn validate_yq_format(format: &str, kind: &str) -> Result<String, CommandResult>
     }
 }
 
-fn collect_yq_inputs(
+/// Read the raw input text for a yq invocation along with the resolved file
+/// path (when one was supplied) so callers such as in-place editing can write
+/// the result back to the same location.
+fn read_yq_input(
     state: &ExecState<'_>,
     options: &YqOptions,
     stdin: &str,
-) -> Result<Vec<JsonValue>, CommandResult> {
-    if options.null_input {
-        return Ok(vec![JsonValue::Null]);
-    }
+) -> Result<(String, Option<String>), CommandResult> {
     let raw_path = options.paths.first().map(String::as_str);
-    let input = if let Some(path) = raw_path {
-        if path == "-" {
-            stdin.to_string()
-        } else {
+    match raw_path {
+        Some("-") | None => Ok((stdin.to_string(), None)),
+        Some(path) => {
             let resolved = resolve_path(&state.cwd, path);
-            state
+            let text = state
                 .session
                 .inner
                 .fs
@@ -15138,12 +15360,15 @@ fn collect_yq_inputs(
                 .read_file(&resolved)
                 .map_err(|_| {
                     stderr_result(1, format!("yq: {resolved}: No such file or directory\n"))
-                })?
+                })?;
+            Ok((text, Some(resolved)))
         }
-    } else {
-        stdin.to_string()
-    };
-    let format = options
+    }
+}
+
+fn detect_yq_input_format(options: &YqOptions, input: &str) -> String {
+    let raw_path = options.paths.first().map(String::as_str);
+    options
         .input_format
         .clone()
         .or_else(|| raw_path.and_then(input_format_from_path))
@@ -15160,15 +15385,38 @@ fn collect_yq_inputs(
             } else {
                 "yaml".to_string()
             }
-        });
-    match format.as_str() {
-        "json" => parse_json_stream(&input)
+        })
+}
+
+/// Parse raw text into one or more JSON documents using the requested input
+/// format, mirroring the upstream `parseInput` switch in
+/// `packages/just-bash/src/commands/yq/formats.ts`.
+fn parse_yq_input(
+    input: &str,
+    format: &str,
+    options: &YqOptions,
+) -> Result<Vec<JsonValue>, CommandResult> {
+    match format {
+        "json" => parse_json_stream(input)
             .map_err(|error| stderr_result(1, format!("yq: parse error: {error}\n"))),
-        "yaml" | "yml" => parse_simple_yaml(&input)
+        "yaml" | "yml" => parse_simple_yaml(input)
             .map(|value| vec![value])
             .map_err(|error| stderr_result(1, format!("yq: {error}\n"))),
-        "ini" => Ok(vec![parse_ini_input(&input)]),
-        "csv" | "tsv" => parse_csv_input(&input)
+        "ini" => Ok(vec![parse_ini_input(input)]),
+        "csv" | "tsv" => {
+            let delimiter = options.csv_delimiter.unwrap_or(if format == "tsv" {
+                '\t'
+            } else {
+                detect_csv_delimiter(input.trim_matches(['\n', '\r']))
+            });
+            parse_csv_input_with(input, delimiter, options.csv_header)
+                .map(|value| vec![value])
+                .map_err(|error| stderr_result(1, format!("yq: {error}\n")))
+        }
+        "toml" => parse_toml_input(input)
+            .map(|value| vec![value])
+            .map_err(|error| stderr_result(1, format!("yq: {error}\n"))),
+        "xml" => parse_xml_input(input, &options.xml_attribute_prefix)
             .map(|value| vec![value])
             .map_err(|error| stderr_result(1, format!("yq: {error}\n"))),
         _ => Err(stderr_result(
@@ -15176,6 +15424,19 @@ fn collect_yq_inputs(
             format!("yq: input format {format} is not implemented in the Rust backend\n"),
         )),
     }
+}
+
+fn collect_yq_inputs(
+    state: &ExecState<'_>,
+    options: &YqOptions,
+    stdin: &str,
+) -> Result<Vec<JsonValue>, CommandResult> {
+    if options.null_input {
+        return Ok(vec![JsonValue::Null]);
+    }
+    let (input, _) = read_yq_input(state, options, stdin)?;
+    let format = detect_yq_input_format(options, &input);
+    parse_yq_input(&input, &format, options)
 }
 
 fn input_format_from_path(path: &str) -> Option<String> {
@@ -15187,17 +15448,33 @@ fn input_format_from_path(path: &str) -> Option<String> {
 }
 
 fn render_yq_output(value: &JsonValue, options: &YqOptions) -> String {
-    if options.output_format == "json" {
-        return render_json_output(
-            value,
-            StructuredOutput {
-                raw: options.raw_output,
-                compact: options.compact,
-                tab_indent: false,
-                indent: options.indent,
-                default_scalar_raw: false,
-            },
-        );
+    match options.output_format.as_str() {
+        "json" => {
+            return render_json_output(
+                value,
+                StructuredOutput {
+                    raw: options.raw_output,
+                    compact: options.compact,
+                    tab_indent: false,
+                    indent: options.indent,
+                    default_scalar_raw: false,
+                },
+            );
+        }
+        "ini" => return render_ini_output(value),
+        "csv" | "tsv" => {
+            let delimiter = options
+                .csv_delimiter
+                .unwrap_or(if options.output_format == "tsv" {
+                    '\t'
+                } else {
+                    ','
+                });
+            return render_csv_output(value, delimiter);
+        }
+        "toml" => return render_toml_output(value),
+        "xml" => return render_xml_output(value, &options.xml_attribute_prefix, options.indent),
+        _ => {}
     }
     if options.raw_output {
         return json_scalar_string(value);
@@ -15206,6 +15483,224 @@ fn render_yq_output(value: &JsonValue, options: &YqOptions) -> String {
         JsonValue::Array(_) | JsonValue::Object(_) => render_yaml_value(value, 0, options.indent),
         _ => json_scalar_string(value),
     }
+}
+
+/// Render a JSON object as INI, mirroring the node `ini` package output: top
+/// level scalar keys come first as `key=value`, then each nested object is a
+/// `[section]` followed by its keys. Non-object roots produce empty output.
+fn render_ini_output(value: &JsonValue) -> String {
+    let JsonValue::Object(map) = value else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for (key, child) in map {
+        if !matches!(child, JsonValue::Object(_)) {
+            out.push_str(&format!("{key}={}\n", ini_scalar_text(child)));
+        }
+    }
+    for (key, child) in map {
+        if let JsonValue::Object(section) = child {
+            out.push_str(&format!("[{key}]\n"));
+            for (skey, sval) in section {
+                out.push_str(&format!("{skey}={}\n", ini_scalar_text(sval)));
+            }
+        }
+    }
+    out
+}
+
+fn ini_scalar_text(value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(text) => text.clone(),
+        JsonValue::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// Render an array of row objects (or a single object) as CSV, matching
+/// papaparse `unparse`: the union of keys forms the header row and each record
+/// emits its values in header order.
+fn render_csv_output(value: &JsonValue, delimiter: char) -> String {
+    let rows: Vec<&JsonValue> = match value {
+        JsonValue::Array(items) => items.iter().collect(),
+        single => vec![single],
+    };
+    let mut headers: Vec<String> = Vec::new();
+    for row in &rows {
+        if let JsonValue::Object(map) = row {
+            for key in map.keys() {
+                if !headers.iter().any(|h| h == key) {
+                    headers.push(key.clone());
+                }
+            }
+        }
+    }
+    let mut out = String::new();
+    if !headers.is_empty() {
+        out.push_str(
+            &headers
+                .iter()
+                .map(|h| yq_csv_escape_field(h, delimiter))
+                .collect::<Vec<_>>()
+                .join(&delimiter.to_string()),
+        );
+        out.push_str("\r\n");
+    }
+    for row in &rows {
+        let cells: Vec<String> = if let JsonValue::Object(map) = row {
+            headers
+                .iter()
+                .map(|h| yq_csv_escape_field(&csv_cell_text(map.get(h)), delimiter))
+                .collect()
+        } else {
+            vec![yq_csv_escape_field(&json_scalar_string(row), delimiter)]
+        };
+        out.push_str(&cells.join(&delimiter.to_string()));
+        out.push_str("\r\n");
+    }
+    out.trim_end_matches("\r\n").to_string()
+}
+
+fn csv_cell_text(value: Option<&JsonValue>) -> String {
+    match value {
+        Some(JsonValue::String(text)) => text.clone(),
+        Some(JsonValue::Null) | None => String::new(),
+        Some(other) => other.to_string(),
+    }
+}
+
+fn yq_csv_escape_field(field: &str, delimiter: char) -> String {
+    if field.contains(delimiter) || field.contains('"') || field.contains('\n') {
+        format!("\"{}\"", field.replace('"', "\"\""))
+    } else {
+        field.to_string()
+    }
+}
+
+/// Render a JSON object as TOML. Scalar keys come first as `key = value`, then
+/// nested object keys become `[table]` sections. Non-object roots return empty
+/// output (matching `smol-toml.stringify`).
+fn render_toml_output(value: &JsonValue) -> String {
+    let JsonValue::Object(map) = value else {
+        return String::new();
+    };
+    let mut out = String::new();
+    render_toml_table(map, &[], &mut out);
+    out
+}
+
+fn render_toml_table(map: &JsonMap<String, JsonValue>, prefix: &[String], out: &mut String) {
+    for (key, child) in map {
+        if !matches!(child, JsonValue::Object(_)) {
+            out.push_str(&format!("{key} = {}\n", toml_value_text(child)));
+        }
+    }
+    for (key, child) in map {
+        if let JsonValue::Object(section) = child {
+            let mut path = prefix.to_vec();
+            path.push(key.clone());
+            out.push_str(&format!("[{}]\n", path.join(".")));
+            render_toml_table(section, &path, out);
+        }
+    }
+}
+
+fn toml_value_text(value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(text) => {
+            format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+        }
+        JsonValue::Bool(flag) => flag.to_string(),
+        JsonValue::Array(items) => {
+            let inner = items
+                .iter()
+                .map(toml_value_text)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[ {inner} ]")
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Render a JSON value as XML, mirroring fast-xml-parser's `XMLBuilder`: object
+/// keys become elements, attribute-prefixed keys become attributes on the
+/// parent element, and arrays repeat the element. Pretty-printed with `indent`
+/// spaces per level.
+fn render_xml_output(value: &JsonValue, attribute_prefix: &str, indent: usize) -> String {
+    let mut out = String::new();
+    if let JsonValue::Object(map) = value {
+        render_xml_element(map, attribute_prefix, indent, 0, &mut out);
+    }
+    out.trim_end().to_string()
+}
+
+fn render_xml_element(
+    map: &JsonMap<String, JsonValue>,
+    attribute_prefix: &str,
+    indent: usize,
+    depth: usize,
+    out: &mut String,
+) {
+    let pad = " ".repeat(indent * depth);
+    for (key, child) in map {
+        if key.starts_with(attribute_prefix) {
+            continue;
+        }
+        match child {
+            JsonValue::Array(items) => {
+                for item in items {
+                    render_xml_named(key, item, attribute_prefix, indent, depth, out);
+                }
+            }
+            other => render_xml_named(key, other, attribute_prefix, indent, depth, out),
+        }
+    }
+    let _ = pad;
+}
+
+fn render_xml_named(
+    name: &str,
+    value: &JsonValue,
+    attribute_prefix: &str,
+    indent: usize,
+    depth: usize,
+    out: &mut String,
+) {
+    let pad = " ".repeat(indent * depth);
+    match value {
+        JsonValue::Object(map) => {
+            let mut attrs = String::new();
+            for (key, val) in map {
+                if let Some(attr) = key.strip_prefix(attribute_prefix) {
+                    attrs.push_str(&format!(
+                        " {attr}=\"{}\"",
+                        xml_escape(&json_scalar_string(val))
+                    ));
+                }
+            }
+            let has_children = map.keys().any(|k| !k.starts_with(attribute_prefix));
+            if has_children {
+                out.push_str(&format!("{pad}<{name}{attrs}>\n"));
+                render_xml_element(map, attribute_prefix, indent, depth + 1, out);
+                out.push_str(&format!("{pad}</{name}>\n"));
+            } else {
+                out.push_str(&format!("{pad}<{name}{attrs}></{name}>\n"));
+            }
+        }
+        JsonValue::Null => out.push_str(&format!("{pad}<{name}></{name}>\n")),
+        other => out.push_str(&format!(
+            "{pad}<{name}>{}</{name}>\n",
+            xml_escape(&json_scalar_string(other))
+        )),
+    }
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Parse INI text into a JSON object, mirroring the node `ini` package
@@ -15274,15 +15769,32 @@ fn parse_ini_scalar(value: &str) -> JsonValue {
 /// `skipEmptyLines: true`, auto delimiter detection). Numeric fields become
 /// numbers and the case-insensitive tokens `true`/`false` become booleans;
 /// every other field stays a string.
-fn parse_csv_input(input: &str) -> Result<JsonValue, String> {
+/// Parse CSV/TSV with an explicit delimiter and header mode. With
+/// `has_header`, the first record names the object fields (papaparse
+/// `header: true`); without it, each record becomes an array of cells
+/// (`header: false`).
+fn parse_csv_input_with(
+    input: &str,
+    delimiter: char,
+    has_header: bool,
+) -> Result<JsonValue, String> {
     let trimmed = input.trim_matches(['\n', '\r']);
     if trimmed.is_empty() {
         return Ok(JsonValue::Array(Vec::new()));
     }
-    let delimiter = detect_csv_delimiter(trimmed);
     let mut records = parse_csv_records(trimmed, delimiter);
     if records.is_empty() {
         return Ok(JsonValue::Array(Vec::new()));
+    }
+    if !has_header {
+        let rows = records
+            .into_iter()
+            .filter(|record| !(record.len() == 1 && record[0].is_empty()))
+            .map(|record| {
+                JsonValue::Array(record.iter().map(|cell| csv_dynamic_typing(cell)).collect())
+            })
+            .collect();
+        return Ok(JsonValue::Array(rows));
     }
     let headers = records.remove(0);
     let mut rows = Vec::new();
@@ -15369,7 +15881,532 @@ fn csv_dynamic_typing(value: &str) -> JsonValue {
     JsonValue::String(value.to_string())
 }
 
+/// Parse a TOML document into a JSON object, covering the subset exercised by
+/// the portable yq tests: top-level and dotted `[section]` tables,
+/// `[[array.of.tables]]`, inline tables, arrays, and the basic scalar types
+/// (strings, integers, floats, booleans). Mirrors `smol-toml`'s output shape.
+fn parse_toml_input(input: &str) -> Result<JsonValue, String> {
+    let mut root = JsonMap::new();
+    // Path of the table that subsequent `key = value` lines belong to.
+    let mut current: Vec<String> = Vec::new();
+    let lines: Vec<&str> = input.lines().collect();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = strip_toml_comment(lines[index].trim());
+        index += 1;
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("[[") {
+            let name = rest
+                .strip_suffix("]]")
+                .ok_or_else(|| format!("toml: invalid array table header: {line}"))?;
+            let path = parse_toml_key_path(name.trim())?;
+            toml_push_array_table(&mut root, &path)?;
+            current = path;
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('[') {
+            let name = rest
+                .strip_suffix(']')
+                .ok_or_else(|| format!("toml: invalid table header: {line}"))?;
+            let path = parse_toml_key_path(name.trim())?;
+            toml_ensure_table(&mut root, &path)?;
+            current = path;
+            continue;
+        }
+        let (key, value_text) = line
+            .split_once('=')
+            .ok_or_else(|| format!("toml: invalid line: {line}"))?;
+        // Support multi-line arrays by joining until brackets balance.
+        let mut value_text = value_text.trim().to_string();
+        while toml_value_is_incomplete(&value_text) && index < lines.len() {
+            value_text.push(' ');
+            value_text.push_str(strip_toml_comment(lines[index].trim()));
+            index += 1;
+        }
+        let key_path = parse_toml_key_path(key.trim())?;
+        let value = parse_toml_value(&value_text)?;
+        let mut full_path = current.clone();
+        full_path.extend(key_path);
+        toml_insert(&mut root, &full_path, value)?;
+    }
+    Ok(JsonValue::Object(root))
+}
+
+fn strip_toml_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut in_string: Option<u8> = None;
+    for (idx, &byte) in bytes.iter().enumerate() {
+        match in_string {
+            Some(quote) => {
+                if byte == quote {
+                    in_string = None;
+                }
+            }
+            None => {
+                if byte == b'"' || byte == b'\'' {
+                    in_string = Some(byte);
+                } else if byte == b'#' {
+                    return line[..idx].trim_end();
+                }
+            }
+        }
+    }
+    line
+}
+
+fn toml_value_is_incomplete(text: &str) -> bool {
+    let opens = text.matches('[').count();
+    let closes = text.matches(']').count();
+    opens > closes
+}
+
+fn parse_toml_key_path(raw: &str) -> Result<Vec<String>, String> {
+    let mut parts = Vec::new();
+    for part in raw.split('.') {
+        let trimmed = part.trim();
+        let key = if (trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2)
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2)
+        {
+            trimmed[1..trimmed.len() - 1].to_string()
+        } else {
+            trimmed.to_string()
+        };
+        if key.is_empty() {
+            return Err(format!("toml: empty key in path: {raw}"));
+        }
+        parts.push(key);
+    }
+    Ok(parts)
+}
+
+fn toml_ensure_table<'a>(
+    root: &'a mut JsonMap<String, JsonValue>,
+    path: &[String],
+) -> Result<&'a mut JsonMap<String, JsonValue>, String> {
+    let mut map = root;
+    for key in path {
+        let entry = map
+            .entry(key.clone())
+            .or_insert_with(|| JsonValue::Object(JsonMap::new()));
+        match entry {
+            JsonValue::Object(child) => map = child,
+            JsonValue::Array(items) => {
+                let last = items
+                    .last_mut()
+                    .ok_or_else(|| format!("toml: cannot descend into empty array: {key}"))?;
+                match last {
+                    JsonValue::Object(child) => map = child,
+                    _ => return Err(format!("toml: key is not a table: {key}")),
+                }
+            }
+            _ => return Err(format!("toml: key is not a table: {key}")),
+        }
+    }
+    Ok(map)
+}
+
+fn toml_push_array_table(
+    root: &mut JsonMap<String, JsonValue>,
+    path: &[String],
+) -> Result<(), String> {
+    let (last, parents) = path
+        .split_last()
+        .ok_or_else(|| "toml: empty array table header".to_string())?;
+    let parent = toml_ensure_table(root, parents)?;
+    let entry = parent
+        .entry(last.clone())
+        .or_insert_with(|| JsonValue::Array(Vec::new()));
+    match entry {
+        JsonValue::Array(items) => {
+            items.push(JsonValue::Object(JsonMap::new()));
+            Ok(())
+        }
+        _ => Err(format!("toml: key is not an array of tables: {last}")),
+    }
+}
+
+fn toml_insert(
+    root: &mut JsonMap<String, JsonValue>,
+    path: &[String],
+    value: JsonValue,
+) -> Result<(), String> {
+    let (last, parents) = path
+        .split_last()
+        .ok_or_else(|| "toml: empty key path".to_string())?;
+    let parent = toml_ensure_table(root, parents)?;
+    parent.insert(last.clone(), value);
+    Ok(())
+}
+
+fn parse_toml_value(text: &str) -> Result<JsonValue, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("toml: missing value".to_string());
+    }
+    if let Some(rest) = text.strip_prefix('[') {
+        let inner = rest
+            .strip_suffix(']')
+            .ok_or_else(|| format!("toml: unterminated array: {text}"))?;
+        let mut items = Vec::new();
+        for element in split_toml_top_level(inner) {
+            let element = element.trim();
+            if element.is_empty() {
+                continue;
+            }
+            items.push(parse_toml_value(element)?);
+        }
+        return Ok(JsonValue::Array(items));
+    }
+    if let Some(rest) = text.strip_prefix('{') {
+        let inner = rest
+            .strip_suffix('}')
+            .ok_or_else(|| format!("toml: unterminated inline table: {text}"))?;
+        let mut map = JsonMap::new();
+        for pair in split_toml_top_level(inner) {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                continue;
+            }
+            let (key, value) = pair
+                .split_once('=')
+                .ok_or_else(|| format!("toml: invalid inline table pair: {pair}"))?;
+            let key_path = parse_toml_key_path(key.trim())?;
+            let value = parse_toml_value(value.trim())?;
+            toml_insert(&mut map, &key_path, value)?;
+        }
+        return Ok(JsonValue::Object(map));
+    }
+    if (text.starts_with('"') && text.ends_with('"') && text.len() >= 2)
+        || (text.starts_with('\'') && text.ends_with('\'') && text.len() >= 2)
+    {
+        let quote = text.as_bytes()[0];
+        let inner = &text[1..text.len() - 1];
+        if quote == b'\'' {
+            return Ok(JsonValue::String(inner.to_string()));
+        }
+        return Ok(JsonValue::String(toml_unescape(inner)));
+    }
+    match text {
+        "true" => return Ok(JsonValue::Bool(true)),
+        "false" => return Ok(JsonValue::Bool(false)),
+        _ => {}
+    }
+    let numeric: String = text.chars().filter(|ch| *ch != '_').collect();
+    if let Ok(integer) = numeric.parse::<i64>() {
+        return Ok(json_integer(integer));
+    }
+    if let Ok(number) = numeric.parse::<f64>()
+        && number.is_finite()
+    {
+        return Ok(json_number(number));
+    }
+    // Fall back to a bare string (dates, etc.).
+    Ok(JsonValue::String(text.to_string()))
+}
+
+fn toml_unescape(value: &str) -> String {
+    let mut out = String::new();
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some('u') => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    if let Ok(code) = u32::from_str_radix(&hex, 16)
+                        && let Some(decoded) = char::from_u32(code)
+                    {
+                        out.push(decoded);
+                    }
+                }
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Split a TOML array/inline-table body on top-level commas, honoring nested
+/// brackets/braces and quoted strings.
+fn split_toml_top_level(input: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0i32;
+    let mut in_string: Option<char> = None;
+    for ch in input.chars() {
+        match in_string {
+            Some(quote) => {
+                current.push(ch);
+                if ch == quote {
+                    in_string = None;
+                }
+            }
+            None => match ch {
+                '"' | '\'' => {
+                    in_string = Some(ch);
+                    current.push(ch);
+                }
+                '[' | '{' => {
+                    depth += 1;
+                    current.push(ch);
+                }
+                ']' | '}' => {
+                    depth -= 1;
+                    current.push(ch);
+                }
+                ',' if depth == 0 => {
+                    parts.push(std::mem::take(&mut current));
+                }
+                _ => current.push(ch),
+            },
+        }
+    }
+    if !current.trim().is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
+/// Parse XML into a JSON object, mirroring the `fast-xml-parser` configuration
+/// used by yq: attributes are kept (prefixed with `attribute_prefix`), text
+/// content keeps the configured node name only when an element also has
+/// attributes, repeated sibling elements collapse into arrays, and empty
+/// elements become `null`.
+fn parse_xml_input(input: &str, attribute_prefix: &str) -> Result<JsonValue, String> {
+    let tokens = tokenize_xml(input)?;
+    let mut pos = 0;
+    let value = parse_xml_nodes(&tokens, &mut pos, None, attribute_prefix)?;
+    Ok(value)
+}
+
+#[derive(Debug)]
+enum XmlToken {
+    Open {
+        name: String,
+        attrs: Vec<(String, String)>,
+        self_closing: bool,
+    },
+    Close(String),
+    Text(String),
+}
+
+fn tokenize_xml(input: &str) -> Result<Vec<XmlToken>, String> {
+    let mut tokens = Vec::new();
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            // Skip declarations / comments.
+            if input[i..].starts_with("<?") {
+                let end = input[i..]
+                    .find("?>")
+                    .ok_or_else(|| "xml: unterminated declaration".to_string())?;
+                i += end + 2;
+                continue;
+            }
+            if input[i..].starts_with("<!--") {
+                let end = input[i..]
+                    .find("-->")
+                    .ok_or_else(|| "xml: unterminated comment".to_string())?;
+                i += end + 3;
+                continue;
+            }
+            let close = input[i..]
+                .find('>')
+                .ok_or_else(|| "xml: unterminated tag".to_string())?;
+            let raw = &input[i + 1..i + close];
+            i += close + 1;
+            if let Some(name) = raw.strip_prefix('/') {
+                tokens.push(XmlToken::Close(name.trim().to_string()));
+            } else {
+                let self_closing = raw.ends_with('/');
+                let body = raw.trim_end_matches('/').trim();
+                let (name, attrs) = parse_xml_tag(body)?;
+                tokens.push(XmlToken::Open {
+                    name,
+                    attrs,
+                    self_closing,
+                });
+            }
+        } else {
+            let next = input[i..].find('<').map(|n| i + n).unwrap_or(bytes.len());
+            let text = &input[i..next];
+            if !text.trim().is_empty() {
+                tokens.push(XmlToken::Text(xml_unescape(text.trim())));
+            }
+            i = next;
+        }
+    }
+    Ok(tokens)
+}
+
+fn parse_xml_tag(body: &str) -> Result<(String, Vec<(String, String)>), String> {
+    let mut chars = body.char_indices().peekable();
+    let mut name = String::new();
+    while let Some(&(_, ch)) = chars.peek() {
+        if ch.is_whitespace() {
+            break;
+        }
+        name.push(ch);
+        chars.next();
+    }
+    let rest = &body[name.len()..];
+    let mut attrs = Vec::new();
+    let mut remaining = rest.trim();
+    while !remaining.is_empty() {
+        let eq = match remaining.find('=') {
+            Some(eq) => eq,
+            None => break,
+        };
+        let key = remaining[..eq].trim().to_string();
+        let after = remaining[eq + 1..].trim_start();
+        let quote = after
+            .chars()
+            .next()
+            .ok_or_else(|| "xml: missing attribute value".to_string())?;
+        if quote != '"' && quote != '\'' {
+            return Err("xml: unquoted attribute value".to_string());
+        }
+        let value_rest = &after[1..];
+        let end = value_rest
+            .find(quote)
+            .ok_or_else(|| "xml: unterminated attribute".to_string())?;
+        let value = xml_unescape(&value_rest[..end]);
+        attrs.push((key, value));
+        remaining = value_rest[end + 1..].trim_start();
+    }
+    Ok((name, attrs))
+}
+
+fn parse_xml_nodes(
+    tokens: &[XmlToken],
+    pos: &mut usize,
+    until: Option<&str>,
+    attribute_prefix: &str,
+) -> Result<JsonValue, String> {
+    let mut map = JsonMap::new();
+    let mut text = String::new();
+    while *pos < tokens.len() {
+        match &tokens[*pos] {
+            XmlToken::Close(name) => {
+                if until == Some(name.as_str()) {
+                    *pos += 1;
+                    break;
+                }
+                return Err(format!("xml: unexpected closing tag: {name}"));
+            }
+            XmlToken::Text(value) => {
+                text.push_str(value);
+                *pos += 1;
+            }
+            XmlToken::Open {
+                name,
+                attrs,
+                self_closing,
+            } => {
+                let name = name.clone();
+                let attrs = attrs.clone();
+                let self_closing = *self_closing;
+                *pos += 1;
+                let child = if self_closing {
+                    xml_build_value(JsonValue::Null, &attrs, attribute_prefix)
+                } else {
+                    let inner = parse_xml_nodes(tokens, pos, Some(&name), attribute_prefix)?;
+                    xml_merge_attrs(inner, &attrs, attribute_prefix)
+                };
+                xml_insert_child(&mut map, name, child);
+            }
+        }
+    }
+    if map.is_empty() {
+        if text.is_empty() {
+            Ok(JsonValue::Null)
+        } else {
+            Ok(JsonValue::String(text))
+        }
+    } else {
+        Ok(JsonValue::Object(map))
+    }
+}
+
+fn xml_insert_child(map: &mut JsonMap<String, JsonValue>, name: String, child: JsonValue) {
+    if let Some(existing) = map.get_mut(&name) {
+        if let JsonValue::Array(items) = existing {
+            items.push(child);
+        } else {
+            let prev = std::mem::replace(existing, JsonValue::Null);
+            *existing = JsonValue::Array(vec![prev, child]);
+        }
+    } else {
+        map.insert(name, child);
+    }
+}
+
+fn xml_build_value(content: JsonValue, attrs: &[(String, String)], prefix: &str) -> JsonValue {
+    if attrs.is_empty() {
+        return content;
+    }
+    let mut map = JsonMap::new();
+    for (key, value) in attrs {
+        map.insert(format!("{prefix}{key}"), JsonValue::String(value.clone()));
+    }
+    JsonValue::Object(map)
+}
+
+fn xml_merge_attrs(inner: JsonValue, attrs: &[(String, String)], prefix: &str) -> JsonValue {
+    if attrs.is_empty() {
+        return inner;
+    }
+    match inner {
+        JsonValue::Object(mut map) => {
+            for (key, value) in attrs {
+                map.insert(format!("{prefix}{key}"), JsonValue::String(value.clone()));
+            }
+            JsonValue::Object(map)
+        }
+        other => {
+            let mut map = JsonMap::new();
+            for (key, value) in attrs {
+                map.insert(format!("{prefix}{key}"), JsonValue::String(value.clone()));
+            }
+            if !matches!(other, JsonValue::Null) {
+                map.insert("+content".to_string(), other);
+            }
+            JsonValue::Object(map)
+        }
+    }
+}
+
+fn xml_unescape(value: &str) -> String {
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
 fn parse_simple_yaml(input: &str) -> Result<JsonValue, String> {
+    // YAML is a JSON superset: flow-style documents such as `{}` or `[1, 2]`
+    // are valid YAML, so try JSON first before falling back to the block parser.
+    let trimmed = input.trim();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        if let Ok(value) = serde_json::from_str::<JsonValue>(trimmed) {
+            return Ok(value);
+        }
+    }
     let lines = input
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -15535,6 +16572,10 @@ fn command_xan(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
         "frequency" => xan_frequency(state, &args[1..], stdin),
         "cat" => xan_cat(state, &args[1..]),
         "join" => xan_join(state, &args[1..]),
+        "groupby" => xan_groupby(state, &args[1..], stdin),
+        "shuffle" => xan_shuffle(state, &args[1..], stdin),
+        "partition" => xan_partition(state, &args[1..], stdin),
+        "transform" => xan_transform(state, &args[1..], stdin),
         "parallel" => stderr_result(1, "xan parallel: not yet implemented\n"),
         other => stderr_result(1, format!("xan: unknown command: {other}\n")),
     }
@@ -16339,6 +17380,483 @@ fn xan_split(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResu
         let _ = fs.write_file(&path, chunk);
     }
     stdout_result(format!("Split into {} parts\n", non_empty.len()))
+}
+
+/// Port of upstream `cmdGroupby`: group rows by one or more columns
+/// (comma-separated, first-seen order preserved) and compute the
+/// `func(expr) as alias` aggregation specs per group. `--sorted` is
+/// accepted but a no-op (insertion order is already preserved).
+fn xan_groupby(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut group_cols: Option<String> = None;
+    let mut agg_expr: Option<String> = None;
+    let mut files: Vec<String> = Vec::new();
+    for arg in args {
+        if arg == "--sorted" {
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        if group_cols.is_none() {
+            group_cols = Some(arg.clone());
+        } else if agg_expr.is_none() {
+            agg_expr = Some(arg.clone());
+        } else {
+            files.push(arg.clone());
+        }
+    }
+    let (Some(group_cols), Some(agg_expr)) = (group_cols, agg_expr) else {
+        return stderr_result(1, "xan groupby: usage: xan groupby COLS EXPR [FILE]\n");
+    };
+    let csv = match read_csv_arg(
+        state,
+        files.first().map(String::as_str),
+        stdin,
+        "xan groupby",
+    ) {
+        Ok(csv) => csv,
+        Err(result) => return result,
+    };
+    let group_keys: Vec<String> = group_cols.split(',').map(|key| key.to_string()).collect();
+    let key_indices: Vec<Option<usize>> = group_keys
+        .iter()
+        .map(|key| csv.headers.iter().position(|header| header == key))
+        .collect();
+    let specs = parse_xan_agg_expr(&agg_expr);
+
+    // Group rows preserving first-seen order, keyed by the NUL-joined values.
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, Vec<Vec<String>>> =
+        std::collections::HashMap::new();
+    for row in &csv.rows {
+        let key = key_indices
+            .iter()
+            .map(|index| index.and_then(|i| row.get(i)).cloned().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\0");
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+            groups.insert(key.clone(), Vec::new());
+        }
+        groups
+            .get_mut(&key)
+            .expect("group inserted")
+            .push(row.clone());
+    }
+
+    let mut headers: Vec<String> = group_keys.clone();
+    headers.extend(specs.iter().map(|spec| spec.alias.clone()));
+
+    let mut out_rows: Vec<Vec<String>> = Vec::new();
+    for key in &order {
+        let group_rows = &groups[key];
+        let mut out_row: Vec<String> = key.split('\0').map(|value| value.to_string()).collect();
+        let group_csv = CsvData {
+            headers: csv.headers.clone(),
+            rows: group_rows.clone(),
+        };
+        for spec in &specs {
+            out_row.push(xan_compute_agg(&group_csv, spec));
+        }
+        out_rows.push(out_row);
+    }
+
+    stdout_result(render_csv(&CsvData {
+        headers,
+        rows: out_rows,
+    }))
+}
+
+/// Port of upstream `cmdShuffle`: Fisher-Yates shuffle of the data rows
+/// using the same seeded LCG as `xan sample` for reproducibility.
+fn xan_shuffle(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut seed: Option<i64> = None;
+    let mut files: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--seed" && i + 1 < args.len() {
+            seed = args[i + 1].parse::<i64>().ok();
+            i += 2;
+            continue;
+        }
+        if !arg.starts_with('-') {
+            files.push(arg.to_string());
+        }
+        i += 1;
+    }
+    match read_csv_arg(
+        state,
+        files.first().map(String::as_str),
+        stdin,
+        "xan shuffle",
+    ) {
+        Ok(mut csv) => {
+            let mut rng: i64 = seed.unwrap_or(0);
+            let mut next_random = || {
+                rng = rng.wrapping_mul(1103515245).wrapping_add(12345) & 0x7fff_ffff;
+                rng as f64 / 0x7fff_ffff as f64
+            };
+            let len = csv.rows.len();
+            if len > 1 {
+                for i in (1..len).rev() {
+                    let j = (next_random() * (i as f64 + 1.0)).floor() as usize;
+                    csv.rows.swap(i, j);
+                }
+            }
+            stdout_result(render_csv(&csv))
+        }
+        Err(result) => result,
+    }
+}
+
+/// Sanitize a partition value into a filename-safe base: every
+/// non-`[A-Za-z0-9_-]` character becomes `_`, empty becomes `empty`.
+fn xan_sanitize_for_filename(val: &str) -> String {
+    let sanitized: String = val
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "empty".to_string()
+    } else {
+        sanitized
+    }
+}
+
+/// FNV-1a 32-bit hash, base36, padded to 6 chars (port of upstream
+/// `shortHash`). Used only to disambiguate colliding sanitized names.
+fn xan_short_hash(s: &str) -> String {
+    let mut h: u32 = 2166136261;
+    for byte in s.encode_utf16() {
+        h = (h ^ (byte as u32)).wrapping_mul(16777619);
+    }
+    let mut base36 = to_base36(h as u64);
+    while base36.len() < 6 {
+        base36.insert(0, '0');
+    }
+    base36.chars().take(6).collect()
+}
+
+/// Lowercase base36 encoding matching JS `Number#toString(36)`.
+fn to_base36(mut value: u64) -> String {
+    if value == 0 {
+        return "0".to_string();
+    }
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut out = Vec::new();
+    while value > 0 {
+        out.push(DIGITS[(value % 36) as usize]);
+        value /= 36;
+    }
+    out.reverse();
+    String::from_utf8(out).expect("base36 ascii")
+}
+
+/// Port of upstream `cmdPartition`: split a CSV by a column's value,
+/// writing one virtual file per distinct value. Distinct values that
+/// sanitize to the same filename are disambiguated with an FNV-1a hash
+/// suffix, and any further collision with a literal value sharing that
+/// hashed form is broken with a `_N` counter so no partition is ever
+/// silently overwritten.
+fn xan_partition(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut column: Option<String> = None;
+    let mut output_dir = ".".to_string();
+    let mut files: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if (arg == "-o" || arg == "--output") && i + 1 < args.len() {
+            output_dir = args[i + 1].clone();
+            i += 2;
+            continue;
+        }
+        if !arg.starts_with('-') {
+            if column.is_none() {
+                column = Some(arg.to_string());
+            } else {
+                files.push(arg.to_string());
+            }
+        }
+        i += 1;
+    }
+    let Some(column) = column else {
+        return stderr_result(1, "xan partition: usage: xan partition COLUMN [FILE]\n");
+    };
+    let csv = match read_csv_arg(
+        state,
+        files.first().map(String::as_str),
+        stdin,
+        "xan partition",
+    ) {
+        Ok(csv) => csv,
+        Err(result) => return result,
+    };
+    let Some(col_index) = csv.headers.iter().position(|header| header == &column) else {
+        return stderr_result(1, format!("xan partition: column '{column}' not found\n"));
+    };
+
+    // Group rows by the column value, preserving first-seen order.
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, Vec<Vec<String>>> =
+        std::collections::HashMap::new();
+    for row in &csv.rows {
+        let val = row.get(col_index).cloned().unwrap_or_default();
+        if !groups.contains_key(&val) {
+            order.push(val.clone());
+            groups.insert(val.clone(), Vec::new());
+        }
+        groups
+            .get_mut(&val)
+            .expect("group inserted")
+            .push(row.clone());
+    }
+
+    // Count how many distinct values map to each sanitized base.
+    let mut sanitized_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for val in &order {
+        let safe = xan_sanitize_for_filename(val);
+        *sanitized_counts.entry(safe).or_insert(0) += 1;
+    }
+
+    // Allocate a unique filename per partition value.
+    let mut allocated: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut final_name: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for val in &order {
+        let safe = xan_sanitize_for_filename(val);
+        let colliding = sanitized_counts.get(&safe).copied().unwrap_or(0) > 1;
+        let base = if colliding {
+            format!("{safe}_{}", xan_short_hash(val))
+        } else {
+            safe
+        };
+        let mut candidate = format!("{base}.csv");
+        let mut n = 1;
+        while allocated.contains(&candidate) {
+            candidate = format!("{base}_{n}.csv");
+            n += 1;
+        }
+        allocated.insert(candidate.clone());
+        final_name.insert(val.clone(), candidate);
+    }
+
+    {
+        let mut fs = match state.session.inner.fs.lock() {
+            Ok(fs) => fs,
+            Err(_) => return stderr_result(1, "xan partition: filesystem lock poisoned\n"),
+        };
+        let dir = resolve_path(&state.cwd, &output_dir);
+        for val in &order {
+            let file_name = match final_name.get(val) {
+                Some(name) => name,
+                None => continue,
+            };
+            let path = resolve_path(&dir, file_name);
+            let chunk = render_csv(&CsvData {
+                headers: csv.headers.clone(),
+                rows: groups[val].clone(),
+            });
+            let _ = fs.write_file(&path, chunk);
+        }
+    }
+
+    stdout_result(format!(
+        "Partitioned into {} files by '{column}'\n",
+        groups.len()
+    ))
+}
+
+/// Evaluate a single moonblade transform expression for one row, with
+/// the special variable `_` bound to the current target column value.
+/// Supports the function/arithmetic subset exercised by `xan transform`:
+/// `add`, `sub`, `mul`, `div`, `upper`, `lower`, `trim`, `len`, plus
+/// bare column references, `_`, and numeric literals.
+fn xan_eval_transform_expr(
+    headers: &[String],
+    row: &[String],
+    underscore: &str,
+    expr: &str,
+) -> String {
+    let expr = expr.trim();
+    let lookup = |name: &str| -> String {
+        if name == "_" {
+            return underscore.to_string();
+        }
+        headers
+            .iter()
+            .position(|header| header == name)
+            .and_then(|index| row.get(index))
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    // String functions over a single argument.
+    for (func, transform) in [("upper", 0u8), ("lower", 1), ("trim", 2), ("len", 3)] {
+        if let Some(inner) = xan_single_arg(expr, func) {
+            let value = xan_eval_transform_expr(headers, row, underscore, &inner);
+            return match transform {
+                0 => value.to_uppercase(),
+                1 => value.to_lowercase(),
+                2 => value.trim().to_string(),
+                _ => value.chars().count().to_string(),
+            };
+        }
+    }
+
+    // Binary numeric functions: add/sub/mul/div.
+    for (func, op) in [("add", '+'), ("sub", '-'), ("mul", '*'), ("div", '/')] {
+        if let Some((a, b)) = xan_two_args(expr, func) {
+            let lhs = xan_eval_transform_expr(headers, row, underscore, &a);
+            let rhs = xan_eval_transform_expr(headers, row, underscore, &b);
+            if let (Ok(x), Ok(y)) = (lhs.parse::<f64>(), rhs.parse::<f64>()) {
+                let result = match op {
+                    '+' => x + y,
+                    '-' => x - y,
+                    '*' => x * y,
+                    _ => x / y,
+                };
+                return json_scalar_string(&json_number(result));
+            }
+            return String::new();
+        }
+    }
+
+    // Numeric literal passthrough.
+    if let Ok(number) = expr.parse::<f64>() {
+        return json_scalar_string(&json_number(number));
+    }
+    // Bare identifier / `_` reference.
+    lookup(expr)
+}
+
+/// Extract the single argument of `func(arg)` (balanced parens), or None.
+fn xan_single_arg(expr: &str, func: &str) -> Option<String> {
+    let prefix = format!("{func}(");
+    let rest = expr.strip_prefix(&prefix)?;
+    let inner = rest.strip_suffix(')')?;
+    Some(inner.trim().to_string())
+}
+
+/// Extract the two top-level comma-separated arguments of `func(a, b)`.
+fn xan_two_args(expr: &str, func: &str) -> Option<(String, String)> {
+    let inner = xan_single_arg(expr, func)?;
+    let chars: Vec<char> = inner.chars().collect();
+    let mut depth = 0;
+    for (i, &c) in chars.iter().enumerate() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                let a: String = chars[..i].iter().collect();
+                let b: String = chars[i + 1..].iter().collect();
+                return Some((a.trim().to_string(), b.trim().to_string()));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Port of upstream `cmdTransform`: rewrite one or more existing columns
+/// in place by evaluating an expression with `_` bound to the column's
+/// current value, optionally renaming the columns with `-r`.
+fn xan_transform(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut target_col: Option<String> = None;
+    let mut transform_expr: Option<String> = None;
+    let mut rename = String::new();
+    let mut files: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if (arg == "-r" || arg == "--rename") && i + 1 < args.len() {
+            rename = args[i + 1].clone();
+            i += 2;
+            continue;
+        }
+        if !arg.starts_with('-') {
+            if target_col.is_none() {
+                target_col = Some(arg.to_string());
+            } else if transform_expr.is_none() {
+                transform_expr = Some(arg.to_string());
+            } else {
+                files.push(arg.to_string());
+            }
+        }
+        i += 1;
+    }
+    let (Some(target_col), Some(transform_expr)) = (target_col, transform_expr) else {
+        return stderr_result(
+            1,
+            "xan transform: usage: xan transform COLUMN EXPR [FILE]\n",
+        );
+    };
+    let csv = match read_csv_arg(
+        state,
+        files.first().map(String::as_str),
+        stdin,
+        "xan transform",
+    ) {
+        Ok(csv) => csv,
+        Err(result) => return result,
+    };
+    let target_cols: Vec<String> = target_col
+        .split(',')
+        .map(|c| c.trim().to_string())
+        .collect();
+    let rename_cols: Vec<String> = if rename.is_empty() {
+        Vec::new()
+    } else {
+        rename.split(',').map(|c| c.trim().to_string()).collect()
+    };
+    for col in &target_cols {
+        if !csv.headers.iter().any(|header| header == col) {
+            return stderr_result(1, format!("xan transform: column '{col}' not found\n"));
+        }
+    }
+    let col_indices: Vec<usize> = target_cols
+        .iter()
+        .map(|col| {
+            csv.headers
+                .iter()
+                .position(|header| header == col)
+                .expect("validated")
+        })
+        .collect();
+
+    let mut new_headers = csv.headers.clone();
+    for (i, &index) in col_indices.iter().enumerate() {
+        if let Some(new_name) = rename_cols.get(i) {
+            if !new_name.is_empty() {
+                new_headers[index] = new_name.clone();
+            }
+        }
+    }
+
+    let mut new_rows: Vec<Vec<String>> = Vec::new();
+    for row in &csv.rows {
+        let mut new_row = row.clone();
+        if new_row.len() < csv.headers.len() {
+            new_row.resize(csv.headers.len(), String::new());
+        }
+        for &index in &col_indices {
+            let underscore = row.get(index).cloned().unwrap_or_default();
+            new_row[index] =
+                xan_eval_transform_expr(&csv.headers, row, &underscore, &transform_expr);
+        }
+        new_rows.push(new_row);
+    }
+    stdout_result(render_csv(&CsvData {
+        headers: new_headers,
+        rows: new_rows,
+    }))
 }
 
 /// One parsed `func(inner) as alias` aggregation specification.
