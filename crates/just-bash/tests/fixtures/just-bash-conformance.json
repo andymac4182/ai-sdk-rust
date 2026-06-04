@@ -15,9 +15,9 @@
     "expectedFailures": 0
   },
   "summary": {
-    "totalCases": 504,
+    "totalCases": 515,
     "byKind": {
-      "comparison-fixture": 474
+      "comparison-fixture": 515
     },
     "byDomain": {
       "awk": 42,
@@ -27,7 +27,7 @@
       "cut": 14,
       "echo": 74,
       "find": 22,
-      "grep": 24,
+      "grep": 27,
       "head-tail": 12,
       "jq": 28,
       "ls": 9,
@@ -38,12 +38,12 @@
       "sed": 42,
       "sort": 11,
       "strings-split": 4,
-      "tar": 57,
+      "tar": 65,
       "test": 1,
       "tr": 14,
       "uniq": 10,
-      "yq": 12,
-      "xan": 30
+      "xan": 30,
+      "yq": 12
     },
     "byStatus": {
       "portable-verified": 504
@@ -26114,6 +26114,436 @@
         "engine": "rust-just-bash",
         "assertion": "stdout-stderr-exit-code-exact"
       }
+    },
+    {
+      "id": "comparison:grep:e970360545cfd7e7",
+      "kind": "comparison-fixture",
+      "domain": "grep",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/grep.comparison.test.ts",
+        "line": 213,
+        "testName": "should match literal string with special chars",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/grep.comparison.fixtures.json",
+        "fixtureId": "e970360545cfd7e7"
+      },
+      "command": "grep -F \".*\" test.txt",
+      "script": "grep -F \".*\" test.txt",
+      "initialFiles": {
+        "test.txt": "hello.*world\ntest pattern\nhello.world\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "hello.*world\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/grep.comparison.test.ts:213:it:should match literal string with special chars",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_grep_e970360545cfd7e7",
+        "notes": "JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_grep_e970360545cfd7e7"
+    },
+    {
+      "id": "comparison:grep:154ea3241b3487b2",
+      "kind": "comparison-fixture",
+      "domain": "grep",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/grep.comparison.test.ts",
+        "line": 220,
+        "testName": "should match literal dot",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/grep.comparison.fixtures.json",
+        "fixtureId": "154ea3241b3487b2"
+      },
+      "command": "grep -F \".\" test.txt",
+      "script": "grep -F \".\" test.txt",
+      "initialFiles": {
+        "test.txt": "a.b\naXb\na..b\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "a.b\na..b\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/grep.comparison.test.ts:220:it:should match literal dot",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_grep_154ea3241b3487b2",
+        "notes": "JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_grep_154ea3241b3487b2"
+    },
+    {
+      "id": "comparison:grep:b83506e9397f4339",
+      "kind": "comparison-fixture",
+      "domain": "grep",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/grep.comparison.test.ts",
+        "line": 227,
+        "testName": "should match literal brackets",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/grep.comparison.fixtures.json",
+        "fixtureId": "b83506e9397f4339"
+      },
+      "command": "grep -F \"[test]\" test.txt",
+      "script": "grep -F \"[test]\" test.txt",
+      "initialFiles": {
+        "test.txt": "[test]\ntest\n[another]\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "[test]\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/grep.comparison.test.ts:227:it:should match literal brackets",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_grep_b83506e9397f4339",
+        "notes": "JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_grep_b83506e9397f4339"
+    },
+    {
+      "id": "comparison:tar:76755482c30f6729",
+      "kind": "comparison-fixture",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts",
+        "line": 21,
+        "testName": "should create and list single file archive",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/tar.comparison.fixtures.json",
+        "fixtureId": "76755482c30f6729"
+      },
+      "command": "tar -cf archive.tar hello.txt && tar -tf archive.tar",
+      "script": "tar -cf archive.tar hello.txt && tar -tf archive.tar",
+      "initialFiles": {
+        "hello.txt": "Hello, World!\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "hello.txt\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts:21:it:should create and list single file archive",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_tar_76755482c30f6729",
+        "notes": "JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_tar_76755482c30f6729"
+    },
+    {
+      "id": "comparison:tar:ea3d17f6c34f860d",
+      "kind": "comparison-fixture",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts",
+        "line": 32,
+        "testName": "should create and list multiple files",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/tar.comparison.fixtures.json",
+        "fixtureId": "ea3d17f6c34f860d"
+      },
+      "command": "tar -cf archive.tar file1.txt file2.txt && tar -tf archive.tar | sort",
+      "script": "tar -cf archive.tar file1.txt file2.txt && tar -tf archive.tar | sort",
+      "initialFiles": {
+        "file1.txt": "Content 1\n",
+        "file2.txt": "Content 2\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "file1.txt\nfile2.txt\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts:32:it:should create and list multiple files",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_tar_ea3d17f6c34f860d",
+        "notes": "JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_tar_ea3d17f6c34f860d"
+    },
+    {
+      "id": "comparison:tar:cdaa68944a83396b",
+      "kind": "comparison-fixture",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts",
+        "line": 58,
+        "testName": "should create and extract single file",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/tar.comparison.fixtures.json",
+        "fixtureId": "cdaa68944a83396b"
+      },
+      "command": "tar -cf archive.tar original.txt && rm original.txt && tar -xf archive.tar && cat original.txt",
+      "script": "tar -cf archive.tar original.txt && rm original.txt && tar -xf archive.tar && cat original.txt",
+      "initialFiles": {
+        "original.txt": "Original content\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "Original content\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts:58:it:should create and extract single file",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_tar_cdaa68944a83396b",
+        "notes": "JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_tar_cdaa68944a83396b"
+    },
+    {
+      "id": "comparison:tar:2ba72b80d7e2315e",
+      "kind": "comparison-fixture",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts",
+        "line": 69,
+        "testName": "should create and extract directory",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/tar.comparison.fixtures.json",
+        "fixtureId": "2ba72b80d7e2315e"
+      },
+      "command": "tar -cf archive.tar mydir && rm -rf mydir && tar -xf archive.tar && cat mydir/nested.txt",
+      "script": "tar -cf archive.tar mydir && rm -rf mydir && tar -xf archive.tar && cat mydir/nested.txt",
+      "initialFiles": {
+        "mydir/nested.txt": "Nested content\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "Nested content\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts:69:it:should create and extract directory",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_tar_2ba72b80d7e2315e",
+        "notes": "JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_tar_2ba72b80d7e2315e"
+    },
+    {
+      "id": "comparison:tar:87cc3d174c5bf2cd",
+      "kind": "comparison-fixture",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts",
+        "line": 80,
+        "testName": "should extract to different directory with -C",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/tar.comparison.fixtures.json",
+        "fixtureId": "87cc3d174c5bf2cd"
+      },
+      "command": "tar -cf archive.tar source.txt && mkdir dest && tar -xf archive.tar -C dest && cat dest/source.txt",
+      "script": "tar -cf archive.tar source.txt && mkdir dest && tar -xf archive.tar -C dest && cat dest/source.txt",
+      "initialFiles": {
+        "source.txt": "Source content\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "Source content\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts:80:it:should extract to different directory with -C",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_tar_87cc3d174c5bf2cd",
+        "notes": "JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_tar_87cc3d174c5bf2cd"
+    },
+    {
+      "id": "comparison:tar:4e2cbf2e913c29c9",
+      "kind": "comparison-fixture",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts",
+        "line": 102,
+        "testName": "should create and list gzip compressed archive",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/tar.comparison.fixtures.json",
+        "fixtureId": "4e2cbf2e913c29c9"
+      },
+      "command": "tar -czf archive.tar.gz compress.txt && tar -tzf archive.tar.gz",
+      "script": "tar -czf archive.tar.gz compress.txt && tar -tzf archive.tar.gz",
+      "initialFiles": {
+        "compress.txt": "Content to compress\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "compress.txt\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts:102:it:should create and list gzip compressed archive",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_tar_4e2cbf2e913c29c9",
+        "notes": "JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_tar_4e2cbf2e913c29c9"
+    },
+    {
+      "id": "comparison:tar:53ef5bd7218ab0f6",
+      "kind": "comparison-fixture",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts",
+        "line": 113,
+        "testName": "should create and extract gzip compressed archive",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/tar.comparison.fixtures.json",
+        "fixtureId": "53ef5bd7218ab0f6"
+      },
+      "command": "tar -czf archive.tar.gz compress.txt && rm compress.txt && tar -xzf archive.tar.gz && cat compress.txt",
+      "script": "tar -czf archive.tar.gz compress.txt && rm compress.txt && tar -xzf archive.tar.gz && cat compress.txt",
+      "initialFiles": {
+        "compress.txt": "Compressed content\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "Compressed content\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts:113:it:should create and extract gzip compressed archive",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_tar_53ef5bd7218ab0f6",
+        "notes": "JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_tar_53ef5bd7218ab0f6"
+    },
+    {
+      "id": "comparison:tar:1eefde366bd2d5f4",
+      "kind": "comparison-fixture",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts",
+        "line": 126,
+        "testName": "should strip leading path components on extract",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/tar.comparison.fixtures.json",
+        "fixtureId": "1eefde366bd2d5f4"
+      },
+      "command": "tar -cf archive.tar deep/path/file.txt && mkdir out && tar -xf archive.tar -C out --strip-components=2 && cat out/file.txt",
+      "script": "tar -cf archive.tar deep/path/file.txt && mkdir out && tar -xf archive.tar -C out --strip-components=2 && cat out/file.txt",
+      "initialFiles": {
+        "deep/path/file.txt": "Deep content\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "Deep content\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts:126:it:should strip leading path components on extract",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_tar_1eefde366bd2d5f4",
+        "notes": "JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_tar_1eefde366bd2d5f4"
     }
   ]
 }
