@@ -7562,6 +7562,206 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn text_search_jbc_grep_exclude_files_without_match_and_bracket_rows() {
+        // grep --exclude: skip files whose basename matches the glob.
+        let exclude = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/dir/file.txt".to_string(), "hello world".to_string()),
+                ("/dir/file.log".to_string(), "hello world".to_string()),
+                ("/dir/other.txt".to_string(), "hello world".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let result = exclude.exec(r#"grep -r --exclude="*.log" hello /dir"#);
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("file.txt"));
+        assert!(result.stdout.contains("other.txt"));
+        assert!(!result.stdout.contains("file.log"));
+
+        // grep --exclude: multiple patterns are all applied.
+        let multi_exclude = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/dir/file.txt".to_string(), "hello".to_string()),
+                ("/dir/file.log".to_string(), "hello".to_string()),
+                ("/dir/file.bak".to_string(), "hello".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            multi_exclude
+                .exec(r#"grep -r --exclude="*.log" --exclude="*.bak" hello /dir"#)
+                .stdout,
+            "/dir/file.txt:hello\n"
+        );
+
+        // grep --exclude: also applies to explicit non-recursive file paths.
+        let non_recursive = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/a.txt".to_string(), "hello".to_string()),
+                ("/b.log".to_string(), "hello".to_string()),
+            ]),
+            cwd: Some("/".to_string()),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            non_recursive
+                .exec(r#"grep --exclude="*.log" hello a.txt b.log"#)
+                .stdout,
+            "a.txt:hello\n"
+        );
+
+        // grep --exclude-dir: skip files under matching directory components.
+        let exclude_dir = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/project/src/main.js".to_string(), "hello".to_string()),
+                (
+                    "/project/node_modules/pkg/index.js".to_string(),
+                    "hello".to_string(),
+                ),
+                ("/project/build/out.js".to_string(), "hello".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let result = exclude_dir.exec("grep -r --exclude-dir=node_modules hello /project");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("src/main.js"));
+        assert!(result.stdout.contains("build/out.js"));
+        assert!(!result.stdout.contains("node_modules"));
+
+        // grep --exclude-dir: multiple directory patterns are all applied.
+        let multi_exclude_dir = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/project/src/main.js".to_string(), "hello".to_string()),
+                (
+                    "/project/node_modules/pkg/index.js".to_string(),
+                    "hello".to_string(),
+                ),
+                ("/project/build/out.js".to_string(), "hello".to_string()),
+                ("/project/.git/objects/abc".to_string(), "hello".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let result = multi_exclude_dir
+            .exec("grep -r --exclude-dir=node_modules --exclude-dir=build hello /project");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("src/main.js"));
+        assert!(!result.stdout.contains("node_modules"));
+        assert!(!result.stdout.contains("build"));
+
+        // grep: --exclude-dir and --exclude combine.
+        let combined = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/project/src/main.js".to_string(), "hello".to_string()),
+                ("/project/src/test.spec.js".to_string(), "hello".to_string()),
+                (
+                    "/project/node_modules/pkg/index.js".to_string(),
+                    "hello".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            combined
+                .exec(r#"grep -r --exclude-dir=node_modules --exclude="*.spec.js" hello /project"#)
+                .stdout,
+            "/project/src/main.js:hello\n"
+        );
+
+        // grep -L: list files without any match.
+        let without = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/dir/has-match.txt".to_string(), "hello world".to_string()),
+                ("/dir/no-match.txt".to_string(), "goodbye world".to_string()),
+                (
+                    "/dir/also-no-match.txt".to_string(),
+                    "nothing here".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+        let result = without
+            .exec("grep -L hello /dir/has-match.txt /dir/no-match.txt /dir/also-no-match.txt");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "/dir/no-match.txt\n/dir/also-no-match.txt\n");
+
+        // grep -L: exit code 0 when at least one file lacks a match.
+        let without_two = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/file1.txt".to_string(), "hello".to_string()),
+                ("/file2.txt".to_string(), "goodbye".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let result = without_two.exec("grep -L hello /file1.txt /file2.txt");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "/file2.txt\n");
+
+        // grep -L: exit code 1 when every file has a match.
+        let all_match = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/file1.txt".to_string(), "hello".to_string()),
+                ("/file2.txt".to_string(), "hello".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let result = all_match.exec("grep -L hello /file1.txt /file2.txt");
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.stdout, "");
+
+        // grep -rL: recursive files-without-match traversal.
+        let recursive_without = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/dir/has-hello.txt".to_string(), "hello".to_string()),
+                ("/dir/no-hello.txt".to_string(), "goodbye".to_string()),
+                ("/dir/sub/has-hello2.txt".to_string(), "hello".to_string()),
+                ("/dir/sub/no-hello2.txt".to_string(), "goodbye".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let result = recursive_without.exec("grep -rL hello /dir");
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("no-hello.txt"));
+        assert!(result.stdout.contains("no-hello2.txt"));
+        assert!(!result.stdout.contains("has-hello.txt"));
+        assert!(!result.stdout.contains("has-hello2.txt"));
+
+        // grep --files-without-match: long form of -L.
+        let long_form = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/a.txt".to_string(), "hello".to_string()),
+                ("/b.txt".to_string(), "goodbye".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            long_form
+                .exec("grep --files-without-match hello /a.txt /b.txt")
+                .stdout,
+            "/b.txt\n"
+        );
+
+        // grep -E bracket: a literal ] is matched when it leads the class.
+        let bracket = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/test.txt".to_string(), "a]b\na[b\nacb\n".to_string())]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            bracket.exec(r#"grep -E "a[][]b" /test.txt"#).stdout,
+            "a]b\na[b\n"
+        );
+
+        // grep -E negated bracket: a leading ] after ^ is matched literally.
+        let neg_bracket = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/test.txt".to_string(), "a]c\nabc\nadc\n".to_string())]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            neg_bracket.exec(r#"grep -E "a[^]b]c" /test.txt"#).stdout,
+            "adc\n"
+        );
+    }
+
+    #[test]
     fn text_search_jbc34_rg_patterns_gitignore_and_edge_rows() {
         assert_home_exec(
             &[("file.txt", "hello world\nhelloworld\n")],

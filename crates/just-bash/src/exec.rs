@@ -2069,6 +2069,7 @@ fn command_grep(
     let mut line_number = false;
     let mut count_only = false;
     let mut files_with_matches = false;
+    let mut files_without_match = false;
     let mut recursive = false;
     let mut word_regexp = false;
     let mut line_regexp = false;
@@ -2079,6 +2080,8 @@ fn command_grep(
     let mut max_count: Option<usize> = None;
     let mut mode = mode;
     let mut include_globs = Vec::new();
+    let mut exclude_globs: Vec<String> = Vec::new();
+    let mut exclude_dir_globs: Vec<String> = Vec::new();
     let mut pattern = None;
     let mut paths = Vec::new();
     let mut index = 0;
@@ -2089,6 +2092,7 @@ fn command_grep(
             "-n" | "--line-number" => line_number = true,
             "-c" | "--count" => count_only = true,
             "-l" | "--files-with-matches" => files_with_matches = true,
+            "-L" | "--files-without-match" => files_without_match = true,
             "-r" | "-R" | "--recursive" => recursive = true,
             "-w" | "--word-regexp" => word_regexp = true,
             "-x" | "--line-regexp" => line_regexp = true,
@@ -2108,6 +2112,22 @@ fn command_grep(
                     continue;
                 }
                 return stderr_result(2, "grep: option '--include' requires an argument\n");
+            }
+            "--exclude" => {
+                if let Some(value) = args.get(index + 1) {
+                    exclude_globs.push(value.clone());
+                    index += 2;
+                    continue;
+                }
+                return stderr_result(2, "grep: option '--exclude' requires an argument\n");
+            }
+            "--exclude-dir" => {
+                if let Some(value) = args.get(index + 1) {
+                    exclude_dir_globs.push(value.clone());
+                    index += 2;
+                    continue;
+                }
+                return stderr_result(2, "grep: option '--exclude-dir' requires an argument\n");
             }
             "-A" | "-B" | "-C" | "-m" => {
                 let value = args
@@ -2132,6 +2152,12 @@ fn command_grep(
             }
             _ if arg.starts_with("--include=") => {
                 include_globs.push(arg["--include=".len()..].to_string());
+            }
+            _ if arg.starts_with("--exclude-dir=") => {
+                exclude_dir_globs.push(arg["--exclude-dir=".len()..].to_string());
+            }
+            _ if arg.starts_with("--exclude=") => {
+                exclude_globs.push(arg["--exclude=".len()..].to_string());
             }
             "--max-count" => {
                 max_count = args.get(index + 1).and_then(|value| value.parse().ok());
@@ -2159,6 +2185,7 @@ fn command_grep(
                         'n' => line_number = true,
                         'c' => count_only = true,
                         'l' => files_with_matches = true,
+                        'L' => files_without_match = true,
                         'r' | 'R' => recursive = true,
                         'w' => word_regexp = true,
                         'x' => line_regexp = true,
@@ -2214,7 +2241,14 @@ fn command_grep(
             text: stdin.to_string(),
         }]
     } else {
-        match grep_inputs(state, &paths, recursive, &include_globs) {
+        match grep_inputs(
+            state,
+            &paths,
+            recursive,
+            &include_globs,
+            &exclude_globs,
+            &exclude_dir_globs,
+        ) {
             Ok(inputs) => inputs,
             Err(error) => return stderr_result(2, format!("grep: {error}\n")),
         }
@@ -2231,6 +2265,7 @@ fn command_grep(
     };
     let mut stdout = String::new();
     let mut matches = 0;
+    let mut files_without_match_listed = 0;
     let show_filename = !no_filename && (paths.len() > 1 || recursive);
     for input in inputs {
         let mut file_matched = false;
@@ -2246,6 +2281,10 @@ fn command_grep(
                 matched_indexes.push(line_index);
                 if files_with_matches {
                     continue;
+                }
+                if files_without_match {
+                    // We only need to know whether the file matched at all.
+                    break;
                 }
                 if count_only {
                     if max_count.is_some_and(|limit| file_matches >= limit) {
@@ -2294,7 +2333,13 @@ fn command_grep(
                 }
             }
         }
-        if files_with_matches && file_matched {
+        if files_without_match {
+            if !file_matched {
+                stdout.push_str(&input.label);
+                stdout.push('\n');
+                files_without_match_listed += 1;
+            }
+        } else if files_with_matches && file_matched {
             stdout.push_str(&input.label);
             stdout.push('\n');
         } else if count_only {
@@ -2318,8 +2363,19 @@ fn command_grep(
             );
         }
     }
+    let exit_code = if files_without_match {
+        if files_without_match_listed == 0 {
+            1
+        } else {
+            0
+        }
+    } else if matches == 0 {
+        1
+    } else {
+        0
+    };
     CommandResult {
-        exit_code: if matches == 0 { 1 } else { 0 },
+        exit_code,
         stdout,
         ..CommandResult::default()
     }
@@ -2533,11 +2589,94 @@ impl LineMatcher {
 
 fn normalize_grep_regex(pattern: &str, mode: GrepMode) -> String {
     let pattern = pattern.replace("[[:<:]]", r"\b").replace("[[:>:]]", r"\b");
-    if mode == GrepMode::BasicRegex {
+    let pattern = if mode == GrepMode::BasicRegex {
         normalize_basic_grep_regex(&pattern)
     } else {
         pattern
+    };
+    normalize_posix_leading_bracket(&pattern)
+}
+
+/// POSIX bracket expressions treat a `]` that appears first (optionally after a
+/// leading `^`) as a literal member of the class, e.g. `[][]` matches `]` or
+/// `[`, and `[^]b]` matches any char except `]` or `b`. The Rust `regex` crate
+/// reads `[]` as an empty/unterminated class and also rejects a bare `[` inside
+/// a class, so rewrite each bracket expression: escape the leading literal `]`
+/// and escape any literal `[` that is not part of a `[:class:]`/`[.coll.]`/
+/// `[=equiv=]` construct. Everything else is copied byte-for-byte.
+fn normalize_posix_leading_bracket(pattern: &str) -> String {
+    let chars = pattern.chars().collect::<Vec<_>>();
+    let mut output = String::new();
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '\\' && index + 1 < chars.len() {
+            output.push(ch);
+            output.push(chars[index + 1]);
+            index += 2;
+            continue;
+        }
+        if ch == '[' {
+            output.push('[');
+            index += 1;
+            // Preserve a leading negation marker before inspecting the class body.
+            if chars.get(index) == Some(&'^') {
+                output.push('^');
+                index += 1;
+            }
+            // A `]` in the first body position is a literal class member.
+            if chars.get(index) == Some(&']') {
+                output.push_str(r"\]");
+                index += 1;
+            }
+            // Walk the remainder of the class body until the closing `]`.
+            while index < chars.len() {
+                match chars[index] {
+                    ']' => {
+                        output.push(']');
+                        index += 1;
+                        break;
+                    }
+                    '[' if matches!(chars.get(index + 1), Some(':' | '.' | '=')) => {
+                        // POSIX named-class / collating / equivalence construct:
+                        // copy verbatim through its matching closing delimiter.
+                        let delimiter = chars[index + 1];
+                        output.push('[');
+                        output.push(delimiter);
+                        index += 2;
+                        while index < chars.len() {
+                            if chars[index] == delimiter && chars.get(index + 1) == Some(&']') {
+                                output.push(delimiter);
+                                output.push(']');
+                                index += 2;
+                                break;
+                            }
+                            output.push(chars[index]);
+                            index += 1;
+                        }
+                    }
+                    '[' => {
+                        // A bare `[` is a literal member; escape it for the Rust engine.
+                        output.push_str(r"\[");
+                        index += 1;
+                    }
+                    '\\' if index + 1 < chars.len() => {
+                        output.push('\\');
+                        output.push(chars[index + 1]);
+                        index += 2;
+                    }
+                    other => {
+                        output.push(other);
+                        index += 1;
+                    }
+                }
+            }
+            continue;
+        }
+        output.push(ch);
+        index += 1;
     }
+    output
 }
 
 fn normalize_basic_grep_regex(pattern: &str) -> String {
@@ -2729,6 +2868,8 @@ fn grep_inputs(
     paths: &[String],
     recursive: bool,
     include_globs: &[String],
+    exclude_globs: &[String],
+    exclude_dir_globs: &[String],
 ) -> Result<Vec<NamedTextInput>, String> {
     let fs = state
         .session
@@ -2737,8 +2878,8 @@ fn grep_inputs(
         .lock()
         .map_err(|_| "filesystem lock poisoned".to_string())?;
     let mut inputs = Vec::new();
-    for path in paths {
-        let path = resolve_path(&state.cwd, path);
+    for original in paths {
+        let path = resolve_path(&state.cwd, original);
         let stat = fs
             .stat(&path)
             .map_err(|_| format!("{path}: No such file or directory"))?;
@@ -2762,6 +2903,12 @@ fn grep_inputs(
                 if !grep_path_matches_includes(&state.cwd, &child_path, include_globs) {
                     continue;
                 }
+                if grep_path_basename_excluded(&child_path, exclude_globs) {
+                    continue;
+                }
+                if grep_path_dir_excluded(&path, &child_path, exclude_dir_globs) {
+                    continue;
+                }
                 let text = fs
                     .read_file(&child_path)
                     .map_err(|_| format!("{child_path}: No such file or directory"))?;
@@ -2771,13 +2918,43 @@ fn grep_inputs(
                 });
             }
         } else {
+            if grep_path_basename_excluded(&path, exclude_globs) {
+                continue;
+            }
             let text = fs
                 .read_file(&path)
                 .map_err(|_| format!("{path}: No such file or directory"))?;
-            inputs.push(NamedTextInput { label: path, text });
+            inputs.push(NamedTextInput {
+                label: original.clone(),
+                text,
+            });
         }
     }
     Ok(inputs)
+}
+
+fn grep_path_basename_excluded(path: &str, exclude_globs: &[String]) -> bool {
+    if exclude_globs.is_empty() {
+        return false;
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    exclude_globs.iter().any(|glob| rg_glob_match(glob, name))
+}
+
+fn grep_path_dir_excluded(root: &str, path: &str, exclude_dir_globs: &[String]) -> bool {
+    if exclude_dir_globs.is_empty() {
+        return false;
+    }
+    // Inspect every directory component between the search root and the file.
+    let relative = path.strip_prefix(&format!("{root}/")).unwrap_or(path);
+    let mut components = relative.split('/').collect::<Vec<_>>();
+    // Drop the file basename; only directory components matter.
+    components.pop();
+    components.iter().any(|component| {
+        exclude_dir_globs
+            .iter()
+            .any(|glob| rg_glob_match(glob, component))
+    })
 }
 
 fn grep_path_matches_includes(cwd: &str, path: &str, include_globs: &[String]) -> bool {
