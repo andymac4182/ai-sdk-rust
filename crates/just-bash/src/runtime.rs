@@ -5019,7 +5019,7 @@ and exhibited clearly, with a label attached.\n";
         // JBC-10: the upstream rg suite explicitly `it.skip`s a family of features
         // that ripgrep itself or the just-bash JS port does not implement (alternate
         // text encodings, PCRE2 look-around, max-columns, file preprocessing,
-        // non-gzip compression, the --no-include-zero/--no-column/--crlf/--no-unicode/
+        // non-gzip compression, the --no-include-zero/--crlf/--no-unicode/
         // --null-data flags, and timestamp-based sorting). The Rust rg port matches
         // that contract by rejecting these features rather than silently mis-handling
         // them. Each assertion fails if the Rust port ever started accepting the flag,
@@ -5055,7 +5055,6 @@ and exhibited clearly, with a label attached.\n";
         unrecognized("rg --search-zip hello f.txt", "--search-zip");
 
         // Output/format flags the upstream skip-suite documents as unimplemented.
-        unrecognized("rg --no-column --vimgrep hello f.txt", "--no-column");
         unrecognized("rg --crlf hello f.txt", "--crlf");
         unrecognized("rg --no-unicode hello f.txt", "--no-unicode");
         unrecognized("rg --null-data hello f.txt", "--null-data");
@@ -5085,14 +5084,11 @@ and exhibited clearly, with a label attached.\n";
             "--ignore-file-case-insensitive",
         );
 
-        // Multiline matching (--multiline / -U), vimgrep output (--vimgrep),
-        // passthru (--passthru), and replacement (--replace / -r) are unimplemented;
-        // upstream skips the multiline/vimgrep/passthru/replacement regression rows.
+        // Multiline matching (--multiline / -U) is unimplemented; upstream skips the
+        // multiline regression rows. (vimgrep/passthru/replacement ARE now
+        // implemented and verified by their own dedicated tests.)
         unrecognized("rg --multiline 'a\\nb' f.txt", "--multiline");
         unrecognized("rg -U 'a\\nb' f.txt", "-U");
-        unrecognized("rg --vimgrep hello f.txt", "--vimgrep");
-        unrecognized("rg --passthru hello f.txt", "--passthru");
-        unrecognized("rg --replace X hello f.txt", "--replace");
 
         // PCRE2 / look-around (-P, raw look-ahead/look-behind) is rejected by the
         // standard regex engine rather than silently matching.
@@ -16279,6 +16275,226 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         // Heading mode prints the file label on its own line above the matches.
         assert!(result.stdout.contains("bar\n"));
         assert!(result.stdout.contains("foo1\n"));
+    }
+
+    #[test]
+    fn rg_column_shows_match_column_with_line_number() {
+        // maps rg.ripgrep-compat.test.ts:691 "should show column with --column"
+        // and imported-tests/misc.test.ts:72 "should show column numbers with --column".
+        // `--column` implies `-n`; the column is the 1-based char index of the match.
+        let result = home_bash(&[("sherlock", SHERLOCK)]).exec("rg -n --column Sherlock sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout,
+            "1:57:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+3:49:be, to a very large extent, the result of luck. Sherlock Holmes\n"
+        );
+    }
+
+    #[test]
+    fn rg_column_directory_search_prefixes_filename_and_column() {
+        // maps imported-tests/regression.test.ts:232 "r105_part2: should show column with --column".
+        let result = home_bash(&[("foo", "zztest\n")]).exec("rg --column test");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "foo:1:3:zztest\n");
+    }
+
+    #[test]
+    fn rg_column_after_bom_is_one_based_from_content_start() {
+        // maps imported-tests/regression.test.ts:1144 "r1638: should have correct column with BOM".
+        // The leading UTF-8 BOM is stripped before searching, so `x` is at column 1.
+        let result = home_bash(&[("foo", "\u{FEFF}x\n")]).exec("rg --column x");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "foo:1:1:x\n");
+    }
+
+    #[test]
+    fn rg_only_matching_with_column_reports_each_match_position() {
+        // maps imported-tests/regression.test.ts:521
+        // "r451_only_matching: should show column with only matching".
+        let result = home_bash(&[("digits.txt", "1 2 3\n123\n")])
+            .exec("rg --only-matching --column '[0-9]' digits.txt");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "1:1:1\n1:3:2\n1:5:3\n2:1:1\n2:2:2\n2:3:3\n");
+    }
+
+    #[test]
+    fn rg_vimgrep_emits_one_line_per_match_with_column() {
+        // maps rg.ripgrep-compat.test.ts:742 "should output vimgrep format with --vimgrep"
+        // and imported-tests/misc.test.ts:1038 "should show vimgrep format".
+        let result =
+            home_bash(&[("sherlock", SHERLOCK)]).exec("rg --vimgrep 'Sherlock|Watson' sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout,
+            "1:16:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+1:57:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+3:49:be, to a very large extent, the result of luck. Sherlock Holmes\n\
+5:12:but Doctor Watson has to have it taken out for him and dusted,\n"
+        );
+    }
+
+    #[test]
+    fn rg_vimgrep_directory_search_prefixes_filename() {
+        // maps imported-tests/misc.test.ts:1038 "should show vimgrep format" (directory form)
+        // and imported-tests/regression.test.ts:220 "r105_part1: should show column with --vimgrep".
+        let result = home_bash(&[("foo", "zztest\n")]).exec("rg --vimgrep test");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "foo:1:3:zztest\n");
+    }
+
+    #[test]
+    fn rg_vimgrep_without_line_numbers_drops_line_column_only() {
+        // maps imported-tests/misc.test.ts:1055 "should show vimgrep format without line numbers".
+        let result = home_bash(&[("sherlock", SHERLOCK)]).exec("rg --vimgrep -N 'Sherlock|Watson'");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout,
+            "sherlock:16:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+sherlock:57:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+sherlock:49:be, to a very large extent, the result of luck. Sherlock Holmes\n\
+sherlock:12:but Doctor Watson has to have it taken out for him and dusted,\n"
+        );
+    }
+
+    #[test]
+    fn rg_byte_offset_with_only_matching_reports_file_byte_position() {
+        // maps rg.ripgrep-compat.test.ts:817 "should show byte offset with -b"
+        // and imported-tests/misc.test.ts:575 "should show byte offset with -b -o".
+        let result = home_bash(&[("sherlock", SHERLOCK)]).exec("rg -b -o Sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout,
+            "sherlock:56:Sherlock\nsherlock:177:Sherlock\n"
+        );
+    }
+
+    #[test]
+    fn rg_replace_substitutes_each_match_in_line() {
+        // maps rg.ripgrep-compat.test.ts:726 "should replace matches with -r"
+        // and imported-tests/misc.test.ts:261 "should replace matches with -r".
+        let result = home_bash(&[("sherlock", SHERLOCK)]).exec("rg -r FooBar Sherlock sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout,
+            "For the Doctor Watsons of this world, as opposed to the FooBar\n\
+be, to a very large extent, the result of luck. FooBar Holmes\n"
+        );
+    }
+
+    #[test]
+    fn rg_replace_with_numbered_capture_groups() {
+        // maps imported-tests/misc.test.ts:278 "should replace with capture groups".
+        let result = home_bash(&[("sherlock", SHERLOCK)])
+            .exec("rg -r '$2, $1' '([A-Z][a-z]+) ([A-Z][a-z]+)' sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout,
+            "For the Watsons, Doctor of this world, as opposed to the Sherlock\n\
+be, to a very large extent, the result of luck. Holmes, Sherlock\n\
+but Watson, Doctor has to have it taken out for him and dusted,\n"
+        );
+    }
+
+    #[test]
+    fn rg_replace_with_named_capture_groups() {
+        // maps imported-tests/misc.test.ts:297 "should replace with named capture groups".
+        let result = home_bash(&[("sherlock", SHERLOCK)])
+            .exec("rg -r '$last, $first' '(?P<first>[A-Z][a-z]+) (?P<last>[A-Z][a-z]+)' sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout,
+            "For the Watsons, Doctor of this world, as opposed to the Sherlock\n\
+be, to a very large extent, the result of luck. Holmes, Sherlock\n\
+but Watson, Doctor has to have it taken out for him and dusted,\n"
+        );
+    }
+
+    #[test]
+    fn rg_replace_with_only_matching_outputs_replaced_groups() {
+        // maps imported-tests/misc.test.ts:316 "should replace only matching parts".
+        let result =
+            home_bash(&[("sherlock", SHERLOCK)]).exec("rg -o -r '$1' 'of (\\w+)' sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "this\ndetective\nluck\nstraw\ncigar\n");
+    }
+
+    #[test]
+    fn rg_replace_full_match_reference_with_braces() {
+        // maps imported-tests/regression.test.ts:1159
+        // "r1739: should replace with reference to full match".
+        let result = home_bash(&[("test", "a\n")]).exec("rg -r '${0}f' '.*' test");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "af\n");
+    }
+
+    #[test]
+    fn rg_passthru_prints_all_lines_with_match_markers() {
+        // maps rg.ripgrep-compat.test.ts:858 "should print all lines with --passthru".
+        let result =
+            home_bash(&[("file", "\nfoo\nbar\nfoobar\n\nbaz\n")]).exec("rg -n --passthru foo file");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "1-\n2:foo\n3-bar\n4:foobar\n5-\n6-baz\n");
+    }
+
+    #[test]
+    fn rg_count_with_only_matching_counts_individual_matches() {
+        // maps imported-tests/misc.test.ts:637 "should count via --count --only-matching".
+        let result = home_bash(&[("sherlock", SHERLOCK)]).exec("rg --count --only-matching the");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "sherlock:4\n");
+    }
+
+    #[test]
+    fn rg_iglob_matches_case_insensitively() {
+        // maps imported-tests/misc.test.ts:519
+        // "should use case-insensitive glob matching with --iglob".
+        let result = home_bash(&[("file1.HTML", "Sherlock\n"), ("file2.html", "Sherlock\n")])
+            .exec("rg --iglob '*.html' Sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout,
+            "file1.HTML:1:Sherlock\nfile2.html:1:Sherlock\n"
+        );
+    }
+
+    #[test]
+    fn rg_glob_case_insensitive_flag_makes_globs_case_insensitive() {
+        // maps imported-tests/misc.test.ts:554
+        // "should make all globs case-insensitive with --glob-case-insensitive".
+        let result = home_bash(&[("file1.HTML", "Sherlock\n"), ("file2.html", "Sherlock\n")])
+            .exec("rg --glob-case-insensitive --glob '*.html' Sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout,
+            "file1.HTML:1:Sherlock\nfile2.html:1:Sherlock\n"
+        );
+    }
+
+    #[test]
+    fn rg_max_filesize_skips_files_over_the_limit() {
+        // maps imported-tests/misc.test.ts:803 "should filter files by size with --max-filesize".
+        let large = format!("Sherlock {}\n", "x".repeat(100));
+        let result = home_bash(&[("small.txt", "Sherlock\n"), ("large.txt", large.as_str())])
+            .exec("rg --max-filesize 50 Sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "small.txt:1:Sherlock\n");
+    }
+
+    #[test]
+    fn rg_max_filesize_accepts_kilobyte_suffix() {
+        // maps imported-tests/misc.test.ts:817 "should accept K suffix for kilobytes".
+        let result = home_bash(&[("test.txt", "Sherlock\n")]).exec("rg --max-filesize 1K Sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "test.txt:1:Sherlock\n");
+    }
+
+    #[test]
+    fn rg_max_filesize_accepts_megabyte_suffix() {
+        // maps imported-tests/misc.test.ts:829 "should accept M suffix for megabytes".
+        let result = home_bash(&[("test.txt", "Sherlock\n")]).exec("rg --max-filesize 1M Sherlock");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "test.txt:1:Sherlock\n");
     }
 
     #[test]
