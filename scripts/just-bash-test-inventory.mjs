@@ -5072,6 +5072,19 @@ const justBashCoreSerializeCaseGroups = [
     notes:
       'just-bash-core verifies Rust AST parse/serialize/parse equivalence for the timed-pipeline, parameter-operation (error-if-unset, substring, prefix/suffix removal, pattern replacement, case modification, indirection, prefix listing, transform @Q), and subshell/group-with-redirection serialize rows.',
   },
+  {
+    file: 'packages/just-bash/src/transform/serialize.test.ts',
+    lines: [
+      151, 159, 161, 168, 170, 172, 174, 181, 182, 183, 184, 185, 186, 187,
+      188, 189, 190, 192, 194, 195, 424, 427,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::transform::serialize',
+    rustTest:
+      'just_bash_core_serialize_round_trips_arithmetic_and_compound_redirection_rows',
+    notes:
+      'just-bash-core verifies Rust AST parse/serialize/parse equivalence for c-style/fallthrough/empty case compound commands, compound-with-redirection (if/for/while/case > file), arithmetic command rows (assignment, comparison, ternary, increment/decrement, nested parens, array element get/set/assoc, nested and command-substitution arithmetic, dynamic base/octal), and nested-command-substitution / group-in-pipeline complex scripts.',
+  },
 ];
 
 const justBashTransformPluginsTeeCaseGroups = [
@@ -5087,6 +5100,28 @@ const justBashTransformPluginsTeeCaseGroups = [
     rustTest: 'just_bash_transform_plugins_tee_semantics_match_upstream',
     notes:
       'just-bash-transform-plugins verifies that the Rust interpreter produces the exact stdout/stderr/exit code the TeePlugin exec/semantics-preservation rows assert for plain runs: simple success/failure, pipelines, &&/||/; chains, $? propagation, subshell/group output and exit-code isolation, for/if/elif/case control flow, arithmetic conditionals, and negated pipelines.',
+  },
+  {
+    file: 'packages/just-bash/src/transform/plugins/tee-plugin.test.ts',
+    lines: [337, 405, 423, 533, 551, 608, 622],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime',
+    rustTest:
+      'just_bash_core_tee_semantics_preservation_pipeline_rows_match_plain_exec',
+    notes:
+      'just-bash-core verifies the TeePlugin semantics-preservation rows whose scripts the real-command Rust interpreter reproduces verbatim (the Rust port has no tee transform, so equivalence means the plain exec yields the documented bytes): cat|grep|sort pipeline, ls stderr redirected through ||/| chains, command substitution into a pipeline, printf|grep|sort|wc -l count, mixed &&/||/| chains, and tr|sed|cat string manipulation.',
+  },
+];
+
+const justBashEncodingPipelineByteEmitCaseGroups = [
+  {
+    file: 'packages/just-bash/src/encoding-pipeline.test.ts',
+    lines: [178],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'jbc45_encoding_pipeline_byte_text_contract_rows_are_byte_safe',
+    notes:
+      'just-bash-core verifies that a byte-emitting custom command pipes downstream without double encoding: the emitter carries "안녕\\n" as its stdout byte string and `wc -c` reports exactly 7 bytes, never the 11 a second UTF-8 round-trip of the multibyte codepoints would produce.',
   },
 ];
 
@@ -5142,6 +5177,7 @@ function caseOverrideFor(testCase) {
     ...jbcYqFixturesCaseGroups,
     ...justBashCoreSerializeCaseGroups,
     ...justBashTransformPluginsTeeCaseGroups,
+    ...justBashEncodingPipelineByteEmitCaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&
