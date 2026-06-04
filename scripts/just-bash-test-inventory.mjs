@@ -1046,6 +1046,45 @@ const jbc09CaseGroups = [
   },
 ];
 
+const r12jbAwkCommandCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.modulo.test.ts',
+    lines: [113],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_modulo_negative_divisor_row',
+    notes:
+      'just-bash-command-awk verifies `%` modulo with a negative divisor truncates toward zero so the result keeps the dividend sign: `7 % -3` is `1`. Also proves the multiplicative right operand parses a leading unary minus.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.math.test.ts',
+    lines: [69, 77],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_rand_and_srand_rows',
+    notes:
+      'just-bash-command-awk verifies `rand()` returns a value in `[0, 1)` and `srand(seed)` reseeds the deterministic generator without error, with the subsequent `rand()` still in `[0, 1)`.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.nextfile.test.ts',
+    lines: [6, 20, 34, 50, 66, 80, 96],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_nextfile_rows',
+    notes:
+      'just-bash-command-awk verifies the `nextfile` statement skips the rest of the current input file and resumes with the next file, driven by FNR/FILENAME and field conditions, so skipped records never reach later rules; FNR resets per file while NR keeps counting, and nextfile on a single file ends processing at that record.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.limits.test.ts',
+    lines: [16, 27, 37, 47, 59, 70, 83, 94, 107, 119],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_execution_limit_rows',
+    notes:
+      'just-bash-command-awk verifies awk execution limits: infinite `while(1)`/`for(;1;)`/`for(;;)`/`do-while(1)` loops fail with a non-empty error and non-zero exit; direct and mutual recursion hit the recursion-depth limit (exit 126, "recursion depth exceeded"); runaway print loops and exponential string concatenation hit output/string-length limits (exit 126, "exceeded"); a large finite array and a missing-file getline loop both terminate with a defined exit code rather than hanging.',
+  },
+];
+
 const jbc10CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/rg/rg.basic.test.ts',
@@ -5584,6 +5623,7 @@ function caseOverrideFor(testCase) {
     ...jb06CaseGroups,
     ...jbc07CaseGroups,
     ...jbc09CaseGroups,
+    ...r12jbAwkCommandCaseGroups,
     ...jbc10CaseGroups,
     ...jbc12CaseGroups,
     ...jbc13CaseGroups,
