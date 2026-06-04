@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bzip2;
 mod cli;
 mod commands;
 mod encoding;

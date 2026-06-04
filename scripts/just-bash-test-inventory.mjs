@@ -5098,6 +5098,108 @@ const r10jbTarCaseGroups = [
   },
 ];
 
+const r12jbTarBzip2CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/tar/bzip2-compress.test.ts',
+    lines: [23, 27, 31, 37, 41],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::bzip2',
+    rustTest: 'bzip2_basic_roundtrip_rows',
+    notes:
+      'just-bash-command-tar verifies the pure-Rust bzip2 compressor round-trips the basic inputs (single byte, short/long ASCII, repeated characters, full printable ASCII range) by encoding with the ported bzip2_compress and decoding with the colocated self-contained bzip2_decompress, mirroring upstream seek-bzip round-trip verification.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tar/bzip2-compress.test.ts',
+    lines: [49, 55, 61, 65, 69, 75, 86],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::bzip2',
+    rustTest: 'bzip2_binary_data_rows',
+    notes:
+      'just-bash-command-tar verifies bzip2 round-trips arbitrary binary data: all 256 byte values ascending and descending, null and 0xFF runs, alternating 0x00/0xFF, deterministic LCG pseudo-random bytes, and data with only two distinct byte values.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tar/bzip2-compress.test.ts',
+    lines: [94, 98, 102, 106, 110, 114, 122],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::bzip2',
+    rustTest: 'bzip2_rle1_edge_case_rows',
+    notes:
+      'just-bash-command-tar verifies the bzip2 RLE1 stage round-trips run-length edge cases: 3 repeats below the threshold, the 4-byte RLE1 boundary, 5 repeats, the 255-byte max single run, 256 repeats spanning two runs, alternating runs of different bytes, and many interspersed runs of three.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tar/bzip2-compress.test.ts',
+    lines: [132, 136, 142, 148, 155],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::bzip2',
+    rustTest: 'bzip2_bwt_edge_case_rows',
+    notes:
+      'just-bash-command-tar verifies the Burrows-Wheeler stage round-trips its hard cases: a single distinct byte repeated, already-sorted and reverse-sorted data, short-period periodic data, and a long identical prefix followed by a different suffix byte.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tar/bzip2-compress.test.ts',
+    lines: [164, 170, 176, 180, 186],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::bzip2',
+    rustTest: 'bzip2_mtf_huffman_edge_case_rows',
+    notes:
+      'just-bash-command-tar verifies the MTF/Huffman stages round-trip high- and low-compressibility data, data with exactly one and exactly two unique symbols, and data where all 256 byte values appear.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tar/bzip2-compress.test.ts',
+    lines: [194, 200, 210, 218],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::bzip2',
+    rustTest: 'bzip2_larger_data_rows',
+    notes:
+      'just-bash-command-tar verifies bzip2 round-trips larger payloads: 10 KB of repeated text, 50 KB of LCG-mixed bytes, 100 KB of highly compressible data, and 150 KB at block-size level 1 that spans multiple bzip2 blocks.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tar/bzip2-compress.test.ts',
+    lines: [233, 238],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::bzip2',
+    rustTest: 'bzip2_size_limit_rows',
+    notes:
+      'just-bash-command-tar verifies bzip2 input-size limits: input one byte over the 10 MB maximum returns the "Input too large" error, and input within the limit compresses without error.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tar/bzip2-compress.test.ts',
+    lines: [250, 256, 262, 268, 274],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::bzip2',
+    rustTest: 'bzip2_block_size_level_rows',
+    notes:
+      'just-bash-command-tar verifies bzip2 block-size levels round-trip at levels 1, 5, and 9 and that out-of-range levels 0 and 10 are rejected with the "Block size level must be 1-9" error.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tar/bzip2-compress.test.ts',
+    lines: [282, 291, 298, 309],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::bzip2',
+    rustTest: 'bzip2_format_compliance_rows',
+    notes:
+      'just-bash-command-tar verifies bzip2 stream-format compliance: the BZh9 header bytes, the block-size level digit encoded in the header for levels 1-9, the 0x314159265359 block magic bytes, and that several inputs decode back to themselves through the self-contained decoder.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tar/bzip2-compress.test.ts',
+    lines: [328, 332, 336, 340, 346, 356, 367],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::bzip2',
+    rustTest: 'bzip2_special_content_pattern_rows',
+    notes:
+      'just-bash-command-tar verifies bzip2 round-trips special content: newline/CR mixtures, null-terminated strings, UTF-8 multibyte sequences, data resembling bzip2 headers, tar-like 512-byte aligned blocks, highly repetitive JSON, and long runs surrounding random data.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tar/bzip2-compress.test.ts',
+    lines: [384],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::bzip2',
+    rustTest: 'bzip2_decompresses_system_bzip2_stream',
+    notes:
+      'just-bash-command-tar verifies the self-contained bzip2 decoder decodes a real macOS /usr/bin/bzip2 stream of "AAAA" back to the original bytes, proving the decoder used for round-trip verification is bzip2-format compliant against an external encoder.',
+  },
+];
+
 const r11jbTarCaseGroups = [
   {
     file: 'packages/just-bash/src/commands/tar/tar.security.test.ts',
@@ -5229,8 +5331,20 @@ function rowOverrideFromGroup(group) {
   return override;
 }
 
+const r12jbTarBzip2SourceGroups = [
+  {
+    files: ['packages/just-bash/src/commands/tar/bzip2-compress.ts'],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::bzip2',
+    rustTest: 'bzip2_basic_roundtrip_rows',
+    notes:
+      'just-bash-command-tar ports the pure bzip2 compressor (RLE1 -> BWT -> MTF -> RLE2 -> Huffman -> bitstream) to crates/just-bash/src/bzip2.rs and proves it against a colocated self-contained bzip2 decoder and a real system bzip2 stream.',
+  },
+];
+
 function sourceOverrideFor(relativePath) {
   const group = [
+    ...r12jbTarBzip2SourceGroups,
     ...jb06SourceGroups,
     ...jbc12SourceGroups,
     ...jbc13SourceGroups,
@@ -5681,6 +5795,7 @@ function caseOverrideFor(testCase) {
     ...jbc46CaseGroups,
     ...r10jbTarCaseGroups,
     ...r11jbTarCaseGroups,
+    ...r12jbTarBzip2CaseGroups,
     ...jbc47CaseGroups,
     ...jbc27CaseGroups,
     ...jbc30AgentExampleCaseGroups,
