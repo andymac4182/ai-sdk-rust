@@ -3151,6 +3151,27 @@ const jbc34CaseGroups = [
   },
 ];
 
+const jbR11JbGrepGlobBinaryCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/grep/grep.advanced.test.ts',
+    lines: [349, 363, 376],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-search',
+    rustTest: 'text_search_jbc_grep_glob_operand_and_binary_rows',
+    notes:
+      'R11JB verifies grep expands unquoted glob file operands itself (the shell leaves them literal): a bare `*.ts` glob matches multiple files in the cwd and adds the filename prefix, a path-qualified `/src/*.ts` glob preserves the directory prefix sorted by path, and a glob that matches nothing searches no files (no stdin fallback, no error) yielding empty output with the no-match exit code 1.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/grep/grep.binary.test.ts',
+    lines: [5, 26],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-search',
+    rustTest: 'text_search_jbc_grep_glob_operand_and_binary_rows',
+    notes:
+      'R11JB verifies grep treats virtual "binary" files as text: a single file searched for a present pattern prints the matching line without a filename prefix, and content with leading NUL bytes still matches on the relevant line and exits 0.',
+  },
+];
+
 const jbc24CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/jq/jq.functions.test.ts',
@@ -3322,6 +3343,38 @@ const jbc24CaseGroups = [
     rustTest: 'structured_data_sqlite3_deep_options_modes_and_error_rows',
     notes:
       'JBC-24 verifies additional portable sqlite3 multi-column, multi-statement, syntax/missing-table diagnostics, and NULL JSON rows over in-memory databases.',
+  },
+];
+
+const r11jbSqlite3CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.parsing.test.ts',
+    lines: [
+      6, 26, 35, 42, 49, 58, 68, 78, 90, 99, 108, 119, 126, 135, 144, 155, 164, 173, 182, 191,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_sqlite3_sql_parsing_and_result_set_rows',
+    notes:
+      'R11-JB verifies the portable sqlite3 SQL statement splitter (semicolons inside single quotes and doubled-quote escapes), quoted/empty/newline values, set-op + subquery-in-FROM + ORDER BY, constant CASE evaluation, and result-set shaping over the in-memory engine.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.test.ts',
+    lines: [98, 127],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_sqlite3_unknown_option_real_precision_and_line_mode_rows',
+    notes:
+      'R11-JB verifies the portable sqlite3 unknown-option diagnostic with exit 1 and full IEEE-754 REAL precision in -json output (3.14 -> 3.1400000000000001).',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.formatters.test.ts',
+    lines: [126, 143],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_sqlite3_unknown_option_real_precision_and_line_mode_rows',
+    notes:
+      'R11-JB verifies portable sqlite3 line-mode column-name right-alignment (minimum width 5) and the blank-line row separator across multiple result rows.',
   },
 ];
 
@@ -5340,8 +5393,10 @@ function caseOverrideFor(testCase) {
     ...jbc22CaseGroups,
     ...jbc23CaseGroups,
     ...jbc34CaseGroups,
+    ...jbR11JbGrepGlobBinaryCaseGroups,
     ...jbc36CaseGroups,
     ...jbc24CaseGroups,
+    ...r11jbSqlite3CaseGroups,
     ...jbc25CaseGroups,
     ...jbc35CaseGroups,
     ...jbc42CaseGroups,

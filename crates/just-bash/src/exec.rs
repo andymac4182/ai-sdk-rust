@@ -2238,11 +2238,24 @@ fn command_grep(
         return stderr_result(2, "grep: missing pattern\n");
     };
     paths.extend(args[index..].iter().cloned());
+    // grep expands glob operands itself (the shell leaves them literal). The
+    // recursive path keeps the raw operands so its existing directory walk and
+    // `--include`/`--exclude` filtering are unaffected.
+    let had_explicit_paths = !paths.is_empty();
+    if !recursive {
+        paths = grep_expand_glob_paths(state, &paths);
+    }
     let inputs = if paths.is_empty() {
-        vec![NamedTextInput {
-            label: String::new(),
-            text: stdin.to_string(),
-        }]
+        if had_explicit_paths {
+            // Every file operand was a glob that matched nothing: grep searches
+            // no files (it does not fall back to stdin), so there are no inputs.
+            Vec::new()
+        } else {
+            vec![NamedTextInput {
+                label: String::new(),
+                text: stdin.to_string(),
+            }]
+        }
     } else {
         match grep_inputs(
             state,
@@ -2864,6 +2877,74 @@ fn fixed_line_matches(
 
 fn is_word_char(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+/// True when a grep file operand carries a glob metacharacter that grep itself
+/// expands against the virtual filesystem (the shell leaves such operands
+/// literal). A `[` only counts when a closing `]` follows it.
+fn grep_path_has_glob(path: &str) -> bool {
+    path.chars()
+        .enumerate()
+        .any(|(index, character)| match character {
+            '*' | '?' => true,
+            '[' => path[index + 1..].contains(']'),
+            _ => false,
+        })
+}
+
+/// Expands the grep file operands, resolving any operand that contains a glob
+/// metacharacter against the virtual filesystem.
+///
+/// Mirrors upstream just-bash `expandGlobPatternWithTypes`: the operand is split
+/// at its last `/` into a directory part and a glob part, the directory is read,
+/// and every entry whose name matches the glob part contributes a path (the bare
+/// entry name when the operand had no slash, otherwise `dir/entry`). Matches are
+/// returned sorted. A glob operand that matches nothing expands to no paths
+/// (grep then searches one fewer file), exactly like the upstream command, while
+/// non-glob operands pass through unchanged. `**` recursive globs are left to the
+/// existing recursive path and are not handled here.
+fn grep_expand_glob_paths(state: &ExecState<'_>, paths: &[String]) -> Vec<String> {
+    if !paths.iter().any(|path| grep_path_has_glob(path)) {
+        return paths.to_vec();
+    }
+    let fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return paths.to_vec(),
+    };
+    let mut expanded = Vec::with_capacity(paths.len());
+    for path in paths {
+        if !grep_path_has_glob(path) || path.contains("**") {
+            expanded.push(path.clone());
+            continue;
+        }
+        let (dir_part, glob_part, had_slash) = match path.rfind('/') {
+            None => (state.cwd.clone(), path.as_str(), false),
+            Some(slash) => {
+                let dir = &path[..slash];
+                let dir = if dir.is_empty() { "/" } else { dir };
+                (dir.to_string(), &path[slash + 1..], true)
+            }
+        };
+        let full_dir = resolve_path(&state.cwd, &dir_part);
+        let Ok(entries) = fs.readdir_with_file_types(&full_dir) else {
+            // A missing directory yields no matches, dropping the operand.
+            continue;
+        };
+        let mut matched = Vec::new();
+        for entry in entries {
+            if rg_glob_match(glob_part, &entry.name) {
+                let full_path = if had_slash {
+                    format!("{dir_part}/{}", entry.name)
+                } else {
+                    entry.name.clone()
+                };
+                matched.push(full_path);
+            }
+        }
+        matched.sort();
+        expanded.extend(matched);
+    }
+    expanded
 }
 
 fn grep_inputs(
@@ -16332,15 +16413,49 @@ fn parse_toml_input(input: &str) -> Result<JsonValue, String> {
         let (key, value_text) = line
             .split_once('=')
             .ok_or_else(|| format!("toml: invalid line: {line}"))?;
-        // Support multi-line arrays by joining until brackets balance.
-        let mut value_text = value_text.trim().to_string();
-        while toml_value_is_incomplete(&value_text) && index < lines.len() {
-            value_text.push(' ');
-            value_text.push_str(strip_toml_comment(lines[index].trim()));
-            index += 1;
-        }
+        let raw_value = value_text.trim();
         let key_path = parse_toml_key_path(key.trim())?;
-        let value = parse_toml_value(&value_text)?;
+        // Multi-line basic (`"""`) or literal (`'''`) strings: collect raw lines
+        // until the matching closing delimiter, mirroring smol-toml.
+        let value = if let Some(delim) = toml_multiline_delim(raw_value) {
+            let mut body = String::new();
+            // Content begins after the opening delimiter on the same line.
+            let mut after = &raw_value[delim.len()..];
+            // A newline immediately after the opening delimiter is trimmed.
+            let mut first = true;
+            loop {
+                if let Some(end) = after.find(delim) {
+                    body.push_str(&after[..end]);
+                    break;
+                }
+                body.push_str(after);
+                let next = lines
+                    .get(index)
+                    .ok_or_else(|| format!("toml: unterminated multiline string: {raw_value}"))?;
+                index += 1;
+                body.push('\n');
+                after = next;
+                let _ = first;
+                first = false;
+            }
+            let _ = first;
+            // Trim a single leading newline right after the opening delimiter.
+            let trimmed = body.strip_prefix('\n').unwrap_or(&body);
+            if delim == "'''" {
+                JsonValue::String(trimmed.to_string())
+            } else {
+                JsonValue::String(toml_unescape(trimmed))
+            }
+        } else {
+            // Support multi-line arrays by joining until brackets balance.
+            let mut value_text = raw_value.to_string();
+            while toml_value_is_incomplete(&value_text) && index < lines.len() {
+                value_text.push(' ');
+                value_text.push_str(strip_toml_comment(lines[index].trim()));
+                index += 1;
+            }
+            parse_toml_value(&value_text)?
+        };
         let mut full_path = current.clone();
         full_path.extend(key_path);
         toml_insert(&mut root, &full_path, value)?;
@@ -16452,6 +16567,20 @@ fn toml_insert(
     let parent = toml_ensure_table(root, parents)?;
     parent.insert(last.clone(), value);
     Ok(())
+}
+
+/// Returns the multiline-string delimiter (`"""` or `'''`) if `value` opens
+/// one and it is not closed on the same line, otherwise `None`.
+fn toml_multiline_delim(value: &str) -> Option<&'static str> {
+    for delim in ["\"\"\"", "'''"] {
+        if let Some(rest) = value.strip_prefix(delim) {
+            // Single-line `"""x"""` is handled by the normal scalar path.
+            if !rest.contains(delim) {
+                return Some(delim);
+            }
+        }
+    }
+    None
 }
 
 fn parse_toml_value(text: &str) -> Result<JsonValue, String> {
@@ -19652,11 +19781,153 @@ fn parse_sql_value(value: &str) -> SqlValue {
 }
 
 fn select_sql(db: &MiniSqlDb, statement: &str) -> Result<SqlResultSet, String> {
-    let body = statement["SELECT ".len()..].trim();
-    if let Some((projection, table)) = body.split_once(" FROM ") {
-        let table = table.trim();
-        let Some(source) = db.tables.get(table) else {
-            return Err(format!("no such table: {table}"));
+    select_sql_body(db, statement.trim())
+}
+
+/// Split an SQL fragment on a top-level keyword (case-insensitive, surrounded by
+/// spaces) that is not nested inside single quotes or parentheses. Returns the
+/// split point if found.
+fn find_top_level_keyword(fragment: &str, keyword: &str) -> Option<usize> {
+    let bytes = fragment.as_bytes();
+    let upper = fragment.to_ascii_uppercase();
+    let needle = format!(" {} ", keyword.to_ascii_uppercase());
+    let mut depth = 0_i32;
+    let mut in_single = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let ch = bytes[index] as char;
+        match ch {
+            '\'' => in_single = !in_single,
+            '(' if !in_single => depth += 1,
+            ')' if !in_single => depth -= 1,
+            _ if !in_single && depth == 0 && upper[index..].starts_with(&needle) => {
+                return Some(index);
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn select_sql_body(db: &MiniSqlDb, body: &str) -> Result<SqlResultSet, String> {
+    let body = body.trim();
+    // Peel a trailing top-level ORDER BY clause so it applies to the whole
+    // (possibly UNION-ed) result set.
+    if let Some(pos) = find_top_level_keyword(body, "ORDER BY") {
+        let head = &body[..pos];
+        let order_clause = body[pos..].trim_start();
+        let order_clause = order_clause["ORDER BY".len()..].trim();
+        let mut result = select_sql_set_ops(db, head)?;
+        sort_sql_result(&mut result, order_clause)?;
+        return Ok(result);
+    }
+    select_sql_set_ops(db, body)
+}
+
+/// Handle UNION / UNION ALL of SELECT terms.
+fn select_sql_set_ops(db: &MiniSqlDb, body: &str) -> Result<SqlResultSet, String> {
+    let body = body.trim();
+    if let Some(pos) = find_top_level_keyword(body, "UNION ALL") {
+        let left = body[..pos].trim();
+        let right = body[pos + " UNION ALL ".len() - 1..].trim();
+        let mut left_set = select_sql_term(db, left)?;
+        let right_set = select_sql_term(db, right)?;
+        left_set.rows.extend(right_set.rows);
+        return Ok(left_set);
+    }
+    if let Some(pos) = find_top_level_keyword(body, "UNION") {
+        let left = body[..pos].trim();
+        let right = body[pos + " UNION ".len() - 1..].trim();
+        let mut left_set = select_sql_term(db, left)?;
+        let right_set = select_sql_term(db, right)?;
+        for row in right_set.rows {
+            if !left_set.rows.contains(&row) {
+                left_set.rows.push(row);
+            }
+        }
+        return Ok(left_set);
+    }
+    select_sql_term(db, body)
+}
+
+/// A single SELECT term, which may itself begin with `SELECT` or be a
+/// parenthesised sub-select / sub-query in FROM.
+fn select_sql_term(db: &MiniSqlDb, term: &str) -> Result<SqlResultSet, String> {
+    let term = term.trim();
+    let rest = match term
+        .get(..7)
+        .map(|prefix| prefix.eq_ignore_ascii_case("SELECT "))
+    {
+        Some(true) => term[7..].trim(),
+        _ => return Err(format!("near \"{term}\": syntax error")),
+    };
+    select_sql_core(db, rest)
+}
+
+fn sort_sql_result(result: &mut SqlResultSet, order_clause: &str) -> Result<(), String> {
+    let mut descending = false;
+    let mut key = order_clause.trim();
+    if let Some(stripped) = key
+        .to_ascii_uppercase()
+        .strip_suffix(" DESC")
+        .map(|_| key[..key.len() - 5].trim())
+    {
+        descending = true;
+        key = stripped;
+    } else if let Some(_stripped) = key
+        .to_ascii_uppercase()
+        .strip_suffix(" ASC")
+        .map(|_| key[..key.len() - 4].trim())
+    {
+        key = key[..key.len() - 4].trim();
+    }
+    let column_index = result
+        .columns
+        .iter()
+        .position(|column| column == key)
+        .or_else(|| key.parse::<usize>().ok().map(|number| number - 1))
+        .unwrap_or(0);
+    result.rows.sort_by(|left, right| {
+        let left_value = left.get(column_index).and_then(|v| v.raw.clone());
+        let right_value = right.get(column_index).and_then(|v| v.raw.clone());
+        compare_sql_values(left_value.as_deref(), right_value.as_deref())
+    });
+    if descending {
+        result.rows.reverse();
+    }
+    Ok(())
+}
+
+fn compare_sql_values(left: Option<&str>, right: Option<&str>) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(left), Some(right)) => match (left.parse::<f64>(), right.parse::<f64>()) {
+            (Ok(left), Ok(right)) => left.partial_cmp(&right).unwrap_or(Ordering::Equal),
+            _ => left.cmp(right),
+        },
+    }
+}
+
+fn select_sql_core(db: &MiniSqlDb, body: &str) -> Result<SqlResultSet, String> {
+    let body = body.trim();
+    if let Some(from_pos) = find_top_level_keyword(body, "FROM") {
+        let projection = &body[..from_pos];
+        let table = body[from_pos + " FROM ".len() - 1..].trim();
+        // A parenthesised sub-query stands in for a real table.
+        let owned_source;
+        let source = if table.starts_with('(') {
+            let inner = match_parenthesised_subquery(table)?;
+            owned_source = select_sql_body(db, inner)?;
+            &owned_source
+        } else {
+            let Some(source) = db.tables.get(table) else {
+                return Err(format!("no such table: {table}"));
+            };
+            source
         };
         if projection.trim() == "*" {
             return Ok(source.clone());
@@ -19695,12 +19966,128 @@ fn select_sql(db: &MiniSqlDb, statement: &str) -> Result<SqlResultSet, String> {
     for (index, value) in values.iter().enumerate() {
         let (raw_value, alias) = split_sql_alias(value);
         columns.push(alias.unwrap_or_else(|| (index + 1).to_string()));
-        row.push(parse_sql_value(raw_value));
+        row.push(eval_sql_scalar(raw_value));
     }
     Ok(SqlResultSet {
         columns,
         rows: vec![row],
     })
+}
+
+/// Given a string that begins with `(`, return the slice between the matching
+/// outermost parentheses (single-quote aware).
+fn match_parenthesised_subquery(text: &str) -> Result<&str, String> {
+    let bytes = text.as_bytes();
+    let mut depth = 0_i32;
+    let mut in_single = false;
+    let mut start = None;
+    for (index, &byte) in bytes.iter().enumerate() {
+        match byte as char {
+            '\'' => in_single = !in_single,
+            '(' if !in_single => {
+                if depth == 0 {
+                    start = Some(index + 1);
+                }
+                depth += 1;
+            }
+            ')' if !in_single => {
+                depth -= 1;
+                if depth == 0 {
+                    let start = start.unwrap_or(0);
+                    return Ok(text[start..index].trim());
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(format!("near \"{text}\": syntax error"))
+}
+
+/// Evaluate a constant scalar expression in a SELECT projection. Supports plain
+/// literals and a single-branch `CASE WHEN <cond> THEN <a> ELSE <b> END` where
+/// the condition is a constant equality comparison.
+fn eval_sql_scalar(expr: &str) -> SqlValue {
+    let trimmed = expr.trim();
+    let upper = trimmed.to_ascii_uppercase();
+    if upper.starts_with("CASE ") && upper.ends_with(" END") {
+        if let Some(value) = eval_sql_case(trimmed) {
+            return value;
+        }
+    }
+    parse_sql_value(trimmed)
+}
+
+fn eval_sql_case(expr: &str) -> Option<SqlValue> {
+    // Strip leading "CASE " and trailing " END".
+    let inner = expr.get(5..expr.len() - 4)?.trim();
+    // Expect the form: WHEN <cond> THEN <a> [ELSE <b>]
+    let rest = strip_leading_keyword(inner, "WHEN")?;
+    let then_pos = find_keyword_at_top_level(rest, "THEN")?;
+    let condition = rest[..then_pos].trim();
+    let after_then = rest[then_pos + "THEN".len()..].trim();
+    let (then_value, else_value) = match find_keyword_at_top_level(after_then, "ELSE") {
+        Some(else_pos) => (
+            after_then[..else_pos].trim(),
+            after_then[else_pos + "ELSE".len()..].trim(),
+        ),
+        None => (after_then, ""),
+    };
+    if eval_sql_condition(condition) {
+        Some(parse_sql_value(then_value))
+    } else {
+        Some(parse_sql_value(else_value))
+    }
+}
+
+fn strip_leading_keyword<'a>(text: &'a str, keyword: &str) -> Option<&'a str> {
+    let text = text.trim_start();
+    if text.len() >= keyword.len() && text[..keyword.len()].eq_ignore_ascii_case(keyword) {
+        Some(text[keyword.len()..].trim_start())
+    } else {
+        None
+    }
+}
+
+/// Find a top-level (not nested in quotes/parens) occurrence of a keyword that
+/// is bounded by whitespace, returning the byte index of the keyword start.
+fn find_keyword_at_top_level(text: &str, keyword: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let upper = text.to_ascii_uppercase();
+    let needle = keyword.to_ascii_uppercase();
+    let mut depth = 0_i32;
+    let mut in_single = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] as char {
+            '\'' => in_single = !in_single,
+            '(' if !in_single => depth += 1,
+            ')' if !in_single => depth -= 1,
+            _ if !in_single && depth == 0 && upper[index..].starts_with(&needle) => {
+                let before_ok = index == 0 || bytes[index - 1].is_ascii_whitespace();
+                let after_index = index + needle.len();
+                let after_ok =
+                    after_index >= bytes.len() || bytes[after_index].is_ascii_whitespace();
+                if before_ok && after_ok {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Evaluate a constant equality / inequality condition such as `1=1`.
+fn eval_sql_condition(condition: &str) -> bool {
+    for (operator, expected) in [("=", true), ("!=", false), ("<>", false)] {
+        if let Some((left, right)) = condition.split_once(operator) {
+            let left = parse_sql_value(left.trim());
+            let right = parse_sql_value(right.trim());
+            return (left == right) == expected;
+        }
+    }
+    false
 }
 
 fn split_sql_alias(value: &str) -> (&str, Option<String>) {
@@ -19913,7 +20300,7 @@ fn format_sql_json(result_set: &SqlResultSet) -> String {
                         value
                             .raw
                             .as_ref()
-                            .map(|value| serde_json::to_string(&csv_json_value(value)).unwrap())
+                            .map(|value| sqlite_json_scalar(value))
                             .unwrap_or_else(|| "null".to_string())
                     )
                 })
@@ -19926,12 +20313,78 @@ fn format_sql_json(result_set: &SqlResultSet) -> String {
     format!("[{rows}]\n")
 }
 
+/// Serialize a sqlite cell value into a JSON scalar literal, matching real
+/// sqlite3 `-json` mode: integers and strings serialize normally, but a real
+/// (floating-point) literal is rendered with full IEEE-754 round-trip
+/// precision (e.g. `3.14` becomes `3.1400000000000001`).
+fn sqlite_json_scalar(value: &str) -> String {
+    if value.parse::<i64>().is_ok() {
+        return value.to_string();
+    }
+    // A value is treated as a REAL only when it carries a decimal point or
+    // exponent and parses as a float; integers were handled above.
+    if (value.contains('.') || value.contains('e') || value.contains('E'))
+        && let Ok(float) = value.parse::<f64>()
+    {
+        return format_sqlite_real(float);
+    }
+    serde_json::to_string(value).unwrap()
+}
+
+/// Format an f64 the way the upstream sqlite3 port renders a REAL, mirroring
+/// JavaScript `value.toPrecision(17).replace(/\.?0+$/, "")`: 17 significant
+/// digits, then strip trailing zeroes (and a dangling decimal point). So `3.14`
+/// renders as `3.1400000000000001`.
+fn format_sqlite_real(value: f64) -> String {
+    let rendered = to_precision_17(value);
+    trim_real_zeroes(&rendered)
+}
+
+/// Render an f64 with exactly 17 significant digits in plain (non-exponential)
+/// notation for the value ranges sqlite emits for `-json`. Mirrors JS
+/// `Number.prototype.toPrecision(17)` for finite, non-exponential magnitudes.
+fn to_precision_17(value: f64) -> String {
+    if value == 0.0 {
+        return "0.0000000000000000".to_string();
+    }
+    let magnitude = value.abs();
+    let exponent = magnitude.log10().floor() as i32;
+    let integer_digits = exponent + 1;
+    let decimals = (17 - integer_digits).max(0) as usize;
+    format!("{value:.decimals$}")
+}
+
+fn trim_real_zeroes(rendered: &str) -> String {
+    if !rendered.contains('.') {
+        return rendered.to_string();
+    }
+    let trimmed = rendered.trim_end_matches('0');
+    let trimmed = trimmed.trim_end_matches('.');
+    if trimmed.is_empty() {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn format_sql_line(result_set: &SqlResultSet, options: &SqliteOptions) -> String {
+    // SQLite line mode right-aligns column names to the widest column name
+    // (minimum width is the longest name) and separates rows with a blank line.
+    let name_width = result_set
+        .columns
+        .iter()
+        .map(|column| column.len())
+        .max()
+        .unwrap_or(0)
+        .max(5);
     let mut output = String::new();
-    for row in &result_set.rows {
+    for (row_index, row) in result_set.rows.iter().enumerate() {
+        if row_index > 0 {
+            output.push('\n');
+        }
         for (column, value) in result_set.columns.iter().zip(row) {
             output.push_str(&format!(
-                "{column:>5} = {}\n",
+                "{column:>name_width$} = {}\n",
                 sql_value_text(value, &options.null_value)
             ));
         }

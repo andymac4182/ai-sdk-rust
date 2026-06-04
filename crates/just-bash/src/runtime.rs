@@ -142,6 +142,87 @@ mod tests {
         Bash::new()
     }
 
+    #[test]
+    fn text_search_jbc_grep_glob_operand_and_binary_rows() {
+        // grep expands unquoted glob file operands itself (the shell leaves them
+        // literal). `grep foo *.ts` in /dir matches a.ts and b.ts, so two files
+        // are searched and the filename prefix is shown; only a.ts contains foo.
+        // maps packages/just-bash/src/commands/grep/grep.advanced.test.ts:349
+        let expand_star = Bash::with_options(BashOptions {
+            cwd: Some("/dir".to_string()),
+            files: BTreeMap::from([
+                ("/dir/a.ts".to_string(), "foo\n".to_string()),
+                ("/dir/b.ts".to_string(), "bar\n".to_string()),
+                ("/dir/c.js".to_string(), "foo\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let result = expand_star.exec("grep foo *.ts");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "a.ts:foo\n");
+        assert_eq!(result.stderr, "");
+
+        // A path-qualified glob expands within its directory, preserving the
+        // directory prefix on each matched label, sorted by path.
+        // maps packages/just-bash/src/commands/grep/grep.advanced.test.ts:363
+        let expand_path = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/src/a.ts".to_string(), "test\n".to_string()),
+                ("/src/b.ts".to_string(), "test\n".to_string()),
+                ("/src/c.js".to_string(), "test\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let result = expand_path.exec("grep test /src/*.ts");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "/src/a.ts:test\n/src/b.ts:test\n");
+        assert_eq!(result.stderr, "");
+
+        // A glob operand that matches nothing expands to no files: grep searches
+        // nothing (it does not fall back to stdin or error), giving empty output
+        // and the no-match exit code 1 with no diagnostic.
+        // maps packages/just-bash/src/commands/grep/grep.advanced.test.ts:376
+        let no_match = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/dir/file.js".to_string(), "content\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let result = no_match.exec("grep test /dir/*.ts");
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.stdout, "");
+        assert_eq!(result.stderr, "");
+
+        // grep treats virtual files as text: a single "binary" file searched for
+        // a present pattern prints the matching line without a filename prefix.
+        // maps packages/just-bash/src/commands/grep/grep.binary.test.ts:5
+        let binary_plain = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/binary.bin".to_string(), "foo\nbar\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let result = binary_plain.exec("grep foo /binary.bin");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "foo\n");
+        assert_eq!(result.stderr, "");
+
+        // Content with leading NUL bytes still matches on the relevant line and
+        // exits 0; the matched line is emitted verbatim (NUL preserved).
+        // maps packages/just-bash/src/commands/grep/grep.binary.test.ts:26
+        let binary_nul = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/binary.bin".to_string(),
+                "\u{0}\u{0}test\n\u{0}foo\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        let result = binary_nul.exec("grep test /binary.bin");
+        assert_eq!(result.exit_code, 0);
+        assert!(
+            result.stdout.contains("test"),
+            "stdout: {:?}",
+            result.stdout
+        );
+        assert_eq!(result.stderr, "");
+    }
+
     /// Closes the just-bash-core `tee-plugin.test.ts` "TeePlugin semantics
     /// preservation" rows that the portable Rust interpreter reproduces
     /// verbatim. Upstream registers a `TeePlugin` and asserts the wrapped run's
@@ -13086,6 +13167,416 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn structured_data_yq_toml_fixtures_rows() {
+        // packages/just-bash/src/commands/yq/yq.fixtures.test.ts — TOML fixtures
+        //   :321 :330 :339 :348 :357 :367 :376 :385 :396 :405 :414 :423
+        // Mirrors the upstream cargo.toml / pyproject.toml / config.toml /
+        // special.toml fixture queries exactly, exercising the portable yq
+        // TOML input parser (tables, dotted keys, inline tables, arrays of
+        // tables, multiline basic/literal strings, and unicode scalars).
+        let cargo = concat!(
+            "[package]\n",
+            "name = \"my-rust-app\"\n",
+            "version = \"1.2.3\"\n",
+            "edition = \"2021\"\n",
+            "authors = [\"Alice <alice@example.com>\", \"Bob <bob@example.com>\"]\n",
+            "description = \"A sample Rust application\"\n\n",
+            "[dependencies]\n",
+            "serde = { version = \"1.0\", features = [\"derive\"] }\n",
+            "tokio = { version = \"1.0\", features = [\"full\"] }\n\n",
+            "[dev-dependencies]\n",
+            "criterion = \"0.5\"\n\n",
+            "[profile.release]\n",
+            "opt-level = 3\n",
+            "lto = true\n",
+        );
+        let config = concat!(
+            "[server]\n",
+            "host = \"localhost\"\n",
+            "port = 8080\n",
+            "debug = false\n\n",
+            "[database]\n",
+            "url = \"postgres://localhost:5432/mydb\"\n",
+            "max_connections = 100\n",
+            "timeout = 30\n\n",
+            "[database.pool]\n",
+            "min_size = 10\n",
+            "max_size = 50\n\n",
+            "[logging]\n",
+            "level = \"info\"\n",
+            "format = \"json\"\n",
+            "output = \"stdout\"\n\n",
+            "[features]\n",
+            "dark_mode = true\n",
+            "notifications = true\n",
+            "analytics = false\n",
+        );
+        let pyproject = concat!(
+            "[project]\n",
+            "name = \"my-python-app\"\n",
+            "version = \"2.0.0\"\n",
+            "description = \"A sample Python application\"\n",
+            "authors = [\n",
+            "    { name = \"Alice\", email = \"alice@example.com\" },\n",
+            "    { name = \"Bob\", email = \"bob@example.com\" }\n",
+            "]\n",
+            "requires-python = \">=3.9\"\n",
+        );
+        let special = concat!(
+            "# TOML edge cases\n\n",
+            "# Basic types\n",
+            "string_value = \"hello world\"\n",
+            "integer_value = 42\n",
+            "float_value = 3.14\n",
+            "boolean_true = true\n",
+            "boolean_false = false\n\n",
+            "# Datetime values\n",
+            "date_value = 2024-01-15\n",
+            "datetime_value = 2024-01-15T10:30:00Z\n\n",
+            "# Arrays\n",
+            "simple_array = [1, 2, 3, 4, 5]\n",
+            "string_array = [\"apple\", \"banana\", \"cherry\"]\n",
+            "nested_array = [[1, 2], [3, 4], [5, 6]]\n\n",
+            "# Multiline strings\n",
+            "multiline_basic = \"\"\"\n",
+            "This is a\n",
+            "multiline string\n",
+            "spanning multiple lines\"\"\"\n\n",
+            "multiline_literal = '''\n",
+            "Line 1\n",
+            "Line 2\n",
+            "Line 3'''\n\n",
+            "# Inline table\n",
+            "inline = { name = \"inline\", value = 123 }\n\n",
+            "# Dotted keys (must be before [[products]] to be root-level)\n",
+            "dotted.key.value = \"nested via dots\"\n\n",
+            "# Unicode (must be before [[products]] to be root-level)\n",
+            "unicode = \"Hello 世界 🌍\"\n\n",
+            "# Array of tables (must come last since it affects all subsequent keys)\n",
+            "[[products]]\n",
+            "name = \"Widget\"\n",
+            "price = 19.99\n\n",
+            "[[products]]\n",
+            "name = \"Gadget\"\n",
+            "price = 29.99\n\n",
+            "[[products]]\n",
+            "name = \"Doodad\"\n",
+            "price = 49.99\n",
+        );
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/fixtures/toml/cargo.toml".to_string(), cargo.to_string()),
+                ("/fixtures/toml/config.toml".to_string(), config.to_string()),
+                (
+                    "/fixtures/toml/pyproject.toml".to_string(),
+                    pyproject.to_string(),
+                ),
+                (
+                    "/fixtures/toml/special.toml".to_string(),
+                    special.to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // :321 should get package name from cargo.toml
+        let pkg_name = env.exec("yq '.package.name' /fixtures/toml/cargo.toml");
+        assert_eq!(pkg_name.exit_code, 0);
+        assert_eq!(pkg_name.stdout, "my-rust-app\n");
+
+        // :330 should get package version from cargo.toml
+        let pkg_ver = env.exec("yq '.package.version' /fixtures/toml/cargo.toml");
+        assert_eq!(pkg_ver.exit_code, 0);
+        assert_eq!(pkg_ver.stdout, "1.2.3\n");
+
+        // :339 should get dependency versions from cargo.toml (inline table)
+        let dep_ver =
+            env.exec("yq '.dependencies.serde.version' /fixtures/toml/cargo.toml -o json -r");
+        assert_eq!(dep_ver.exit_code, 0);
+        assert_eq!(dep_ver.stdout, "1.0\n");
+
+        // :348 should get project name from pyproject.toml
+        let proj_name = env.exec("yq '.project.name' /fixtures/toml/pyproject.toml");
+        assert_eq!(proj_name.exit_code, 0);
+        assert_eq!(proj_name.stdout, "my-python-app\n");
+
+        // :357 should get author emails from pyproject.toml (array of inline tables)
+        let emails = env.exec("yq '.project.authors[].email' /fixtures/toml/pyproject.toml");
+        assert_eq!(emails.exit_code, 0);
+        assert!(emails.stdout.contains("alice@example.com"));
+        assert!(emails.stdout.contains("bob@example.com"));
+
+        // :367 should get database settings from config.toml (integer)
+        let max_conn = env.exec("yq '.database.max_connections' /fixtures/toml/config.toml");
+        assert_eq!(max_conn.exit_code, 0);
+        assert_eq!(max_conn.stdout, "100\n");
+
+        // :376 should get nested pool settings from config.toml (dotted section)
+        let pool_max = env.exec("yq '.database.pool.max_size' /fixtures/toml/config.toml");
+        assert_eq!(pool_max.exit_code, 0);
+        assert_eq!(pool_max.stdout, "50\n");
+
+        // :385 should get feature flags from config.toml (booleans)
+        let features = env.exec("yq '.features' /fixtures/toml/config.toml -o json");
+        assert_eq!(features.exit_code, 0);
+        let parsed_features = serde_json::from_str::<serde_json::Value>(&features.stdout).unwrap();
+        assert_eq!(parsed_features["dark_mode"], serde_json::json!(true));
+        assert_eq!(parsed_features["analytics"], serde_json::json!(false));
+
+        // :396 should handle array of tables from special.toml
+        let products = env.exec("yq '.products[].name' /fixtures/toml/special.toml");
+        assert_eq!(products.exit_code, 0);
+        assert_eq!(products.stdout, "Widget\nGadget\nDoodad\n");
+
+        // :405 should handle inline tables from special.toml
+        let inline = env.exec("yq '.inline.name' /fixtures/toml/special.toml");
+        assert_eq!(inline.exit_code, 0);
+        assert_eq!(inline.stdout, "inline\n");
+
+        // :414 should handle unicode from special.toml
+        let unicode = env.exec("yq '.unicode' /fixtures/toml/special.toml");
+        assert_eq!(unicode.exit_code, 0);
+        assert!(unicode.stdout.contains("Hello"));
+
+        // :423 should convert TOML to JSON from config.toml
+        let server = env.exec("yq '.server' /fixtures/toml/config.toml -o json");
+        assert_eq!(server.exit_code, 0);
+        let parsed_server = serde_json::from_str::<serde_json::Value>(&server.stdout).unwrap();
+        assert_eq!(parsed_server["host"], serde_json::json!("localhost"));
+        assert_eq!(parsed_server["port"], serde_json::json!(8080));
+    }
+
+    #[test]
+    fn structured_data_yq_format_parser_security_rows() {
+        // packages/just-bash/src/commands/yq/yq.yaml-security.test.ts
+        //   :47 (!!python tag unresolved), :119 (XML XXE not expanded),
+        //   :138 (XML __proto__ element safe), :155 (CSV __proto__ header safe),
+        //   :166 (TOML dangerous key safe), :181 (INI dangerous section safe).
+        // Each parser must treat dangerous constructs as inert data, matching
+        // the upstream vitest expectations exactly.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/python.yaml".to_string(),
+                    "exploit: !!python/object/apply:os.system ['echo pwned']\n".to_string(),
+                ),
+                (
+                    "/xxe.xml".to_string(),
+                    concat!(
+                        "<?xml version=\"1.0\"?>\n",
+                        "<!DOCTYPE foo [\n",
+                        "  <!ENTITY xxe SYSTEM \"file:///etc/passwd\">\n",
+                        "]>\n",
+                        "<root><data>&xxe;</data></root>\n",
+                    )
+                    .to_string(),
+                ),
+                (
+                    "/proto.xml".to_string(),
+                    "<root><__proto__><polluted>true</polluted></__proto__><safe>value</safe></root>".to_string(),
+                ),
+                (
+                    "/proto.csv".to_string(),
+                    "__proto__,safe\nevil,value\n".to_string(),
+                ),
+                (
+                    "/proto.toml".to_string(),
+                    "\"__proto__\" = \"evil\"\nsafe = \"value\"\n".to_string(),
+                ),
+                (
+                    "/proto.ini".to_string(),
+                    "[__proto__]\npolluted=true\n\n[safe]\nvalue=ok\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // :47 should not execute !!python/object tags — value stays raw text.
+        let python = env.exec("yq '.exploit' /python.yaml");
+        assert_eq!(python.exit_code, 0);
+        assert_ne!(python.stdout, "pwned\n");
+
+        // :119 should not expand external entities (XXE).
+        let xxe = env.exec("yq -p xml '.root.data' /xxe.xml");
+        if xxe.exit_code == 0 {
+            assert!(!xxe.stdout.contains("root:"));
+        }
+
+        // :138 should handle __proto__ element name in XML safely.
+        let xml_proto = env.exec("yq -p xml '.root.safe' /proto.xml");
+        assert_eq!(xml_proto.exit_code, 0);
+        assert_eq!(xml_proto.stdout.trim(), "value");
+
+        // :155 should handle __proto__ column header in CSV safely.
+        let csv_proto = env.exec("yq -p csv '.[0].safe' /proto.csv");
+        assert_eq!(csv_proto.exit_code, 0);
+        assert_eq!(csv_proto.stdout.trim(), "value");
+
+        // :166 should handle dangerous keys in TOML safely.
+        let toml_proto = env.exec("yq -p toml '.safe' /proto.toml");
+        assert_eq!(toml_proto.exit_code, 0);
+        assert_eq!(toml_proto.stdout.trim(), "value");
+
+        // :181 should handle dangerous section names in INI safely.
+        let ini_proto = env.exec("yq -p ini '.safe.value' /proto.ini");
+        assert_eq!(ini_proto.exit_code, 0);
+        assert_eq!(ini_proto.stdout.trim(), "ok");
+    }
+
+    #[test]
+    fn structured_data_yq_xml_io_and_format_conversion_rows() {
+        // packages/just-bash/src/commands/yq/yq.test.ts
+        //   :149 (read XML), :160 (XML attributes), :174 (output XML),
+        //   :492 (JSON -> CSV), :699 (custom XML attribute prefix).
+        // packages/just-bash/src/commands/yq/yq.fixtures.test.ts
+        //   :454 (CSV -> JSON), :475 (YAML -> INI), :485 (INI -> JSON),
+        //   :506 (YAML -> TOML), :729 (average age), :747 (group_by),
+        //   :757 (object construction from map).
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/data.xml".to_string(),
+                    "<root><name>test</name><value>42</value></root>".to_string(),
+                ),
+                (
+                    "/attr.xml".to_string(),
+                    "<item id=\"123\" name=\"test\"/>".to_string(),
+                ),
+                (
+                    "/out.yaml".to_string(),
+                    "\nroot:\n  name: test\n  value: 42\n".to_string(),
+                ),
+                (
+                    "/data.json".to_string(),
+                    "[{\"name\":\"alice\",\"score\":95},{\"name\":\"bob\",\"score\":87}]"
+                        .to_string(),
+                ),
+                ("/prefix.xml".to_string(), "<item id=\"123\"/>".to_string()),
+                (
+                    "/fixtures/csv/users.csv".to_string(),
+                    concat!(
+                        "name,age,email,active\n",
+                        "alice,30,alice@example.com,true\n",
+                        "bob,25,bob@example.com,false\n",
+                    )
+                    .to_string(),
+                ),
+                (
+                    "/fixtures/yaml/simple.yaml".to_string(),
+                    concat!(
+                        "title: Simple Document\ncount: 42\nenabled: true\n",
+                        "tags:\n  - important\n  - featured\n  - new\n",
+                    )
+                    .to_string(),
+                ),
+                (
+                    "/fixtures/ini/config.ini".to_string(),
+                    "[database]\nhost=localhost\n\n[server]\nport=8080\n".to_string(),
+                ),
+                (
+                    "/fixtures/yaml/users.yaml".to_string(),
+                    concat!(
+                        "users:\n",
+                        "  - name: alice\n    age: 30\n    email: alice@example.com\n",
+                        "  - name: bob\n    age: 25\n    email: bob@example.com\n",
+                        "  - name: charlie\n    age: 35\n    email: charlie@example.com\n",
+                    )
+                    .to_string(),
+                ),
+                (
+                    "/fixtures/csv/products.csv".to_string(),
+                    concat!(
+                        "id,name,price,category,in_stock\n",
+                        "1,Widget,19.99,electronics,true\n",
+                        "2,Gadget,29.99,electronics,true\n",
+                        "3,Gizmo,9.99,accessories,false\n",
+                    )
+                    .to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // yq.test.ts :149 should read XML with -p xml
+        let xml_read = env.exec("yq -p xml '.root.name' /data.xml");
+        assert_eq!(xml_read.exit_code, 0);
+        assert_eq!(xml_read.stdout, "test\n");
+
+        // yq.test.ts :160 should handle XML attributes (+@ prefix)
+        let xml_attr = env.exec("yq -p xml '.item[\"+@id\"]' /attr.xml -o json");
+        assert_eq!(xml_attr.exit_code, 0);
+        assert_eq!(xml_attr.stdout, "\"123\"\n");
+
+        // yq.test.ts :174 should output as XML
+        let xml_out = env.exec("yq -o xml '.' /out.yaml");
+        assert_eq!(xml_out.exit_code, 0);
+        assert!(xml_out.stdout.contains("<root>"));
+        assert!(xml_out.stdout.contains("<name>test</name>"));
+        assert!(xml_out.stdout.contains("<value>42</value>"));
+        assert!(xml_out.stdout.contains("</root>"));
+
+        // yq.test.ts :492 should convert JSON to CSV (key order preserved)
+        let json_csv = env.exec("yq -p json -o csv '.' /data.json");
+        assert_eq!(json_csv.exit_code, 0);
+        assert!(json_csv.stdout.contains("name,score"));
+        assert!(json_csv.stdout.contains("alice,95"));
+        assert!(json_csv.stdout.contains("bob,87"));
+
+        // yq.test.ts :699 should use custom attribute prefix
+        let xml_prefix = env
+            .exec("yq -p xml --xml-attribute-prefix='@' '.item[\"@id\"]' /prefix.xml -o json -r");
+        assert_eq!(xml_prefix.exit_code, 0);
+        assert_eq!(xml_prefix.stdout, "123\n");
+
+        // fixtures :454 should convert CSV to JSON (dynamic typing)
+        let csv_json = env.exec("yq -p csv '.[0]' /fixtures/csv/users.csv -o json");
+        assert_eq!(csv_json.exit_code, 0);
+        let csv_user = serde_json::from_str::<serde_json::Value>(&csv_json.stdout).unwrap();
+        assert_eq!(csv_user["name"], serde_json::json!("alice"));
+        assert_eq!(csv_user["age"], serde_json::json!(30));
+
+        // fixtures :475 should convert YAML to INI
+        let yaml_ini = env.exec("yq '.' /fixtures/yaml/simple.yaml -o ini");
+        assert_eq!(yaml_ini.exit_code, 0);
+        assert!(yaml_ini.stdout.contains("title=Simple Document"));
+        assert!(yaml_ini.stdout.contains("count=42"));
+
+        // fixtures :485 should convert INI to JSON (INI values stay strings)
+        let ini_json = env.exec("yq -p ini '.' /fixtures/ini/config.ini -o json");
+        assert_eq!(ini_json.exit_code, 0);
+        let cfg = serde_json::from_str::<serde_json::Value>(&ini_json.stdout).unwrap();
+        assert_eq!(cfg["database"]["host"], serde_json::json!("localhost"));
+        assert_eq!(cfg["server"]["port"], serde_json::json!("8080"));
+
+        // fixtures :506 should convert YAML to TOML
+        let yaml_toml = env.exec("yq '.' /fixtures/yaml/simple.yaml -o toml");
+        assert_eq!(yaml_toml.exit_code, 0);
+        assert!(yaml_toml.stdout.contains("title = \"Simple Document\""));
+        assert!(yaml_toml.stdout.contains("count = 42"));
+
+        // fixtures :729 should calculate average age from users.yaml
+        let avg_age = env.exec("yq '[.users[].age] | add / length' /fixtures/yaml/users.yaml");
+        assert_eq!(avg_age.exit_code, 0);
+        assert_eq!(avg_age.stdout, "30\n");
+
+        // fixtures :747 should group products by category from products.csv
+        let group_by = env.exec(
+            "yq -p csv 'group_by(.category) | map({category: .[0].category, count: length})' /fixtures/csv/products.csv -o json",
+        );
+        assert_eq!(group_by.exit_code, 0);
+        let groups = serde_json::from_str::<serde_json::Value>(&group_by.stdout).unwrap();
+        assert_eq!(groups.as_array().unwrap().len(), 2);
+
+        // fixtures :757 should transform user data structure from users.yaml
+        let transform = env
+            .exec("yq '.users | map({(.name): .email}) | add' /fixtures/yaml/users.yaml -o json");
+        assert_eq!(transform.exit_code, 0);
+        let emails = serde_json::from_str::<serde_json::Value>(&transform.stdout).unwrap();
+        assert_eq!(emails["alice"], serde_json::json!("alice@example.com"));
+        assert_eq!(emails["bob"], serde_json::json!("bob@example.com"));
+    }
+
+    #[test]
     fn structured_data_yq_format_conversion_frontmatter_and_autodetect_rows() {
         // packages/just-bash/src/commands/yq/yq.test.ts
         //   :354 :365 (format validation), :377 :395 :407 :424 (INI),
@@ -14909,6 +15400,170 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
             env.exec(r#"echo | awk 'BEGIN { printf "%s %s\n", "__proto__", "constructor" }'"#)
                 .stdout,
             "__proto__ constructor\n"
+        );
+    }
+
+    /// Closes the portable `sqlite3.parsing.test.ts` rows. Upstream exercises the
+    /// SQL statement splitter (semicolons inside quotes / doubled-quote escapes),
+    /// quoted-value handling, set-op + subquery edge cases, and result-set
+    /// shaping over the in-memory engine. Each assertion fails if the parser,
+    /// `''` unescaping, UNION/subquery/ORDER BY, or CASE evaluation regresses.
+    #[test]
+    fn structured_data_sqlite3_sql_parsing_and_result_set_rows() {
+        let env = bash();
+
+        // statement splitting :6,:26 — semicolons inside single-quoted strings
+        // must not split the statement.
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"CREATE TABLE t(x); INSERT INTO t VALUES('a;b'); SELECT * FROM t\"")
+                .stdout,
+            "a;b\n"
+        );
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"CREATE TABLE t(x); INSERT INTO t VALUES('a;b;c;d'); SELECT * FROM t\"")
+                .stdout,
+            "a;b;c;d\n"
+        );
+        // :35 statement without trailing semicolon
+        assert_eq!(env.exec("sqlite3 :memory: \"SELECT 1\"").stdout, "1\n");
+        // :42 empty statements (multiple semicolons)
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"SELECT 1;;; SELECT 2\"").stdout,
+            "1\n2\n"
+        );
+        // :49 whitespace-only (incl. newline) between statements
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"SELECT 1;   \n   SELECT 2\"")
+                .stdout,
+            "1\n2\n"
+        );
+        // :58 SQL doubled-quote escaping with embedded semicolon
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"CREATE TABLE t(x); INSERT INTO t VALUES('it''s;weird'); SELECT * FROM t\"")
+                .stdout,
+            "it's;weird\n"
+        );
+        // :68 multiple doubled quotes with semicolon inside
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"CREATE TABLE t(x); INSERT INTO t VALUES('a''b;c''d'); SELECT * FROM t\"")
+                .stdout,
+            "a'b;c'd\n"
+        );
+        // :78 doubled quote at end of string followed by semicolon
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"CREATE TABLE t(x); INSERT INTO t VALUES('test'''); SELECT * FROM t\"")
+                .stdout,
+            "test'\n"
+        );
+        // :90 escaped single quotes in SQLite style
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"CREATE TABLE t(x); INSERT INTO t VALUES('it''s'); SELECT * FROM t\"")
+                .stdout,
+            "it's\n"
+        );
+        // :99 empty string value
+        assert_eq!(
+            env.exec(
+                "sqlite3 :memory: \"CREATE TABLE t(x); INSERT INTO t VALUES(''); SELECT * FROM t\""
+            )
+            .stdout,
+            "\n"
+        );
+        // :108 string value containing newlines
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"CREATE TABLE t(x); INSERT INTO t VALUES('line1\nline2'); SELECT * FROM t\"")
+                .stdout,
+            "line1\nline2\n"
+        );
+        // :119 single statement
+        assert_eq!(env.exec("sqlite3 :memory: \"SELECT 42\"").stdout, "42\n");
+        // :126 many statements
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"SELECT 1; SELECT 2; SELECT 3; SELECT 4; SELECT 5\"")
+                .stdout,
+            "1\n2\n3\n4\n5\n"
+        );
+        // :135 complex query with subquery in FROM, UNION dedupe and ORDER BY
+        assert_eq!(
+            env.exec(
+                "sqlite3 :memory: \"SELECT * FROM (SELECT 1 as x UNION SELECT 2) ORDER BY x\""
+            )
+            .stdout,
+            "1\n2\n"
+        );
+        // :144 constant CASE expression
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"SELECT CASE WHEN 1=1 THEN 'yes' ELSE 'no' END\"")
+                .stdout,
+            "yes\n"
+        );
+        // :155 empty result set prints nothing
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"CREATE TABLE t(x); SELECT * FROM t\"")
+                .stdout,
+            ""
+        );
+        // :164 -header still prints the header row for an empty result set
+        assert_eq!(
+            env.exec("sqlite3 -header :memory: \"CREATE TABLE t(a INT, b TEXT); SELECT * FROM t\"")
+                .stdout,
+            "a|b\n"
+        );
+        // :173 single-column projection
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"CREATE TABLE t(x); INSERT INTO t VALUES(1),(2); SELECT x FROM t\"")
+                .stdout,
+            "1\n2\n"
+        );
+        // :182 many columns joined by the list separator
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"SELECT 1,2,3,4,5,6,7,8,9,10\"")
+                .stdout,
+            "1|2|3|4|5|6|7|8|9|10\n"
+        );
+        // :191 single aliased row
+        assert_eq!(
+            env.exec("sqlite3 :memory: \"SELECT 42 as answer\"").stdout,
+            "42\n"
+        );
+    }
+
+    /// Closes the portable `sqlite3.test.ts` unknown-option and REAL-precision
+    /// rows plus the matching `sqlite3.formatters.test.ts` line-mode rows.
+    #[test]
+    fn structured_data_sqlite3_unknown_option_real_precision_and_line_mode_rows() {
+        let env = bash();
+
+        // sqlite3.test.ts:98 unknown option emits the exact diagnostic + exit 1.
+        let unknown = env.exec("sqlite3 -unknown :memory: \"SELECT 1\"");
+        assert_eq!(
+            unknown.stderr,
+            "sqlite3: Error: unknown option: -unknown\nUse -help for a list of options.\n"
+        );
+        assert_eq!(unknown.exit_code, 1);
+
+        // sqlite3.test.ts:127 REAL values render with full IEEE-754 precision in
+        // -json (3.14 -> 3.1400000000000001), integers stay integral.
+        assert_eq!(
+            env.exec("sqlite3 -json :memory: \"CREATE TABLE t(i INT, f REAL); INSERT INTO t VALUES(42, 3.14); SELECT * FROM t\"")
+                .stdout,
+            "[{\"i\":42,\"f\":3.1400000000000001}]\n"
+        );
+
+        // sqlite3.formatters.test.ts:126 line mode right-aligns column names to a
+        // minimum width of 5 with the "=" at a constant offset.
+        let aligned = env.exec("sqlite3 -line :memory: \"SELECT 1 as aa, 2 as bbbb\"");
+        let lines: Vec<&str> = aligned.stdout.lines().filter(|l| !l.is_empty()).collect();
+        assert!(aligned.stdout.contains("aa = 1"));
+        assert!(aligned.stdout.contains("bbbb = 2"));
+        assert_eq!(lines[0].find('='), lines[1].find('='));
+
+        // sqlite3.formatters.test.ts:143 multiple rows in line mode are separated
+        // by a blank line.
+        assert_eq!(
+            env.exec("sqlite3 -line :memory: \"SELECT 1 as x UNION SELECT 2\"")
+                .stdout,
+            "    x = 1\n\n    x = 2\n"
         );
     }
 }
