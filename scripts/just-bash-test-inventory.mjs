@@ -4226,6 +4226,45 @@ const jbc37CaseGroups = [
   },
 ];
 
+const jbcXanGroupbyTransformCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.groupby.test.ts',
+    lines: [13, 22, 29, 38, 47, 58, 77, 91],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_groupby_rows',
+    notes:
+      'JBC verifies portable xan groupby sum/count()/nested-add/mean/multi-max aggregations, multi-column grouping with first-seen order, the --sorted no-op flag, and header-only empty data over in-memory CSV.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.data.test.ts',
+    lines: [119, 133],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_shuffle_rows',
+    notes:
+      'JBC verifies portable xan shuffle reproducibility with --seed (Fisher-Yates over the shared seeded LCG) and that distinct seeds produce distinct orderings over in-memory CSV.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.data.test.ts',
+    lines: [205, 214, 225, 280, 332],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_partition_rows',
+    notes:
+      'JBC verifies portable xan partition by column value, the missing-column error, and the collision-safe filename allocator (FNV-1a hash suffix plus counter disambiguation) that prevents distinct values sanitizing to the same name from silently overwriting one another, with deterministic filenames across runs.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.transform.test.ts',
+    lines: [12, 19, 28, 35, 42, 51, 58, 65, 73],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_transform_rows',
+    notes:
+      'JBC verifies portable xan transform in-place column rewriting with add/mul/upper expressions, the `_` current-column variable, single and comma-separated multi-column targets, -r rename (single and multi), and the missing-column/missing-argument/missing-expression usage errors over in-memory CSV.',
+  },
+];
+
 const jbcYqFixturesCaseGroups = [
   {
     file: 'packages/just-bash/src/commands/yq/yq.fixtures.test.ts',
@@ -4899,6 +4938,7 @@ function caseOverrideFor(testCase) {
     ...jbpiParserInterpreterCaseGroups,
     ...jbc37CaseGroups,
     ...jbc44CaseGroups,
+    ...jbcXanGroupbyTransformCaseGroups,
     ...jbcYqFixturesCaseGroups,
   ].find(
     (entry) =>

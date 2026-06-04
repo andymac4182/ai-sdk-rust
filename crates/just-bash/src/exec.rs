@@ -15535,6 +15535,10 @@ fn command_xan(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
         "frequency" => xan_frequency(state, &args[1..], stdin),
         "cat" => xan_cat(state, &args[1..]),
         "join" => xan_join(state, &args[1..]),
+        "groupby" => xan_groupby(state, &args[1..], stdin),
+        "shuffle" => xan_shuffle(state, &args[1..], stdin),
+        "partition" => xan_partition(state, &args[1..], stdin),
+        "transform" => xan_transform(state, &args[1..], stdin),
         "parallel" => stderr_result(1, "xan parallel: not yet implemented\n"),
         other => stderr_result(1, format!("xan: unknown command: {other}\n")),
     }
@@ -16339,6 +16343,483 @@ fn xan_split(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResu
         let _ = fs.write_file(&path, chunk);
     }
     stdout_result(format!("Split into {} parts\n", non_empty.len()))
+}
+
+/// Port of upstream `cmdGroupby`: group rows by one or more columns
+/// (comma-separated, first-seen order preserved) and compute the
+/// `func(expr) as alias` aggregation specs per group. `--sorted` is
+/// accepted but a no-op (insertion order is already preserved).
+fn xan_groupby(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut group_cols: Option<String> = None;
+    let mut agg_expr: Option<String> = None;
+    let mut files: Vec<String> = Vec::new();
+    for arg in args {
+        if arg == "--sorted" {
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        if group_cols.is_none() {
+            group_cols = Some(arg.clone());
+        } else if agg_expr.is_none() {
+            agg_expr = Some(arg.clone());
+        } else {
+            files.push(arg.clone());
+        }
+    }
+    let (Some(group_cols), Some(agg_expr)) = (group_cols, agg_expr) else {
+        return stderr_result(1, "xan groupby: usage: xan groupby COLS EXPR [FILE]\n");
+    };
+    let csv = match read_csv_arg(
+        state,
+        files.first().map(String::as_str),
+        stdin,
+        "xan groupby",
+    ) {
+        Ok(csv) => csv,
+        Err(result) => return result,
+    };
+    let group_keys: Vec<String> = group_cols.split(',').map(|key| key.to_string()).collect();
+    let key_indices: Vec<Option<usize>> = group_keys
+        .iter()
+        .map(|key| csv.headers.iter().position(|header| header == key))
+        .collect();
+    let specs = parse_xan_agg_expr(&agg_expr);
+
+    // Group rows preserving first-seen order, keyed by the NUL-joined values.
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, Vec<Vec<String>>> =
+        std::collections::HashMap::new();
+    for row in &csv.rows {
+        let key = key_indices
+            .iter()
+            .map(|index| index.and_then(|i| row.get(i)).cloned().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\0");
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+            groups.insert(key.clone(), Vec::new());
+        }
+        groups
+            .get_mut(&key)
+            .expect("group inserted")
+            .push(row.clone());
+    }
+
+    let mut headers: Vec<String> = group_keys.clone();
+    headers.extend(specs.iter().map(|spec| spec.alias.clone()));
+
+    let mut out_rows: Vec<Vec<String>> = Vec::new();
+    for key in &order {
+        let group_rows = &groups[key];
+        let mut out_row: Vec<String> = key.split('\0').map(|value| value.to_string()).collect();
+        let group_csv = CsvData {
+            headers: csv.headers.clone(),
+            rows: group_rows.clone(),
+        };
+        for spec in &specs {
+            out_row.push(xan_compute_agg(&group_csv, spec));
+        }
+        out_rows.push(out_row);
+    }
+
+    stdout_result(render_csv(&CsvData {
+        headers,
+        rows: out_rows,
+    }))
+}
+
+/// Port of upstream `cmdShuffle`: Fisher-Yates shuffle of the data rows
+/// using the same seeded LCG as `xan sample` for reproducibility.
+fn xan_shuffle(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut seed: Option<i64> = None;
+    let mut files: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--seed" && i + 1 < args.len() {
+            seed = args[i + 1].parse::<i64>().ok();
+            i += 2;
+            continue;
+        }
+        if !arg.starts_with('-') {
+            files.push(arg.to_string());
+        }
+        i += 1;
+    }
+    match read_csv_arg(
+        state,
+        files.first().map(String::as_str),
+        stdin,
+        "xan shuffle",
+    ) {
+        Ok(mut csv) => {
+            let mut rng: i64 = seed.unwrap_or(0);
+            let mut next_random = || {
+                rng = rng.wrapping_mul(1103515245).wrapping_add(12345) & 0x7fff_ffff;
+                rng as f64 / 0x7fff_ffff as f64
+            };
+            let len = csv.rows.len();
+            if len > 1 {
+                for i in (1..len).rev() {
+                    let j = (next_random() * (i as f64 + 1.0)).floor() as usize;
+                    csv.rows.swap(i, j);
+                }
+            }
+            stdout_result(render_csv(&csv))
+        }
+        Err(result) => result,
+    }
+}
+
+/// Sanitize a partition value into a filename-safe base: every
+/// non-`[A-Za-z0-9_-]` character becomes `_`, empty becomes `empty`.
+fn xan_sanitize_for_filename(val: &str) -> String {
+    let sanitized: String = val
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "empty".to_string()
+    } else {
+        sanitized
+    }
+}
+
+/// FNV-1a 32-bit hash, base36, padded to 6 chars (port of upstream
+/// `shortHash`). Used only to disambiguate colliding sanitized names.
+fn xan_short_hash(s: &str) -> String {
+    let mut h: u32 = 2166136261;
+    for byte in s.encode_utf16() {
+        h = (h ^ (byte as u32)).wrapping_mul(16777619);
+    }
+    let mut base36 = to_base36(h as u64);
+    while base36.len() < 6 {
+        base36.insert(0, '0');
+    }
+    base36.chars().take(6).collect()
+}
+
+/// Lowercase base36 encoding matching JS `Number#toString(36)`.
+fn to_base36(mut value: u64) -> String {
+    if value == 0 {
+        return "0".to_string();
+    }
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut out = Vec::new();
+    while value > 0 {
+        out.push(DIGITS[(value % 36) as usize]);
+        value /= 36;
+    }
+    out.reverse();
+    String::from_utf8(out).expect("base36 ascii")
+}
+
+/// Port of upstream `cmdPartition`: split a CSV by a column's value,
+/// writing one virtual file per distinct value. Distinct values that
+/// sanitize to the same filename are disambiguated with an FNV-1a hash
+/// suffix, and any further collision with a literal value sharing that
+/// hashed form is broken with a `_N` counter so no partition is ever
+/// silently overwritten.
+fn xan_partition(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut column: Option<String> = None;
+    let mut output_dir = ".".to_string();
+    let mut files: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if (arg == "-o" || arg == "--output") && i + 1 < args.len() {
+            output_dir = args[i + 1].clone();
+            i += 2;
+            continue;
+        }
+        if !arg.starts_with('-') {
+            if column.is_none() {
+                column = Some(arg.to_string());
+            } else {
+                files.push(arg.to_string());
+            }
+        }
+        i += 1;
+    }
+    let Some(column) = column else {
+        return stderr_result(1, "xan partition: usage: xan partition COLUMN [FILE]\n");
+    };
+    let csv = match read_csv_arg(
+        state,
+        files.first().map(String::as_str),
+        stdin,
+        "xan partition",
+    ) {
+        Ok(csv) => csv,
+        Err(result) => return result,
+    };
+    let Some(col_index) = csv.headers.iter().position(|header| header == &column) else {
+        return stderr_result(1, format!("xan partition: column '{column}' not found\n"));
+    };
+
+    // Group rows by the column value, preserving first-seen order.
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, Vec<Vec<String>>> =
+        std::collections::HashMap::new();
+    for row in &csv.rows {
+        let val = row.get(col_index).cloned().unwrap_or_default();
+        if !groups.contains_key(&val) {
+            order.push(val.clone());
+            groups.insert(val.clone(), Vec::new());
+        }
+        groups
+            .get_mut(&val)
+            .expect("group inserted")
+            .push(row.clone());
+    }
+
+    // Count how many distinct values map to each sanitized base.
+    let mut sanitized_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for val in &order {
+        let safe = xan_sanitize_for_filename(val);
+        *sanitized_counts.entry(safe).or_insert(0) += 1;
+    }
+
+    // Allocate a unique filename per partition value.
+    let mut allocated: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut final_name: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for val in &order {
+        let safe = xan_sanitize_for_filename(val);
+        let colliding = sanitized_counts.get(&safe).copied().unwrap_or(0) > 1;
+        let base = if colliding {
+            format!("{safe}_{}", xan_short_hash(val))
+        } else {
+            safe
+        };
+        let mut candidate = format!("{base}.csv");
+        let mut n = 1;
+        while allocated.contains(&candidate) {
+            candidate = format!("{base}_{n}.csv");
+            n += 1;
+        }
+        allocated.insert(candidate.clone());
+        final_name.insert(val.clone(), candidate);
+    }
+
+    {
+        let mut fs = match state.session.inner.fs.lock() {
+            Ok(fs) => fs,
+            Err(_) => return stderr_result(1, "xan partition: filesystem lock poisoned\n"),
+        };
+        let dir = resolve_path(&state.cwd, &output_dir);
+        for val in &order {
+            let file_name = match final_name.get(val) {
+                Some(name) => name,
+                None => continue,
+            };
+            let path = resolve_path(&dir, file_name);
+            let chunk = render_csv(&CsvData {
+                headers: csv.headers.clone(),
+                rows: groups[val].clone(),
+            });
+            let _ = fs.write_file(&path, chunk);
+        }
+    }
+
+    stdout_result(format!(
+        "Partitioned into {} files by '{column}'\n",
+        groups.len()
+    ))
+}
+
+/// Evaluate a single moonblade transform expression for one row, with
+/// the special variable `_` bound to the current target column value.
+/// Supports the function/arithmetic subset exercised by `xan transform`:
+/// `add`, `sub`, `mul`, `div`, `upper`, `lower`, `trim`, `len`, plus
+/// bare column references, `_`, and numeric literals.
+fn xan_eval_transform_expr(
+    headers: &[String],
+    row: &[String],
+    underscore: &str,
+    expr: &str,
+) -> String {
+    let expr = expr.trim();
+    let lookup = |name: &str| -> String {
+        if name == "_" {
+            return underscore.to_string();
+        }
+        headers
+            .iter()
+            .position(|header| header == name)
+            .and_then(|index| row.get(index))
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    // String functions over a single argument.
+    for (func, transform) in [("upper", 0u8), ("lower", 1), ("trim", 2), ("len", 3)] {
+        if let Some(inner) = xan_single_arg(expr, func) {
+            let value = xan_eval_transform_expr(headers, row, underscore, &inner);
+            return match transform {
+                0 => value.to_uppercase(),
+                1 => value.to_lowercase(),
+                2 => value.trim().to_string(),
+                _ => value.chars().count().to_string(),
+            };
+        }
+    }
+
+    // Binary numeric functions: add/sub/mul/div.
+    for (func, op) in [("add", '+'), ("sub", '-'), ("mul", '*'), ("div", '/')] {
+        if let Some((a, b)) = xan_two_args(expr, func) {
+            let lhs = xan_eval_transform_expr(headers, row, underscore, &a);
+            let rhs = xan_eval_transform_expr(headers, row, underscore, &b);
+            if let (Ok(x), Ok(y)) = (lhs.parse::<f64>(), rhs.parse::<f64>()) {
+                let result = match op {
+                    '+' => x + y,
+                    '-' => x - y,
+                    '*' => x * y,
+                    _ => x / y,
+                };
+                return json_scalar_string(&json_number(result));
+            }
+            return String::new();
+        }
+    }
+
+    // Numeric literal passthrough.
+    if let Ok(number) = expr.parse::<f64>() {
+        return json_scalar_string(&json_number(number));
+    }
+    // Bare identifier / `_` reference.
+    lookup(expr)
+}
+
+/// Extract the single argument of `func(arg)` (balanced parens), or None.
+fn xan_single_arg(expr: &str, func: &str) -> Option<String> {
+    let prefix = format!("{func}(");
+    let rest = expr.strip_prefix(&prefix)?;
+    let inner = rest.strip_suffix(')')?;
+    Some(inner.trim().to_string())
+}
+
+/// Extract the two top-level comma-separated arguments of `func(a, b)`.
+fn xan_two_args(expr: &str, func: &str) -> Option<(String, String)> {
+    let inner = xan_single_arg(expr, func)?;
+    let chars: Vec<char> = inner.chars().collect();
+    let mut depth = 0;
+    for (i, &c) in chars.iter().enumerate() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                let a: String = chars[..i].iter().collect();
+                let b: String = chars[i + 1..].iter().collect();
+                return Some((a.trim().to_string(), b.trim().to_string()));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Port of upstream `cmdTransform`: rewrite one or more existing columns
+/// in place by evaluating an expression with `_` bound to the column's
+/// current value, optionally renaming the columns with `-r`.
+fn xan_transform(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut target_col: Option<String> = None;
+    let mut transform_expr: Option<String> = None;
+    let mut rename = String::new();
+    let mut files: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if (arg == "-r" || arg == "--rename") && i + 1 < args.len() {
+            rename = args[i + 1].clone();
+            i += 2;
+            continue;
+        }
+        if !arg.starts_with('-') {
+            if target_col.is_none() {
+                target_col = Some(arg.to_string());
+            } else if transform_expr.is_none() {
+                transform_expr = Some(arg.to_string());
+            } else {
+                files.push(arg.to_string());
+            }
+        }
+        i += 1;
+    }
+    let (Some(target_col), Some(transform_expr)) = (target_col, transform_expr) else {
+        return stderr_result(
+            1,
+            "xan transform: usage: xan transform COLUMN EXPR [FILE]\n",
+        );
+    };
+    let csv = match read_csv_arg(
+        state,
+        files.first().map(String::as_str),
+        stdin,
+        "xan transform",
+    ) {
+        Ok(csv) => csv,
+        Err(result) => return result,
+    };
+    let target_cols: Vec<String> = target_col
+        .split(',')
+        .map(|c| c.trim().to_string())
+        .collect();
+    let rename_cols: Vec<String> = if rename.is_empty() {
+        Vec::new()
+    } else {
+        rename.split(',').map(|c| c.trim().to_string()).collect()
+    };
+    for col in &target_cols {
+        if !csv.headers.iter().any(|header| header == col) {
+            return stderr_result(1, format!("xan transform: column '{col}' not found\n"));
+        }
+    }
+    let col_indices: Vec<usize> = target_cols
+        .iter()
+        .map(|col| {
+            csv.headers
+                .iter()
+                .position(|header| header == col)
+                .expect("validated")
+        })
+        .collect();
+
+    let mut new_headers = csv.headers.clone();
+    for (i, &index) in col_indices.iter().enumerate() {
+        if let Some(new_name) = rename_cols.get(i) {
+            if !new_name.is_empty() {
+                new_headers[index] = new_name.clone();
+            }
+        }
+    }
+
+    let mut new_rows: Vec<Vec<String>> = Vec::new();
+    for row in &csv.rows {
+        let mut new_row = row.clone();
+        if new_row.len() < csv.headers.len() {
+            new_row.resize(csv.headers.len(), String::new());
+        }
+        for &index in &col_indices {
+            let underscore = row.get(index).cloned().unwrap_or_default();
+            new_row[index] =
+                xan_eval_transform_expr(&csv.headers, row, &underscore, &transform_expr);
+        }
+        new_rows.push(new_row);
+    }
+    stdout_result(render_csv(&CsvData {
+        headers: new_headers,
+        rows: new_rows,
+    }))
 }
 
 /// One parsed `func(inner) as alias` aggregation specification.

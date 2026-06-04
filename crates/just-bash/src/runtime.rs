@@ -10586,6 +10586,340 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn structured_data_xan_groupby_rows() {
+        // Ports packages/just-bash/src/commands/xan/xan.groupby.test.ts:13,22,29,38,47,58,77,91.
+        let data =
+            "id,value_A,value_B,value_C\nx,1,2,3\ny,2,3,4\nz,3,4,5\ny,1,2,3\nz,2,3,5\nz,3,6,7\n";
+        let multi = "name,color,count\njohn,blue,1\nmary,orange,3\nmary,orange,2\njohn,yellow,9\njohn,blue,2\n";
+        let sorted =
+            "id,value_A,value_B,value_C\nx,1,2,3\ny,2,3,4\ny,1,2,3\nz,2,3,5\nz,3,6,7\nz,3,4,5\n";
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/data.csv".to_string(), data.to_string()),
+                ("/multi.csv".to_string(), multi.to_string()),
+                ("/sorted.csv".to_string(), sorted.to_string()),
+                (
+                    "/empty.csv".to_string(),
+                    "id,value_A,value_B,value_C\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // groups and sums
+        assert_eq!(
+            env.exec("xan groupby id 'sum(value_A) as sumA' /data.csv")
+                .stdout,
+            "id,sumA\nx,1\ny,3\nz,8\n"
+        );
+        // groups and counts (alias defaults to count())
+        assert_eq!(
+            env.exec("xan groupby id 'count()' /data.csv").stdout,
+            "id,count()\nx,1\ny,2\nz,3\n"
+        );
+        // groups with complex nested add() expression
+        assert_eq!(
+            env.exec("xan groupby id 'sum(add(value_A,add(value_B,value_C))) as sum' /data.csv")
+                .stdout,
+            "id,sum\nx,6\ny,15\nz,38\n"
+        );
+        // computes mean per group (JS float formatting preserved)
+        assert_eq!(
+            env.exec("xan groupby id 'mean(value_A) as meanA' /data.csv")
+                .stdout,
+            "id,meanA\nx,1\ny,1.5\nz,2.6666666666666665\n"
+        );
+        // computes max per group across multiple specs
+        assert_eq!(
+            env.exec(
+                "xan groupby id 'max(value_A) as maxA, max(value_B) as maxB,max(value_C) as maxC' /data.csv"
+            )
+            .stdout,
+            "id,maxA,maxB,maxC\nx,1,2,3\ny,2,3,4\nz,3,6,7\n"
+        );
+        // groups by multiple columns preserving first-seen order
+        assert_eq!(
+            env.exec("xan groupby name,color 'sum(count) as sum' /multi.csv")
+                .stdout,
+            "name,color,sum\njohn,blue,3\nmary,orange,5\njohn,yellow,9\n"
+        );
+        // --sorted is accepted (no-op) and still groups correctly
+        assert_eq!(
+            env.exec("xan groupby id 'sum(value_A) as sumA' --sorted /sorted.csv")
+                .stdout,
+            "id,sumA\nx,1\ny,3\nz,8\n"
+        );
+        // empty data yields just the header row
+        assert_eq!(
+            env.exec("xan groupby id 'sum(value_A) as sumA' --sorted /empty.csv")
+                .stdout,
+            "id,sumA\n"
+        );
+    }
+
+    #[test]
+    fn structured_data_xan_shuffle_rows() {
+        // Ports packages/just-bash/src/commands/xan/xan.data.test.ts:119,133.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/data.csv".to_string(), "n\n1\n2\n3\n4\n5\n".to_string()),
+                (
+                    "/ten.csv".to_string(),
+                    "n\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // shuffles rows with seed for reproducibility: header preserved,
+        // all five values present, six total lines.
+        let result = env.exec("xan shuffle --seed 42 /data.csv");
+        assert_eq!(result.exit_code, 0);
+        let lines: Vec<&str> = result.stdout.trim().split('\n').collect();
+        assert_eq!(lines[0], "n");
+        assert_eq!(lines.len(), 6);
+        let mut values: Vec<i64> = lines[1..]
+            .iter()
+            .map(|l| l.parse::<i64>().unwrap())
+            .collect();
+        values.sort_unstable();
+        assert_eq!(values, vec![1, 2, 3, 4, 5]);
+        // Deterministic for a given seed.
+        assert_eq!(
+            env.exec("xan shuffle --seed 42 /data.csv").stdout,
+            result.stdout
+        );
+
+        // produces different order with different seeds
+        let r1 = env.exec("xan shuffle --seed 1 /ten.csv");
+        let r2 = env.exec("xan shuffle --seed 2 /ten.csv");
+        assert_eq!(r1.exit_code, 0);
+        assert_eq!(r2.exit_code, 0);
+        assert_ne!(r1.stdout, r2.stdout);
+    }
+
+    #[test]
+    fn structured_data_xan_partition_rows() {
+        // Ports packages/just-bash/src/commands/xan/xan.data.test.ts:205,214,225,280,332.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.csv".to_string(),
+                "region,value\nnorth,10\nsouth,20\nnorth,30\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        // partitions by column value
+        assert_eq!(
+            env.exec("xan partition region /data.csv").stdout,
+            "Partitioned into 2 files by 'region'\n"
+        );
+        assert_eq!(
+            env.exec("cat /north.csv").stdout,
+            "region,value\nnorth,10\nnorth,30\n"
+        );
+        assert_eq!(
+            env.exec("cat /south.csv").stdout,
+            "region,value\nsouth,20\n"
+        );
+
+        // errors on missing column
+        let missing = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/m.csv".to_string(), "a,b\n1,2\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let err = missing.exec("xan partition nonexistent /m.csv");
+        assert_eq!(err.exit_code, 1);
+        assert_eq!(
+            err.stderr,
+            "xan partition: column 'nonexistent' not found\n"
+        );
+
+        // does not silently overwrite when distinct values share a sanitized name:
+        // a/b, a:b, a b all sanitize to a_b -> distinct hashed files.
+        let collide = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.csv".to_string(),
+                "key,value\na/b,1\na:b,2\na b,3\nplain,4\na/b,11\na:b,22\na b,33\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            collide.exec("xan partition key /data.csv").stdout,
+            "Partitioned into 4 files by 'key'\n"
+        );
+        let ls = collide.exec("ls /");
+        let files: Vec<&str> = ls
+            .stdout
+            .split('\n')
+            .filter(|f| f.ends_with(".csv") && *f != "data.csv")
+            .collect();
+        assert_eq!(files.len(), 4);
+        assert!(files.contains(&"plain.csv"));
+        // The colliding files together contain exactly the six colliding rows.
+        let mut all_values: Vec<String> = Vec::new();
+        for f in files.iter().filter(|f| f.starts_with("a_b")) {
+            let content = collide.exec(&format!("cat /{f}")).stdout;
+            for line in content.split('\n').skip(1).filter(|l| !l.is_empty()) {
+                all_values.push(line.to_string());
+            }
+        }
+        all_values.sort();
+        assert_eq!(
+            all_values,
+            vec!["a b,3", "a b,33", "a/b,1", "a/b,11", "a:b,2", "a:b,22"]
+        );
+
+        // disambiguates a hash-suffixed colliding name vs a literal value
+        // with the same sanitized form (FNV-1a of "a/b"), computed here
+        // with the same FNV-1a base36 logic the implementation uses.
+        let hash = {
+            let mut h: u32 = 2166136261;
+            for byte in "a/b".encode_utf16() {
+                h = (h ^ (byte as u32)).wrapping_mul(16777619);
+            }
+            let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
+            let mut value = h as u64;
+            let mut out = Vec::new();
+            if value == 0 {
+                out.push(b'0');
+            }
+            while value > 0 {
+                out.push(digits[(value % 36) as usize]);
+                value /= 36;
+            }
+            out.reverse();
+            let mut base36 = String::from_utf8(out).unwrap();
+            while base36.len() < 6 {
+                base36.insert(0, '0');
+            }
+            base36.chars().take(6).collect::<String>()
+        };
+        let literal_like = format!("a_b_{hash}");
+        let disambig = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.csv".to_string(),
+                format!("key,value\na/b,1\na:b,2\n{literal_like},3\n"),
+            )]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            disambig.exec("xan partition key /data.csv").stdout,
+            "Partitioned into 3 files by 'key'\n"
+        );
+        let ls = disambig.exec("ls /");
+        let files: Vec<&str> = ls
+            .stdout
+            .split('\n')
+            .filter(|f| f.ends_with(".csv") && *f != "data.csv")
+            .collect();
+        assert_eq!(files.len(), 3);
+        let unique: std::collections::HashSet<&&str> = files.iter().collect();
+        assert_eq!(unique.len(), 3);
+        let mut rows: Vec<String> = Vec::new();
+        for f in &files {
+            let content = disambig.exec(&format!("cat /{f}")).stdout;
+            for line in content.split('\n').skip(1).filter(|l| !l.is_empty()) {
+                rows.push(line.to_string());
+            }
+        }
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                "a/b,1".to_string(),
+                "a:b,2".to_string(),
+                format!("{literal_like},3")
+            ]
+        );
+
+        // deterministic suffix across repeated runs (same input = same filenames).
+        let run = || {
+            let b = Bash::with_options(BashOptions {
+                files: BTreeMap::from([(
+                    "/data.csv".to_string(),
+                    "k,v\na/b,1\na:b,2\n".to_string(),
+                )]),
+                ..BashOptions::default()
+            });
+            b.exec("xan partition k /data.csv");
+            let mut names: Vec<String> = b
+                .exec("ls /")
+                .stdout
+                .split('\n')
+                .filter(|f| f.ends_with(".csv") && *f != "data.csv")
+                .map(|f| f.to_string())
+                .collect();
+            names.sort();
+            names
+        };
+        let ls1 = run();
+        let ls2 = run();
+        assert_eq!(ls1, ls2);
+        assert_eq!(ls1.len(), 2);
+    }
+
+    #[test]
+    fn structured_data_xan_transform_rows() {
+        // Ports packages/just-bash/src/commands/xan/xan.transform.test.ts:12,19,28,35,42,51,58,65,73.
+        let data = "a,b,c\n1,2,3\n4,5,6\n";
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/data.csv".to_string(), data.to_string()),
+                (
+                    "/names.csv".to_string(),
+                    "name,value\nhello,1\nworld,2\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // transforms a column with expression
+        assert_eq!(
+            env.exec("xan transform b 'add(a, b)' /data.csv").stdout,
+            "a,b,c\n1,3,3\n4,9,6\n"
+        );
+        // transforms with rename
+        assert_eq!(
+            env.exec("xan transform b 'add(a, b)' -r sum /data.csv")
+                .stdout,
+            "a,sum,c\n1,3,3\n4,9,6\n"
+        );
+        // transforms with underscore reference
+        assert_eq!(
+            env.exec("xan transform b 'mul(_, 2)' /data.csv").stdout,
+            "a,b,c\n1,4,3\n4,10,6\n"
+        );
+        // transforms multiple columns
+        assert_eq!(
+            env.exec("xan transform a,b 'mul(_, 10)' /data.csv").stdout,
+            "a,b,c\n10,20,3\n40,50,6\n"
+        );
+        // transforms multiple columns with rename
+        assert_eq!(
+            env.exec("xan transform a,b 'mul(_, 10)' -r x,y /data.csv")
+                .stdout,
+            "x,y,c\n10,20,3\n40,50,6\n"
+        );
+        // errors on missing column
+        let err = env.exec("xan transform z 'add(a, b)' /data.csv");
+        assert_eq!(err.exit_code, 1);
+        assert!(err.stderr.contains("column 'z' not found"));
+        // errors on missing arguments (no positional args at all)
+        let err = env.exec("xan transform");
+        assert_eq!(err.exit_code, 1);
+        assert!(err.stderr.contains("usage"));
+        // errors on missing expression (only the column positional supplied)
+        let err = env.exec("echo '' | xan transform a");
+        assert_eq!(err.exit_code, 1);
+        assert!(err.stderr.contains("usage"));
+        // transforms with string function upper(_)
+        assert_eq!(
+            env.exec("xan transform name 'upper(_)' /names.csv").stdout,
+            "name,value\nHELLO,1\nWORLD,2\n"
+        );
+    }
+
+    #[test]
     fn structured_data_sqlite3_options_errors_and_simple_select_rows() {
         let env = bash();
 
