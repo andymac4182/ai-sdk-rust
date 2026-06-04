@@ -1015,7 +1015,34 @@ const jbc09CaseGroups = [
     owner: 'crates/just-bash::runtime::awk',
     rustTest: 'awk_jbc_command_awk_getline_main_input_rows',
     notes:
-      'just-bash-command-awk verifies plain `getline` and `getline VAR` reading the next record from the main input stream: getline into $0 re-splits fields, getline into a variable leaves $0/fields intact, NR advances on each successful read and getline-at-EOF is a no-op, getline inside a pattern-matched action skips the consumed record from the main loop, and combining adjacent records with getline. Redirected forms (getline < file, cmd | getline) and getline used as a return-valued expression remain pending.',
+      'just-bash-command-awk verifies plain `getline` and `getline VAR` reading the next record from the main input stream: getline into $0 re-splits fields, getline into a variable leaves $0/fields intact, NR advances on each successful read and getline-at-EOF is a no-op, getline inside a pattern-matched action skips the consumed record from the main loop, and combining adjacent records with getline. The command-pipe form (cmd | getline) remains pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.getline.test.ts',
+    lines: [104, 121, 136, 270, 281, 296, 307, 318, 332, 343],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_getline_from_file_rows',
+    notes:
+      'just-bash-command-awk verifies `getline [VAR] < FILE` reading the next line from an external file: a per-file cursor advances one line per read, getline < file re-splits $0 with the current FS, getline VAR < file assigns the whole line and leaves $0/NF intact, and the redirect evaluates to 1 on a successful read, 0 at EOF, and -1 when the file cannot be opened (used in both `ret = (getline ...)` and `while ((getline ...) > 0)` forms). The command-pipe form (cmd | getline) remains pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.errors.test.ts',
+    lines: [277],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_getline_from_file_rows',
+    notes:
+      'just-bash-command-awk verifies `getline VAR < FILE` returns -1 for a non-existent file while the surrounding program continues and exits 0.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.getline.test.ts',
+    lines: [200, 217, 234, 251],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_print_to_file_rows',
+    notes:
+      'just-bash-command-awk verifies `print`/`printf` redirected to a virtual file: `print > FILE` truncates then keeps the stream open so each record appends in order, `print >> FILE` appends to existing content, and `printf "%03d\\n" > FILE` writes formatted output to the file while stdout stays empty.',
   },
 ];
 

@@ -13292,6 +13292,195 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         );
     }
 
+    // JBC-awk: `getline [VAR] < FILE` reading from an external file, including
+    // the 1/0/-1 return value, EOF handling, $0 re-split, and getline-into-var
+    // not re-splitting. Each assertion fails if the per-file cursor, return
+    // value, or field re-split is wrong.
+    // Upstream: packages/just-bash/src/commands/awk/awk.getline.test.ts
+    //   :104 reads from external file with getline < file,
+    //   :121 reads entire file line by line with getline < file,
+    //   :136 returns -1 for nonexistent file in getline,
+    //   :270 returns 1 on successful read, :281 returns 0 on EOF,
+    //   :296 returns -1 on error, :307 re-splits $0 after getline,
+    //   :318 does not re-split when getline into variable,
+    //   :332 reads all lines in while loop, :343 counts lines with getline loop.
+    // Also packages/just-bash/src/commands/awk/awk.errors.test.ts:277 handle
+    // getline from non-existent file.
+    #[test]
+    fn awk_jbc_command_awk_getline_from_file_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/test/main.txt".to_string(), "line1\nline2".to_string()),
+                (
+                    "/test/other.txt".to_string(),
+                    "external1\nexternal2\nexternal3".to_string(),
+                ),
+                ("/test/seq.txt".to_string(), "a\nb\nc".to_string()),
+                ("/test/colon.txt".to_string(), "a:b:c".to_string()),
+                ("/test/single.txt".to_string(), "single".to_string()),
+                ("/test/nums.txt".to_string(), "1\n2\n3\n4\n5".to_string()),
+                ("/test/abcd.txt".to_string(), "a\nb\nc\nd".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // :104 reads from external file with getline < file (a fresh cursor per
+        // file; each main record pulls the next external line).
+        assert_eq!(
+            env.exec(r#"awk '{ getline ext < "/test/other.txt"; print $0, ext }' /test/main.txt"#)
+                .stdout,
+            "line1 external1\nline2 external2\n"
+        );
+
+        // :121 reads entire file line by line with getline < file in a while
+        // loop over the redirect's return value.
+        assert_eq!(
+            env.exec(
+                r#"awk 'BEGIN { while ((getline line < "/test/seq.txt") > 0) print "got:", line }'"#
+            )
+            .stdout,
+            "got: a\ngot: b\ngot: c\n"
+        );
+
+        // :136 returns -1 for nonexistent file in getline.
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { ret = getline x < "/nonexistent"; print "ret:", ret }'"#)
+                .stdout,
+            "ret: -1\n"
+        );
+
+        // :270 returns 1 on successful read.
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { ret = (getline < "/test/main.txt"); print "ret:", ret }'"#)
+                .stdout,
+            "ret: 1\n"
+        );
+
+        // :281 returns 0 on EOF after reading the single available line.
+        assert_eq!(
+            env.exec(
+                "awk 'BEGIN {\n  getline < \"/test/single.txt\"\n  ret = (getline < \"/test/single.txt\")\n  print \"ret:\", ret\n}'"
+            )
+            .stdout,
+            "ret: 0\n"
+        );
+
+        // :296 returns -1 on error (unopenable path).
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { ret = (getline < "/nonexistent/file"); print "ret:", ret }'"#)
+                .stdout,
+            "ret: -1\n"
+        );
+
+        // :307 re-splits $0 after getline (FS applies to the read line).
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { FS=":"; getline < "/test/colon.txt"; print $2 }'"#)
+                .stdout,
+            "b\n"
+        );
+
+        // :318 does not re-split when getline into variable (NF stays 0).
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { FS=":"; getline x < "/test/colon.txt"; print x; print NF }'"#)
+                .stdout,
+            "a:b:c\n0\n"
+        );
+
+        // :332 reads all lines in while loop, summing numeric values.
+        assert_eq!(
+            env.exec(
+                r#"awk 'BEGIN { sum=0; while ((getline n < "/test/nums.txt") > 0) sum += n; print sum }'"#
+            )
+            .stdout,
+            "15\n"
+        );
+
+        // :343 counts lines with a plain getline loop.
+        assert_eq!(
+            env.exec(
+                r#"awk 'BEGIN { count=0; while ((getline < "/test/abcd.txt") > 0) count++; print count }'"#
+            )
+            .stdout,
+            "4\n"
+        );
+
+        // awk.errors.test.ts:277 should handle getline from non-existent file
+        // (stdin is ignored; the redirect returns -1).
+        let from_missing =
+            env.exec(r#"echo '1' | awk '{ ret = (getline x < "/nonexistent"); print ret }'"#);
+        assert_eq!(from_missing.stdout, "-1\n");
+        assert_eq!(from_missing.exit_code, 0);
+    }
+
+    // JBC-awk: `print`/`printf` redirected to a file with `>` (truncate) and
+    // `>>` (append). Each assertion fails if the redirect buffer, append seed,
+    // or printf formatting to file is wrong.
+    // Upstream: packages/just-bash/src/commands/awk/awk.getline.test.ts
+    //   :200 writes to file with print > file,
+    //   :217 overwrites then appends with > on same file,
+    //   :234 appends with print >> file, :251 printf writes to file.
+    #[test]
+    fn awk_jbc_command_awk_print_to_file_rows() {
+        // :200 writes to file with print > file (stdout stays empty).
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/test/input.txt".to_string(), "hello\nworld".to_string())]),
+            ..BashOptions::default()
+        });
+        let result = env.exec(r#"awk '{ print $0 > "/test/output.txt" }' /test/input.txt"#);
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "");
+        assert_eq!(env.read_file("/test/output.txt").unwrap(), "hello\nworld\n");
+
+        // :217 overwrites the file: the open `>` stream appends each record so
+        // every line lands in order.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/test/input.txt".to_string(),
+                "line1\nline2\nline3".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            env.exec(r#"awk '{ print $0 > "/test/out.txt" }' /test/input.txt"#)
+                .exit_code,
+            0
+        );
+        assert_eq!(
+            env.read_file("/test/out.txt").unwrap(),
+            "line1\nline2\nline3\n"
+        );
+
+        // :234 appends with print >> file (existing content is preserved).
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/test/existing.txt".to_string(), "existing\n".to_string()),
+                ("/test/input.txt".to_string(), "new1\nnew2".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            env.exec(r#"awk '{ print $0 >> "/test/existing.txt" }' /test/input.txt"#)
+                .exit_code,
+            0
+        );
+        assert_eq!(
+            env.read_file("/test/existing.txt").unwrap(),
+            "existing\nnew1\nnew2\n"
+        );
+
+        // :251 printf writes to file with %03d zero-padding.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/test/input.txt".to_string(), "1\n2\n3".to_string())]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            env.exec(r#"awk '{ printf "%03d\n", $1 > "/test/out.txt" }' /test/input.txt"#)
+                .exit_code,
+            0
+        );
+        assert_eq!(env.read_file("/test/out.txt").unwrap(), "001\n002\n003\n");
+    }
+
     // JBC-awk: special variables FILENAME/FNR and string functions
     // match()/RSTART/RLENGTH/gensub(), printf %x/%X/%o/%c, and the ^/** power
     // operators with a fractional exponent.

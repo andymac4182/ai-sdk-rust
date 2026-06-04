@@ -8773,6 +8773,10 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
         functions: program.functions.clone(),
         main_input,
         main_cursor: 0,
+        session: state.session,
+        cwd: state.cwd.clone(),
+        getline_files: BTreeMap::new(),
+        output_files: BTreeMap::new(),
     };
     let mut nr = 0usize;
     let mut last_filename = String::new();
@@ -8791,6 +8795,7 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
         ) {
             Ok(AwkFlow::Continue) | Ok(AwkFlow::Next) => {}
             Ok(AwkFlow::Exit(code)) => {
+                runtime.flush_output_files();
                 return CommandResult {
                     stdout,
                     exit_code: code,
@@ -8839,6 +8844,7 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
                     Ok(AwkFlow::Continue) => {}
                     Ok(AwkFlow::Next) => break,
                     Ok(AwkFlow::Exit(code)) => {
+                        runtime.flush_output_files();
                         return CommandResult {
                             stdout,
                             exit_code: code,
@@ -8871,6 +8877,7 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
         ) {
             Ok(AwkFlow::Continue) | Ok(AwkFlow::Next) => {}
             Ok(AwkFlow::Exit(code)) => {
+                runtime.flush_output_files();
                 return CommandResult {
                     stdout,
                     exit_code: code,
@@ -8883,6 +8890,7 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
             Err(error) => return stderr_result(1, format!("awk: {error}\n")),
         }
     }
+    runtime.flush_output_files();
     stdout_result(stdout)
 }
 
@@ -9467,8 +9475,16 @@ struct AwkInputRecord {
     fnr: usize,
 }
 
+/// Cursor state for an external file opened by `getline [VAR] < FILE`. Lines
+/// are read lazily on first open; the cursor advances one line per getline.
 #[derive(Clone, Debug)]
-struct AwkRuntime {
+struct AwkGetlineFile {
+    /// `None` when the file could not be opened (getline then returns -1).
+    lines: Option<Vec<String>>,
+    cursor: usize,
+}
+
+struct AwkRuntime<'a> {
     separator: AwkSeparator,
     ofs: String,
     ors: String,
@@ -9482,9 +9498,19 @@ struct AwkRuntime {
     /// `getline` (plain / into-variable) share this cursor so a plain `getline`
     /// consumes the line the loop would otherwise visit next.
     main_cursor: usize,
+    /// Session used to read files for `getline < FILE` and flush files written
+    /// by `print > FILE` / `print >> FILE`.
+    session: &'a JustBashSession,
+    /// Command working directory used to resolve relative redirect paths.
+    cwd: String,
+    /// Open `getline < FILE` streams keyed by resolved path.
+    getline_files: BTreeMap<String, AwkGetlineFile>,
+    /// Buffered output for `print > FILE` / `print >> FILE`, keyed by resolved
+    /// path and flushed to the session filesystem when the program finishes.
+    output_files: BTreeMap<String, String>,
 }
 
-impl AwkRuntime {
+impl AwkRuntime<'_> {
     /// Advances the shared main-input cursor by one record, returning the
     /// consumed record. Returns `None` at end of input. Used by plain `getline`
     /// and `getline VAR`, which read the next record from the main stream.
@@ -9493,6 +9519,70 @@ impl AwkRuntime {
         self.main_cursor += 1;
         Some(record)
     }
+
+    /// Reads the next line from an external file for `getline [VAR] < FILE`.
+    /// Returns `Ok(Some(line))` on a successful read, `Ok(None)` at EOF, and
+    /// `Err(())` when the file cannot be opened. The file is read once on first
+    /// access and split into newline-delimited records.
+    fn getline_file_next(&mut self, resolved: &str) -> Result<Option<String>, ()> {
+        let entry = self
+            .getline_files
+            .entry(resolved.to_string())
+            .or_insert_with(|| match self.session.read_file(resolved) {
+                Ok(content) => AwkGetlineFile {
+                    lines: Some(awk_split_input_lines(&content)),
+                    cursor: 0,
+                },
+                Err(_) => AwkGetlineFile {
+                    lines: None,
+                    cursor: 0,
+                },
+            });
+        let Some(lines) = entry.lines.as_ref() else {
+            return Err(());
+        };
+        match lines.get(entry.cursor).cloned() {
+            Some(line) => {
+                entry.cursor += 1;
+                Ok(Some(line))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Resolves `path` against the command cwd for redirect/getline targets.
+    fn resolve_redirect_path(&self, path: &str) -> String {
+        resolve_path(&self.cwd, path)
+    }
+
+    /// Buffers `text` for `print`/`printf > FILE`. The first write with
+    /// `Truncate` starts a fresh buffer; `Append` seeds the buffer from the
+    /// existing file content. Later writes append to the open buffer.
+    fn redirect_output(&mut self, resolved: &str, kind: AwkRedirectKind, text: &str) {
+        if !self.output_files.contains_key(resolved) {
+            let initial = match kind {
+                AwkRedirectKind::Append => self.session.read_file(resolved).unwrap_or_default(),
+                AwkRedirectKind::Truncate => String::new(),
+            };
+            self.output_files.insert(resolved.to_string(), initial);
+        }
+        if let Some(buffer) = self.output_files.get_mut(resolved) {
+            buffer.push_str(text);
+        }
+    }
+
+    /// Flushes every buffered redirect target to the session filesystem.
+    fn flush_output_files(&self) {
+        for (path, content) in &self.output_files {
+            let _ = self.session.write_file(path, content);
+        }
+    }
+}
+
+/// Splits text into the records `getline < FILE` yields: newline-delimited
+/// lines with a trailing newline ignored (so "a\nb\n" reads as ["a", "b"]).
+fn awk_split_input_lines(content: &str) -> Vec<String> {
+    content.lines().map(str::to_string).collect()
 }
 
 #[derive(Clone, Debug)]
@@ -9590,10 +9680,14 @@ enum AwkAction {
         delta: i32,
     },
     Expr(AwkExpr),
-    Print(Vec<AwkExpr>),
+    Print {
+        args: Vec<AwkExpr>,
+        redirect: Option<AwkRedirect>,
+    },
     Printf {
         format: AwkExpr,
         args: Vec<AwkExpr>,
+        redirect: Option<AwkRedirect>,
     },
     If {
         condition: AwkExpr,
@@ -9683,6 +9777,30 @@ enum AwkExpr {
         op: AwkAssignOp,
         value: Box<AwkExpr>,
     },
+    /// `getline [VAR] < FILE` reading the next line from an external file.
+    /// `target` is `None` for plain `getline < FILE` (updates `$0`, re-splits
+    /// fields) and `Some(var)` for `getline VAR < FILE` (updates only the
+    /// variable). Evaluates to "1" on a successful read, "0" at EOF, and "-1"
+    /// when the file cannot be opened, matching POSIX awk's getline return.
+    GetlineFile {
+        target: Option<String>,
+        path: Box<AwkExpr>,
+    },
+}
+
+/// Whether a `print`/`printf` redirection truncates (`>`) or appends (`>>`)
+/// the destination file. Once a file is opened with `>` during a single awk
+/// run, subsequent writes to it append (awk keeps the stream open).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AwkRedirectKind {
+    Truncate,
+    Append,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AwkRedirect {
+    kind: AwkRedirectKind,
+    path: AwkExpr,
 }
 
 impl AwkSeparator {
@@ -9774,7 +9892,10 @@ fn parse_awk_program(program: &str) -> Result<AwkProgram, String> {
             let pattern = parse_awk_pattern(source[cursor..].trim())?;
             rules.push(AwkRule {
                 pattern,
-                actions: vec![AwkAction::Print(vec![AwkExpr::whole_line()])],
+                actions: vec![AwkAction::Print {
+                    args: vec![AwkExpr::whole_line()],
+                    redirect: None,
+                }],
             });
             cursor = source.len();
             continue;
@@ -9954,7 +10075,11 @@ fn parse_awk_actions(body: &str) -> Result<Vec<AwkAction>, String> {
             continue;
         }
         if let Some(rest) = strip_awk_keyword(statement, "print") {
-            actions.push(AwkAction::Print(parse_awk_print_exprs(rest)?));
+            let (body, redirect) = split_awk_output_redirect(rest)?;
+            actions.push(AwkAction::Print {
+                args: parse_awk_print_exprs(&body)?,
+                redirect,
+            });
             index += 1;
             continue;
         }
@@ -10373,8 +10498,9 @@ fn parse_awk_nested_actions(source: &str) -> Result<Vec<AwkAction>, String> {
 }
 
 fn parse_awk_printf_action(rest: &str) -> Result<AwkAction, String> {
-    let rest = strip_awk_parentheses(rest.trim());
-    let parts = split_awk_top_level(rest, ',');
+    let (body, redirect) = split_awk_output_redirect(rest)?;
+    let body = strip_awk_parentheses(body.trim());
+    let parts = split_awk_top_level(body, ',');
     let Some(format) = parts.first() else {
         return Err("unsupported program".to_string());
     };
@@ -10385,7 +10511,58 @@ fn parse_awk_printf_action(rest: &str) -> Result<AwkAction, String> {
             .skip(1)
             .map(|part| parse_awk_expr(part.trim()))
             .collect::<Result<Vec<_>, _>>()?,
+        redirect,
     })
+}
+
+/// Splits a `print`/`printf` argument list from a trailing `> FILE` or
+/// `>> FILE` output redirection. The `>`/`>>` operator is recognised only at
+/// the top level (outside strings, regex literals, parentheses, and brackets)
+/// so a `>` comparison inside an argument expression is left intact. Returns
+/// the argument source and the parsed redirect (if any).
+fn split_awk_output_redirect(rest: &str) -> Result<(String, Option<AwkRedirect>), String> {
+    let bytes = rest.as_bytes();
+    let mut cursor = 0usize;
+    let mut in_string = false;
+    let mut in_regex = false;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'"' if !is_awk_escaped(rest, cursor) => in_string = !in_string,
+            b'/' if !in_string && awk_regex_delimiter(rest, cursor, in_regex) => {
+                in_regex = !in_regex;
+            }
+            b'(' if !in_string && !in_regex => paren_depth += 1,
+            b')' if !in_string && !in_regex => paren_depth = paren_depth.saturating_sub(1),
+            b'[' if !in_string && !in_regex => bracket_depth += 1,
+            b']' if !in_string && !in_regex => bracket_depth = bracket_depth.saturating_sub(1),
+            b'>' if !in_string && !in_regex && paren_depth == 0 && bracket_depth == 0 => {
+                // A `>>` is an append redirect; a single `>` truncates. Neither
+                // is a `>=` comparison (those never start an output target). The
+                // `>` is only a redirect when its target is a plain expression:
+                // if a top-level `?` follows, the `>` is the comparison of a
+                // ternary (e.g. `print x > 3 ? a : b`), not a redirection.
+                let (op_len, kind) = if rest[cursor..].starts_with(">>") {
+                    (2, AwkRedirectKind::Append)
+                } else if rest[cursor + 1..].starts_with('=') {
+                    (0, AwkRedirectKind::Truncate)
+                } else {
+                    (1, AwkRedirectKind::Truncate)
+                };
+                if op_len > 0 {
+                    let target = rest[cursor + op_len..].trim();
+                    if find_awk_top_level_char(target, '?').is_none() {
+                        let path = parse_awk_expr(target)?;
+                        return Ok((rest[..cursor].to_string(), Some(AwkRedirect { kind, path })));
+                    }
+                }
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    Ok((rest.to_string(), None))
 }
 
 fn parse_awk_print_exprs(rest: &str) -> Result<Vec<AwkExpr>, String> {
@@ -10817,6 +10994,27 @@ impl<'a> AwkExprParser<'a> {
         }
         if let Some(identifier) = self.take_identifier() {
             self.skip_whitespace();
+            // `getline [VAR] < FILE` reads the next line of an external file and
+            // evaluates to 1/0/-1. A plain `getline`/`getline VAR` without a `<`
+            // source falls through to the main-input statement form handled by
+            // the action parser, so only the redirected form is built here.
+            if identifier == "getline" {
+                let after_getline = self.cursor;
+                let target = self.take_identifier().map(str::to_string);
+                self.skip_whitespace();
+                if self.peek_char() == Some('<') {
+                    self.cursor += 1;
+                    let path = self.parse_primary()?;
+                    return Ok(AwkExpr::GetlineFile {
+                        target,
+                        path: Box::new(path),
+                    });
+                }
+                // No file source: rewind past any consumed VAR so the identifier
+                // path below returns `getline` as a bare identifier (the action
+                // parser turns it into the main-input getline statement).
+                self.cursor = after_getline;
+            }
             if self.consume_char('(') {
                 let args_source = self.take_until_matching_paren()?;
                 let args = if args_source.trim().is_empty() {
@@ -10968,10 +11166,31 @@ fn awk_expr_to_target(expression: &AwkExpr) -> Result<AwkTarget, String> {
     }
 }
 
+/// Routes `print`/`printf` output to stdout or, when a `> FILE` / `>> FILE`
+/// redirect is present, to the buffered virtual-file target. The redirect path
+/// is evaluated against the current record so dynamic filenames work.
+fn awk_emit_output(
+    text: &str,
+    redirect: &Option<AwkRedirect>,
+    context: &mut AwkRecordContext,
+    runtime: &mut AwkRuntime<'_>,
+    stdout: &mut String,
+) -> Result<(), String> {
+    match redirect {
+        None => stdout.push_str(text),
+        Some(AwkRedirect { kind, path }) => {
+            let path = eval_awk_expr(path, context, runtime)?;
+            let resolved = runtime.resolve_redirect_path(&path);
+            runtime.redirect_output(&resolved, *kind, text);
+        }
+    }
+    Ok(())
+}
+
 fn execute_awk_actions(
     actions: &[AwkAction],
     context: &mut AwkRecordContext,
-    runtime: &mut AwkRuntime,
+    runtime: &mut AwkRuntime<'_>,
     stdout: &mut String,
 ) -> Result<AwkFlow, String> {
     for action in actions {
@@ -10988,21 +11207,27 @@ fn execute_awk_actions(
             AwkAction::Expr(expression) => {
                 let _ = eval_awk_expr(expression, context, runtime)?;
             }
-            AwkAction::Print(expressions) => {
-                let values = expressions
+            AwkAction::Print { args, redirect } => {
+                let values = args
                     .iter()
                     .map(|expr| eval_awk_expr(expr, context, runtime))
                     .collect::<Result<Vec<_>, _>>()?;
-                stdout.push_str(&values.join(&runtime.ofs));
-                stdout.push_str(&runtime.ors);
+                let mut text = values.join(&runtime.ofs);
+                text.push_str(&runtime.ors);
+                awk_emit_output(&text, redirect, context, runtime, stdout)?;
             }
-            AwkAction::Printf { format, args } => {
+            AwkAction::Printf {
+                format,
+                args,
+                redirect,
+            } => {
                 let format = eval_awk_expr(format, context, runtime)?;
                 let values = args
                     .iter()
                     .map(|expr| eval_awk_expr(expr, context, runtime))
                     .collect::<Result<Vec<_>, _>>()?;
-                stdout.push_str(&format_awk_printf(&format, &values)?);
+                let text = format_awk_printf(&format, &values)?;
+                awk_emit_output(&text, redirect, context, runtime, stdout)?;
             }
             AwkAction::If {
                 condition,
@@ -11170,7 +11395,7 @@ fn execute_awk_actions(
 fn eval_awk_expr(
     expression: &AwkExpr,
     context: &mut AwkRecordContext,
-    runtime: &mut AwkRuntime,
+    runtime: &mut AwkRuntime<'_>,
 ) -> Result<String, String> {
     match expression {
         AwkExpr::Literal(value) | AwkExpr::RegexLiteral(value) => Ok(value.clone()),
@@ -11242,6 +11467,29 @@ fn eval_awk_expr(
             set_awk_target_value(target, assigned.clone(), context, runtime)?;
             Ok(assigned)
         }
+        AwkExpr::GetlineFile { target, path } => {
+            let path = eval_awk_expr(path, context, runtime)?;
+            let resolved = runtime.resolve_redirect_path(&path);
+            match runtime.getline_file_next(&resolved) {
+                // -1: the file could not be opened.
+                Err(()) => Ok("-1".to_string()),
+                // 0: end of file, leaving `$0`/the target variable untouched.
+                Ok(None) => Ok("0".to_string()),
+                Ok(Some(line)) => {
+                    match target {
+                        // `getline < FILE`: replace `$0` and re-split fields with
+                        // the current FS (so `print $2` after the read works).
+                        None => context.replace_line(line, &runtime.separator),
+                        // `getline VAR < FILE`: assign the whole line to VAR and
+                        // leave `$0`/NF intact.
+                        Some(name) => {
+                            runtime.variables.insert(name.clone(), line);
+                        }
+                    }
+                    Ok("1".to_string())
+                }
+            }
+        }
     }
 }
 
@@ -11250,7 +11498,7 @@ fn eval_awk_binary(
     op: AwkBinaryOp,
     right: &AwkExpr,
     context: &mut AwkRecordContext,
-    runtime: &mut AwkRuntime,
+    runtime: &mut AwkRuntime<'_>,
 ) -> Result<String, String> {
     match op {
         AwkBinaryOp::And => {
@@ -11312,7 +11560,7 @@ fn eval_awk_binary(
 fn eval_awk_truth(
     expression: &AwkExpr,
     context: &mut AwkRecordContext,
-    runtime: &mut AwkRuntime,
+    runtime: &mut AwkRuntime<'_>,
 ) -> Result<bool, String> {
     if let AwkExpr::RegexLiteral(pattern) = expression {
         return Regex::new(pattern)
@@ -11325,7 +11573,7 @@ fn eval_awk_truth(
 fn awk_identifier_value(
     identifier: &str,
     context: &AwkRecordContext,
-    runtime: &AwkRuntime,
+    runtime: &AwkRuntime<'_>,
 ) -> String {
     match identifier {
         "NR" => context.nr.to_string(),
@@ -11370,7 +11618,7 @@ fn awk_field_value(index: isize, context: &AwkRecordContext) -> String {
 fn eval_awk_array_key(
     key: &AwkExpr,
     context: &mut AwkRecordContext,
-    runtime: &mut AwkRuntime,
+    runtime: &mut AwkRuntime<'_>,
 ) -> Result<String, String> {
     eval_awk_expr(key, context, runtime)
 }
@@ -11378,7 +11626,7 @@ fn eval_awk_array_key(
 fn get_awk_target_value(
     target: &AwkTarget,
     context: &mut AwkRecordContext,
-    runtime: &mut AwkRuntime,
+    runtime: &mut AwkRuntime<'_>,
 ) -> Result<String, String> {
     match target {
         AwkTarget::Variable(name) => Ok(awk_identifier_value(name, context, runtime)),
@@ -11402,7 +11650,7 @@ fn set_awk_target_value(
     target: &AwkTarget,
     value: String,
     context: &mut AwkRecordContext,
-    runtime: &mut AwkRuntime,
+    runtime: &mut AwkRuntime<'_>,
 ) -> Result<(), String> {
     match target {
         AwkTarget::Variable(name) => match name.as_str() {
@@ -11434,7 +11682,7 @@ fn increment_awk_target(
     target: &AwkTarget,
     delta: i32,
     context: &mut AwkRecordContext,
-    runtime: &mut AwkRuntime,
+    runtime: &mut AwkRuntime<'_>,
 ) -> Result<String, String> {
     let current = get_awk_target_value(target, context, runtime)?;
     let updated = format_awk_number(awk_to_number(&current) + f64::from(delta));
@@ -11516,7 +11764,7 @@ fn eval_awk_function(
     name: &str,
     args: &[AwkExpr],
     context: &mut AwkRecordContext,
-    runtime: &mut AwkRuntime,
+    runtime: &mut AwkRuntime<'_>,
 ) -> Result<String, String> {
     if let Some(function) = runtime.functions.get(name).cloned() {
         return eval_awk_user_function(&function, args, context, runtime);
@@ -11759,7 +12007,7 @@ fn eval_awk_user_function(
     function: &AwkFunction,
     args: &[AwkExpr],
     context: &mut AwkRecordContext,
-    runtime: &mut AwkRuntime,
+    runtime: &mut AwkRuntime<'_>,
 ) -> Result<String, String> {
     let values = args
         .iter()
@@ -11896,7 +12144,7 @@ fn awk_pattern_matches(
     pattern: &AwkPattern,
     rule_index: usize,
     context: &mut AwkRecordContext,
-    runtime: &mut AwkRuntime,
+    runtime: &mut AwkRuntime<'_>,
 ) -> Result<bool, String> {
     match pattern {
         AwkPattern::Begin | AwkPattern::End => Ok(false),
@@ -11923,7 +12171,7 @@ fn awk_pattern_matches(
 fn awk_pattern_matches_stateless(
     pattern: &AwkPattern,
     context: &mut AwkRecordContext,
-    runtime: &mut AwkRuntime,
+    runtime: &mut AwkRuntime<'_>,
 ) -> Result<bool, String> {
     match pattern {
         AwkPattern::Begin | AwkPattern::End => Ok(false),
