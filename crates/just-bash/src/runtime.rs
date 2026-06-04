@@ -14643,4 +14643,272 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         });
         assert_eq!(yesno.exec(r#"awk '/yes/' /data.txt"#).stdout, "yes\nyes\n");
     }
+
+    #[test]
+    fn awk_r10jb_command_awk_parsing_block_and_expression_rows() {
+        // Mirrors packages/just-bash/src/commands/awk/awk.parsing.test.ts
+        // block-structure parsing and expression-parsing edge cases.
+        let env = Bash::default();
+        let triple = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "x\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let _ = &triple;
+
+        // :401 C-style for loop in BEGIN concatenates 1..3.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { for (i=1; i<=3; i++) printf i; print "" }'"#)
+                .stdout,
+            "123\n"
+        );
+        // :410 while loop.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { i=1; while(i<=3) { printf i; i++ }; print "" }'"#)
+                .stdout,
+            "123\n"
+        );
+        // :419 do-while loop.
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN { i=1; do { printf i; i++ } while(i<=3); print "" }'"#
+            )
+            .stdout,
+            "123\n"
+        );
+        // :428 for-in loop sums array values.
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN { a[1]=1; a[2]=2; for (k in a) sum+=a[k]; print sum }'"#
+            )
+            .stdout,
+            "3\n"
+        );
+        // :472 negative numbers parse as unary minus.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print -5 }'"#).stdout,
+            "-5\n"
+        );
+        // :487 chained field access $($1).
+        assert_eq!(
+            env.exec(r#"echo "1 2 3" | awk '{ print $($1) }'"#).stdout,
+            "1\n"
+        );
+        // :495 array with an arithmetic index expression.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { a[1+1] = "two"; print a[2] }'"#)
+                .stdout,
+            "two\n"
+        );
+        // :504 ternary with nested expressions.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print (1 ? (2 ? "a" : "b") : "c") }'"#)
+                .stdout,
+            "a\n"
+        );
+
+        // :515 missing program is an error mentioning "missing".
+        let missing = env.exec("awk");
+        assert_eq!(missing.exit_code, 1);
+        assert!(
+            missing.stderr.contains("missing"),
+            "expected missing-program diagnostic, got {:?}",
+            missing.stderr
+        );
+        // :522 invalid option exits 1.
+        assert_eq!(env.exec("awk --invalid-option '{print}'").exit_code, 1);
+        // :528 missing input file exits 1 with a "No such file" diagnostic.
+        let nofile = env.exec("awk '{print}' /nonexistent.txt");
+        assert_eq!(nofile.exit_code, 1);
+        assert!(
+            nofile.stderr.contains("No such file"),
+            "expected No-such-file diagnostic, got {:?}",
+            nofile.stderr
+        );
+    }
+
+    #[test]
+    fn awk_r10jb_command_awk_output_file_redirection_rows() {
+        // Mirrors packages/just-bash/src/commands/awk/awk.output.test.ts
+        // file-output redirection rows.
+        // :144 print > FILE truncates and writes a single record.
+        let env = Bash::default();
+        assert_eq!(
+            env.exec(
+                r#"echo "test" | awk '{ print "output" > "/tmp/out.txt" }' && cat /tmp/out.txt"#
+            )
+            .stdout,
+            "output\n"
+        );
+        // :153 print >> FILE appends to existing content.
+        let existing = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/tmp/existing.txt".to_string(), "line1\n".to_string())]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            existing
+                .exec(
+                    r#"echo "test" | awk '{ print "line2" >> "/tmp/existing.txt" }' && cat /tmp/existing.txt"#
+                )
+                .stdout,
+            "line1\nline2\n"
+        );
+        // :164 print > FILE keeps the stream open so multiple records all land in order.
+        let abc = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "a\nb\nc\n".to_string())]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            abc.exec(r#"awk '{ print $0 > "/tmp/out.txt" }' /data.txt && cat /tmp/out.txt"#)
+                .stdout,
+            "a\nb\nc\n"
+        );
+    }
+
+    #[test]
+    fn awk_r10jb_command_awk_utf8_stdin_row() {
+        // Mirrors packages/just-bash/src/commands/awk/awk.utf8-stdin.test.ts:5 —
+        // awk splits multibyte fields read through a pipe.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/in.txt".to_string(), "한글 café 漢字\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let result = env.exec("cat /in.txt | awk '{ print $2 }'");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "café\n");
+    }
+
+    #[test]
+    fn awk_r10jb_command_awk_prototype_pollution_dangerous_key_rows() {
+        // Mirrors packages/just-bash/src/commands/awk/awk.prototype-pollution.test.ts —
+        // AWK variables, arrays, fields, and special variables named after
+        // JavaScript-dangerous keywords must behave like ordinary AWK identifiers.
+        let env = Bash::default();
+
+        // :51 a variable named after a dangerous keyword holds an ordinary value.
+        for keyword in [
+            "constructor",
+            "__proto__",
+            "prototype",
+            "hasOwnProperty",
+            "isPrototypeOf",
+            "toString",
+            "valueOf",
+            "__defineGetter__",
+            "__defineSetter__",
+        ] {
+            let program =
+                format!("echo | awk 'BEGIN {{ {keyword} = \"test_value\"; print {keyword} }}'");
+            let result = env.exec(&program);
+            assert_eq!(result.exit_code, 0, "keyword {keyword} exit");
+            assert_eq!(result.stdout, "test_value\n", "keyword {keyword} output");
+        }
+        // :61 multiple dangerous-keyword variables coexist.
+        assert_eq!(
+            env.exec(
+                "echo | awk 'BEGIN {\n  __proto__ = \"a\"\n  constructor = \"b\"\n  prototype = \"c\"\n  print __proto__, constructor, prototype\n}'"
+            )
+            .stdout,
+            "a b c\n"
+        );
+        // :78 an array key that is a dangerous keyword round-trips.
+        for keyword in ["constructor", "__proto__", "prototype", "hasOwnProperty"] {
+            let program = format!(
+                "echo | awk 'BEGIN {{ arr[\"{keyword}\"] = \"value\"; print arr[\"{keyword}\"] }}'"
+            );
+            let result = env.exec(&program);
+            assert_eq!(result.exit_code, 0, "array key {keyword} exit");
+            assert_eq!(result.stdout, "value\n", "array key {keyword} output");
+        }
+        // :88 iterating an array with dangerous keys yields every entry.
+        let iterate = env.exec(
+            "echo | awk 'BEGIN {\n  arr[\"__proto__\"] = 1\n  arr[\"constructor\"] = 2\n  arr[\"prototype\"] = 3\n  for (k in arr) print k, arr[k]\n}' | sort",
+        );
+        assert_eq!(iterate.exit_code, 0);
+        assert!(iterate.stdout.contains("__proto__ 1"));
+        assert!(iterate.stdout.contains("constructor 2"));
+        assert!(iterate.stdout.contains("prototype 3"));
+        // :104 the `in` operator distinguishes present vs absent dangerous keys.
+        assert_eq!(
+            env.exec(
+                "echo | awk 'BEGIN { arr[\"__proto__\"] = 1; if (\"__proto__\" in arr) print \"found\"; if (\"constructor\" in arr) print \"not found\" }'"
+            )
+            .stdout,
+            "found\n"
+        );
+        // :117 deleting a dangerous key removes it.
+        assert_eq!(
+            env.exec(
+                "echo | awk 'BEGIN { arr[\"__proto__\"] = 1; delete arr[\"__proto__\"]; if (\"__proto__\" in arr) print \"still there\"; else print \"deleted\" }'"
+            )
+            .stdout,
+            "deleted\n"
+        );
+        // :134 -v keyword=value assigns a dangerous-keyword variable.
+        for keyword in ["constructor", "__proto__", "prototype", "hasOwnProperty"] {
+            let program = format!("echo | awk -v {keyword}=injected 'BEGIN {{ print {keyword} }}'");
+            let result = env.exec(&program);
+            assert_eq!(result.exit_code, 0, "-v {keyword} exit");
+            assert_eq!(result.stdout, "injected\n", "-v {keyword} output");
+        }
+        // :146 / :153 field input containing dangerous keywords prints verbatim.
+        assert_eq!(
+            env.exec(r#"echo '__proto__' | awk '{ print $1 }'"#).stdout,
+            "__proto__\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo 'constructor' | awk '{ print $1 }'"#)
+                .stdout,
+            "constructor\n"
+        );
+        // :160 CSV-like dangerous keywords split into ordinary fields.
+        assert_eq!(
+            env.exec(r#"echo '__proto__,constructor,prototype' | awk -F, '{ print $1, $2, $3 }'"#)
+                .stdout,
+            "__proto__ constructor prototype\n"
+        );
+        // :169 dangerous keyword used as an array key built from field data.
+        assert_eq!(
+            env.exec(
+                "printf '__proto__ value1\nconstructor value2\n' | awk '{ data[$1] = $2 } END { print data[\"__proto__\"], data[\"constructor\"] }'"
+            )
+            .stdout,
+            "value1 value2\n"
+        );
+    }
+
+    #[test]
+    fn awk_r10jb_command_awk_prototype_pollution_string_function_rows() {
+        // Mirrors packages/just-bash/src/commands/awk/awk.prototype-pollution.test.ts —
+        // string/regex builtins operate on dangerous-keyword values normally.
+        let env = Bash::default();
+
+        // :181 gsub replaces every dangerous-keyword occurrence in $0.
+        assert_eq!(
+            env.exec(
+                r#"echo '__proto__ test __proto__' | awk '{ gsub(/__proto__/, "replaced"); print }'"#
+            )
+            .stdout,
+            "replaced test replaced\n"
+        );
+        // :190 split honours a dangerous-keyword payload across the array.
+        assert_eq!(
+            env.exec(
+                "echo | awk 'BEGIN { str = \"__proto__:constructor:prototype\"; n = split(str, arr, \":\"); print arr[1], arr[2], arr[3] }'"
+            )
+            .stdout,
+            "__proto__ constructor prototype\n"
+        );
+        // :203 match locates a dangerous-keyword pattern.
+        assert_eq!(
+            env.exec(r#"echo '__proto__' | awk '{ if (match($0, /__proto__/)) print "matched" }'"#)
+                .stdout,
+            "matched\n"
+        );
+        // :214 printf prints dangerous-keyword string arguments verbatim.
+        assert_eq!(
+            env.exec(r#"echo | awk 'BEGIN { printf "%s %s\n", "__proto__", "constructor" }'"#)
+                .stdout,
+            "__proto__ constructor\n"
+        );
+    }
 }

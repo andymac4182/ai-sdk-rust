@@ -4817,6 +4817,36 @@ const jbc46CaseGroups = [
   },
 ];
 
+const r10jbTarCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/tar/tar.bundle.test.ts',
+    lines: [26, 33, 50, 67, 84, 101, 110, 119, 136, 156, 176, 192],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'r10jb_tar_bundle_create_list_extract_codecs_and_option_rows',
+    notes:
+      'R10JB mirrors the bundled tar binary behavior on the in-process Rust session: help banner, create/list, create/extract, gzip and bzip2 virtual codec round trips, xz and zstd fail-closed rejection, -a auto-compress by filename, -T files-from, -X exclude-from, -tvf permission column, and -v verbose stderr listing.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tar/tar.security.test.ts',
+    lines: [12, 30, 44, 58, 73],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'r10jb_tar_security_traversal_leading_slash_symlink_and_codec_gates',
+    notes:
+      "R10JB verifies tar security hardening on extract: a `../` parent-traversal entry is blocked with exit 2 and \"Path contains '..'\", a leading slash is stripped under -C by default, -P/--absolute-names restores absolute extraction, an unsafe `..` symlink target is rejected, and xz encode is fail-closed with the native-codec-risk message.",
+  },
+  {
+    file: 'packages/just-bash/src/commands/tar/tar.binary.test.ts',
+    lines: [24, 38, 59, 73, 87, 101, 115, 129, 145, 159, 173],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'r10jb_tar_binary_null_all_bytes_pipe_and_special_filename_rows',
+    notes:
+      'R10JB verifies binary-faithful tar round trips for files with embedded null bytes and all 256 byte values, listing and extraction of an archive piped through cat (binary stdin), gzip and bzip2 archives piped through cat, xz and zstd fail-closed rejection, UTF-8 text round trip, gzip UTF-8 round trip, and special-character filename listing.',
+  },
+];
+
 const jbc47CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/sed/sed.errors.test.ts',
@@ -5166,6 +5196,25 @@ const justBashCoreSerializeCaseGroups = [
     notes:
       'just-bash-core verifies Rust AST parse/serialize/parse equivalence for c-style/fallthrough/empty case compound commands, compound-with-redirection (if/for/while/case > file), arithmetic command rows (assignment, comparison, ternary, increment/decrement, nested parens, array element get/set/assoc, nested and command-substitution arithmetic, dynamic base/octal), and nested-command-substitution / group-in-pipeline complex scripts.',
   },
+  {
+    file: 'packages/just-bash/src/transform/serialize.test.ts',
+    lines: [196, 197, 198, 199, 204, 205, 206, 207, 208, 209, 210, 211, 421, 429, 432, 435],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::transform::serialize',
+    rustTest:
+      'just_bash_core_serialize_round_trips_conditional_and_complex_script_rows',
+    notes:
+      'just-bash-core verifies Rust AST parse/serialize/parse equivalence for the remaining arithmetic-command edge rows (single-quoted operand, $-prefixed variable, compound += assignment, arithmetic command with redirection), the full [[ ... ]] conditional-command grammar (string/file tests, &&/||, negation, grouping, regex match, bare-word truthiness), and the complex-script rows (pipeline with redirections, function body with compound command, pipeline loop body, function with redirections).',
+  },
+  {
+    file: 'packages/just-bash/src/transform/serialize.test.ts',
+    lines: [299, 362, 363, 367, 396],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell',
+    rustTest: 'just_bash_core_serialize_and_tee_execution_equivalence_rows',
+    notes:
+      'just-bash-core verifies the serialize.test.ts execution-equivalence rows (nested command substitution with inner quotes, multiple statements, conditional &&/|| logic, case statement, array-in-subshell): the original runs through the real Rust interpreter, the parsed AST is serialized, and the serialized program re-executes to byte-identical stdout/stderr/exit code, also asserting the upstream-correct output.',
+  },
 ];
 
 const justBashTransformPluginsTeeCaseGroups = [
@@ -5192,6 +5241,15 @@ const justBashTransformPluginsTeeCaseGroups = [
     notes:
       'just-bash-core verifies the TeePlugin semantics-preservation rows whose scripts the real-command Rust interpreter reproduces verbatim (the Rust port has no tee transform, so equivalence means the plain exec yields the documented bytes): cat|grep|sort pipeline, ls stderr redirected through ||/| chains, command substitution into a pipeline, printf|grep|sort|wc -l count, mixed &&/||/| chains, and tr|sed|cat string manipulation.',
   },
+  {
+    file: 'packages/just-bash/src/transform/plugins/tee-plugin.test.ts',
+    lines: [451, 509, 515, 641, 649],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell',
+    rustTest: 'just_bash_core_serialize_and_tee_execution_equivalence_rows',
+    notes:
+      'just-bash-core verifies the TeePlugin assertSameSemantics rows the real Rust interpreter reproduces with deterministic command fakes: function definition piped to cat, heredoc piped to sort, deeply nested command substitution, quoted-vs-unquoted word splitting, and two sequential here-docs. Each runs the original, serializes the parsed AST, re-executes the serialized form, and asserts both runs match the upstream-correct bytes/exit code.',
+  },
 ];
 
 const justBashEncodingPipelineByteEmitCaseGroups = [
@@ -5206,8 +5264,57 @@ const justBashEncodingPipelineByteEmitCaseGroups = [
   },
 ];
 
+const r10jbCommandAwkCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.parsing.test.ts',
+    lines: [401, 410, 419, 428, 472, 487, 495, 504, 515, 522, 528],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_r10jb_command_awk_parsing_block_and_expression_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk parsing of for/while/do-while/for-in blocks, unary-minus negative literals, chained field access $($1), arithmetic array indices, nested ternary, and the missing-program/invalid-option/missing-file error cases. The "--5" double-negative row remains pending unary-minus operand parsing.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.output.test.ts',
+    lines: [144, 153, 164],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_r10jb_command_awk_output_file_redirection_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk file-output redirection: print > FILE truncates then keeps the stream open so multiple records append in order, and print >> FILE appends to existing virtual file content.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.utf8-stdin.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_r10jb_command_awk_utf8_stdin_row',
+    notes:
+      'just-bash-command-awk verifies portable awk splits multibyte UTF-8 fields correctly when reading through a pipe (the second whitespace field of "한글 café 漢字" is "café").',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.prototype-pollution.test.ts',
+    lines: [51, 61, 78, 88, 104, 117, 134, 146, 153, 160, 169],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_r10jb_command_awk_prototype_pollution_dangerous_key_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk treats JavaScript-dangerous keywords (__proto__, constructor, prototype, hasOwnProperty, ...) as ordinary identifiers: as scalar variable names, array keys (round-trip, for-in iteration, the in operator, delete), -v assignments, raw field input, -F CSV splitting, and array keys built from field data. The ENVIRON-from-export rows (29, 39) and the JS-prototype-non-pollution rows (292, 305) remain pending/JS-only.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.prototype-pollution.test.ts',
+    lines: [181, 190, 203, 214],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_r10jb_command_awk_prototype_pollution_string_function_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk string/regex builtins operate on dangerous-keyword values normally: gsub global replacement, split into array elements, match locating the pattern, and printf %s of dangerous-keyword string arguments.',
+  },
+];
+
 function caseOverrideFor(testCase) {
   const group = [
+    ...r10jbCommandAwkCaseGroups,
     ...jbSedTestTsCaseGroups,
     ...jbAliasCaseGroups,
     ...jbInterpreterBuiltinsCaseGroups,
@@ -5244,6 +5351,7 @@ function caseOverrideFor(testCase) {
     ...jbc43CaseGroups,
     ...jbc45CaseGroups,
     ...jbc46CaseGroups,
+    ...r10jbTarCaseGroups,
     ...jbc47CaseGroups,
     ...jbc27CaseGroups,
     ...jbc30AgentExampleCaseGroups,
