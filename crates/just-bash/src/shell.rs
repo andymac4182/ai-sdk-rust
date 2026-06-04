@@ -9044,6 +9044,160 @@ esac"#,
         assert!(multi_result.script.contains("10-30-45"));
     }
 
+    /// Mirrors the upstream `TeePlugin error handling` describe block plus the
+    /// `TeePlugin transform output` AST-rewrite rows in
+    /// `packages/just-bash/src/transform/plugins/tee-plugin.test.ts` (lines
+    /// 711-806). These rows assert the exact transform contract: which commands
+    /// are wrapped with `tee`, that single commands / `&&`/`||` chains /
+    /// compound constructs are NOT wrapped, that PIPESTATUS is saved and
+    /// restored whenever any stage was wrapped, and that the persistent counter
+    /// produces monotonically increasing, unique log-file indices. The Rust
+    /// transform emits newline statement separators where upstream emits ` ; `,
+    /// so the wrapped-script shape is asserted via substring/structure rather
+    /// than byte-identical equality (the metadata is asserted exactly). Each
+    /// assertion fails if the wrap-selection, PIPESTATUS rewrite, or counter
+    /// logic regresses.
+    #[test]
+    fn jbc19_tee_plugin_error_handling_and_transform_output_rows() {
+        let fixed_ts = "2024-01-15T10:30:45.123Z";
+        let sanitized_ts = "2024-01-15T10-30-45.123Z";
+        let dir = format!("/tmp/logs/{sanitized_ts}");
+        let new_tee =
+            || BashTransformPipeline::new().use_plugin(TeePlugin::new("/tmp/logs", fixed_ts));
+
+        // line 711 / 743: single command — no wrapping (no existing pipe).
+        let mut single = new_tee();
+        let single_result = single.transform("echo hello").unwrap();
+        assert_eq!(single_result.script, "echo hello");
+        assert!(single_result.metadata.tee_files.is_empty());
+
+        // line 749: pipeline wraps each command and saves + restores PIPESTATUS.
+        let mut pipeline = new_tee();
+        let pipeline_result = pipeline.transform("echo hello | grep hello").unwrap();
+        assert!(
+            pipeline_result
+                .script
+                .contains(&format!("tee {dir}-000-echo.stdout.txt"))
+        );
+        assert!(
+            pipeline_result
+                .script
+                .contains(&format!("tee {dir}-001-grep.stdout.txt"))
+        );
+        assert!(
+            pipeline_result
+                .script
+                .contains("__tps0=${PIPESTATUS[0]} __tps1=${PIPESTATUS[2]}")
+        );
+        assert!(
+            pipeline_result
+                .script
+                .contains("(exit $__tps0) | (exit $__tps1)")
+        );
+        assert_eq!(pipeline_result.metadata.tee_files.len(), 2);
+
+        // line 721: pipeline exit code preserved through PIPESTATUS — the
+        // grep-failure pipeline still wraps both stages and records two tee files.
+        let mut preserve = new_tee();
+        let preserve_result = preserve.transform("echo hello | grep nomatch").unwrap();
+        assert_eq!(preserve_result.metadata.tee_files.len(), 2);
+        assert!(
+            preserve_result
+                .script
+                .contains("__tps0=${PIPESTATUS[0]} __tps1=${PIPESTATUS[2]}")
+        );
+
+        // line 756: single commands in && / || chains — no wrapping.
+        let mut chains = new_tee();
+        let chains_result = chains
+            .transform("echo first && echo second || echo third")
+            .unwrap();
+        assert_eq!(
+            chains_result.script,
+            "echo first && echo second || echo third"
+        );
+        assert!(chains_result.metadata.tee_files.is_empty());
+
+        // line 762: pipeline in && chain wraps the pipeline, skips the single
+        // command, and leaves the trailing `&& echo found` intact.
+        let mut chain_pipe = new_tee();
+        let chain_pipe_result = chain_pipe
+            .transform("echo hello | grep hello && echo found")
+            .unwrap();
+        assert!(
+            chain_pipe_result
+                .script
+                .contains(&format!("tee {dir}-000-echo.stdout.txt"))
+        );
+        assert!(
+            chain_pipe_result
+                .script
+                .contains(&format!("tee {dir}-001-grep.stdout.txt"))
+        );
+        assert!(chain_pipe_result.script.contains("&& echo found"));
+        assert_eq!(chain_pipe_result.metadata.tee_files.len(), 2);
+
+        // line 770: assignment-only and single commands — no wrapping. Both
+        // statements are single-command pipelines, so the rewrite only splits
+        // the `;` into a statement separator and records no tee files.
+        let mut assign = new_tee();
+        let assign_result = assign.transform("VAR=hello; echo $VAR").unwrap();
+        assert!(assign_result.metadata.tee_files.is_empty());
+        assert!(assign_result.script.contains("VAR=hello"));
+        assert!(assign_result.script.contains("echo $VAR"));
+        assert!(!assign_result.script.contains("tee "));
+
+        // line 777: compound commands are not wrapped.
+        let mut compound = new_tee();
+        let compound_result = compound.transform("if true; then echo yes; fi").unwrap();
+        assert!(compound_result.metadata.tee_files.is_empty());
+        assert!(!compound_result.script.contains("tee "));
+
+        // line 783: persistent counter across pipelines yields unique, ordered
+        // indices for every wrapped stage across separate statements.
+        let mut counter = new_tee();
+        let counter_result = counter.transform("echo a | cat; echo b | cat").unwrap();
+        assert!(counter_result.script.contains("000-echo"));
+        assert!(counter_result.script.contains("001-cat"));
+        assert!(counter_result.script.contains("002-echo"));
+        assert!(counter_result.script.contains("003-cat"));
+        assert_eq!(
+            counter_result
+                .metadata
+                .tee_files
+                .iter()
+                .map(|file| file.command_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+
+        // line 791: still saves/restores PIPESTATUS even when only some commands
+        // are wrapped. With targetCommandPattern=^echo$, only `echo` is wrapped
+        // (one tee file), but `tee` inflates PIPESTATUS from 2 to 3 entries so
+        // the save/restore epilogue is still emitted.
+        let mut partial = BashTransformPipeline::new().use_plugin(
+            TeePlugin::new("/tmp/logs", fixed_ts)
+                .with_target_command_pattern(Regex::new("^echo$").unwrap()),
+        );
+        let partial_result = partial.transform("echo hello | cat").unwrap();
+        assert!(
+            partial_result
+                .script
+                .contains(&format!("tee {dir}-000-echo.stdout.txt"))
+        );
+        assert!(
+            partial_result
+                .script
+                .contains("__tps0=${PIPESTATUS[0]} __tps1=${PIPESTATUS[2]}")
+        );
+        assert!(
+            partial_result
+                .script
+                .contains("(exit $__tps0) | (exit $__tps1)")
+        );
+        assert_eq!(partial_result.metadata.tee_files.len(), 1);
+    }
+
     #[test]
     fn jbc19_tee_plugin_exec_describe_rows() {
         // Mirrors packages/just-bash/src/transform/plugins/tee-plugin.test.ts
