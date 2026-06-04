@@ -981,6 +981,24 @@ const jbc10CaseGroups = [
     notes:
       'JBC-10 verifies imported rg misc rows: -v/-n inverted, -i case-insensitive, -w word, -x whole-line, -F literal, -q quiet, -t/-T file-type filter, -g/--glob filters, --count/--count-matches/--include-zero counts, --files-with-matches/--files-without-match, -A/-B/-C context with line numbers, --files listing, and --sort path over the virtual filesystem.',
   },
+  {
+    file: 'packages/just-bash/src/commands/rg/rg.no-filename.test.ts',
+    lines: [222, 234, 246, 258, 276, 289, 304, 316, 328, 340, 353, 367, 379, 393],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_upstream_no_filename_context_filter_and_regex_rows_are_portable',
+    notes:
+      'JBC-10 verifies rg -I (no-filename) with -A/-B/-C context (keeping line numbers and context separators, no per-file separator across files), -t/-g filters, --hidden, combined short flags (-Iin/-In), regex alternation and character classes, and -I -N -o piping output over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [22, 39, 73, 88, 104, 120, 155, 188, 324, 376, 390, 438, 453, 509, 538, 550],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_regression_gitignore_regex_and_flag_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported ripgrep regression rows: rooted/unanchored/nested/trailing-slash/double-star/dot-star gitignore patterns, --files with a path argument, IP-style repeated-group and cyrillic case-folding regex, smart-case bracket sensitivity, -e dash patterns, -q quiet exit, --only-matching, and --quiet --files glob exit codes over the virtual filesystem.',
+  },
 ];
 
 const jbc12SourceGroups = [
