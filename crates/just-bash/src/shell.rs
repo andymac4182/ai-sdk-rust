@@ -7246,6 +7246,168 @@ esac"#,
     }
 
     #[test]
+    fn jbc19_tee_plugin_exec_describe_rows() {
+        // Mirrors packages/just-bash/src/transform/plugins/tee-plugin.test.ts
+        // "TeePlugin exec" describe block. Each block asserts the observable
+        // AST-rewrite contract: which commands are wrapped in `tee`, the
+        // recorded metadata (commandName/command/stdoutFile), and the counter.
+        let fixed_ts = "2024-01-15T10:30:45.123Z";
+        let sanitized_ts = "2024-01-15T10-30-45.123Z";
+
+        let new_tee =
+            || BashTransformPipeline::new().use_plugin(TeePlugin::new("/tmp/logs", fixed_ts));
+
+        // line 9: does not wrap single commands (no existing pipe).
+        let mut single = new_tee();
+        let single_result = single.transform("echo hello").unwrap();
+        assert_eq!(single_result.script, "echo hello");
+        assert!(single_result.metadata.tee_files.is_empty());
+
+        // line 23: captures stdout for each command in pipeline.
+        let mut two = new_tee();
+        let two_result = two.transform("cat /data/input.txt | grep hello").unwrap();
+        assert_eq!(two_result.metadata.tee_files.len(), 2);
+        assert_eq!(two_result.metadata.tee_files[0].command_name, "cat");
+        assert_eq!(
+            two_result.metadata.tee_files[0].command,
+            "cat /data/input.txt"
+        );
+        assert_eq!(two_result.metadata.tee_files[1].command_name, "grep");
+        assert_eq!(two_result.metadata.tee_files[1].command, "grep hello");
+
+        // line 48: only captures targeted commands in pipeline.
+        let mut echo_only = BashTransformPipeline::new().use_plugin(
+            TeePlugin::new("/tmp/logs", fixed_ts)
+                .with_target_command_pattern(Regex::new("^echo$").unwrap()),
+        );
+        let echo_only_result = echo_only.transform("echo hello | cat").unwrap();
+        assert_eq!(echo_only_result.metadata.tee_files.len(), 1);
+        assert_eq!(echo_only_result.metadata.tee_files[0].command_name, "echo");
+        assert_eq!(echo_only_result.metadata.tee_files[0].command, "echo hello");
+
+        // line 69: captures output from pipeline with multiple stages.
+        let mut three = new_tee();
+        let three_result = three
+            .transform("cat /data/words.txt | grep ^a | sort")
+            .unwrap();
+        assert_eq!(
+            three_result
+                .metadata
+                .tee_files
+                .iter()
+                .map(|file| file.command_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cat", "grep", "sort"]
+        );
+
+        // line 97: writes to nested output directory.
+        let mut nested =
+            BashTransformPipeline::new().use_plugin(TeePlugin::new("/tmp/logs/deep/dir", fixed_ts));
+        let nested_result = nested.transform("echo test | cat").unwrap();
+        assert_eq!(nested_result.metadata.tee_files[0].command_name, "echo");
+        assert_eq!(
+            nested_result.metadata.tee_files[0].stdout_file,
+            format!("/tmp/logs/deep/dir/{sanitized_ts}-000-echo.stdout.txt")
+        );
+
+        // line 130: preserves pipeline semantics (PIPESTATUS save/restore) so the
+        // last command exit code wins even with tee wrapping inserted.
+        let mut grep_fail = new_tee();
+        let grep_fail_result = grep_fail.transform("echo hello | grep nomatch").unwrap();
+        assert_eq!(grep_fail_result.metadata.tee_files.len(), 2);
+        assert!(grep_fail_result.script.contains("__tps0=${PIPESTATUS[0]}"));
+        assert!(
+            grep_fail_result
+                .script
+                .contains("(exit $__tps0) | (exit $__tps1)")
+        );
+
+        // line 161: skips single commands in && and || chains.
+        let mut chain = new_tee();
+        let chain_result = chain
+            .transform("echo first && echo second; false || echo fallback")
+            .unwrap();
+        assert!(chain_result.metadata.tee_files.is_empty());
+
+        // line 175: skips compound commands (if/for/while/subshell/group).
+        let mut compound = new_tee();
+        let compound_result = compound.transform("if true; then echo y; fi").unwrap();
+        assert!(compound_result.metadata.tee_files.is_empty());
+
+        // line 187: wraps pipelines inside && chains when a pipe exists, but the
+        // trailing single command is left untouched.
+        let mut chain_pipe = new_tee();
+        let chain_pipe_result = chain_pipe
+            .transform("cat /data/f.txt | grep hello && echo found")
+            .unwrap();
+        assert_eq!(chain_pipe_result.metadata.tee_files.len(), 2);
+        assert_eq!(chain_pipe_result.metadata.tee_files[0].command_name, "cat");
+        assert_eq!(chain_pipe_result.metadata.tee_files[1].command_name, "grep");
+
+        // line 206: returns empty teeFiles when targetCommandPattern matches nothing.
+        let mut no_match = BashTransformPipeline::new().use_plugin(
+            TeePlugin::new("/tmp/logs", fixed_ts)
+                .with_target_command_pattern(Regex::new("^nonexistent_command$").unwrap()),
+        );
+        let no_match_result = no_match.transform("echo hello | cat").unwrap();
+        assert!(no_match_result.metadata.tee_files.is_empty());
+
+        // line 222: targetCommandPattern matches multiple different commands.
+        let mut multi_target = BashTransformPipeline::new().use_plugin(
+            TeePlugin::new("/tmp/logs", fixed_ts)
+                .with_target_command_pattern(Regex::new("^(cat|sort)$").unwrap()),
+        );
+        let multi_target_result = multi_target
+            .transform("cat /data/file.txt | grep hello | sort")
+            .unwrap();
+        assert_eq!(multi_target_result.metadata.tee_files.len(), 2);
+        assert_eq!(
+            multi_target_result.metadata.tee_files[0].command_name,
+            "cat"
+        );
+        assert_eq!(
+            multi_target_result.metadata.tee_files[1].command_name,
+            "sort"
+        );
+
+        // line 242: multiple transform calls produce unique file paths via the
+        // persistent counter.
+        let mut persistent = new_tee();
+        let first = persistent.transform("echo first | cat").unwrap();
+        let second = persistent.transform("echo second | cat").unwrap();
+        assert!(!first.metadata.tee_files.is_empty());
+        assert!(!second.metadata.tee_files.is_empty());
+        assert_ne!(
+            first.metadata.tee_files[0].stdout_file,
+            second.metadata.tee_files[0].stdout_file
+        );
+
+        // line 262: mixed targeted and non-targeted commands in one pipeline.
+        let mut mixed = BashTransformPipeline::new().use_plugin(
+            TeePlugin::new("/tmp/logs", fixed_ts)
+                .with_target_command_pattern(Regex::new("^cat$").unwrap()),
+        );
+        let mixed_result = mixed.transform("cat /data/file.txt | wc -l").unwrap();
+        assert_eq!(mixed_result.metadata.tee_files.len(), 1);
+        assert_eq!(mixed_result.metadata.tee_files[0].command_name, "cat");
+
+        // line 284: compound command (while loop) inside a pipeline is skipped,
+        // while the leading simple command is captured exactly once.
+        let mut while_pipe = new_tee();
+        let while_pipe_result = while_pipe
+            .transform("echo -e 'a\\nb\\nc' | while read line; do echo \"got: $line\"; done")
+            .unwrap();
+        let echo_entries: Vec<&TeeFileInfo> = while_pipe_result
+            .metadata
+            .tee_files
+            .iter()
+            .filter(|file| file.command_name == "echo")
+            .collect();
+        assert_eq!(echo_entries.len(), 1);
+        assert_eq!(echo_entries[0].command, "echo -e 'a\\nb\\nc'");
+    }
+
+    #[test]
     fn jbc19_transform_plugin_ordering_and_metadata_rows() {
         #[derive(Default)]
         struct CustomPlugin;
