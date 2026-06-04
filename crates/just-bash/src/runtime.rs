@@ -12220,4 +12220,40 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
             "-4\n"
         );
     }
+
+    // just-bash-command-awk: portable awk gensub backreferences and printf
+    // %c / %e formatting that the existing subset previously mis-handled.
+    // Upstream: packages/just-bash/src/commands/awk/awk.functions.test.ts
+    //   :412 gensub backreferences (\2 \1) reorder captured groups,
+    //   :499 printf %c prints the first character of a string argument,
+    //   :510 printf %.2e formats in scientific notation as `1.23e+3`.
+    #[test]
+    fn awk_jbc_command_awk_gensub_backreference_and_printf_c_e_rows() {
+        let env = Bash::default();
+
+        // :412 gensub with \2 \1 backreferences swaps the two captured words.
+        // The shell-level `\\\\2` collapses to `\2` for the awk string literal,
+        // mirroring the upstream template-literal escaping.
+        let backref = env.exec(
+            r#"echo "hello world" | awk '{ print gensub(/([a-z]+) ([a-z]+)/, "\\2 \\1", 1) }'"#,
+        );
+        assert_eq!(backref.exit_code, 0);
+        assert_eq!(backref.stdout, "world hello\n");
+
+        // :499 printf %c with a string argument prints its first character.
+        let char_string = env.exec(r#"echo "" | awk 'BEGIN { printf "%c\n", "hello" }'"#);
+        assert_eq!(char_string.exit_code, 0);
+        assert_eq!(char_string.stdout, "h\n");
+
+        // A numeric %c argument still prints the character for that code point,
+        // guarding against a regression in the dual numeric/string handling.
+        let char_code = env.exec(r#"echo "" | awk 'BEGIN { printf "%c\n", 65 }'"#);
+        assert_eq!(char_code.stdout, "A\n");
+
+        // :510 printf %.2e formats 1234.5 as `1.23e+3` (JS toExponential form:
+        // explicit sign, no leading zero in the exponent).
+        let scientific = env.exec(r#"echo "" | awk 'BEGIN { printf "%.2e\n", 1234.5 }'"#);
+        assert_eq!(scientific.exit_code, 0);
+        assert_eq!(scientific.stdout, "1.23e+3\n");
+    }
 }
