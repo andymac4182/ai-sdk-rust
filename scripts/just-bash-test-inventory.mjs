@@ -3100,6 +3100,20 @@ const jbc25CaseGroups = [
       'JBC-25 verifies portable AWK length, substr, index, case conversion, sub/gsub including matched-text replacement and field targets, and bounded sprintf rows; wider formatting and remaining substitution variants stay pending.',
   },
   {
+    file: 'packages/just-bash/src/commands/awk/awk.strings.test.ts',
+    lines: [
+      80, 109, 118, 147, 165, 185, 194, 214, 223, 232, 271, 289, 327,
+      336, 345, 365, 374, 383, 390, 401, 410, 419, 428, 439, 446, 455,
+      464,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest:
+      'awk_jbc25_string_builtin_concat_compare_and_coercion_rows',
+    notes:
+      'JBC-25 verifies additional portable AWK string rows: substr middle slice, index single-char and first-occurrence, tolower/toupper across cases and symbols, sub match/no-match/explicit-target, gsub no-match and digit replacement, sprintf width/left-justify/zero-pad, variable and literal concatenation, numeric-literal concatenation, accumulating concat, string ==/!=/</> comparison, leading-numeric and non-numeric +0 coercion, and number-to-string via empty concatenation.',
+  },
+  {
     file: 'packages/just-bash/src/commands/awk/awk.modulo.test.ts',
     lines: [6, 36, 54, 74],
     status: 'portable-verified',
