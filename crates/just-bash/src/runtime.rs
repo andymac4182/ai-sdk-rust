@@ -3778,6 +3778,92 @@ and exhibited clearly, with a label attached.\n";
                 .stdout,
             "no\n"
         );
+
+        // regex parsing (awk.parsing.test.ts :216..:261)
+        assert_eq!(
+            env.exec(r#"echo "hello" | awk '/hello/ { print "matched" }'"#)
+                .stdout,
+            "matched\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "a.b" | awk '/a\.b/ { print "matched" }'"#)
+                .stdout,
+            "matched\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "abc" | awk '/[abc]+/ { print "matched" }'"#)
+                .stdout,
+            "matched\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "hello" | awk '/^hello$/ { print "matched" }'"#)
+                .stdout,
+            "matched\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "aaa" | awk '/a+/ { print "matched" }'"#)
+                .stdout,
+            "matched\n"
+        );
+        // division is distinguished from a regex literal in expression position.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x = 10 / 2; print x }'"#)
+                .stdout,
+            "5\n"
+        );
+
+        // operator parsing (awk.parsing.test.ts :294..:331)
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print (1 <= 2), (2 >= 1), (1 == 1), (1 != 2) }'"#)
+                .stdout,
+            "1 1 1 1\n"
+        );
+        // ((10+5)-3)*2/4 = 6 through compound assignment operators.
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x=10; x+=5; x-=3; x*=2; x/=4; print x }'"#)
+                .stdout,
+            "6\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x=5; print ++x, x++, x }'"#)
+                .stdout,
+            "6 6 7\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print (1 && 1), (1 || 0), !0 }'"#)
+                .stdout,
+            "1 1 1\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "hello" | awk '{ print ($0 ~ /hello/), ($0 !~ /world/) }'"#)
+                .stdout,
+            "1 1\n"
+        );
+
+        // block structure parsing (awk.parsing.test.ts :342..:374)
+        assert_eq!(
+            env.exec(r#"echo "test" | awk '{ } { print "ok" }'"#).stdout,
+            "ok\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "test" | awk '/test/ { print "1" } /test/ { print "2" }'"#)
+                .stdout,
+            "1\n2\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "x" | awk 'BEGIN { print "B" } END { print "E" }'"#)
+                .stdout,
+            "B\nE\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "hello" | awk '/hello/'"#).stdout,
+            "hello\n"
+        );
+        assert_eq!(
+            env.exec(r#"echo "hello" | awk '{ print "matched" }'"#)
+                .stdout,
+            "matched\n"
+        );
     }
 
     #[test]
@@ -13064,5 +13150,128 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         );
         // :42 negated character class [^a-z] matches only the digit record.
         assert_eq!(mixed.exec(r#"awk '/[^a-z]/' /data.txt"#).stdout, "123\n");
+
+        // :51 alternation /red|blue/ matches either branch.
+        let colors = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "red\ngreen\nblue\nyellow\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            colors.exec(r#"awk '/red|blue/' /data.txt"#).stdout,
+            "red\nblue\n"
+        );
+
+        // Expression patterns operating over numeric/string field values.
+        let nums = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "1\n2\n3\n".to_string())]),
+            ..BashOptions::default()
+        });
+        // :71 numeric equality keeps only the matching record.
+        assert_eq!(nums.exec(r#"awk '$1 == 2' /data.txt"#).stdout, "2\n");
+        // :80 numeric inequality keeps every non-matching record.
+        assert_eq!(nums.exec(r#"awk '$1 != 2' /data.txt"#).stdout, "1\n3\n");
+        let names = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "alice\nbob\ncharlie\n".to_string())]),
+            ..BashOptions::default()
+        });
+        // :107 string equality against a quoted literal.
+        assert_eq!(names.exec(r#"awk '$1 == "bob"' /data.txt"#).stdout, "bob\n");
+        let fruit3 = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "apple\nbanana\ncherry\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        // :116 lexicographic comparison against a string literal.
+        assert_eq!(
+            fruit3.exec(r#"awk '$1 < "c"' /data.txt"#).stdout,
+            "apple\nbanana\n"
+        );
+
+        // Combined patterns over NR and field values.
+        let header = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "header\nline1\nline2\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        // :165 NR == 1 matches the first record.
+        assert_eq!(header.exec(r#"awk 'NR == 1' /data.txt"#).stdout, "header\n");
+        // :174 NR > 1 skips the first record.
+        assert_eq!(
+            header.exec(r#"awk 'NR > 1' /data.txt"#).stdout,
+            "line1\nline2\n"
+        );
+        let five = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "1\n2\n3\n4\n5\n".to_string())]),
+            ..BashOptions::default()
+        });
+        // :183 compound NR range expression.
+        assert_eq!(
+            five.exec(r#"awk 'NR >= 2 && NR <= 4' /data.txt"#).stdout,
+            "2\n3\n4\n"
+        );
+        let six = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "a\nb\nc\nd\ne\nf\n".to_string())]),
+            ..BashOptions::default()
+        });
+        // :192 every Nth record via NR % 2 == 1.
+        assert_eq!(
+            six.exec(r#"awk 'NR % 2 == 1' /data.txt"#).stdout,
+            "a\nc\ne\n"
+        );
+
+        // Field regex-match patterns using ~ and !~.
+        let labeled = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "apple red\nbanana yellow\napricot orange\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        // :203 $1 ~ /^a/ keeps records whose first field starts with a.
+        assert_eq!(
+            labeled.exec(r#"awk '$1 ~ /^a/' /data.txt"#).stdout,
+            "apple red\napricot orange\n"
+        );
+        // :212 $1 !~ /^a/ keeps the inverse set.
+        assert_eq!(
+            labeled.exec(r#"awk '$1 !~ /^a/' /data.txt"#).stdout,
+            "banana yellow\n"
+        );
+        let twofield = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "fruit apple\nveg carrot\nfruit banana\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        // :221 $2 ~ /^a/ matches on the second field.
+        assert_eq!(
+            twofield.exec(r#"awk '$2 ~ /^a/' /data.txt"#).stdout,
+            "fruit apple\n"
+        );
+
+        // :232 action-only rule with no pattern runs on every record.
+        let abc = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "a\nb\nc\n".to_string())]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            abc.exec(r#"awk '{ print "line:", $0 }' /data.txt"#).stdout,
+            "line: a\nline: b\nline: c\n"
+        );
+
+        // :243 pattern-only rule prints every matching record.
+        let yesno = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "yes\nno\nyes\n".to_string())]),
+            ..BashOptions::default()
+        });
+        assert_eq!(yesno.exec(r#"awk '/yes/' /data.txt"#).stdout, "yes\nyes\n");
     }
 }
