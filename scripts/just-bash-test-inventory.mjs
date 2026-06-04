@@ -4362,6 +4362,35 @@ const jbInterpreterBuiltinsCaseGroups = [
     notes:
       'JB export builtin: portable export of a value then a [ ... ] && conditional use over the virtual session.',
   },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/export.test.ts',
+    lines: [40],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::builtins::export',
+    rustTest:
+      'just_bash_bash_general_export_does_not_persist_functions_reset_and_filesystem_persists',
+    notes:
+      'JB export builtin: a variable exported in one exec call is not visible to a later exec on the same session, matching the upstream fresh-shell-per-exec contract.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/export.test.ts',
+    lines: [116],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::builtins::export',
+    rustTest: 'builtins_export_initial_env_vars_available_in_every_exec',
+    notes:
+      'JB export builtin: env vars supplied via the Bash constructor options remain available in every subsequent exec call on the same session.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/set.test.ts',
+    lines: [228, 240, 251, 263, 276, 288, 303, 314],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::builtins::set',
+    rustTest:
+      'builtins_set_e_exits_immediately_when_command_fails; builtins_set_e_continues_execution_without_set_e; builtins_set_e_does_not_exit_if_command_succeeds; builtins_set_e_disabled_with_set_plus_e; builtins_set_e_enabled_with_set_o_errexit; builtins_set_e_disabled_with_set_plus_o_errexit; builtins_set_e_does_not_exit_on_failed_command_in_and_short_circuit; builtins_set_e_does_not_exit_on_failed_command_in_or_short_circuit',
+    notes:
+      'JB set builtin errexit (set -e / set -o errexit and their +e / +o disablement): a failing simple command aborts the script with exit code 1, a succeeding command does not, +e/+o re-disables errexit, and AND-OR list members that fail on the left of && or || do not trigger errexit.',
+  },
 ];
 
 const jbExecOptionsLoggingCaseGroups = [
