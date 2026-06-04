@@ -3395,6 +3395,19 @@ const jbc33CaseGroups = [
   },
   {
     file: 'packages/just-bash/src/regex/user-regex.test.ts',
+    lines: [
+      33, 38, 43, 49, 200, 223, 249, 255, 393, 404, 412, 453, 463, 464,
+      471, 483, 488, 495, 500,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::regex',
+    rustTest:
+      'jbc33_user_regex_portable_membership_zero_length_multiline_and_unicode_rows',
+    notes:
+      'JBC-33 verifies portable user-regex membership testing, zero-length word-boundary global matching, multiline anchoring, cached-matcher reuse, escaped specials, anchors, the empty pattern, Unicode literal/escape matching, and the dotAll flag with Rust regex; JavaScript lastIndex state and native RegExp wrapper rows stay documented separately.',
+  },
+  {
+    file: 'packages/just-bash/src/regex/user-regex.test.ts',
     lines: jbc33RegexJsOnlyLines,
     status: 'js-only-documented',
     owner: 'crates/just-bash::regex::js-wrapper-exception',

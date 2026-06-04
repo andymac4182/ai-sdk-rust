@@ -7554,6 +7554,66 @@ greet World",
         assert!(non_capturing.get(2).is_none());
     }
 
+    // JBC-33: additional portable user-regex rows mirroring the interleaved
+    // `test`/`it` cases in packages/just-bash/src/regex/user-regex.test.ts that
+    // exercise membership testing, zero-length global matching, multiline
+    // semantics, cached-matcher reuse, anchors, the empty pattern, Unicode
+    // literals/escapes, and the dotAll flag. The JavaScript-only lastIndex
+    // state and native RegExp wrapper rows stay documented separately; here we
+    // assert only the observable, portable regex semantics those rows verify.
+    #[test]
+    fn jbc33_user_regex_portable_membership_zero_length_multiline_and_unicode_rows() {
+        // test(): membership predicate (lines 33, 38, 43, 49, 249, 255, 393).
+        assert!(Regex::new("foo").unwrap().is_match("foobar"));
+        assert!(!Regex::new("foo").unwrap().is_match("bar"));
+        assert!(Regex::new("(?i)foo").unwrap().is_match("FOO"));
+        // Global `a` against "aaa" still reports a match regardless of any
+        // JS lastIndex bookkeeping; the portable result is a plain match.
+        assert!(Regex::new("a").unwrap().is_match("aaa"));
+        // ConstantRegex `/foo/` and `/a/g` rows observe the same membership.
+        assert!(Regex::new("foo").unwrap().is_match("foobar"));
+        assert!(Regex::new("a").unwrap().is_match("aaa"));
+        // RegexLike compatibility row: `\d+` against "a1b22c333" matches.
+        assert!(Regex::new("\\d+").unwrap().is_match("a1b22c333"));
+
+        // matchAll(): zero-length word-boundary matches (line 200). Boundaries
+        // surround each word: before/after 'a' and before/after 'b' = 4.
+        assert_eq!(Regex::new("\\b").unwrap().find_iter("a b").count(), 4);
+
+        // multiline (line 223): `^foo` with the multiline flag anchors to the
+        // start of each line, so it matches the second line here; without the
+        // flag the same pattern only anchors at the very start of the input.
+        assert!(Regex::new("(?m)^foo").unwrap().is_match("bar\nfoo"));
+        assert!(!Regex::new("^foo").unwrap().is_match("bar\nfoo"));
+
+        // acquireMatcher reuse (lines 404, 412): repeated calls on one compiled
+        // pattern keep returning correct independent results.
+        let o_plus = Regex::new("o+").unwrap();
+        assert_eq!(
+            o_plus
+                .find_iter("foooo bar ooo")
+                .map(|m| m.as_str())
+                .collect::<Vec<_>>(),
+            vec!["oooo", "ooo"]
+        );
+        assert!(o_plus.find("bar baz").is_none());
+        let foo_global = Regex::new("foo").unwrap();
+        assert_eq!(foo_global.replace_all("foo bar foo", "baz"), "baz bar baz");
+        assert_eq!(foo_global.replace_all("foo only once", "X"), "X only once");
+
+        // edge cases: escaped special chars (453), anchors (463/464),
+        // empty pattern (471), Unicode literal (483) and escape with the u
+        // flag (488), and the dotAll flag (495/500).
+        assert!(Regex::new("\\[\\]\\(\\)").unwrap().is_match("[]()"));
+        assert!(Regex::new("^foo$").unwrap().is_match("foo"));
+        assert!(!Regex::new("^foo$").unwrap().is_match("foobar"));
+        assert!(Regex::new("").unwrap().is_match("anything"));
+        assert!(Regex::new("café").unwrap().is_match("I love café"));
+        assert!(Regex::new("\\x{1F600}").unwrap().is_match("Hello 😀"));
+        assert!(Regex::new("(?s)a.b").unwrap().is_match("a\nb"));
+        assert!(!Regex::new("a.b").unwrap().is_match("a\nb"));
+    }
+
     // JBC-13: portable break/continue conformance mirroring
     // packages/just-bash/src/syntax/break-continue.test.ts (all 12 upstream cases).
     #[test]
