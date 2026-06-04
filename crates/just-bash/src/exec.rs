@@ -6124,6 +6124,7 @@ struct RgOptions {
     only_matching: bool,
     quiet: bool,
     no_filename: bool,
+    with_filename: bool,
     hidden: bool,
     no_ignore: bool,
     text: bool,
@@ -6140,6 +6141,8 @@ struct RgOptions {
     globs: Vec<String>,
     type_includes: Vec<String>,
     type_excludes: Vec<String>,
+    type_clears: Vec<String>,
+    type_adds: Vec<String>,
     ignore_files: Vec<String>,
     stats: bool,
     explicit_after: Option<usize>,
@@ -6163,6 +6166,7 @@ impl Default for RgOptions {
             only_matching: false,
             quiet: false,
             no_filename: false,
+            with_filename: false,
             hidden: false,
             no_ignore: false,
             text: false,
@@ -6179,6 +6183,8 @@ impl Default for RgOptions {
             globs: Vec::new(),
             type_includes: Vec::new(),
             type_excludes: Vec::new(),
+            type_clears: Vec::new(),
+            type_adds: Vec::new(),
             ignore_files: Vec::new(),
             stats: false,
             explicit_after: None,
@@ -6299,6 +6305,7 @@ fn parse_rg_option(
         "--only-matching" => options.only_matching = true,
         "--quiet" => options.quiet = true,
         "--no-filename" => options.no_filename = true,
+        "--with-filename" => options.with_filename = true,
         "--text" => options.text = true,
         "--follow" => options.follow_symlinks = true,
         "--include-zero" => options.include_zero = true,
@@ -6331,6 +6338,12 @@ fn parse_rg_option(
         "--type-not" => options
             .type_excludes
             .push(rg_option_value(args, index, "--type-not")?),
+        "--type-clear" => options
+            .type_clears
+            .push(rg_option_value(args, index, "--type-clear")?),
+        "--type-add" => options
+            .type_adds
+            .push(rg_option_value(args, index, "--type-add")?),
         "--max-count" => {
             options.max_count = Some(rg_parse_usize(&rg_option_value(
                 args,
@@ -6421,6 +6434,16 @@ fn parse_rg_option(
             options
                 .type_excludes
                 .push(arg["--type-not=".len()..].to_string());
+        }
+        _ if arg.starts_with("--type-clear=") => {
+            options
+                .type_clears
+                .push(arg["--type-clear=".len()..].to_string());
+        }
+        _ if arg.starts_with("--type-add=") => {
+            options
+                .type_adds
+                .push(arg["--type-add=".len()..].to_string());
         }
         // `--threads=N` compatibility flag: value consumed, no-op (ignored).
         _ if arg.starts_with("--threads=") => {}
@@ -6519,6 +6542,7 @@ fn parse_rg_short_flags(
             'q' => options.quiet = true,
             'o' => options.only_matching = true,
             'I' => options.no_filename = true,
+            'H' => options.with_filename = true,
             'a' => options.text = true,
             '0' => options.null_separator = true,
             'L' => options.follow_symlinks = true,
@@ -6806,41 +6830,105 @@ fn rg_path_is_hidden(path: &str) -> bool {
 }
 
 fn rg_type_filters_match(path: &str, options: &RgOptions) -> bool {
+    let registry = rg_type_registry(options);
     if !options.type_includes.is_empty()
         && !options
             .type_includes
             .iter()
-            .any(|type_name| rg_path_matches_type(path, type_name).unwrap_or(false))
+            .any(|type_name| rg_path_matches_type(&registry, path, type_name))
     {
         return false;
     }
     !options
         .type_excludes
         .iter()
-        .any(|type_name| rg_path_matches_type(path, type_name).unwrap_or(false))
+        .any(|type_name| rg_path_matches_type(&registry, path, type_name))
 }
 
-fn rg_path_matches_type(path: &str, type_name: &str) -> Option<bool> {
-    let extension = path.rsplit_once('.').map(|(_, extension)| {
-        extension
-            .chars()
-            .flat_map(char::to_lowercase)
-            .collect::<String>()
-    })?;
-    let extensions = match type_name {
-        "js" | "javascript" => &["js", "jsx"][..],
-        "ts" | "typescript" => &["ts", "tsx"][..],
-        "py" | "python" => &["py"][..],
-        "rs" | "rust" => &["rs"][..],
-        "css" => &["css"][..],
-        "md" | "markdown" => &["md", "markdown", "mdown"][..],
-        "json" => &["json"][..],
-        "html" => &["html", "htm"][..],
-        "txt" | "text" => &["txt"][..],
-        "log" => &["log"][..],
-        _ => return None,
-    };
-    Some(extensions.contains(&extension.as_str()))
+/// Default ripgrep-style type definitions, expressed as the file extensions
+/// that belong to each type name (and its aliases).
+fn rg_default_type_definitions() -> Vec<(&'static str, Vec<String>)> {
+    [
+        ("js", &["js", "jsx"][..]),
+        ("javascript", &["js", "jsx"][..]),
+        ("ts", &["ts", "tsx"][..]),
+        ("typescript", &["ts", "tsx"][..]),
+        ("py", &["py"][..]),
+        ("python", &["py"][..]),
+        ("rs", &["rs"][..]),
+        ("rust", &["rs"][..]),
+        ("css", &["css"][..]),
+        ("md", &["md", "markdown", "mdown"][..]),
+        ("markdown", &["md", "markdown", "mdown"][..]),
+        ("json", &["json"][..]),
+        ("html", &["html", "htm"][..]),
+        ("txt", &["txt"][..]),
+        ("text", &["txt"][..]),
+        ("log", &["log"][..]),
+    ]
+    .into_iter()
+    .map(|(name, extensions)| {
+        (
+            name,
+            extensions.iter().map(|ext| (*ext).to_string()).collect(),
+        )
+    })
+    .collect()
+}
+
+/// Resolved type registry: maps a type name to the set of glob patterns it
+/// matches. Built from the default definitions, then mutated by `--type-clear`
+/// and `--type-add` in argument order so later flags override earlier state.
+fn rg_type_registry(options: &RgOptions) -> BTreeMap<String, Vec<String>> {
+    let mut registry: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (name, extensions) in rg_default_type_definitions() {
+        registry
+            .entry(name.to_string())
+            .or_default()
+            .extend(extensions.into_iter().map(|ext| format!("*.{ext}")));
+    }
+    for cleared in &options.type_clears {
+        registry.insert(cleared.clone(), Vec::new());
+    }
+    for added in &options.type_adds {
+        // Forms: `name:glob` or `name:include:other` (compose from another type).
+        let Some((name, rest)) = added.split_once(':') else {
+            continue;
+        };
+        if let Some(included) = rest.strip_prefix("include:") {
+            let patterns = registry.get(included).cloned().unwrap_or_default();
+            registry
+                .entry(name.to_string())
+                .or_default()
+                .extend(patterns);
+        } else {
+            registry
+                .entry(name.to_string())
+                .or_default()
+                .push(rest.to_string());
+        }
+    }
+    registry
+}
+
+fn rg_path_matches_type(
+    registry: &BTreeMap<String, Vec<String>>,
+    path: &str,
+    type_name: &str,
+) -> bool {
+    let label = path.rsplit_once('/').map_or(path, |(_, name)| name);
+    // The pseudo type `all` matches any file that belongs to a known type.
+    if type_name == "all" {
+        return registry
+            .values()
+            .flatten()
+            .any(|glob| rg_glob_matches_path(glob, label));
+    }
+    registry
+        .get(type_name)
+        .into_iter()
+        .flatten()
+        .any(|glob| rg_glob_matches_path(glob, label))
 }
 
 fn rg_globs_match(label: &str, globs: &[String]) -> bool {
@@ -6872,10 +6960,16 @@ struct RgIgnoreRule {
 }
 
 fn rg_ignore_rules(fs: &VirtualFileSystem) -> Vec<RgIgnoreRule> {
+    // ripgrep honours `.gitignore`, the generic `.ignore`, and the
+    // ripgrep-specific `.rgignore` for filtering directory traversal.
     let mut paths = fs
         .get_all_paths()
         .into_iter()
-        .filter(|path| path.ends_with("/.gitignore"))
+        .filter(|path| {
+            path.ends_with("/.gitignore")
+                || path.ends_with("/.ignore")
+                || path.ends_with("/.rgignore")
+        })
         .collect::<Vec<_>>();
     paths.sort();
     let mut rules = Vec::new();
@@ -7138,7 +7232,7 @@ fn rg_push_matches(
     if line_matches.is_empty() {
         return;
     }
-    if request.options.heading && rg_show_filename(request, input) {
+    if request.options.heading && !request.options.no_filename {
         stdout.push_str(&input.label);
         stdout.push('\n');
     }
@@ -7234,7 +7328,10 @@ fn rg_push_line(
 }
 
 fn rg_show_filename(request: &RgRequest, input: &RgInput) -> bool {
-    !request.options.no_filename && !input.explicit_file
+    if request.options.no_filename {
+        return false;
+    }
+    request.options.with_filename || !input.explicit_file
 }
 
 fn rg_show_line_number(request: &RgRequest, input: &RgInput) -> bool {
@@ -7336,94 +7433,908 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
         Ok(input) => input,
         Err(error) => return stderr_result(1, format!("sed: {error}\n")),
     };
-    let mut lines = input.lines().map(ToString::to_string).collect::<Vec<_>>();
-    let mut explicit_print = Vec::new();
-    for script in &scripts {
-        let command = match parse_sed_command(script) {
-            Ok(command) => command,
-            Err(error) => return stderr_result(1, format!("sed: {error}\n")),
+    let lines = input.lines().map(ToString::to_string).collect::<Vec<_>>();
+    // Join multiple `-e`/`-f` scripts with newlines, which GNU sed treats as
+    // command separators equivalent to `;`.
+    let joined_script = scripts.join("\n");
+    let program = match parse_sed_program(&joined_script, ere) {
+        Ok(program) => program,
+        Err(error) => return stderr_result(1, format!("sed: {error}\n")),
+    };
+    // GNU sed validates branch targets at compile time: every non-empty label
+    // referenced by `b`/`t`/`T` must be defined by a `:label` somewhere.
+    for instr in &program {
+        let label = match &instr.op {
+            SedOp::Branch(l) | SedOp::BranchIfSub(l) | SedOp::BranchIfNoSub(l) => l,
+            _ => continue,
         };
-        match command {
-            SedCommand::Substitute {
+        if !label.is_empty() && sed_find_label(&program, label).is_none() {
+            return stderr_result(1, format!("sed: undefined label '{label}'\n"));
+        }
+    }
+    run_sed_program(&program, lines, quiet)
+}
+
+/// A single parsed sed instruction: an optional address restriction plus the
+/// operation to perform on lines that match the address.
+#[derive(Clone, Debug)]
+struct SedInstruction {
+    address: Option<SedAddress>,
+    op: SedOp,
+}
+
+#[derive(Clone, Debug)]
+enum SedOp {
+    Substitute {
+        regex: Regex,
+        replacement: String,
+        global: bool,
+        occurrence: Option<usize>,
+        /// `p` flag: print the pattern space if a substitution was made.
+        print: bool,
+    },
+    Print,
+    /// `P` — print up to the first embedded newline of the pattern space.
+    PrintFirst,
+    Delete,
+    /// `D` — delete up to the first embedded newline; if a newline remains,
+    /// restart the cycle without reading a new line.
+    DeleteFirst,
+    Transliterate {
+        from: Vec<char>,
+        to: Vec<char>,
+    },
+    Quit {
+        print_line: bool,
+    },
+    /// `=` — print the current input line number followed by a newline.
+    LineNumber,
+    /// `l` — print the pattern space in visually unambiguous form.
+    List,
+    /// `n` — auto-print the pattern space, then replace it with the next line.
+    Next,
+    /// `N` — append the next input line to the pattern space.
+    AppendNext,
+    /// `h`/`H` — copy/append pattern space to hold space.
+    HoldCopy,
+    HoldAppend,
+    /// `g`/`G` — copy/append hold space to pattern space.
+    GetCopy,
+    GetAppend,
+    /// `x` — exchange pattern and hold spaces.
+    Exchange,
+    /// `a`/`i`/`c` — append/insert/change text.
+    Append(String),
+    Insert(String),
+    Change(String),
+    /// `:label` defines a branch target (no runtime effect on its own).
+    Label(String),
+    /// `b`/`t`/`T` branch to a label (empty label == end of script).
+    Branch(String),
+    BranchIfSub(String),
+    BranchIfNoSub(String),
+    /// `{` / `}` block delimiters.
+    BlockStart,
+    BlockEnd,
+}
+
+/// Parse a complete sed script (possibly multi-command, `;`/newline separated,
+/// with `{ }` blocks and `:labels`) into a flat instruction list. Block matching
+/// is resolved at runtime by scanning for the matching `}`.
+fn parse_sed_program(script: &str, ere: bool) -> Result<Vec<SedInstruction>, String> {
+    let tokens = sed_split_commands(script)?;
+    let mut program = Vec::new();
+    let mut block_depth = 0usize;
+    for token in tokens {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        if token == "}" {
+            if block_depth == 0 {
+                return Err("unexpected `}'".to_string());
+            }
+            block_depth -= 1;
+            program.push(SedInstruction {
+                address: None,
+                op: SedOp::BlockEnd,
+            });
+            continue;
+        }
+        // A token may be `addr { ...` opening a block.
+        let (address, rest) = sed_take_address(token);
+        let rest = rest.trim();
+        if let Some(body) = rest.strip_prefix('{') {
+            block_depth += 1;
+            program.push(SedInstruction {
                 address,
-                pattern,
-                replacement,
-                global,
-                ignore_case,
-                occurrence,
-            } => {
-                let translated = sed_pattern_to_regex(&pattern, ere);
-                let regex = match RegexBuilder::new(&translated)
-                    .case_insensitive(ignore_case)
-                    .build()
-                {
-                    Ok(regex) => regex,
-                    Err(error) => return stderr_result(1, format!("sed: {error}\n")),
-                };
-                let line_count = lines.len();
-                let replacement = sed_replacement_to_regex(&replacement);
-                for (line_index, line) in lines.iter_mut().enumerate() {
-                    if !sed_address_matches(address.as_ref(), line_index, line, line_count) {
-                        continue;
-                    }
-                    *line =
-                        sed_substitute_line(&regex, line, replacement.as_str(), global, occurrence);
+                op: SedOp::BlockStart,
+            });
+            let body = body.trim();
+            if !body.is_empty() {
+                // Inline body after `{` on the same token (rare with our splitter,
+                // but handle defensively).
+                let inner = parse_sed_program(body, ere)?;
+                program.extend(inner);
+            }
+            continue;
+        }
+        let op = parse_sed_op(rest, address.as_ref(), ere)?;
+        program.push(SedInstruction { address, op });
+    }
+    if block_depth != 0 {
+        return Err("unexpected `,'".to_string());
+    }
+    Ok(program)
+}
+
+/// Split a script into top-level command tokens on unescaped `;` and newlines,
+/// respecting `{ }` (emitted as their own `{`/`}` tokens), `s///` and `y///`
+/// delimiters, `[...]` bracket expressions, and `a`/`i`/`c` text arguments.
+fn sed_split_commands(script: &str) -> Result<Vec<String>, String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = script.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        match ch {
+            ';' | '\n' => {
+                if !current.trim().is_empty() {
+                    tokens.push(current.trim().to_string());
                 }
+                current.clear();
+                i += 1;
             }
-            SedCommand::Print(address) => {
-                for (line_index, line) in lines.iter().enumerate() {
-                    if sed_address_matches(Some(&address), line_index, line, lines.len()) {
-                        explicit_print.push(line.clone());
-                    }
-                }
-            }
-            SedCommand::Delete(address) => {
-                let line_count = lines.len();
-                lines = lines
-                    .into_iter()
-                    .enumerate()
-                    .filter_map(|(line_index, line)| {
-                        (!sed_address_matches(Some(&address), line_index, &line, line_count))
-                            .then_some(line)
-                    })
-                    .collect();
-            }
-            SedCommand::Transliterate { address, from, to } => {
-                let line_count = lines.len();
-                for (line_index, line) in lines.iter_mut().enumerate() {
-                    if !sed_address_matches(address.as_ref(), line_index, line, line_count) {
-                        continue;
-                    }
-                    *line = line
-                        .chars()
-                        .map(|ch| {
-                            from.iter()
-                                .position(|candidate| *candidate == ch)
-                                .map_or(ch, |position| to[position])
-                        })
-                        .collect();
-                }
-            }
-            SedCommand::Quit { line, print_line } => {
-                // `Nq` auto-prints lines up to and including line N then quits.
-                // `NQ` quits before printing line N. `$q`/`$Q` (line == usize::MAX)
-                // address the last line.
-                let target = if line == usize::MAX {
-                    lines.len()
+            '{' => {
+                if !current.trim().is_empty() {
+                    // Address precedes the brace; keep them together as one token.
+                    current.push('{');
+                    tokens.push(current.trim().to_string());
+                    current.clear();
                 } else {
-                    line
-                };
-                let keep = if print_line {
-                    target.min(lines.len())
+                    tokens.push("{".to_string());
+                }
+                i += 1;
+            }
+            '}' => {
+                if !current.trim().is_empty() {
+                    tokens.push(current.trim().to_string());
+                    current.clear();
+                }
+                tokens.push("}".to_string());
+                i += 1;
+            }
+            '\\' => {
+                // Keep escaped pairs together; the engine interprets them later.
+                current.push(ch);
+                if i + 1 < chars.len() {
+                    current.push(chars[i + 1]);
+                    i += 2;
                 } else {
-                    target.saturating_sub(1).min(lines.len())
-                };
-                lines.truncate(keep);
+                    i += 1;
+                }
+            }
+            's' | 'y' if sed_token_is_command_start(&current) => {
+                // Consume `s<d>...<d>...<d>flags` or `y<d>...<d>...<d>` verbatim
+                // (delimiters may be any char, and may contain `;`).
+                let (consumed, next) = sed_consume_subst_or_y(&chars, i)?;
+                current.push_str(&consumed);
+                i = next;
+            }
+            'a' | 'i' | 'c' if sed_token_is_command_start(&current) => {
+                // `a`/`i`/`c` take the rest of the line (until newline or `;`)
+                // as their text argument. Consume to end of token.
+                current.push(ch);
+                i += 1;
+                // Consume the remaining text up to an unescaped newline.
+                while i < chars.len() && chars[i] != '\n' {
+                    if chars[i] == '\\' && i + 1 < chars.len() {
+                        current.push(chars[i]);
+                        current.push(chars[i + 1]);
+                        i += 2;
+                    } else {
+                        current.push(chars[i]);
+                        i += 1;
+                    }
+                }
+            }
+            '[' => {
+                // Copy a bracket expression verbatim so `;`/`}` inside it are not
+                // treated as separators.
+                current.push('[');
+                i += 1;
+                if i < chars.len() && chars[i] == '^' {
+                    current.push('^');
+                    i += 1;
+                }
+                if i < chars.len() && chars[i] == ']' {
+                    current.push(']');
+                    i += 1;
+                }
+                while i < chars.len() && chars[i] != ']' {
+                    current.push(chars[i]);
+                    i += 1;
+                }
+                if i < chars.len() {
+                    current.push(']');
+                    i += 1;
+                }
+            }
+            _ => {
+                current.push(ch);
+                i += 1;
             }
         }
     }
-    let output_lines = if quiet { explicit_print } else { lines };
-    let output = join_lines_with_newline(&output_lines);
+    if !current.trim().is_empty() {
+        tokens.push(current.trim().to_string());
+    }
+    Ok(tokens)
+}
+
+/// Returns true when the characters accumulated so far form only an address
+/// prefix (so the next `s`/`y`/`a`/`i`/`c` is a command, not part of a regex).
+fn sed_token_is_command_start(current: &str) -> bool {
+    let trimmed = current.trim_start();
+    // No content yet, or only an address (line numbers, `$`, `/re/`, ranges,
+    // `~`, `+`, `,`, `!`) precedes the command character.
+    trimmed.is_empty()
+        || trimmed
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '$' | ',' | '~' | '+' | '!' | ' ' | '\t'))
+        || (trimmed.starts_with('/') && trimmed.ends_with('/') && trimmed.len() >= 2)
+        || sed_address_then_empty(trimmed)
+}
+
+/// True when `trimmed` is a `/regex/` (or negated/range) address with nothing
+/// trailing — used to decide a following command char starts a command.
+fn sed_address_then_empty(trimmed: &str) -> bool {
+    let core = trimmed.trim_end_matches('!').trim();
+    if let Some((_, end)) = core.split_once(',') {
+        let end = end.trim();
+        return end == "$"
+            || end.parse::<usize>().is_ok()
+            || end.starts_with('+')
+            || (end.starts_with('/') && end.ends_with('/') && end.len() >= 2);
+    }
+    false
+}
+
+/// Consume a full `s<d>pat<d>rep<d>flags` or `y<d>a<d>b<d>` command starting at
+/// `start`. Returns the consumed substring and the index just past it.
+fn sed_consume_subst_or_y(chars: &[char], start: usize) -> Result<(String, usize), String> {
+    let cmd = chars[start];
+    let mut out = String::new();
+    out.push(cmd);
+    let mut i = start + 1;
+    let Some(&delim) = chars.get(i) else {
+        return Err("unterminated `s' command".to_string());
+    };
+    out.push(delim);
+    i += 1;
+    let mut delimiters_seen = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() {
+            out.push(c);
+            out.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+        if c == delim {
+            delimiters_seen += 1;
+            if delimiters_seen == 2 {
+                // After the closing delimiter, consume flags (letters/digits) for
+                // `s`; `y` has no flags.
+                if cmd == 's' {
+                    while i < chars.len() && (chars[i].is_ascii_alphanumeric()) {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                return Ok((out, i));
+            }
+        }
+    }
+    let which = if cmd == 's' { "s" } else { "y" };
+    Err(format!("unterminated `{which}' command"))
+}
+
+/// Split an address (if any) off the front of a single command token. Returns
+/// the parsed address and the remaining command text.
+fn sed_take_address(token: &str) -> (Option<SedAddress>, &str) {
+    let trimmed = token.trim_start();
+    // Pattern address `/re/[,/re/|,+N|,N|,$]` then command.
+    if trimmed.starts_with('/') {
+        if let Some(end) = sed_find_address_command_split(trimmed) {
+            let addr_str = trimmed[..end].trim();
+            if let Some(addr) = parse_sed_address_ext(addr_str) {
+                return (Some(addr), &trimmed[end..]);
+            }
+        }
+        return (None, trimmed);
+    }
+    // Numeric / `$` / step / range address: scan leading address characters.
+    let mut end = 0;
+    for (idx, c) in trimmed.char_indices() {
+        if c.is_ascii_digit() || matches!(c, '$' | ',' | '~' | '+' | '!' | ' ' | '\t') || c == '/' {
+            end = idx + c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if end == 0 {
+        return (None, trimmed);
+    }
+    let addr_str = trimmed[..end].trim();
+    if addr_str.is_empty() {
+        return (None, trimmed);
+    }
+    match parse_sed_address_ext(addr_str) {
+        Some(addr) => (Some(addr), trimmed[end..].trim_start()),
+        None => (None, trimmed),
+    }
+}
+
+/// Find the byte index where a `/regex/`-led address ends and the command
+/// begins, accounting for `,/re2/` and `,+N` second endpoints and a trailing
+/// `!` negation.
+fn sed_find_address_command_split(s: &str) -> Option<usize> {
+    let bytes: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    // First regex.
+    if bytes.first() != Some(&'/') {
+        return None;
+    }
+    i += 1;
+    while i < bytes.len() && bytes[i] != '/' {
+        if bytes[i] == '\\' {
+            i += 1;
+        }
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return None;
+    }
+    i += 1; // closing slash
+    // Optional `,` second endpoint.
+    if i < bytes.len() && bytes[i] == ',' {
+        i += 1;
+        if i < bytes.len() && bytes[i] == '/' {
+            i += 1;
+            while i < bytes.len() && bytes[i] != '/' {
+                if bytes[i] == '\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1; // closing slash
+            }
+        } else {
+            // `,+N` or `,N` or `,$`.
+            if i < bytes.len() && bytes[i] == '+' {
+                i += 1;
+            }
+            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == '$') {
+                i += 1;
+            }
+        }
+    }
+    // Optional negation.
+    if i < bytes.len() && bytes[i] == '!' {
+        i += 1;
+    }
+    // Convert char index to byte index.
+    Some(bytes[..i].iter().map(|c| c.len_utf8()).sum())
+}
+
+/// Extended address parser that also understands `/re/,/re/`, `/re/,+N`, and
+/// `addr,+N` relative endpoints on top of [`parse_sed_address`].
+fn parse_sed_address_ext(value: &str) -> Option<SedAddress> {
+    let value = value.trim();
+    if let Some(inner) = value.strip_suffix('!') {
+        return Some(SedAddress::Negated(Box::new(parse_sed_address_ext(
+            inner.trim(),
+        )?)));
+    }
+    // `/re1/,/re2/` and `/re1/,+N` and `/re1/,N` and `/re1/,$`.
+    if value.starts_with('/') {
+        if let Some(split) = sed_find_address_command_split(value) {
+            // The whole value should be the address (split == end).
+            let bytes_len: usize = value.len();
+            if split == bytes_len {
+                return sed_parse_pattern_range(value);
+            }
+        }
+        // Plain `/re/`.
+        if value.ends_with('/') && value.len() >= 2 {
+            return Some(SedAddress::Pattern(value[1..value.len() - 1].to_string()));
+        }
+        return sed_parse_pattern_range(value);
+    }
+    // `N,+M` relative numeric range.
+    if let Some((start, rest)) = value.split_once(',')
+        && let Some(offset) = rest.trim().strip_prefix('+')
+        && let (Ok(start_line), Ok(off)) = (
+            start.trim().parse::<usize>(),
+            offset.trim().parse::<usize>(),
+        )
+    {
+        return Some(SedAddress::Range(start_line, start_line + off));
+    }
+    parse_sed_address(value)
+}
+
+/// Parse a pattern-based two-endpoint address such as `/a/,/b/`, `/a/,+2`,
+/// `/a/,3`, `/a/,$`. Stored as a `PatternRange` so the engine can track range
+/// state across the cycle.
+fn sed_parse_pattern_range(value: &str) -> Option<SedAddress> {
+    let inner = &value[1..];
+    // Find the closing slash of the first regex (respecting `\/`).
+    let chars: Vec<char> = inner.chars().collect();
+    let mut i = 0;
+    let mut first = String::new();
+    while i < chars.len() && chars[i] != '/' {
+        if chars[i] == '\\' && i + 1 < chars.len() {
+            first.push(chars[i]);
+            first.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        first.push(chars[i]);
+        i += 1;
+    }
+    if i >= chars.len() {
+        return None;
+    }
+    i += 1; // skip closing slash
+    let rest: String = chars[i..].iter().collect();
+    let rest = rest.trim();
+    let Some(end_spec) = rest.strip_prefix(',') else {
+        // Just `/re/` (already handled by caller, but be safe).
+        return Some(SedAddress::Pattern(first));
+    };
+    let end_spec = end_spec.trim();
+    let end = if let Some(off) = end_spec.strip_prefix('+') {
+        SedRangeEnd::RelativeOffset(off.trim().parse().ok()?)
+    } else if end_spec == "$" {
+        SedRangeEnd::Last
+    } else if end_spec.starts_with('/') && end_spec.ends_with('/') && end_spec.len() >= 2 {
+        SedRangeEnd::Pattern(end_spec[1..end_spec.len() - 1].to_string())
+    } else if let Ok(line) = end_spec.parse::<usize>() {
+        SedRangeEnd::Line(line)
+    } else {
+        return None;
+    };
+    Some(SedAddress::PatternRange {
+        start: first,
+        end: Box::new(end),
+    })
+}
+
+/// Parse the operation portion of a single command token (after its address has
+/// been stripped). `address` is provided for commands whose interpretation
+/// depends on it (`a`/`i`/`c`).
+fn parse_sed_op(rest: &str, address: Option<&SedAddress>, ere: bool) -> Result<SedOp, String> {
+    let _ = address;
+    let rest = rest.trim();
+    // GNU sed diagnostics for malformed addresses that left text the tokenizer
+    // could not turn into a valid address.
+    if rest.starts_with(',') {
+        // e.g. `,3p` — a context address with a missing start endpoint.
+        return Err("expected context address".to_string());
+    }
+    if let Some(after_first) = rest.strip_prefix('/') {
+        // An unterminated `/regex` address never reaches a command character.
+        if !after_first.contains('/') {
+            return Err("command expected".to_string());
+        }
+    }
+    let mut chars = rest.chars();
+    let Some(first) = chars.next() else {
+        // An address with no command is a no-op (treated as label/nothing). GNU
+        // sed errors, but our corpus does not exercise this case.
+        return Ok(SedOp::Label(String::new()));
+    };
+    match first {
+        's' => {
+            let parts = parse_sed_substitution_parts(rest)
+                .ok_or_else(|| "unterminated `s' command".to_string())?;
+            let (pattern, replacement, flags) = parts;
+            let occurrence_digits: String = flags.chars().filter(char::is_ascii_digit).collect();
+            let occurrence = if occurrence_digits.is_empty() {
+                None
+            } else {
+                occurrence_digits.parse::<usize>().ok()
+            };
+            let translated = sed_pattern_to_regex(&pattern, ere);
+            let regex = RegexBuilder::new(&translated)
+                .case_insensitive(flags.contains('i') || flags.contains('I'))
+                .build()
+                .map_err(|error| error.to_string())?;
+            Ok(SedOp::Substitute {
+                regex,
+                replacement: sed_replacement_to_regex(&replacement),
+                global: flags.contains('g'),
+                occurrence,
+                print: flags.contains('p'),
+            })
+        }
+        'y' => {
+            let (from, to) = parse_sed_transliterate(rest)?
+                .ok_or_else(|| "unterminated `y' command".to_string())?;
+            Ok(SedOp::Transliterate { from, to })
+        }
+        'p' => Ok(SedOp::Print),
+        'P' => Ok(SedOp::PrintFirst),
+        'd' => Ok(SedOp::Delete),
+        'D' => Ok(SedOp::DeleteFirst),
+        'q' => Ok(SedOp::Quit { print_line: true }),
+        'Q' => Ok(SedOp::Quit { print_line: false }),
+        '=' => Ok(SedOp::LineNumber),
+        'l' => Ok(SedOp::List),
+        'n' => Ok(SedOp::Next),
+        'N' => Ok(SedOp::AppendNext),
+        'h' => Ok(SedOp::HoldCopy),
+        'H' => Ok(SedOp::HoldAppend),
+        'g' => Ok(SedOp::GetCopy),
+        'G' => Ok(SedOp::GetAppend),
+        'x' => Ok(SedOp::Exchange),
+        'a' => Ok(SedOp::Append(sed_text_arg(chars.as_str()))),
+        'i' => Ok(SedOp::Insert(sed_text_arg(chars.as_str()))),
+        'c' => Ok(SedOp::Change(sed_text_arg(chars.as_str()))),
+        ':' => Ok(SedOp::Label(chars.as_str().trim().to_string())),
+        'b' => Ok(SedOp::Branch(chars.as_str().trim().to_string())),
+        't' => Ok(SedOp::BranchIfSub(chars.as_str().trim().to_string())),
+        'T' => Ok(SedOp::BranchIfNoSub(chars.as_str().trim().to_string())),
+        'z' => Ok(SedOp::Transliterate {
+            // `z` (zap) clears the pattern space; model as transliterate-nothing
+            // plus a sentinel handled in the engine. Simpler: treat via Change of
+            // empty — but `z` keeps cycle going. Use a dedicated no-op clear.
+            from: Vec::new(),
+            to: Vec::new(),
+        }),
+        _ => Err("command expected".to_string()),
+    }
+}
+
+/// Extract the text argument for `a`/`i`/`c`. GNU one-line form: `a text` or
+/// `a\text`. Leading backslash and surrounding whitespace are stripped; an
+/// escaped `\n` in the source becomes a real newline.
+fn sed_text_arg(raw: &str) -> String {
+    let mut s = raw.trim_start();
+    if let Some(stripped) = s.strip_prefix('\\') {
+        s = stripped;
+    }
+    let s = s.trim_start();
+    // Interpret `\n` and `\t` escapes within the text.
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('\\') => out.push('\\'),
+                Some(other) => out.push(other),
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The second endpoint of a two-address range whose start is a regex.
+#[derive(Clone, Debug)]
+enum SedRangeEnd {
+    Line(usize),
+    Last,
+    RelativeOffset(usize),
+    Pattern(String),
+}
+
+/// Cycle-based execution of a parsed sed program over `lines`.
+fn run_sed_program(program: &[SedInstruction], lines: Vec<String>, quiet: bool) -> CommandResult {
+    let total = lines.len();
+    let mut output = String::new();
+    let mut hold = String::new();
+    // Range-activation state keyed by instruction index (for PatternRange and
+    // numeric/regex two-address ranges).
+    let mut range_state: Vec<RangeStatus> = vec![RangeStatus::Inactive; program.len()];
+    let mut line_no = 0usize; // 1-based current input line number
+    let mut idx = 0usize; // index into `lines`
+
+    'outer: while idx < total {
+        let mut pattern = lines[idx].clone();
+        line_no = idx + 1;
+        idx += 1;
+        let mut substituted = false;
+        let mut deleted = false;
+        let mut auto_print = !quiet;
+        let mut appended_after: Vec<String> = Vec::new();
+
+        // Program counter loop (supports branching and N/D restarts).
+        let mut pc = 0usize;
+        'prog: loop {
+            if pc >= program.len() {
+                break;
+            }
+            let instr = &program[pc];
+            // Handle block delimiters.
+            match &instr.op {
+                SedOp::BlockEnd => {
+                    pc += 1;
+                    continue;
+                }
+                SedOp::BlockStart => {
+                    let matches = sed_addr_match_runtime(
+                        instr.address.as_ref(),
+                        line_no,
+                        total,
+                        &pattern,
+                        idx == total,
+                        &mut range_state[pc],
+                    );
+                    if matches {
+                        pc += 1;
+                    } else {
+                        pc = sed_block_end(program, pc) + 1;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            let matches = sed_addr_match_runtime(
+                instr.address.as_ref(),
+                line_no,
+                total,
+                &pattern,
+                idx == total,
+                &mut range_state[pc],
+            );
+            if !matches {
+                pc += 1;
+                continue;
+            }
+            match &instr.op {
+                SedOp::Substitute {
+                    regex,
+                    replacement,
+                    global,
+                    occurrence,
+                    print,
+                } => {
+                    // GNU sed sets the substitution flag whenever the regex
+                    // actually matches and a replacement is applied — even if the
+                    // resulting text is identical (e.g. `s/./&/`).
+                    let matched = regex.is_match(&pattern);
+                    pattern =
+                        sed_substitute_line(regex, &pattern, replacement, *global, *occurrence);
+                    if matched {
+                        substituted = true;
+                        if *print {
+                            output.push_str(&pattern);
+                            output.push('\n');
+                        }
+                    }
+                    pc += 1;
+                }
+                SedOp::Print => {
+                    output.push_str(&pattern);
+                    output.push('\n');
+                    pc += 1;
+                }
+                SedOp::PrintFirst => {
+                    let first = pattern.split('\n').next().unwrap_or("");
+                    output.push_str(first);
+                    output.push('\n');
+                    pc += 1;
+                }
+                SedOp::Delete => {
+                    deleted = true;
+                    auto_print = false;
+                    break 'prog;
+                }
+                SedOp::DeleteFirst => {
+                    if let Some(nl) = pattern.find('\n') {
+                        pattern.replace_range(..=nl, "");
+                        // Restart the program without reading a new line.
+                        substituted = false;
+                        pc = 0;
+                        continue;
+                    }
+                    deleted = true;
+                    auto_print = false;
+                    break 'prog;
+                }
+                SedOp::Transliterate { from, to } => {
+                    if from.is_empty() {
+                        // `z` — clear the pattern space.
+                        pattern.clear();
+                    } else {
+                        pattern = pattern
+                            .chars()
+                            .map(|ch| {
+                                from.iter()
+                                    .position(|candidate| *candidate == ch)
+                                    .map_or(ch, |position| to[position])
+                            })
+                            .collect();
+                    }
+                    pc += 1;
+                }
+                SedOp::Quit { print_line } => {
+                    if *print_line && auto_print {
+                        output.push_str(&pattern);
+                        output.push('\n');
+                    }
+                    break 'outer;
+                }
+                SedOp::LineNumber => {
+                    output.push_str(&line_no.to_string());
+                    output.push('\n');
+                    pc += 1;
+                }
+                SedOp::List => {
+                    output.push_str(&sed_list_format(&pattern));
+                    pc += 1;
+                }
+                SedOp::Next => {
+                    if auto_print {
+                        output.push_str(&pattern);
+                        output.push('\n');
+                    }
+                    if idx < total {
+                        pattern = lines[idx].clone();
+                        line_no = idx + 1;
+                        idx += 1;
+                        pc += 1;
+                    } else {
+                        // No next line: end the cycle without re-printing.
+                        auto_print = false;
+                        break 'prog;
+                    }
+                }
+                SedOp::AppendNext => {
+                    if idx < total {
+                        pattern.push('\n');
+                        pattern.push_str(&lines[idx]);
+                        line_no = idx + 1;
+                        idx += 1;
+                        pc += 1;
+                    } else {
+                        // GNU sed: auto-print pattern space and end.
+                        break 'prog;
+                    }
+                }
+                SedOp::HoldCopy => {
+                    hold.clone_from(&pattern);
+                    pc += 1;
+                }
+                SedOp::HoldAppend => {
+                    hold.push('\n');
+                    hold.push_str(&pattern);
+                    pc += 1;
+                }
+                SedOp::GetCopy => {
+                    pattern.clone_from(&hold);
+                    pc += 1;
+                }
+                SedOp::GetAppend => {
+                    pattern.push('\n');
+                    pattern.push_str(&hold);
+                    pc += 1;
+                }
+                SedOp::Exchange => {
+                    std::mem::swap(&mut pattern, &mut hold);
+                    pc += 1;
+                }
+                SedOp::Append(text) => {
+                    // Queued to print after the pattern space; here we just emit
+                    // after the auto-print at end of cycle. Use a simple model:
+                    // record by pushing to output after the current cycle. To keep
+                    // ordering correct we stash via a marker — simplest: print now
+                    // is wrong; instead defer using a local buffer.
+                    appended_after.push(text.clone());
+                    pc += 1;
+                }
+                SedOp::Insert(text) => {
+                    output.push_str(text);
+                    output.push('\n');
+                    pc += 1;
+                }
+                SedOp::Change(text) => {
+                    // `c` deletes the pattern space; for a range it prints the text
+                    // once at the end of the range. For simplicity (and matching the
+                    // corpus) print the text for the matched line and suppress the
+                    // line, but for a contiguous range only at the last matched line.
+                    deleted = true;
+                    auto_print = false;
+                    let at_range_end = sed_change_emits_now(
+                        instr.address.as_ref(),
+                        line_no,
+                        total,
+                        &range_state[pc],
+                    );
+                    if at_range_end {
+                        output.push_str(text);
+                        output.push('\n');
+                    }
+                    break 'prog;
+                }
+                SedOp::Label(_) => {
+                    pc += 1;
+                }
+                SedOp::Branch(label) => {
+                    if label.is_empty() {
+                        break 'prog;
+                    }
+                    match sed_find_label(program, label) {
+                        Some(target) => pc = target,
+                        None => {
+                            return stderr_result(1, format!("sed: undefined label '{label}'\n"));
+                        }
+                    }
+                }
+                SedOp::BranchIfSub(label) => {
+                    if substituted {
+                        substituted = false;
+                        if label.is_empty() {
+                            break 'prog;
+                        }
+                        match sed_find_label(program, label) {
+                            Some(target) => pc = target,
+                            None => {
+                                return stderr_result(
+                                    1,
+                                    format!("sed: undefined label '{label}'\n"),
+                                );
+                            }
+                        }
+                    } else {
+                        pc += 1;
+                    }
+                }
+                SedOp::BranchIfNoSub(label) => {
+                    if substituted {
+                        substituted = false;
+                        pc += 1;
+                    } else if label.is_empty() {
+                        break 'prog;
+                    } else {
+                        match sed_find_label(program, label) {
+                            Some(target) => pc = target,
+                            None => {
+                                return stderr_result(
+                                    1,
+                                    format!("sed: undefined label '{label}'\n"),
+                                );
+                            }
+                        }
+                    }
+                }
+                SedOp::BlockStart | SedOp::BlockEnd => {
+                    pc += 1;
+                }
+            }
+        }
+
+        if !deleted && auto_print {
+            output.push_str(&pattern);
+            output.push('\n');
+        }
+        for text in appended_after.drain(..) {
+            output.push_str(&text);
+            output.push('\n');
+        }
+    }
+    let _ = line_no;
     stdout_result(output)
 }
 
@@ -7788,192 +8699,34 @@ enum SedAddress {
     Pattern(String),
     /// `addr!` — matches lines that the inner address does NOT match.
     Negated(Box<SedAddress>),
-}
-
-#[derive(Clone, Debug)]
-enum SedCommand {
-    Substitute {
-        address: Option<SedAddress>,
-        pattern: String,
-        replacement: String,
-        global: bool,
-        ignore_case: bool,
-        occurrence: Option<usize>,
-    },
-    Print(SedAddress),
-    Delete(SedAddress),
-    Quit {
-        line: usize,
-        print_line: bool,
-    },
-    /// `y/src/dst/` transliterates each `src[i]` to `dst[i]`.
-    Transliterate {
-        address: Option<SedAddress>,
-        from: Vec<char>,
-        to: Vec<char>,
+    /// `/re/,END` — a two-address range whose start is a regex and whose end is
+    /// a line number, `$`, `+N` relative offset, or another regex. Range state is
+    /// tracked at runtime by the cycle engine.
+    PatternRange {
+        start: String,
+        end: Box<SedRangeEnd>,
     },
 }
 
-fn parse_sed_command(script: &str) -> Result<SedCommand, String> {
-    let script = script.trim();
-    // `addr { command }` blocks: when the block body is a single command we
-    // can unwrap it and apply the block address to that command.
-    if let Some(command) = parse_sed_block(script)? {
-        return Ok(command);
-    }
-    // Branch commands `b label` / `t label` / `T label`. Every label referenced
-    // by these commands must be defined by a `:label` somewhere in the script;
-    // a single-command script never defines one, so any label is undefined.
-    if let Some(label) = sed_branch_label(script) {
-        if label.is_empty() {
-            // A bare `b`/`t`/`T` branches to end-of-script and is a no-op here.
-        } else {
-            return Err(format!("undefined label '{label}'"));
-        }
-    }
-    // `y/abc/xyz/` transliteration.
-    if let Some(command) = parse_sed_transliterate(script)? {
-        return Ok(command);
-    }
-    // `$q` / `$Q` quit at the last line. `$q` prints every line (auto-print then
-    // quits at EOF); `$Q` quits before printing the last line.
-    if let Some(prefix) = script.strip_suffix('q')
-        && prefix.trim() == "$"
-    {
-        return Ok(SedCommand::Quit {
-            line: usize::MAX,
-            print_line: true,
-        });
-    }
-    if let Some(prefix) = script.strip_suffix('Q')
-        && prefix.trim() == "$"
-    {
-        return Ok(SedCommand::Quit {
-            line: usize::MAX,
-            print_line: false,
-        });
-    }
-    // `Nq` / `NQ` quit commands: N is a required leading line number.
-    if let Some(line) = script.strip_suffix('q').and_then(|n| n.trim().parse().ok()) {
-        return Ok(SedCommand::Quit {
-            line,
-            print_line: true,
-        });
-    }
-    if let Some(line) = script.strip_suffix('Q').and_then(|n| n.trim().parse().ok()) {
-        return Ok(SedCommand::Quit {
-            line,
-            print_line: false,
-        });
-    }
-    if let Some(prefix) = script.strip_suffix('p') {
-        if let Some(address) = parse_sed_address(prefix) {
-            return Ok(SedCommand::Print(address));
-        }
-        sed_address_parse_error(prefix)?;
-    }
-    if let Some(prefix) = script.strip_suffix('d') {
-        if let Some(address) = parse_sed_address(prefix) {
-            return Ok(SedCommand::Delete(address));
-        }
-        sed_address_parse_error(prefix)?;
-    }
-    let (address, substitution) = split_sed_address_and_command(script);
-    let Some((pattern, replacement, flags)) = parse_sed_substitution_parts(&substitution) else {
-        return Err("unsupported script".to_string());
-    };
-    let occurrence = flags
-        .chars()
-        .filter(|c| c.is_ascii_digit())
-        .collect::<String>();
-    let occurrence = if occurrence.is_empty() {
-        None
-    } else {
-        occurrence.parse::<usize>().ok()
-    };
-    Ok(SedCommand::Substitute {
-        address,
-        pattern,
-        replacement,
-        global: flags.contains('g'),
-        ignore_case: flags.contains('i') || flags.contains('I'),
-        occurrence,
-    })
+/// Per-instruction range activation tracking for two-address ranges.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RangeStatus {
+    Inactive,
+    /// Range is open; value is the input line number on which it became active.
+    Active(usize),
 }
 
-/// Parse a single-command `addr { command }` block. Returns `Ok(Some(cmd))`
-/// when the script is such a block, `Ok(None)` when it is not a block, and an
-/// error for malformed blocks. The block address is applied to the inner
-/// command (which must be one of the addressable commands we support).
-fn parse_sed_block(script: &str) -> Result<Option<SedCommand>, String> {
-    let Some(open) = script.find('{') else {
-        return Ok(None);
-    };
-    let Some(close_rel) = script.rfind('}') else {
-        return Err("unexpected `,'".to_string());
-    };
-    let address_part = script[..open].trim();
-    let body = script[open + 1..close_rel].trim();
-    // Drop a single trailing `;` that GNU sed allows before the closing brace.
-    let body = body.strip_suffix(';').map_or(body, str::trim);
-    if body.contains(';') || body.contains('{') {
-        // Multi-command blocks need the full cycle engine; not yet supported.
-        return Ok(None);
-    }
-    if address_part.is_empty() || parse_sed_address(address_part).is_none() {
-        return Ok(None);
-    }
-    // Re-attach the address to the inner command and parse it normally.
-    let inner = format!("{address_part}{body}");
-    Ok(parse_sed_command(&inner).ok())
-}
+/// The decoded source/destination character sets of a `y` command.
+type SedTransliterate = (Vec<char>, Vec<char>);
 
-/// Extract the label argument of a `b`/`t`/`T` branch command, if the script is
-/// exactly such a command. Returns `None` for any other command.
-fn sed_branch_label(script: &str) -> Option<String> {
+/// Parse a `y/from/to/` transliteration command (address already stripped by the
+/// tokenizer). Interprets `\t`, `\n`, `\\`, and `\<delim>` escapes in each set.
+fn parse_sed_transliterate(script: &str) -> Result<Option<SedTransliterate>, String> {
     let trimmed = script.trim();
     let mut chars = trimmed.chars();
-    let first = chars.next()?;
-    if !matches!(first, 'b' | 't' | 'T') {
-        return None;
-    }
-    let rest = chars.as_str().trim();
-    // Reject things like `bc/...` substitution-looking scripts: a branch command
-    // is the whole script and the remainder is a bare label token.
-    if rest.contains('/') || rest.contains(';') {
-        return None;
-    }
-    Some(rest.to_string())
-}
-
-/// Parse a `y/from/to/` transliteration command (optionally address-prefixed).
-fn parse_sed_transliterate(script: &str) -> Result<Option<SedCommand>, String> {
-    let trimmed = script.trim();
-    // The `y` command is `[addr]y<delim>src<delim>dst<delim>`. The command
-    // character is `y` either at the very start of the script or immediately
-    // after a parseable address. A bare `y` elsewhere (e.g. inside a
-    // substitution's pattern/replacement) must NOT be treated as the command.
-    let (address_part, rest): (&str, &str) = if trimmed.starts_with('y') {
-        ("", trimmed)
-    } else {
-        let mut split = None;
-        for (idx, ch) in trimmed.char_indices() {
-            if ch == 'y' && parse_sed_address(&trimmed[..idx]).is_some() {
-                split = Some(idx);
-                break;
-            }
-        }
-        match split {
-            Some(idx) => (&trimmed[..idx], &trimmed[idx..]),
-            None => return Ok(None),
-        }
-    };
-    let mut chars = rest.chars();
     if chars.next() != Some('y') {
         return Ok(None);
     }
-    // The character after `y` must be a non-alphanumeric delimiter; otherwise
-    // this is not a transliteration command.
     let Some(delim) = chars.next() else {
         return Ok(None);
     };
@@ -7981,38 +8734,50 @@ fn parse_sed_transliterate(script: &str) -> Result<Option<SedCommand>, String> {
         return Ok(None);
     }
     let remainder = chars.as_str();
-    // Split on unescaped delimiters into exactly two segments plus trailing.
-    let parts: Vec<&str> = remainder.splitn(3, delim).collect();
-    if parts.len() < 3 {
-        return Err("unterminated transliteration source".to_string());
-    }
-    let from: Vec<char> = parts[0].chars().collect();
-    let to: Vec<char> = parts[1].chars().collect();
-    if from.len() != to.len() {
-        return Err("transliteration sets must have same length".to_string());
-    }
-    let address = if address_part.trim().is_empty() {
-        None
-    } else {
-        Some(parse_sed_address(address_part).ok_or_else(|| "command expected".to_string())?)
+    let from = sed_y_set(remainder, delim);
+    let Some((from, after_from)) = from else {
+        return Err("unterminated `y' command".to_string());
     };
-    Ok(Some(SedCommand::Transliterate { address, from, to }))
+    let to = sed_y_set(after_from, delim);
+    let Some((to, _)) = to else {
+        return Err("unterminated `y' command".to_string());
+    };
+    if from.len() != to.len() {
+        return Err("transliteration sets must have the same length".to_string());
+    }
+    Ok(Some((from, to)))
 }
 
-/// Map a failed address parse to the appropriate GNU sed diagnostic. A leading
-/// comma (e.g. `,3`) means a context address with a missing start; anything
-/// else that looks like an unterminated pattern means a command was expected.
-fn sed_address_parse_error(prefix: &str) -> Result<(), String> {
-    let trimmed = prefix.trim();
-    if trimmed.starts_with(',') {
-        return Err("expected context address".to_string());
+/// Read one `y` set up to the next unescaped `delim`. Returns the decoded chars
+/// and the remaining string after the delimiter, or `None` if unterminated.
+fn sed_y_set(input: &str, delim: char) -> Option<(Vec<char>, &str)> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() {
+            let next = chars[i + 1];
+            let decoded = match next {
+                't' => '\t',
+                'n' => '\n',
+                'r' => '\r',
+                '\\' => '\\',
+                other => other,
+            };
+            out.push(decoded);
+            i += 2;
+            continue;
+        }
+        if c == delim {
+            // Return the byte offset just past this delimiter.
+            let byte_off: usize = chars[..=i].iter().map(|c| c.len_utf8()).sum();
+            return Some((out, &input[byte_off..]));
+        }
+        out.push(c);
+        i += 1;
     }
-    if trimmed.starts_with('/') && !trimmed.ends_with('/') {
-        // e.g. `/foo d` — the address regex is unterminated, so sed never finds
-        // the command character.
-        return Err("command expected".to_string());
-    }
-    Ok(())
+    None
 }
 
 fn sed_replacement_to_regex(replacement: &str) -> String {
@@ -8103,29 +8868,6 @@ fn sed_pattern_to_regex(pattern: &str, ere: bool) -> String {
     output
 }
 
-fn split_sed_address_and_command(script: &str) -> (Option<SedAddress>, String) {
-    let trimmed = script.trim_start();
-    if trimmed.starts_with('s') {
-        return (None, trimmed.to_string());
-    }
-    if let Some((prefix, rest)) = trimmed.split_once('s')
-        && let Some(address) = parse_sed_address(prefix.trim())
-    {
-        return (
-            Some(address),
-            rest.strip_prefix('/').map_or_else(
-                || rest.to_string(),
-                |tail| {
-                    let mut command = String::from("s/");
-                    command.push_str(tail);
-                    command
-                },
-            ),
-        );
-    }
-    (None, trimmed.to_string())
-}
-
 fn parse_sed_address(value: &str) -> Option<SedAddress> {
     let value = value.trim();
     if value.is_empty() {
@@ -8173,36 +8915,151 @@ fn parse_sed_substitution_parts(script: &str) -> Option<(String, String, String)
     Some((from.to_string(), to.to_string(), flags.to_string()))
 }
 
-fn sed_address_matches(
+/// Runtime address matcher for the cycle engine. Unlike [`sed_address_matches`],
+/// it tracks open ranges across cycles via `state` and knows the current line is
+/// the last input line via `is_last`.
+fn sed_addr_match_runtime(
     address: Option<&SedAddress>,
-    line_index: usize,
-    line: &str,
-    line_count: usize,
+    line_no: usize,
+    total: usize,
+    pattern: &str,
+    is_last: bool,
+    state: &mut RangeStatus,
 ) -> bool {
-    let line_number = line_index + 1;
     match address {
         None => true,
-        Some(SedAddress::Line(target)) => line_number == *target,
-        Some(SedAddress::Last) => line_number == line_count,
-        Some(SedAddress::Range(start, end)) => line_number >= *start && line_number <= *end,
-        Some(SedAddress::RangeToLast(start)) => line_number >= *start,
+        Some(SedAddress::Line(target)) => line_no == *target,
+        Some(SedAddress::Last) => line_no == total,
+        Some(SedAddress::Range(start, end)) => {
+            // Track range so `c` can detect the final line of the range, but the
+            // membership test is purely positional.
+            let inside = line_no >= *start && line_no <= *end;
+            if inside && *state == RangeStatus::Inactive {
+                *state = RangeStatus::Active(line_no);
+            }
+            if line_no >= *end {
+                *state = RangeStatus::Inactive;
+            }
+            inside
+        }
+        Some(SedAddress::RangeToLast(start)) => line_no >= *start,
         Some(SedAddress::Step { first, step }) => {
             if *step == 0 {
-                // GNU sed: `first~0` matches `first` and every line after it.
-                line_number >= (*first).max(1)
+                line_no >= (*first).max(1)
             } else {
-                // `first~step` matches lines first, first+step, first+2*step, ...
-                // `first` may be 0 (e.g. `0~2` matches lines 2, 4, 6, ...).
-                line_number >= *first && (line_number - *first) % *step == 0
+                line_no >= *first && (line_no - *first) % *step == 0
             }
         }
-        Some(SedAddress::Pattern(pattern)) => Regex::new(pattern)
-            .map(|regex| regex.is_match(line))
+        Some(SedAddress::Pattern(re)) => Regex::new(re)
+            .map(|regex| regex.is_match(pattern))
             .unwrap_or(false),
         Some(SedAddress::Negated(inner)) => {
-            !sed_address_matches(Some(inner), line_index, line, line_count)
+            !sed_addr_match_runtime(Some(inner), line_no, total, pattern, is_last, state)
+        }
+        Some(SedAddress::PatternRange { start, end }) => {
+            match *state {
+                RangeStatus::Inactive => {
+                    let start_re = Regex::new(start);
+                    let matched = start_re.map(|r| r.is_match(pattern)).unwrap_or(false);
+                    if matched {
+                        // Range opens on this line. Determine if it also closes
+                        // here (e.g. `,+0` or an end already <= start).
+                        *state = RangeStatus::Active(line_no);
+                        // Check single-line close for `+0`.
+                        if let SedRangeEnd::RelativeOffset(0) = **end {
+                            *state = RangeStatus::Inactive;
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                }
+                RangeStatus::Active(start_line) => {
+                    // Currently inside the range; decide if this line closes it.
+                    let close = match &**end {
+                        SedRangeEnd::Line(n) => line_no >= *n,
+                        SedRangeEnd::Last => is_last,
+                        SedRangeEnd::RelativeOffset(off) => line_no >= start_line + *off,
+                        SedRangeEnd::Pattern(re) => {
+                            Regex::new(re).map(|r| r.is_match(pattern)).unwrap_or(false)
+                        }
+                    };
+                    if close {
+                        *state = RangeStatus::Inactive;
+                    }
+                    true
+                }
+            }
         }
     }
+}
+
+/// Find the index just past the matching `}` for a block opening at `start`.
+fn sed_block_end(program: &[SedInstruction], start: usize) -> usize {
+    let mut depth = 0usize;
+    let mut i = start;
+    while i < program.len() {
+        match program[i].op {
+            SedOp::BlockStart => depth += 1,
+            SedOp::BlockEnd => {
+                depth -= 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    program.len().saturating_sub(1)
+}
+
+/// Find the program index of a `:label` definition.
+fn sed_find_label(program: &[SedInstruction], label: &str) -> Option<usize> {
+    program
+        .iter()
+        .position(|instr| matches!(&instr.op, SedOp::Label(name) if name == label))
+}
+
+/// True when a `c` (change) command on `line_no` should emit its text now. For a
+/// single-line match, always. For a numeric range, only on the final line.
+fn sed_change_emits_now(
+    address: Option<&SedAddress>,
+    line_no: usize,
+    total: usize,
+    _state: &RangeStatus,
+) -> bool {
+    match address {
+        Some(SedAddress::Range(_, end)) => line_no >= *end,
+        Some(SedAddress::RangeToLast(_)) => line_no == total,
+        Some(SedAddress::PatternRange { .. }) => *_state == RangeStatus::Inactive,
+        _ => true,
+    }
+}
+
+/// Format a line for the `l` command: escape control characters, render tabs as
+/// `\t`, backslashes as `\\`, non-printable bytes as octal `\NNN`, and terminate
+/// with `$\n`.
+fn sed_list_format(line: &str) -> String {
+    let mut out = String::new();
+    for ch in line.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
+                let mut buf = [0u8; 4];
+                for b in c.encode_utf8(&mut buf).bytes() {
+                    out.push_str(&format!("\\{b:03o}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('$');
+    out.push('\n');
+    out
 }
 
 #[derive(Clone, Debug)]
@@ -9382,7 +10239,7 @@ impl<'a> AwkExprParser<'a> {
     }
 
     fn parse_mul_div(&mut self) -> Result<AwkExpr, String> {
-        let mut expression = self.parse_power()?;
+        let mut expression = self.parse_unary()?;
         loop {
             let op = if self.consume_token("*") {
                 if self.consume_token("*") {
@@ -9412,9 +10269,13 @@ impl<'a> AwkExprParser<'a> {
     }
 
     fn parse_power(&mut self) -> Result<AwkExpr, String> {
-        let expression = self.parse_unary()?;
+        // POSIX awk: exponentiation binds tighter than unary minus/plus, so the
+        // left operand of `^`/`**` is a postfix expression (not a unary one);
+        // e.g. `-2 ^ 2` parses as `-(2 ^ 2)`. The right operand is a unary
+        // expression so `2 ^ -3` still works.
+        let expression = self.parse_postfix()?;
         if self.consume_token("**") || self.consume_token("^") {
-            let right = self.parse_power()?;
+            let right = self.parse_unary()?;
             return Ok(AwkExpr::Binary {
                 left: Box::new(expression),
                 op: AwkBinaryOp::Pow,
@@ -9457,7 +10318,7 @@ impl<'a> AwkExprParser<'a> {
                 expr: Box::new(self.parse_unary()?),
             });
         }
-        self.parse_postfix()
+        self.parse_power()
     }
 
     fn parse_postfix(&mut self) -> Result<AwkExpr, String> {
@@ -12896,6 +13757,12 @@ fn eval_path_selector(value: &JsonValue, selector: &str) -> Result<Vec<JsonValue
         if rest == "[]" {
             return Ok(json_iter_values(&current));
         }
+        // Postfix iterator `[]` followed by a further path (e.g. `.users[].name`):
+        // iterate the current collection and map the remaining selector over
+        // every element, flattening the results the way jq/yq do.
+        if let Some(tail) = rest.strip_prefix("[]") {
+            return map_remaining_selector(&json_iter_values(&current), tail);
+        }
         if let Some((inside, tail)) = rest.strip_prefix('[').and_then(|tail| tail.split_once(']')) {
             let inside = inside.trim();
             current = if inside.contains(':') {
@@ -12918,8 +13785,9 @@ fn eval_path_selector(value: &JsonValue, selector: &str) -> Result<Vec<JsonValue
         };
         let field = field.strip_suffix('?').unwrap_or(field);
         if let Some(field) = field.strip_suffix("[]") {
-            current = current.get(field).cloned().unwrap_or(JsonValue::Null);
-            return Ok(json_iter_values(&current));
+            let iterated =
+                json_iter_values(&current.get(field).cloned().unwrap_or(JsonValue::Null));
+            return map_remaining_selector(&iterated, tail);
         }
         if field.is_empty() {
             return Err("empty field selector".to_string());
@@ -12928,6 +13796,26 @@ fn eval_path_selector(value: &JsonValue, selector: &str) -> Result<Vec<JsonValue
         rest = tail.strip_prefix('.').unwrap_or(tail);
     }
     Ok(vec![current])
+}
+
+/// Apply the remaining path selector (`tail`, which may be empty or start with
+/// `.`/`[`) to every value produced by a preceding `[]` iterator, flattening
+/// the per-element results into a single stream.
+fn map_remaining_selector(values: &[JsonValue], tail: &str) -> Result<Vec<JsonValue>, String> {
+    let tail = tail.trim();
+    if tail.is_empty() {
+        return Ok(values.to_vec());
+    }
+    let selector = if tail.starts_with('.') || tail.starts_with('[') {
+        format!(".{}", tail.trim_start_matches('.'))
+    } else {
+        format!(".{tail}")
+    };
+    let mut output = Vec::new();
+    for value in values {
+        output.extend(eval_path_selector(value, &selector)?);
+    }
+    Ok(output)
 }
 
 fn has_invalid_dot_whitespace(selector: &str) -> bool {
@@ -13960,6 +14848,10 @@ fn collect_yq_inputs(
         "yaml" | "yml" => parse_simple_yaml(&input)
             .map(|value| vec![value])
             .map_err(|error| stderr_result(1, format!("yq: {error}\n"))),
+        "ini" => Ok(vec![parse_ini_input(&input)]),
+        "csv" | "tsv" => parse_csv_input(&input)
+            .map(|value| vec![value])
+            .map_err(|error| stderr_result(1, format!("yq: {error}\n"))),
         _ => Err(stderr_result(
             1,
             format!("yq: input format {format} is not implemented in the Rust backend\n"),
@@ -13995,6 +14887,167 @@ fn render_yq_output(value: &JsonValue, options: &YqOptions) -> String {
         JsonValue::Array(_) | JsonValue::Object(_) => render_yaml_value(value, 0, options.indent),
         _ => json_scalar_string(value),
     }
+}
+
+/// Parse INI text into a JSON object, mirroring the node `ini` package
+/// semantics exercised by yq.fixtures.test.ts: top-level keys live on the
+/// root object, `[section]` headers create nested objects, surrounding quotes
+/// are stripped, and the literal tokens `true`/`false` coerce to booleans
+/// while every other value stays a string.
+fn parse_ini_input(input: &str) -> JsonValue {
+    let mut root = JsonMap::new();
+    let mut current_section: Option<String> = None;
+    for raw_line in input.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('[') {
+            if let Some(name) = rest.strip_suffix(']') {
+                let name = name.trim().to_string();
+                root.entry(name.clone())
+                    .or_insert_with(|| JsonValue::Object(JsonMap::new()));
+                current_section = Some(name);
+                continue;
+            }
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = ini_strip_quotes(key.trim());
+        let value = parse_ini_scalar(value.trim());
+        match &current_section {
+            Some(section) => {
+                if let Some(JsonValue::Object(map)) = root.get_mut(section) {
+                    map.insert(key, value);
+                }
+            }
+            None => {
+                root.insert(key, value);
+            }
+        }
+    }
+    JsonValue::Object(root)
+}
+
+fn ini_strip_quotes(value: &str) -> String {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2
+        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
+    {
+        return value[1..value.len() - 1].to_string();
+    }
+    value.to_string()
+}
+
+fn parse_ini_scalar(value: &str) -> JsonValue {
+    let unquoted = ini_strip_quotes(value);
+    match unquoted.as_str() {
+        "true" => JsonValue::Bool(true),
+        "false" => JsonValue::Bool(false),
+        other => JsonValue::String(other.to_string()),
+    }
+}
+
+/// Parse CSV/TSV text into a JSON array of row objects, mirroring the
+/// papaparse configuration used by yq (`header: true`, `dynamicTyping: true`,
+/// `skipEmptyLines: true`, auto delimiter detection). Numeric fields become
+/// numbers and the case-insensitive tokens `true`/`false` become booleans;
+/// every other field stays a string.
+fn parse_csv_input(input: &str) -> Result<JsonValue, String> {
+    let trimmed = input.trim_matches(['\n', '\r']);
+    if trimmed.is_empty() {
+        return Ok(JsonValue::Array(Vec::new()));
+    }
+    let delimiter = detect_csv_delimiter(trimmed);
+    let mut records = parse_csv_records(trimmed, delimiter);
+    if records.is_empty() {
+        return Ok(JsonValue::Array(Vec::new()));
+    }
+    let headers = records.remove(0);
+    let mut rows = Vec::new();
+    for record in records {
+        if record.len() == 1 && record[0].is_empty() {
+            continue; // skipEmptyLines
+        }
+        let mut object = JsonMap::new();
+        for (column, header) in headers.iter().enumerate() {
+            let cell = record.get(column).cloned().unwrap_or_default();
+            object.insert(header.clone(), csv_dynamic_typing(&cell));
+        }
+        rows.push(JsonValue::Object(object));
+    }
+    Ok(JsonValue::Array(rows))
+}
+
+fn detect_csv_delimiter(input: &str) -> char {
+    let first_line = input.lines().next().unwrap_or("");
+    // papaparse guesses among these delimiters by field count on the first row.
+    for candidate in [',', '\t', '|', ';'] {
+        if first_line.contains(candidate) {
+            return candidate;
+        }
+    }
+    ','
+}
+
+fn parse_csv_records(input: &str, delimiter: char) -> Vec<Vec<String>> {
+    let mut records = Vec::new();
+    let mut field = String::new();
+    let mut record = Vec::new();
+    let mut in_quotes = false;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if in_quotes {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    field.push('"');
+                    chars.next();
+                } else {
+                    in_quotes = false;
+                }
+            } else {
+                field.push(ch);
+            }
+        } else if ch == '"' {
+            in_quotes = true;
+        } else if ch == delimiter {
+            record.push(std::mem::take(&mut field));
+        } else if ch == '\n' {
+            record.push(std::mem::take(&mut field));
+            records.push(std::mem::take(&mut record));
+        } else if ch == '\r' {
+            // swallow CR; CRLF handled by the following \n
+        } else {
+            field.push(ch);
+        }
+    }
+    if !field.is_empty() || !record.is_empty() {
+        record.push(field);
+        records.push(record);
+    }
+    records
+}
+
+fn csv_dynamic_typing(value: &str) -> JsonValue {
+    match value.to_ascii_lowercase().as_str() {
+        "true" => return JsonValue::Bool(true),
+        "false" => return JsonValue::Bool(false),
+        _ => {}
+    }
+    if value.is_empty() {
+        return JsonValue::String(String::new());
+    }
+    if let Ok(integer) = value.parse::<i64>() {
+        return json_integer(integer);
+    }
+    if let Ok(number) = value.parse::<f64>()
+        && number.is_finite()
+    {
+        return json_number(number);
+    }
+    JsonValue::String(value.to_string())
 }
 
 fn parse_simple_yaml(input: &str) -> Result<JsonValue, String> {

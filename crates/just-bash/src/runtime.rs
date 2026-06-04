@@ -2181,6 +2181,217 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn sed_cycle_engine_advanced_and_command_rows() {
+        // Cycle-engine coverage for the GNU sed commands that require a real
+        // execution loop with pattern/hold space, multi-command `;`-separated
+        // scripts, `{ }` blocks, `:label` branch targets, and N/n/D/P/=/l/a/i/c.
+        // Each assertion mirrors an upstream just-bash test by file:line.
+        let five = || {
+            Bash::with_options(BashOptions {
+                files: BTreeMap::from([
+                    (
+                        "/test/file.txt".to_string(),
+                        "line 1\nline 2\nline 3\nline 4\nline 5\n".to_string(),
+                    ),
+                    (
+                        "/test/alpha.txt".to_string(),
+                        "alpha\nbeta\ngamma\ndelta\n".to_string(),
+                    ),
+                ]),
+                cwd: Some("/test".to_string()),
+                ..BashOptions::default()
+            })
+        };
+        let file = |content: &str| {
+            Bash::with_options(BashOptions {
+                files: BTreeMap::from([("/test.txt".to_string(), content.to_string())]),
+                cwd: Some("/".to_string()),
+                ..BashOptions::default()
+            })
+        };
+
+        // ---- sed.advanced.test.ts ----
+        // :6 N appends next line to pattern space (even line count).
+        assert_eq!(
+            file("line1\nline2\nline3\nline4\n")
+                .exec("sed 'N;s/\\n/ /' /test.txt")
+                .stdout,
+            "line1 line2\nline3 line4\n"
+        );
+        // :15 N auto-prints when there is no next line (odd line count).
+        assert_eq!(
+            file("line1\nline2\nline3\n")
+                .exec("sed 'N;s/\\n/ /' /test.txt")
+                .stdout,
+            "line1 line2\nline3\n"
+        );
+        // :25 N joins pairs of lines.
+        assert_eq!(
+            file("a\nb\nc\nd\n")
+                .exec("sed 'N;s/\\n/,/' /test.txt")
+                .stdout,
+            "a,b\nc,d\n"
+        );
+        // :53 y handles escape sequences (`\t` -> space).
+        assert_eq!(
+            file("a\tb\n").exec("sed 'y/\\t/ /' /test.txt").stdout,
+            "a b\n"
+        );
+        // :63 `=` prints line numbers interleaved with the pattern space.
+        assert_eq!(
+            file("a\nb\nc\n").exec("sed '=' /test.txt").stdout,
+            "1\na\n2\nb\n3\nc\n"
+        );
+        // :71 `2=` prints the line number only for the addressed line.
+        assert_eq!(
+            file("a\nb\nc\n").exec("sed '2=' /test.txt").stdout,
+            "a\n2\nb\nc\n"
+        );
+        // :81 `b;d` branches unconditionally to end of script, skipping `d`.
+        assert_eq!(
+            file("hello\nworld\n").exec("sed 'b;d' /test.txt").stdout,
+            "hello\nworld\n"
+        );
+        // :90 `b skip;d;:skip` branches to a label, skipping `d`.
+        assert_eq!(
+            file("hello\nworld\n")
+                .exec("sed 'b skip;d;:skip' /test.txt")
+                .stdout,
+            "hello\nworld\n"
+        );
+        // :99 `t;d` conditional branch on a successful substitution.
+        assert_eq!(
+            file("hello\nworld\n")
+                .exec("sed 's/hello/HELLO/;t;d' /test.txt")
+                .stdout,
+            "HELLO\n"
+        );
+        // :108 `t done` conditional branch to a label.
+        assert_eq!(
+            file("hello\nworld\n")
+                .exec("sed 's/hello/HELLO/;t done;s/world/WORLD/;:done' /test.txt")
+                .stdout,
+            "HELLO\nWORLD\n"
+        );
+
+        // ---- sed.commands.test.ts ----
+        // :50 `l` lists special characters with escapes and a trailing `$`.
+        let l1 = file("a\tb\nc\n").exec("sed -n 'l' /test.txt");
+        assert!(
+            l1.stdout.contains("\\t"),
+            "l: tab escape, got {:?}",
+            l1.stdout
+        );
+        assert!(
+            l1.stdout.contains('$'),
+            "l: end marker, got {:?}",
+            l1.stdout
+        );
+        // :61 `l` renders non-printable bytes as octal `\001`.
+        let l2 = file("a\u{1}b\n").exec("sed -n 'l' /test.txt");
+        assert!(
+            l2.stdout.contains("\\001"),
+            "l: octal escape, got {:?}",
+            l2.stdout
+        );
+        // :73 `-n '='` prints line numbers only.
+        assert_eq!(
+            five().exec("sed -n '=' /test/file.txt").stdout,
+            "1\n2\n3\n4\n5\n"
+        );
+        // :79 `2{=;p}` prints the line number before the pattern space.
+        assert_eq!(
+            five().exec("sed -n '2{=;p}' /test/file.txt").stdout,
+            "2\nline 2\n"
+        );
+        // :87 `2a added` appends text after the addressed line.
+        assert_eq!(
+            five().exec("sed '2a added' /test/alpha.txt").stdout,
+            "alpha\nbeta\nadded\ngamma\ndelta\n"
+        );
+        // :93 `2i inserted` inserts text before the addressed line.
+        assert_eq!(
+            five().exec("sed '2i inserted' /test/alpha.txt").stdout,
+            "alpha\ninserted\nbeta\ngamma\ndelta\n"
+        );
+        // :99 `2c replaced` changes the addressed line.
+        assert_eq!(
+            five().exec("sed '2c replaced' /test/alpha.txt").stdout,
+            "alpha\nreplaced\ngamma\ndelta\n"
+        );
+        // :105 `2,3c replaced` changes a range, emitting the text once.
+        assert_eq!(
+            five().exec("sed '2,3c replaced' /test/alpha.txt").stdout,
+            "alpha\nreplaced\ndelta\n"
+        );
+        // :114 `n;p` reads the next line, then prints (every other line).
+        assert_eq!(
+            five().exec("sed -n 'n;p' /test/file.txt").stdout,
+            "line 2\nline 4\n"
+        );
+        // :121 `N;s/\n/ + /` appends the next line and joins pairs.
+        assert_eq!(
+            five().exec("sed 'N;s/\\n/ + /' /test/alpha.txt").stdout,
+            "alpha + beta\ngamma + delta\n"
+        );
+        // :130 `h` copies pattern space to hold space.
+        assert_eq!(
+            five().exec("sed -n '1h;3{g;p}' /test/alpha.txt").stdout,
+            "alpha\n"
+        );
+        // :137 `H` appends pattern space to hold space.
+        assert_eq!(
+            five().exec("sed -n '1h;2H;2{g;p}' /test/alpha.txt").stdout,
+            "alpha\nbeta\n"
+        );
+        // :144 `G` appends hold space to pattern space.
+        assert_eq!(
+            five().exec("sed -n '1h;3{G;p}' /test/alpha.txt").stdout,
+            "gamma\nalpha\n"
+        );
+        // :150 `x` exchanges pattern and hold spaces.
+        assert_eq!(
+            five().exec("sed -n '1h;2x;2p' /test/alpha.txt").stdout,
+            "alpha\n"
+        );
+        // :159 `N;D` deletes up to the first newline and restarts the cycle.
+        assert_eq!(five().exec("sed 'N;D' /test/file.txt").stdout, "line 5\n");
+        // :169 `N;P` prints only the first line of each joined pair.
+        assert_eq!(
+            five().exec("sed -n 'N;P' /test/alpha.txt").stdout,
+            "alpha\ngamma\n"
+        );
+        // :178 `:start;s/a/A/;t start;...` loops with `b`/`t` and a label.
+        assert_eq!(
+            five()
+                .exec("sed -e ':start;s/a/A/;t start;s/A/X/g' /test/alpha.txt")
+                .stdout,
+            "XlphX\nbetX\ngXmmX\ndeltX\n"
+        );
+        // :188 `t end` branches on a successful substitution.
+        assert_eq!(
+            five()
+                .exec("sed -e 's/alpha/FOUND/;t end;s/./X/g;:end' /test/alpha.txt")
+                .stdout,
+            "FOUND\nXXXX\nXXXXX\nXXXXX\n"
+        );
+        // :197 `T skip` branches when no substitution was made.
+        assert_eq!(
+            five()
+                .exec("sed -e 's/alpha/FOUND/;T skip;s/FOUND/REPLACED/;:skip' /test/alpha.txt")
+                .stdout,
+            "REPLACED\nbeta\ngamma\ndelta\n"
+        );
+        // :208 nested `{ }` block applies multiple commands to a range.
+        assert_eq!(
+            five()
+                .exec("sed '2,3{s/e/E/g;s/a/A/g}' /test/alpha.txt")
+                .stdout,
+            "alpha\nbEtA\ngAmmA\ndelta\n"
+        );
+    }
+
+    #[test]
     fn awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors() {
         let env = Bash::with_options(BashOptions {
             files: BTreeMap::from([
@@ -4265,6 +4476,105 @@ and exhibited clearly, with a label attached.\n",
             "rg --sort path Sherlock",
             0,
             "a.txt:1:Sherlock\nz.txt:1:Sherlock\n",
+        );
+    }
+
+    #[test]
+    fn rg_imported_misc_type_heading_ignore_and_symlink_rows_are_portable() {
+        // packages/just-bash/src/commands/rg/imported-tests/misc.test.ts
+        // 89 - with_filename: should show filename with -H even for single file
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -H Sherlock sherlock",
+            0,
+            "sherlock:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+sherlock:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 107 - with_heading: should show heading format
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg --heading Sherlock sherlock",
+            0,
+            "sherlock\n\
+For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 348 - file_types_all: should filter type 'all' (only typed files)
+        assert_home_exec(
+            &[("sherlock", SHERLOCK), ("file.py", "Sherlock\n")],
+            "rg -t all Sherlock",
+            0,
+            "file.py:1:Sherlock\n",
+        );
+        // 380 - file_types_negate_all: should negate type 'all' (only untyped files)
+        assert_home_exec(
+            &[("sherlock", SHERLOCK), ("file.py", "Sherlock\n")],
+            "rg -T all Sherlock",
+            0,
+            "sherlock:1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+sherlock:3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 398 - file_type_clear: should clear type patterns with --type-clear
+        assert_home_exec(
+            &[("file.py", "test\n"), ("file.rs", "test\n")],
+            "rg --type-clear py -t py test",
+            1,
+            "",
+        );
+        // 415 - file_type_add: should add type patterns with --type-add
+        assert_home_exec(
+            &[("file.foo", "test\n"), ("file.bar", "test\n")],
+            "rg --type-add 'custom:*.foo' -t custom test",
+            0,
+            "file.foo:1:test\n",
+        );
+        // 434 - file_type_add_compose: should compose types with include
+        assert_home_exec(
+            &[
+                ("file.js", "test\n"),
+                ("file.ts", "test\n"),
+                ("file.py", "test\n"),
+            ],
+            "rg --type-add 'web:include:js' -t web test",
+            0,
+            "file.js:1:test\n",
+        );
+        // 891 - ignore_generic: should respect .ignore
+        assert_home_exec(
+            &[("sherlock", SHERLOCK), (".ignore", "sherlock\n")],
+            "rg Sherlock",
+            1,
+            "",
+        );
+        // 906 - ignore_ripgrep: should respect .rgignore
+        assert_home_exec(
+            &[("sherlock", SHERLOCK), (".rgignore", "sherlock\n")],
+            "rg Sherlock",
+            1,
+            "",
+        );
+        // 946 - symlink_nofollow: should not follow file symlinks during traversal by default
+        assert_home_exec(
+            &[("searchdir/real.txt", "test content\n")],
+            "ln -s real.txt /home/user/searchdir/link.txt\nrg test searchdir",
+            0,
+            "searchdir/real.txt:1:test content\n",
+        );
+        // 965 - symlink_follow: should follow file symlinks during traversal with -L
+        assert_home_exec(
+            &[("searchdir/real.txt", "test content\n")],
+            "ln -s real.txt /home/user/searchdir/link.txt\nrg -L test searchdir",
+            0,
+            "searchdir/link.txt:1:test content\n\
+searchdir/real.txt:1:test content\n",
+        );
+        // 1004 - unrestricted2: should include hidden files with -uu
+        assert_home_exec(
+            &[(".sherlock", SHERLOCK)],
+            "rg -uu Sherlock",
+            0,
+            ".sherlock:1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+.sherlock:3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
         );
     }
 
@@ -11071,6 +11381,195 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn structured_data_yq_fixtures_yaml_json_ini_csv_rows() {
+        // packages/just-bash/src/commands/yq/yq.fixtures.test.ts
+        //   YAML: :103   JSON: :139,:149,:158,:167
+        //   INI:  :222,:231,:241,:252,:259
+        //   CSV:  :273,:282,:291,:300,:310
+        // Each assertion mirrors the upstream vitest expectation exactly,
+        // exercising the portable yq YAML/JSON/INI/CSV input parsers.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/fixtures/yaml/users.yaml".to_string(),
+                    concat!(
+                        "users:\n",
+                        "  - name: alice\n    age: 30\n    email: alice@example.com\n    active: true\n",
+                        "  - name: bob\n    age: 25\n    email: bob@example.com\n    active: false\n",
+                        "  - name: charlie\n    age: 35\n    email: charlie@example.com\n    active: true\n",
+                        "metadata:\n  version: 1.0\n  generated: \"2024-01-01\"\n",
+                    )
+                    .to_string(),
+                ),
+                (
+                    "/fixtures/json/users.json".to_string(),
+                    concat!(
+                        "{\n  \"users\": [\n",
+                        "    { \"name\": \"alice\", \"age\": 30, \"email\": \"alice@example.com\", \"active\": true },\n",
+                        "    { \"name\": \"bob\", \"age\": 25, \"email\": \"bob@example.com\", \"active\": false },\n",
+                        "    { \"name\": \"charlie\", \"age\": 35, \"email\": \"charlie@example.com\", \"active\": true }\n",
+                        "  ]\n}\n",
+                    )
+                    .to_string(),
+                ),
+                (
+                    "/fixtures/json/nested.json".to_string(),
+                    concat!(
+                        "{\n  \"company\": {\n    \"name\": \"Acme Corp\",\n    \"departments\": [\n",
+                        "      { \"name\": \"Engineering\", \"employees\": 50, \"budget\": 500000 },\n",
+                        "      { \"name\": \"Sales\", \"employees\": 30, \"budget\": 300000 },\n",
+                        "      { \"name\": \"Marketing\", \"employees\": 20, \"budget\": 200000 }\n",
+                        "    ]\n  }\n}\n",
+                    )
+                    .to_string(),
+                ),
+                (
+                    "/fixtures/ini/config.ini".to_string(),
+                    concat!(
+                        "[database]\nhost=localhost\nport=5432\nname=myapp\nssl=true\n\n",
+                        "[server]\nhost=0.0.0.0\nport=8080\ndebug=false\nworkers=4\n\n",
+                        "[logging]\nlevel=info\nformat=json\npath=/var/log/app.log\n",
+                    )
+                    .to_string(),
+                ),
+                (
+                    "/fixtures/ini/app.ini".to_string(),
+                    concat!(
+                        "name=MyApp\nversion=2.5.0\nenvironment=production\n\n",
+                        "[features]\ndark_mode=true\nnotifications=true\nanalytics=false\n\n",
+                        "[limits]\nmax_users=1000\nmax_requests=10000\ntimeout=30\n",
+                    )
+                    .to_string(),
+                ),
+                (
+                    "/fixtures/csv/users.csv".to_string(),
+                    concat!(
+                        "name,age,email,active\n",
+                        "alice,30,alice@example.com,true\n",
+                        "bob,25,bob@example.com,false\n",
+                        "charlie,35,charlie@example.com,true\n",
+                    )
+                    .to_string(),
+                ),
+                (
+                    "/fixtures/csv/products.csv".to_string(),
+                    concat!(
+                        "id,name,price,category,in_stock\n",
+                        "1,Widget,19.99,electronics,true\n",
+                        "2,Gadget,29.99,electronics,true\n",
+                        "3,Gizmo,9.99,accessories,false\n",
+                        "4,Doodad,49.99,electronics,true\n",
+                        "5,Thingamajig,14.99,accessories,true\n",
+                    )
+                    .to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // --- YAML fixtures ---
+        // :103 should extract user names from users.yaml
+        let names = env.exec("yq '.users[].name' /fixtures/yaml/users.yaml");
+        assert_eq!(names.exit_code, 0);
+        assert_eq!(names.stdout, "alice\nbob\ncharlie\n");
+
+        // --- JSON fixtures ---
+        // :139 should extract user emails from users.json
+        let emails = env.exec("yq -p json '.users[].email' /fixtures/json/users.json");
+        assert_eq!(emails.exit_code, 0);
+        assert!(emails.stdout.contains("alice@example.com"));
+        assert!(emails.stdout.contains("bob@example.com"));
+
+        // :149 should get department names from nested.json
+        let departments =
+            env.exec("yq -p json '.company.departments[].name' /fixtures/json/nested.json");
+        assert_eq!(departments.exit_code, 0);
+        assert_eq!(departments.stdout, "Engineering\nSales\nMarketing\n");
+
+        // :158 should calculate total employees from nested.json
+        let employees = env.exec(
+            "yq -p json '[.company.departments[].employees] | add' /fixtures/json/nested.json",
+        );
+        assert_eq!(employees.exit_code, 0);
+        assert_eq!(employees.stdout, "100\n");
+
+        // :167 should find departments with budget > 250000
+        let budget = env.exec(
+            "yq -p json '[.company.departments[] | select(.budget > 250000) | .name]' /fixtures/json/nested.json -o json",
+        );
+        assert_eq!(budget.exit_code, 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&budget.stdout).unwrap(),
+            serde_json::json!(["Engineering", "Sales"])
+        );
+
+        // --- INI fixtures ---
+        // :222 should get database host from config.ini
+        let ini_host = env.exec("yq -p ini '.database.host' /fixtures/ini/config.ini");
+        assert_eq!(ini_host.exit_code, 0);
+        assert_eq!(ini_host.stdout, "localhost\n");
+
+        // :231 should get server port from config.ini (INI values are strings)
+        let ini_port = env.exec("yq -p ini '.server.port' /fixtures/ini/config.ini");
+        assert_eq!(ini_port.exit_code, 0);
+        assert!(ini_port.stdout.trim().contains("8080"));
+
+        // :241 should get all section keys from config.ini
+        let ini_keys = env.exec("yq -p ini 'keys' /fixtures/ini/config.ini");
+        assert_eq!(ini_keys.exit_code, 0);
+        assert!(ini_keys.stdout.contains("database"));
+        assert!(ini_keys.stdout.contains("server"));
+        assert!(ini_keys.stdout.contains("logging"));
+
+        // :252 should get top-level name from app.ini
+        let ini_name = env.exec("yq -p ini '.name' /fixtures/ini/app.ini");
+        assert_eq!(ini_name.exit_code, 0);
+        assert_eq!(ini_name.stdout, "MyApp\n");
+
+        // :259 should get feature flags from app.ini (booleans)
+        let ini_features = env.exec("yq -p ini '.features' /fixtures/ini/app.ini -o json");
+        assert_eq!(ini_features.exit_code, 0);
+        let features = serde_json::from_str::<serde_json::Value>(&ini_features.stdout).unwrap();
+        assert_eq!(features["dark_mode"], serde_json::json!(true));
+        assert_eq!(features["notifications"], serde_json::json!(true));
+        assert_eq!(features["analytics"], serde_json::json!(false));
+
+        // --- CSV fixtures ---
+        // :273 should get first user name from users.csv
+        let csv_first = env.exec("yq -p csv '.[0].name' /fixtures/csv/users.csv");
+        assert_eq!(csv_first.exit_code, 0);
+        assert_eq!(csv_first.stdout, "alice\n");
+
+        // :282 should get all user ages from users.csv (numbers)
+        let csv_ages = env.exec("yq -p csv '.[].age' /fixtures/csv/users.csv");
+        assert_eq!(csv_ages.exit_code, 0);
+        assert_eq!(csv_ages.stdout, "30\n25\n35\n");
+
+        // :291 should filter electronics products from products.csv
+        let csv_filter = env.exec(
+            "yq -p csv '[.[] | select(.category == \"electronics\") | .name]' /fixtures/csv/products.csv -o json",
+        );
+        assert_eq!(csv_filter.exit_code, 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&csv_filter.stdout).unwrap(),
+            serde_json::json!(["Widget", "Gadget", "Doodad"])
+        );
+
+        // :300 should calculate total price of in-stock items from products.csv
+        let csv_total = env.exec(
+            "yq -p csv '[.[] | select(.in_stock == true) | .price] | add' /fixtures/csv/products.csv",
+        );
+        assert_eq!(csv_total.exit_code, 0);
+        let total: f64 = csv_total.stdout.trim().parse().unwrap();
+        assert!((total - 114.96).abs() < 0.01, "total was {total}");
+
+        // :310 should get product count from products.csv
+        let csv_count = env.exec("yq -p csv 'length' /fixtures/csv/products.csv");
+        assert_eq!(csv_count.exit_code, 0);
+        assert_eq!(csv_count.stdout, "5\n");
+    }
+
+    #[test]
     fn awk_jbc_command_awk_expression_edge_and_error_rows() {
         // Maps the portable pending rows of awk.expressions.test.ts,
         // awk.edge-cases.test.ts, and awk.errors.test.ts that the Rust awk
@@ -11592,6 +12091,133 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
             env.exec(r#"echo "" | awk 'BEGIN { i=1; do { print i; i++ } while(i<=3) }'"#)
                 .stdout,
             "1\n2\n3\n"
+        );
+    }
+
+    // JBC-awk: operator semantics — division-by-zero exit code, the remaining
+    // comparison operators, short-circuit evaluation of && and ||, regex match
+    // operators in conditions and on fields, ternary expressions, chained
+    // increments, and operator precedence.
+    // Upstream: packages/just-bash/src/commands/awk/awk.operators.test.ts
+    #[test]
+    fn awk_jbc_command_awk_operator_precedence_and_logic_rows() {
+        let env = Bash::default();
+
+        // :80 division by zero exits 0 (inf/0 result tolerated)
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 10 / 0 }'"#)
+                .exit_code,
+            0
+        );
+        // :116 compare with <=
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print (3 <= 5), (5 <= 5), (6 <= 5) }'"#)
+                .stdout,
+            "1 1 0\n"
+        );
+        // :125 compare with >
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print (5 > 3), (3 > 5) }'"#)
+                .stdout,
+            "1 0\n"
+        );
+        // :172 short-circuit && (RHS assignment not evaluated)
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x=0; (0 && (x=1)); print x }'"#)
+                .stdout,
+            "0\n"
+        );
+        // :181 short-circuit || (RHS assignment not evaluated)
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x=0; (1 || (x=1)); print x }'"#)
+                .stdout,
+            "0\n"
+        );
+
+        let files = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "apple\nbanana\napricot\ncherry\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        // :219 use ~ in condition
+        assert_eq!(
+            files.exec(r#"awk '$0 ~ /^a/ { print }' /data.txt"#).stdout,
+            "apple\napricot\n"
+        );
+        // :228 use !~ in condition
+        assert_eq!(
+            files.exec(r#"awk '$0 !~ /^a/ { print }' /data.txt"#).stdout,
+            "banana\ncherry\n"
+        );
+
+        // :237 match field with regex
+        assert_eq!(
+            env.exec(r#"echo "123 abc 456" | awk '{ print ($2 ~ /[a-z]+/) }'"#)
+                .stdout,
+            "1\n"
+        );
+        // :266 ternary works with expressions
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x=5; print (x > 3 ? "big" : "small") }'"#)
+                .stdout,
+            "big\n"
+        );
+        // :275 nest ternary operators
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN { x=5; print (x<3 ? "low" : (x<7 ? "mid" : "high")) }'"#
+            )
+            .stdout,
+            "mid\n"
+        );
+        // :295 ternary in print arguments
+        assert_eq!(
+            env.exec(r#"echo "5" | awk '{ print "Value is " ($1 % 2 == 0 ? "even" : "odd") }'"#)
+                .stdout,
+            "Value is odd\n"
+        );
+        // :407 chain increments in expression
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { x = 1; y = x++ + ++x; print y, x }'"#)
+                .stdout,
+            "4 3\n"
+        );
+        // :420 multiplication before addition
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 2 + 3 * 4 }'"#)
+                .stdout,
+            "14\n"
+        );
+        // :429 parentheses for grouping
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print (2 + 3) * 4 }'"#)
+                .stdout,
+            "20\n"
+        );
+        // :438 exponent before multiplication
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 2 * 3 ^ 2 }'"#)
+                .stdout,
+            "18\n"
+        );
+        // :447 comparison before logical
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 1 < 2 && 3 < 4 }'"#)
+                .stdout,
+            "1\n"
+        );
+        // :456 complex precedence
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 2 + 3 * 4 ^ 2 - 10 / 2 }'"#)
+                .stdout,
+            "45\n"
+        );
+        // :466 unary minus precedence: -2^2 == -(2^2) == -4
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print -2 ^ 2 }'"#).stdout,
+            "-4\n"
         );
     }
 }

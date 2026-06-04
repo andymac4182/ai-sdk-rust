@@ -951,6 +951,15 @@ const jbc09CaseGroups = [
     notes:
       'just-bash-command-awk verifies portable awk do-while loops execute the body at least once and re-test the condition after each iteration.',
   },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.operators.test.ts',
+    lines: [80, 116, 125, 172, 181, 219, 228, 237, 266, 275, 295, 407, 420, 429, 438, 447, 456, 466],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_operator_precedence_and_logic_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk operator semantics: division-by-zero exit code, the <= and > comparisons, short-circuit && and ||, ~/!~ regex match in conditions and on fields, ternary with expressions/nesting/in print arguments, chained increments, and operator precedence including POSIX unary-minus vs exponent binding (-2^2 == -4).',
+  },
 ];
 
 const jbc10CaseGroups = [
@@ -1091,6 +1100,15 @@ const jbc10CaseGroups = [
     rustTest: 'rg_imported_misc_search_modes_counts_and_context_rows_are_portable',
     notes:
       'JBC-10 verifies imported rg misc rows: -v/-n inverted, -i case-insensitive, -w word, -x whole-line, -F literal, -q quiet, -t/-T file-type filter, -g/--glob filters, --count/--count-matches/--include-zero counts, --files-with-matches/--files-without-match, -A/-B/-C context with line numbers, --files listing, and --sort path over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
+    lines: [89, 107, 348, 380, 398, 415, 434, 891, 906, 946, 965, 1004],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_misc_type_heading_ignore_and_symlink_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported rg misc rows: -H forces the filename prefix on a single explicit file, --heading prints the file label heading then unprefixed lines, -t all / -T all match (or negate) any known file type, --type-clear empties a type so it matches nothing, --type-add registers a glob-based or include-composed type, the generic .ignore and ripgrep-specific .rgignore files exclude matching paths, file symlinks are skipped during traversal by default and followed with -L, and -uu (unrestricted2) includes hidden dotfiles over the virtual filesystem.',
   },
   {
     file: 'packages/just-bash/src/commands/rg/rg.no-filename.test.ts',
@@ -4035,6 +4053,18 @@ const jbc37CaseGroups = [
   },
 ];
 
+const jbcYqFixturesCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.fixtures.test.ts',
+    lines: [103, 139, 149, 158, 167, 222, 231, 241, 252, 259, 273, 282, 291, 300, 310],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_yq_fixtures_yaml_json_ini_csv_rows',
+    notes:
+      'JBC-yq verifies portable yq fixture queries over YAML and JSON input (postfix `[]` projection, select/add aggregation), plus the Rust INI and CSV input parsers (section nesting, true/false coercion, papaparse-style dynamic typing) exercised by the fixtures suite.',
+  },
+];
+
 const jbc44CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/query-engine/safe-object.test.ts',
@@ -4670,6 +4700,7 @@ function caseOverrideFor(testCase) {
     ...jbR2CaseGroups,
     ...jbc37CaseGroups,
     ...jbc44CaseGroups,
+    ...jbcYqFixturesCaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&
