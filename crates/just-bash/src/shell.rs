@@ -4234,8 +4234,8 @@ impl<D: CommandDispatcher> Interpreter<D> {
         }
     }
 
-    fn eval_arithmetic(&self, source: &str) -> i64 {
-        ArithmeticEvaluator::new(source, &self.state).parse()
+    fn eval_arithmetic(&mut self, source: &str) -> i64 {
+        ArithmeticEvaluator::new(source, &mut self.state).parse()
     }
 }
 
@@ -4693,29 +4693,121 @@ enum ArithToken {
     Op(String),
     LeftParen,
     RightParen,
+    LeftBracket,
+    RightBracket,
+    Question,
+    Colon,
+    Comma,
     End,
+}
+
+/// An assignable target within an arithmetic expression.
+#[derive(Debug, Clone)]
+enum ArithLValue {
+    Scalar(String),
+    Element { name: String, index: usize },
 }
 
 struct ArithmeticEvaluator<'a> {
     tokens: Vec<ArithToken>,
     pos: usize,
-    state: &'a ShellState,
+    state: &'a mut ShellState,
+    /// Guard against runaway recursion when resolving variable names that
+    /// refer to themselves (e.g. `a=a`).
+    depth: usize,
 }
 
 impl<'a> ArithmeticEvaluator<'a> {
-    fn new(source: &str, state: &'a ShellState) -> Self {
+    fn new(source: &str, state: &'a mut ShellState) -> Self {
         Self {
             tokens: tokenize_arithmetic(source),
             pos: 0,
             state,
+            depth: 0,
         }
     }
 
     fn parse(&mut self) -> i64 {
-        self.parse_expr(1)
+        // The top level is a comma sequence, returning the last value.
+        let mut value = self.parse_assignment();
+        while matches!(self.current(), ArithToken::Comma) {
+            self.advance();
+            value = self.parse_assignment();
+        }
+        value
     }
 
-    fn parse_expr(&mut self, min_prec: u8) -> i64 {
+    /// Resolve a Bash variable reference to an integer. Bash recursively
+    /// re-evaluates the variable's string value as an arithmetic expression
+    /// (so `a=5; b=a` makes `$((b))` yield 5, and `e='1+2'` makes
+    /// `$((e + 3))` yield 6).
+    fn resolve_name(&mut self, name: &str) -> i64 {
+        if self.depth > 64 {
+            return 0;
+        }
+        let Some(raw) = self.state.lookup_var(name).map(str::to_string) else {
+            return 0;
+        };
+        if raw.trim().is_empty() {
+            return 0;
+        }
+        if let Some(value) = parse_arith_literal(raw.trim()) {
+            return value;
+        }
+        // Re-evaluate the stored string as an arithmetic expression.
+        let mut nested = ArithmeticEvaluator {
+            tokens: tokenize_arithmetic(&raw),
+            pos: 0,
+            state: self.state,
+            depth: self.depth + 1,
+        };
+        nested.parse()
+    }
+
+    /// Lowest-precedence non-comma level: assignment (right-associative).
+    fn parse_assignment(&mut self) -> i64 {
+        let start = self.pos;
+        if let Some(lvalue) = self.try_parse_lvalue() {
+            if let ArithToken::Op(operator) = self.current().clone() {
+                if is_assignment_op(&operator) {
+                    self.advance();
+                    let rhs = self.parse_assignment();
+                    let current = self.read_lvalue(&lvalue);
+                    let result = if operator == "=" {
+                        rhs
+                    } else {
+                        eval_arith_binary(&operator[..operator.len() - 1], current, rhs)
+                    };
+                    self.write_lvalue(&lvalue, result);
+                    return result;
+                }
+            }
+            // Not an assignment; rewind and fall through to the ternary parser.
+            self.pos = start;
+        }
+        self.parse_ternary()
+    }
+
+    fn parse_ternary(&mut self) -> i64 {
+        let condition = self.parse_binary(1);
+        if matches!(self.current(), ArithToken::Question) {
+            self.advance();
+            let when_true = self.parse_assignment();
+            if matches!(self.current(), ArithToken::Colon) {
+                self.advance();
+            }
+            let when_false = self.parse_assignment();
+            if condition != 0 {
+                when_true
+            } else {
+                when_false
+            }
+        } else {
+            condition
+        }
+    }
+
+    fn parse_binary(&mut self, min_prec: u8) -> i64 {
         let mut left = self.parse_prefix();
         while let ArithToken::Op(operator) = self.current().clone() {
             let Some((precedence, right_assoc)) = arith_precedence(&operator) else {
@@ -4724,27 +4816,49 @@ impl<'a> ArithmeticEvaluator<'a> {
             if precedence < min_prec {
                 break;
             }
+            // Short-circuit logical operators must not evaluate (and must not
+            // run side effects in) the right-hand side when the result is
+            // already determined.
+            if operator == "&&" && left == 0 {
+                self.advance();
+                self.skip_binary(precedence + 1);
+                left = 0;
+                continue;
+            }
+            if operator == "||" && left != 0 {
+                self.advance();
+                self.skip_binary(precedence + 1);
+                left = 1;
+                continue;
+            }
             self.advance();
             let next_min = if right_assoc {
                 precedence
             } else {
                 precedence + 1
             };
-            let right = self.parse_expr(next_min);
-            left = eval_arith_binary(&operator, left, right);
+            let right = self.parse_binary(next_min);
+            left = match operator.as_str() {
+                "&&" => i64::from(left != 0 && right != 0),
+                "||" => i64::from(left != 0 || right != 0),
+                _ => eval_arith_binary(&operator, left, right),
+            };
         }
         left
     }
 
+    /// Consume (without producing observable side effects) the right operand of
+    /// a short-circuited logical operator.
+    fn skip_binary(&mut self, min_prec: u8) {
+        let saved = self.state.clone();
+        self.parse_binary(min_prec);
+        *self.state = saved;
+    }
+
     fn parse_prefix(&mut self) -> i64 {
-        match self.advance() {
-            ArithToken::Number(value) => value,
-            ArithToken::Ident(name) => self
-                .state
-                .lookup_var(&name)
-                .and_then(|value| value.parse::<i64>().ok())
-                .unwrap_or(0),
+        match self.current().clone() {
             ArithToken::Op(operator) if matches!(operator.as_str(), "+" | "-" | "!" | "~") => {
+                self.advance();
                 let value = self.parse_prefix();
                 match operator.as_str() {
                     "+" => value,
@@ -4754,14 +4868,104 @@ impl<'a> ArithmeticEvaluator<'a> {
                     _ => value,
                 }
             }
+            ArithToken::Op(operator) if matches!(operator.as_str(), "++" | "--") => {
+                self.advance();
+                let Some(lvalue) = self.try_parse_lvalue() else {
+                    return 0;
+                };
+                let current = self.read_lvalue(&lvalue);
+                let updated = if operator == "++" {
+                    current + 1
+                } else {
+                    current - 1
+                };
+                self.write_lvalue(&lvalue, updated);
+                updated
+            }
             ArithToken::LeftParen => {
-                let value = self.parse_expr(1);
+                self.advance();
+                let value = self.parse();
                 if matches!(self.current(), ArithToken::RightParen) {
                     self.advance();
                 }
                 value
             }
-            _ => 0,
+            ArithToken::Number(value) => {
+                self.advance();
+                value
+            }
+            ArithToken::Ident(_) => {
+                let lvalue = self
+                    .try_parse_lvalue()
+                    .expect("identifier token yields an lvalue");
+                // Post-increment / post-decrement.
+                if let ArithToken::Op(operator) = self.current().clone() {
+                    if matches!(operator.as_str(), "++" | "--") {
+                        self.advance();
+                        let current = self.read_lvalue(&lvalue);
+                        let updated = if operator == "++" {
+                            current + 1
+                        } else {
+                            current - 1
+                        };
+                        self.write_lvalue(&lvalue, updated);
+                        return current;
+                    }
+                }
+                self.read_lvalue(&lvalue)
+            }
+            _ => {
+                self.advance();
+                0
+            }
+        }
+    }
+
+    /// Parse an assignable target (a bare name or `name[index]`). Returns `None`
+    /// and consumes nothing extra if the next token is not an identifier.
+    fn try_parse_lvalue(&mut self) -> Option<ArithLValue> {
+        let ArithToken::Ident(name) = self.current().clone() else {
+            return None;
+        };
+        self.advance();
+        if matches!(self.current(), ArithToken::LeftBracket) {
+            self.advance();
+            let index = self.parse();
+            if matches!(self.current(), ArithToken::RightBracket) {
+                self.advance();
+            }
+            let index = usize::try_from(index).unwrap_or(0);
+            Some(ArithLValue::Element { name, index })
+        } else {
+            Some(ArithLValue::Scalar(name))
+        }
+    }
+
+    fn read_lvalue(&mut self, lvalue: &ArithLValue) -> i64 {
+        match lvalue {
+            ArithLValue::Scalar(name) => self.resolve_name(name),
+            ArithLValue::Element { name, index } => self
+                .state
+                .arrays
+                .get(name)
+                .and_then(|values| values.get(*index))
+                .and_then(|value| parse_arith_literal(value.trim()))
+                .unwrap_or(0),
+        }
+    }
+
+    fn write_lvalue(&mut self, lvalue: &ArithLValue, value: i64) {
+        match lvalue {
+            ArithLValue::Scalar(name) => {
+                self.state.assign_var(name.clone(), value.to_string());
+            }
+            ArithLValue::Element { name, index } => {
+                let values = self.state.arrays.entry(name.clone()).or_default();
+                if values.len() <= *index {
+                    values.resize(*index + 1, String::new());
+                }
+                values[*index] = value.to_string();
+            }
         }
     }
 
@@ -4778,6 +4982,46 @@ impl<'a> ArithmeticEvaluator<'a> {
     }
 }
 
+fn is_assignment_op(operator: &str) -> bool {
+    matches!(
+        operator,
+        "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>=" | "&=" | "|=" | "^="
+    )
+}
+
+/// Parse a Bash arithmetic integer literal: decimal, `0x` hex, leading-zero
+/// octal, or `base#digits` notation. Returns `None` for non-literal strings so
+/// the caller can fall back to expression evaluation.
+fn parse_arith_literal(text: &str) -> Option<i64> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let (negative, body) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let magnitude = parse_unsigned_arith_literal(body)?;
+    Some(if negative { -magnitude } else { magnitude })
+}
+
+fn parse_unsigned_arith_literal(body: &str) -> Option<i64> {
+    if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+        return i64::from_str_radix(hex, 16).ok();
+    }
+    if let Some((base, digits)) = body.split_once('#') {
+        let radix: u32 = base.parse().ok()?;
+        if !(2..=36).contains(&radix) {
+            return None;
+        }
+        return i64::from_str_radix(digits, radix).ok();
+    }
+    if body.len() > 1 && body.starts_with('0') && body.bytes().all(|byte| byte.is_ascii_digit()) {
+        return i64::from_str_radix(body, 8).ok();
+    }
+    body.parse::<i64>().ok()
+}
+
 fn tokenize_arithmetic(source: &str) -> Vec<ArithToken> {
     let chars = source.chars().collect::<Vec<_>>();
     let mut pos = 0usize;
@@ -4789,14 +5033,18 @@ fn tokenize_arithmetic(source: &str) -> Vec<ArithToken> {
         }
         if character.is_ascii_digit() {
             let start = pos;
+            // Consume the longest run of characters that can form a numeric
+            // literal: decimal/hex/octal digits, `x`/`X` (hex prefix), `#`
+            // (base#digits notation), and alphanumerics for the digits of a
+            // base# literal.
             while chars
                 .get(pos)
-                .is_some_and(|character| character.is_ascii_digit())
+                .is_some_and(|character| character.is_ascii_alphanumeric() || *character == '#')
             {
                 pos += 1;
             }
             let text = chars[start..pos].iter().collect::<String>();
-            tokens.push(ArithToken::Number(text.parse::<i64>().unwrap_or(0)));
+            tokens.push(ArithToken::Number(parse_arith_literal(&text).unwrap_or(0)));
             continue;
         }
         if character == '$' {
@@ -4832,10 +5080,38 @@ fn tokenize_arithmetic(source: &str) -> Vec<ArithToken> {
             pos += 1;
             continue;
         }
+        if character == '[' {
+            tokens.push(ArithToken::LeftBracket);
+            pos += 1;
+            continue;
+        }
+        if character == ']' {
+            tokens.push(ArithToken::RightBracket);
+            pos += 1;
+            continue;
+        }
+        if character == '?' {
+            tokens.push(ArithToken::Question);
+            pos += 1;
+            continue;
+        }
+        if character == ':' {
+            tokens.push(ArithToken::Colon);
+            pos += 1;
+            continue;
+        }
+        if character == ',' {
+            tokens.push(ArithToken::Comma);
+            pos += 1;
+            continue;
+        }
         let mut matched = false;
+        // Longest-match first so compound assignment / increment operators win
+        // over their single-character prefixes.
         for operator in [
-            "**", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "+", "-", "*", "/", "%", "<",
-            ">", "&", "|", "^", "!", "~",
+            "<<=", ">>=", "**", "++", "--", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "+=",
+            "-=", "*=", "/=", "%=", "&=", "|=", "^=", "+", "-", "*", "/", "%", "<", ">", "&", "|",
+            "^", "!", "~", "=",
         ] {
             if chars[pos..].iter().take(operator.len()).collect::<String>() == operator {
                 tokens.push(ArithToken::Op(operator.to_string()));
@@ -5222,6 +5498,118 @@ mod tests {
         );
         assert_eq!(shell.exec("(( 5 )); echo $?").stdout, "0\n");
         assert_eq!(shell.exec("(( 0 )); echo $?").stdout, "1\n");
+    }
+
+    #[test]
+    fn upstream_arithmetic_comma_short_circuit_ternary_rows() {
+        // comma operator: yields the last value
+        assert_eq!(shell().exec("echo $((1, 2, 3))").stdout, "3\n");
+        // short-circuit logical AND: rhs assignment must not run
+        assert_eq!(
+            shell().exec("x=5; echo $((0 && (x=10))); echo $x").stdout,
+            "0\n5\n"
+        );
+        // short-circuit logical OR: rhs assignment must not run
+        assert_eq!(
+            shell().exec("x=5; echo $((1 || (x=10))); echo $x").stdout,
+            "1\n5\n"
+        );
+        // ternary true / false / nested branches
+        assert_eq!(shell().exec("echo $((1 ? 10 : 20))").stdout, "10\n");
+        assert_eq!(shell().exec("echo $((0 ? 10 : 20))").stdout, "20\n");
+        assert_eq!(shell().exec("echo $((1 ? 2 ? 3 : 4 : 5))").stdout, "3\n");
+    }
+
+    #[test]
+    fn upstream_arithmetic_increment_decrement_rows() {
+        assert_eq!(shell().exec("x=5; echo $((++x)); echo $x").stdout, "6\n6\n");
+        assert_eq!(shell().exec("x=5; echo $((x++)); echo $x").stdout, "5\n6\n");
+        assert_eq!(shell().exec("x=5; echo $((--x)); echo $x").stdout, "4\n4\n");
+        assert_eq!(shell().exec("x=5; echo $((x--)); echo $x").stdout, "5\n4\n");
+    }
+
+    #[test]
+    fn upstream_arithmetic_assignment_operator_rows() {
+        assert_eq!(shell().exec("echo $((x = 5)); echo $x").stdout, "5\n5\n");
+        assert_eq!(
+            shell().exec("x=10; echo $((x += 5)); echo $x").stdout,
+            "15\n15\n"
+        );
+        assert_eq!(
+            shell().exec("x=10; echo $((x -= 3)); echo $x").stdout,
+            "7\n7\n"
+        );
+        assert_eq!(
+            shell().exec("x=4; echo $((x *= 3)); echo $x").stdout,
+            "12\n12\n"
+        );
+        assert_eq!(
+            shell().exec("x=20; echo $((x /= 4)); echo $x").stdout,
+            "5\n5\n"
+        );
+        assert_eq!(
+            shell().exec("x=17; echo $((x %= 5)); echo $x").stdout,
+            "2\n2\n"
+        );
+        assert_eq!(
+            shell().exec("x=2; echo $((x <<= 3)); echo $x").stdout,
+            "16\n16\n"
+        );
+        assert_eq!(
+            shell().exec("x=32; echo $((x >>= 2)); echo $x").stdout,
+            "8\n8\n"
+        );
+        assert_eq!(
+            shell().exec("x=12; echo $((x &= 10)); echo $x").stdout,
+            "8\n8\n"
+        );
+        assert_eq!(
+            shell().exec("x=12; echo $((x |= 1)); echo $x").stdout,
+            "13\n13\n"
+        );
+        assert_eq!(
+            shell().exec("x=12; echo $((x ^= 5)); echo $x").stdout,
+            "9\n9\n"
+        );
+    }
+
+    #[test]
+    fn upstream_arithmetic_variable_resolution_and_base_rows() {
+        // recursive variable name resolution: b=a, a=5 -> 5
+        assert_eq!(shell().exec("a=5; b=a; echo $((b))").stdout, "5\n");
+        // expressions stored in variables are re-evaluated
+        assert_eq!(shell().exec("e='1+2'; echo $((e + 3))").stdout, "6\n");
+        // number bases: octal, hex, base#number, hex-with-letters
+        assert_eq!(shell().exec("echo $((010))").stdout, "8\n");
+        assert_eq!(shell().exec("echo $((0xFF))").stdout, "255\n");
+        assert_eq!(shell().exec("echo $((2#1010))").stdout, "10\n");
+        assert_eq!(shell().exec("echo $((16#ff))").stdout, "255\n");
+    }
+
+    #[test]
+    fn upstream_arithmetic_array_element_rows() {
+        assert_eq!(
+            shell().exec("arr=(10 20 30); echo $((arr[1] + 5))").stdout,
+            "25\n"
+        );
+        assert_eq!(
+            shell()
+                .exec("arr=(0 0 0); echo $((arr[1] = 42)); echo ${arr[1]}")
+                .stdout,
+            "42\n42\n"
+        );
+        assert_eq!(
+            shell()
+                .exec("arr=(10 20 30); echo $((arr[0]++)); echo ${arr[0]}")
+                .stdout,
+            "10\n11\n"
+        );
+    }
+
+    #[test]
+    fn upstream_arithmetic_command_assignment_row() {
+        // (( x = 5 + 3 )) assigns within the arithmetic command form
+        assert_eq!(shell().exec("(( x = 5 + 3 )); echo $x").stdout, "8\n");
     }
 
     #[test]

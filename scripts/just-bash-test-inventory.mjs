@@ -1345,6 +1345,51 @@ const jbc15CaseGroups = [
       'JBC-15 verifies portable arithmetic expansion and command rows for binary, comparison, logical, unary, variable, grouping, precedence, and zero/nonzero status behavior.',
   },
   {
+    file: 'packages/just-bash/src/interpreter/arithmetic.test.ts',
+    lines: [90, 157, 164, 231, 238, 245],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::arithmetic',
+    rustTest: 'upstream_arithmetic_comma_short_circuit_ternary_rows',
+    notes:
+      'JBC-15 verifies portable arithmetic comma sequencing, short-circuit && / || that suppresses right-hand side assignment side effects, and true/false/nested ternary evaluation.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/arithmetic.test.ts',
+    lines: [201, 208, 215, 222],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::arithmetic',
+    rustTest: 'upstream_arithmetic_increment_decrement_rows',
+    notes:
+      'JBC-15 verifies portable arithmetic pre/post increment and decrement returning the correct expression value and mutating the underlying variable.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/arithmetic.test.ts',
+    lines: [254, 261, 268, 275, 282, 289, 296, 303, 310, 317, 324],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::arithmetic',
+    rustTest: 'upstream_arithmetic_assignment_operator_rows',
+    notes:
+      'JBC-15 verifies portable arithmetic = and compound += -= *= /= %= <<= >>= &= |= ^= assignment operators returning and persisting the assigned value.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/arithmetic.test.ts',
+    lines: [377, 384, 443, 450, 457, 464],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::arithmetic',
+    rustTest: 'upstream_arithmetic_variable_resolution_and_base_rows',
+    notes:
+      'JBC-15 verifies portable recursive variable-name resolution, re-evaluation of expressions stored in variables, and octal / hex / base#number / hex-with-letters literal parsing.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/arithmetic.test.ts',
+    lines: [416, 423, 432],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::arithmetic',
+    rustTest: 'upstream_arithmetic_array_element_rows',
+    notes:
+      'JBC-15 verifies portable arithmetic array-element access, assignment, and post-increment over indexed arrays.',
+  },
+  {
     file: 'packages/just-bash/src/interpreter/control-flow.test.ts',
     lines: [6, 17, 29, 90, 101, 126, 138, 163, 375, 388, 401, 414, 498],
     status: 'portable-verified',
