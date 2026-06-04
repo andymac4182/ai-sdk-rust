@@ -13455,6 +13455,10 @@ fn command_xan(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
         "sort" => xan_sort_cmd(state, &args[1..], stdin),
         "dedup" => xan_dedup(state, &args[1..], stdin),
         "search" => xan_search(state, &args[1..], stdin),
+        "top" => xan_top(state, &args[1..], stdin),
+        "transpose" => xan_transpose(state, &args[1..], stdin),
+        "fixlengths" => xan_fixlengths(state, &args[1..], stdin),
+        "split" => xan_split(state, &args[1..], stdin),
         "agg" => xan_agg(state, &args[1..], stdin),
         "sample" => xan_sample(state, &args[1..], stdin),
         "flatten" | "f" => xan_flatten(state, &args[1..], stdin),
@@ -13786,7 +13790,12 @@ fn xan_search(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
         .build()
     {
         Ok(regex) => regex,
-        Err(error) => return stderr_result(1, format!("xan search: invalid regex: {error}\n")),
+        Err(_) => {
+            return stderr_result(
+                1,
+                format!("xan search: invalid regex pattern '{pattern}'\n"),
+            );
+        }
     };
     match read_csv_arg(state, positional_arg(args), stdin, "xan search") {
         Ok(mut csv) => {
@@ -13805,6 +13814,241 @@ fn xan_search(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
         }
         Err(result) => result,
     }
+}
+
+/// Port of upstream `cmdTop`: sort by a numeric column descending (or
+/// ascending with `-R`/`-r`/`--reverse`) and keep the first `n` rows.
+fn xan_top(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut n: usize = 10;
+    let mut column: Option<String> = None;
+    let mut reverse = false;
+    let mut files: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if (arg == "-l" || arg == "-n") && i + 1 < args.len() {
+            n = args[i + 1].parse::<usize>().unwrap_or(0);
+            i += 2;
+            continue;
+        }
+        if arg == "-R" || arg == "-r" || arg == "--reverse" {
+            reverse = true;
+        } else if !arg.starts_with('-') {
+            if column.is_none() {
+                column = Some(arg.to_string());
+            } else {
+                files.push(arg.to_string());
+            }
+        }
+        i += 1;
+    }
+    match read_csv_arg(state, files.first().map(String::as_str), stdin, "xan top") {
+        Ok(mut csv) => {
+            let column = column.or_else(|| csv.headers.first().cloned());
+            let index = column
+                .as_ref()
+                .and_then(|name| csv.headers.iter().position(|header| header == name))
+                .unwrap_or(0);
+            csv.rows.sort_by(|left, right| {
+                let na = left
+                    .get(index)
+                    .and_then(|cell| cell.parse::<f64>().ok())
+                    .unwrap_or(f64::NAN);
+                let nb = right
+                    .get(index)
+                    .and_then(|cell| cell.parse::<f64>().ok())
+                    .unwrap_or(f64::NAN);
+                let ordering = if reverse {
+                    na.partial_cmp(&nb)
+                } else {
+                    nb.partial_cmp(&na)
+                };
+                ordering.unwrap_or(std::cmp::Ordering::Equal)
+            });
+            csv.rows.truncate(n);
+            stdout_result(render_csv(&csv))
+        }
+        Err(result) => result,
+    }
+}
+
+/// Port of upstream `cmdTranspose`: swap rows and columns. The first
+/// column name plus each row's first-column value become the new
+/// headers; each remaining source column becomes a new row.
+fn xan_transpose(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    match read_csv_arg(state, positional_arg(args), stdin, "xan transpose") {
+        Ok(csv) => {
+            if csv.rows.is_empty() {
+                let transposed = CsvData {
+                    headers: vec!["column".to_string()],
+                    rows: csv.headers.iter().map(|h| vec![h.clone()]).collect(),
+                };
+                return stdout_result(render_csv(&transposed));
+            }
+            let first_col = csv.headers.first().cloned().unwrap_or_default();
+            let mut new_headers = vec![first_col];
+            for (i, row) in csv.rows.iter().enumerate() {
+                let value = row.first().cloned().unwrap_or_else(|| format!("row_{i}"));
+                new_headers.push(value);
+            }
+            let mut new_rows: Vec<Vec<String>> = Vec::new();
+            for col_index in 1..csv.headers.len() {
+                let mut new_row = vec![csv.headers[col_index].clone()];
+                for row in &csv.rows {
+                    new_row.push(row.get(col_index).cloned().unwrap_or_default());
+                }
+                new_rows.push(new_row);
+            }
+            stdout_result(render_csv(&CsvData {
+                headers: new_headers,
+                rows: new_rows,
+            }))
+        }
+        Err(result) => result,
+    }
+}
+
+/// Port of upstream `cmdFixlengths`: pad short rows with a default value
+/// (or truncate with `-l`) so every row has the same column count.
+fn xan_fixlengths(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut target_len: Option<usize> = None;
+    let mut default_value = String::new();
+    let mut files: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if (arg == "-l" || arg == "--length") && i + 1 < args.len() {
+            target_len = args[i + 1].parse::<usize>().ok();
+            i += 2;
+            continue;
+        }
+        if (arg == "-d" || arg == "--default") && i + 1 < args.len() {
+            default_value = args[i + 1].clone();
+            i += 2;
+            continue;
+        }
+        if !arg.starts_with('-') {
+            files.push(arg.to_string());
+        }
+        i += 1;
+    }
+    let input = match read_text_arg(
+        state,
+        files.first().map(String::as_str),
+        stdin,
+        "xan fixlengths",
+    ) {
+        Ok(input) => input,
+        Err(result) => return result,
+    };
+    let rows: Vec<Vec<String>> = input.trim().lines().map(parse_csv_line).collect();
+    if rows.is_empty() {
+        return CommandResult::default();
+    }
+    let max_len = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let len = target_len.unwrap_or(max_len);
+    let mut output = String::new();
+    for row in &rows {
+        let fixed: Vec<String> = if row.len() == len {
+            row.clone()
+        } else if row.len() < len {
+            let mut padded = row.clone();
+            padded.resize(len, default_value.clone());
+            padded
+        } else {
+            row[..len].to_vec()
+        };
+        output.push_str(&fixed.join(","));
+        output.push('\n');
+    }
+    stdout_result(output)
+}
+
+/// Port of upstream `cmdSplit`: split data rows into chunks by count
+/// (`-c`) or size (`-S`), writing each chunk to a virtual file and
+/// reporting how many non-empty parts were produced.
+fn xan_split(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut num_parts: Option<usize> = None;
+    let mut part_size: Option<usize> = None;
+    let mut output_dir = ".".to_string();
+    let mut files: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if (arg == "-c" || arg == "--chunks") && i + 1 < args.len() {
+            num_parts = args[i + 1].parse::<usize>().ok();
+            i += 2;
+            continue;
+        }
+        if (arg == "-S" || arg == "--size") && i + 1 < args.len() {
+            part_size = args[i + 1].parse::<usize>().ok();
+            i += 2;
+            continue;
+        }
+        if (arg == "-o" || arg == "--output") && i + 1 < args.len() {
+            output_dir = args[i + 1].clone();
+            i += 2;
+            continue;
+        }
+        if !arg.starts_with('-') {
+            files.push(arg.to_string());
+        }
+        i += 1;
+    }
+    if num_parts.is_none() && part_size.is_none() {
+        return stderr_result(1, "xan split: must specify -c or -S\n");
+    }
+    let csv = match read_csv_arg(state, files.first().map(String::as_str), stdin, "xan split") {
+        Ok(csv) => csv,
+        Err(result) => return result,
+    };
+    let mut parts: Vec<Vec<Vec<String>>> = Vec::new();
+    if let Some(num) = num_parts {
+        let size = if num == 0 {
+            0
+        } else {
+            csv.rows.len().div_ceil(num)
+        };
+        for chunk in 0..num {
+            let start = chunk.saturating_mul(size);
+            let end = (start + size).min(csv.rows.len());
+            if start < end {
+                parts.push(csv.rows[start..end].to_vec());
+            } else {
+                parts.push(Vec::new());
+            }
+        }
+    } else if let Some(size) = part_size {
+        if size > 0 {
+            let mut start = 0;
+            while start < csv.rows.len() {
+                let end = (start + size).min(csv.rows.len());
+                parts.push(csv.rows[start..end].to_vec());
+                start += size;
+            }
+        }
+    }
+    let non_empty: Vec<Vec<Vec<String>>> =
+        parts.into_iter().filter(|part| !part.is_empty()).collect();
+    let base_name = files
+        .first()
+        .map(|name| name.trim_end_matches(".csv").to_string())
+        .unwrap_or_else(|| "part".to_string());
+    let mut fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, "xan split: filesystem lock poisoned\n"),
+    };
+    for (index, part) in non_empty.iter().enumerate() {
+        let file_name = format!("{base_name}_{:03}.csv", index + 1);
+        let dir = resolve_path(&state.cwd, &output_dir);
+        let path = resolve_path(&dir, &file_name);
+        let chunk = render_csv(&CsvData {
+            headers: csv.headers.clone(),
+            rows: part.clone(),
+        });
+        let _ = fs.write_file(&path, chunk);
+    }
+    stdout_result(format!("Split into {} parts\n", non_empty.len()))
 }
 
 /// One parsed `func(inner) as alias` aggregation specification.

@@ -8471,6 +8471,115 @@ be, to a very large extent, the result of luck. Sherlock Holmes\n",
     }
 
     #[test]
+    fn structured_data_xan_top_transpose_fixlengths_split_search_rows() {
+        // Ports packages/just-bash/src/commands/xan/xan.filter-sort.test.ts:129,138,149,158,185
+        // and packages/just-bash/src/commands/xan/xan.data.test.ts:85,98,108,147,156,165,176,185,194.
+        let products = "id,name,price,category,in_stock\n1,Widget,19.99,electronics,true\n2,Gadget,29.99,electronics,true\n3,Gizmo,9.99,accessories,false\n4,Doodad,49.99,electronics,true\n5,Thingamajig,14.99,accessories,true\n";
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/products.csv".to_string(), products.to_string()),
+                (
+                    "/search.csv".to_string(),
+                    "h1,h2\nfoobar,x\nabc,y\nbarfoo,z\n".to_string(),
+                ),
+                ("/bad.csv".to_string(), "name\nalice\n".to_string()),
+                (
+                    "/metric.csv".to_string(),
+                    "metric,jan,feb,mar\nsales,100,150,200\ncosts,80,90,100\n".to_string(),
+                ),
+                ("/single.csv".to_string(), "name\nalice\nbob\n".to_string()),
+                ("/emptycols.csv".to_string(), "a,b,c\n".to_string()),
+                (
+                    "/ragged.csv".to_string(),
+                    "a,b,c\n1,2,3\n4,5\n6\n".to_string(),
+                ),
+                (
+                    "/wide.csv".to_string(),
+                    "a,b,c,d\n1,2,3,4\n5,6,7,8\n".to_string(),
+                ),
+                ("/short.csv".to_string(), "a,b,c\n1,2\n3\n".to_string()),
+                ("/six.csv".to_string(), "n\n1\n2\n3\n4\n5\n6\n".to_string()),
+                ("/five.csv".to_string(), "n\n1\n2\n3\n4\n5\n".to_string()),
+                ("/one.csv".to_string(), "n\n1\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // xan top: top N by numeric column (descending)
+        assert_eq!(
+            env.exec("xan top price -l 2 /products.csv").stdout,
+            "id,name,price,category,in_stock\n4,Doodad,49.99,electronics,true\n2,Gadget,29.99,electronics,true\n"
+        );
+        // xan top -R: bottom N (ascending)
+        assert_eq!(
+            env.exec("xan top price -l 2 -R /products.csv").stdout,
+            "id,name,price,category,in_stock\n3,Gizmo,9.99,accessories,false\n5,Thingamajig,14.99,accessories,true\n"
+        );
+
+        // xan search: regex over all columns
+        assert_eq!(
+            env.exec("xan search -r '^foo' /search.csv").stdout,
+            "h1,h2\nfoobar,x\n"
+        );
+        // xan search -v: inverted match
+        assert_eq!(
+            env.exec("xan search -v -r '^foo' /search.csv").stdout,
+            "h1,h2\nabc,y\nbarfoo,z\n"
+        );
+        // xan search: invalid regex pattern reports a precise error
+        let bad = env.exec("xan search '[' /bad.csv");
+        assert_eq!(bad.exit_code, 1);
+        assert_eq!(bad.stderr, "xan search: invalid regex pattern '['\n");
+
+        // xan transpose: swap rows and columns
+        assert_eq!(
+            env.exec("xan transpose /metric.csv").stdout,
+            "metric,sales,costs\njan,100,80\nfeb,150,90\nmar,200,100\n"
+        );
+        // xan transpose: single column (no data rows after transpose)
+        assert_eq!(
+            env.exec("xan transpose /single.csv").stdout,
+            "name,alice,bob\n"
+        );
+        // xan transpose: header-only input
+        assert_eq!(
+            env.exec("xan transpose /emptycols.csv").stdout,
+            "column\na\nb\nc\n"
+        );
+
+        // xan fixlengths: pad short rows
+        assert_eq!(
+            env.exec("xan fixlengths /ragged.csv").stdout,
+            "a,b,c\n1,2,3\n4,5,\n6,,\n"
+        );
+        // xan fixlengths -l: truncate long rows
+        assert_eq!(
+            env.exec("xan fixlengths -l 2 /wide.csv").stdout,
+            "a,b\n1,2\n5,6\n"
+        );
+        // xan fixlengths -d: custom default value
+        assert_eq!(
+            env.exec("xan fixlengths -d 'N/A' /short.csv").stdout,
+            "a,b,c\n1,2,N/A\n3,N/A,N/A\n"
+        );
+
+        // xan split -c: into N chunks
+        assert_eq!(
+            env.exec("xan split -c 3 /six.csv").stdout,
+            "Split into 3 parts\n"
+        );
+        // xan split -S: by chunk size
+        assert_eq!(
+            env.exec("xan split -S 2 /five.csv").stdout,
+            "Split into 3 parts\n"
+        );
+        // xan split: errors without -c or -S
+        let err = env.exec("xan split /one.csv");
+        assert_eq!(err.exit_code, 1);
+        assert_eq!(err.stderr, "xan split: must specify -c or -S\n");
+    }
+
+    #[test]
     fn structured_data_sqlite3_options_errors_and_simple_select_rows() {
         let env = bash();
 

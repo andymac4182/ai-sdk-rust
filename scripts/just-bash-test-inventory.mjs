@@ -3561,12 +3561,30 @@ const jbc37CaseGroups = [
   },
   {
     file: 'packages/just-bash/src/commands/xan/xan.frequency.test.ts',
-    lines: [12, 22, 34, 43, 50, 61],
+    lines: [12, 22, 34, 43, 50, 61, 75],
     status: 'portable-verified',
     owner: 'crates/just-bash::runtime::structured-data',
     rustTest: 'structured_data_xan_frequency_rows',
     notes:
-      'JBC verifies portable xan frequency all-columns, -s column select, -l limit, empty-value <empty> display, equal-count stability ordering, and -g groupby header over in-memory CSV.',
+      'JBC verifies portable xan frequency all-columns, -s column select, -l limit, empty-value <empty> display, equal-count stability ordering, -g groupby header, and -A show-all (limit 0) over in-memory CSV.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.filter-sort.test.ts',
+    lines: [129, 138, 149, 158, 185],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_top_transpose_fixlengths_split_search_rows',
+    notes:
+      'JBC verifies portable xan top numeric-descending and -R bottom-N selection, plus xan search regex/-v inverted matching and the precise invalid-regex-pattern error over in-memory CSV.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.data.test.ts',
+    lines: [85, 98, 108, 147, 156, 165, 176, 185, 194],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_top_transpose_fixlengths_split_search_rows',
+    notes:
+      'JBC verifies portable xan transpose (multi-row, single-column, header-only), xan fixlengths padding/truncation/custom-default, and xan split -c/-S part counting plus the missing-mode error over in-memory CSV with virtual-file output.',
   },
   {
     file: 'packages/just-bash/src/commands/yq/yq.prototype-pollution.test.ts',
