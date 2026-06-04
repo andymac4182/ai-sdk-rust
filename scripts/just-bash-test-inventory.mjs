@@ -4589,6 +4589,30 @@ const jbc47CaseGroups = [
   },
 ];
 
+const jbSedTestTsCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/sed/sed.test.ts',
+    lines: [
+      267, 281, 294, 307, 320, 339, 354, 364, 378, 388, 398, 410, 426, 435,
+      444, 455, 464, 473, 484, 493, 609, 618, 627, 638, 647, 658, 670, 682,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sed',
+    rustTest: 'sed_test_ts_inplace_holdspace_text_and_cycle_rows',
+    notes:
+      'command-sed verifies the sed.test.ts cycle-engine rows over the virtual session: -i/--in-place editing (single/global/delete/match-delete/multi-file), the h/H/g/G/x hold space, the a/i/c text commands, relative-offset (+N) addresses with and without { } blocks, grouped { } commands, and the P/D first-line commands. Each assertion mirrors the upstream expectation verbatim.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sed/sed.commands.test.ts',
+    lines: [216, 249],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sed',
+    rustTest: 'sed_test_ts_inplace_holdspace_text_and_cycle_rows',
+    notes:
+      'command-sed verifies multiple -e scripts run in sequence and relative-offset (/alpha/,+2) address matching through the sed cycle engine.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -4830,6 +4854,7 @@ const jbExecOptionsLoggingCaseGroups = [
 
 function caseOverrideFor(testCase) {
   const group = [
+    ...jbSedTestTsCaseGroups,
     ...jbAliasCaseGroups,
     ...jbInterpreterBuiltinsCaseGroups,
     ...jbR5ParserInterpreterCaseGroups,

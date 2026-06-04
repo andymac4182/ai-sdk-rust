@@ -2391,6 +2391,261 @@ and exhibited clearly, with a label attached.\n";
         );
     }
 
+    /// Closes the `command-sed` strict gaps from `sed.test.ts` and
+    /// `sed.commands.test.ts` that exercise the GNU sed cycle engine through
+    /// the virtual session: `-i`/`--in-place` editing, the `h/H/g/G/x` hold
+    /// space, the `a/i/c` text commands, relative-offset (`+N`) addresses,
+    /// grouped `{ }` commands, and the `P`/`D` first-line commands. Each
+    /// assertion mirrors an upstream just-bash test verbatim by file:line and
+    /// fails if the behavior is wrong.
+    #[test]
+    fn sed_test_ts_inplace_holdspace_text_and_cycle_rows() {
+        // Helper: build a fresh root session with the supplied files.
+        let session = |files: &[(&str, &str)]| {
+            Bash::with_options(BashOptions {
+                files: files
+                    .iter()
+                    .map(|(p, c)| (p.to_string(), c.to_string()))
+                    .collect::<BTreeMap<_, _>>(),
+                cwd: Some("/".to_string()),
+                ..BashOptions::default()
+            })
+        };
+
+        // ---- in-place editing (-i) — sed.test.ts ----
+        // :267 `-i 's/hello/hi/'` modifies the file and prints nothing.
+        let env = session(&[("/test.txt", "hello world\n")]);
+        let r = env.exec("sed -i 's/hello/hi/' /test.txt");
+        assert_eq!(r.stdout, "");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(env.exec("cat /test.txt").stdout, "hi world\n");
+        // :281 `-i 's/foo/baz/g'` global in-place replacement.
+        let env = session(&[("/test.txt", "foo foo foo\nbar foo bar\n")]);
+        assert_eq!(env.exec("sed -i 's/foo/baz/g' /test.txt").stdout, "");
+        assert_eq!(
+            env.exec("cat /test.txt").stdout,
+            "baz baz baz\nbar baz bar\n"
+        );
+        // :294 `-i '2d'` deletes a line in place.
+        let env = session(&[("/test.txt", "line 1\nline 2\nline 3\n")]);
+        assert_eq!(env.exec("sed -i '2d' /test.txt").stdout, "");
+        assert_eq!(env.exec("cat /test.txt").stdout, "line 1\nline 3\n");
+        // :307 `-i '/remove/d'` deletes matching lines in place.
+        let env = session(&[("/test.txt", "keep this\nremove this\nkeep that\n")]);
+        assert_eq!(env.exec("sed -i '/remove/d' /test.txt").stdout, "");
+        assert_eq!(env.exec("cat /test.txt").stdout, "keep this\nkeep that\n");
+        // :320 `-i` edits multiple files in place.
+        let env = session(&[("/a.txt", "hello\n"), ("/b.txt", "hello\n")]);
+        assert_eq!(env.exec("sed -i 's/hello/hi/' /a.txt /b.txt").stdout, "");
+        assert_eq!(env.exec("cat /a.txt").stdout, "hi\n");
+        assert_eq!(env.exec("cat /b.txt").stdout, "hi\n");
+        // :339 `--in-place` is the long form of `-i`.
+        let env = session(&[("/test.txt", "old text\n")]);
+        assert_eq!(env.exec("sed --in-place 's/old/new/' /test.txt").stdout, "");
+        assert_eq!(env.exec("cat /test.txt").stdout, "new text\n");
+
+        // ---- hold space commands (h/H/g/G/x) — sed.test.ts ----
+        // :354 `1h;3G` copies line 1 to hold then appends hold at line 3.
+        assert_eq!(
+            session(&[("/test.txt", "first\nsecond\nthird\n")])
+                .exec("sed '1h;3G' /test.txt")
+                .stdout,
+            "first\nsecond\nthird\nfirst\n"
+        );
+        // :364 `H;$G` accumulates every line in hold then appends at EOF.
+        assert_eq!(
+            session(&[("/test.txt", "a\nb\nc\n")])
+                .exec("sed 'H;$G' /test.txt")
+                .stdout,
+            "a\nb\nc\na\nb\nc\n"
+        );
+        // :378 `1h;2g` copies hold to pattern space, replacing line 2.
+        assert_eq!(
+            session(&[("/test.txt", "first\nsecond\n")])
+                .exec("sed '1h;2g' /test.txt")
+                .stdout,
+            "first\nfirst\n"
+        );
+        // :388 `1h;2G` appends hold space to pattern space at line 2.
+        assert_eq!(
+            session(&[("/test.txt", "header\ndata\n")])
+                .exec("sed '1h;2G' /test.txt")
+                .stdout,
+            "header\ndata\nheader\n"
+        );
+        // :398 `x` exchanges pattern and hold spaces each cycle.
+        assert_eq!(
+            session(&[("/test.txt", "A\nB\n")])
+                .exec("sed 'x' /test.txt")
+                .stdout,
+            "\nA\n"
+        );
+        // :410 `-n '$g;$p'` copies the (empty) hold at EOF and prints it.
+        assert_eq!(
+            session(&[("/test.txt", "1\n2\n3\n")])
+                .exec("sed -n '$g;$p' /test.txt")
+                .stdout,
+            "\n"
+        );
+
+        // ---- append command (a) — sed.test.ts ----
+        // :426 `2a\ appended` appends text after the addressed line.
+        assert_eq!(
+            session(&[("/test.txt", "line 1\nline 2\nline 3\n")])
+                .exec("sed '2a\\ appended' /test.txt")
+                .stdout,
+            "line 1\nline 2\nappended\nline 3\n"
+        );
+        // :435 `a\ ---` appends after every line.
+        assert_eq!(
+            session(&[("/test.txt", "a\nb\n")])
+                .exec("sed 'a\\ ---' /test.txt")
+                .stdout,
+            "a\n---\nb\n---\n"
+        );
+        // :444 `$a\ footer` appends after the last line.
+        assert_eq!(
+            session(&[("/test.txt", "first\nlast\n")])
+                .exec("sed '$a\\ footer' /test.txt")
+                .stdout,
+            "first\nlast\nfooter\n"
+        );
+
+        // ---- insert command (i) — sed.test.ts ----
+        // :455 `2i\ inserted` inserts before the addressed line.
+        assert_eq!(
+            session(&[("/test.txt", "line 1\nline 2\nline 3\n")])
+                .exec("sed '2i\\ inserted' /test.txt")
+                .stdout,
+            "line 1\ninserted\nline 2\nline 3\n"
+        );
+        // :464 `1i\ header` inserts before the first line.
+        assert_eq!(
+            session(&[("/test.txt", "content\n")])
+                .exec("sed '1i\\ header' /test.txt")
+                .stdout,
+            "header\ncontent\n"
+        );
+        // :473 `i\ >` inserts before every line.
+        assert_eq!(
+            session(&[("/test.txt", "a\nb\n")])
+                .exec("sed 'i\\ >' /test.txt")
+                .stdout,
+            ">\na\n>\nb\n"
+        );
+
+        // ---- change command (c) — sed.test.ts ----
+        // :484 `1c\ new line` changes the matching line.
+        assert_eq!(
+            session(&[("/test.txt", "old line\n")])
+                .exec("sed '1c\\ new line' /test.txt")
+                .stdout,
+            "new line\n"
+        );
+        // :493 `2c\ replaced` changes a specific line number.
+        assert_eq!(
+            session(&[("/test.txt", "line 1\nline 2\nline 3\n")])
+                .exec("sed '2c\\ replaced' /test.txt")
+                .stdout,
+            "line 1\nreplaced\nline 3\n"
+        );
+
+        // ---- relative offset address (+N) — sed.test.ts ----
+        // :609 `/^2/,+2d` deletes the match and the next N lines.
+        assert_eq!(
+            session(&[("/test.txt", "1\n2\n3\n4\n5\n")])
+                .exec("sed '/^2/,+2d' /test.txt")
+                .stdout,
+            "1\n5\n"
+        );
+        // :618 `-n '/a/,+1p'` prints the match plus the next line, repeating.
+        assert_eq!(
+            session(&[("/test.txt", "a\n1\nc\nc\na\n2\na\n3\n")])
+                .exec("sed -n '/a/,+1p' /test.txt")
+                .stdout,
+            "a\n1\na\n2\na\n3\n"
+        );
+        // :627 `/^2/,+2{d}` combines a relative-offset range with a `{ }` block.
+        assert_eq!(
+            session(&[("/test.txt", "1\n2\n3\n4\n5\n")])
+                .exec("sed '/^2/,+2{d}' /test.txt")
+                .stdout,
+            "1\n5\n"
+        );
+
+        // ---- grouped commands — sed.test.ts ----
+        // :638 `2{s/b/B/}` runs a command in a group on the addressed line.
+        assert_eq!(
+            session(&[("/test.txt", "a\nb\nc\n")])
+                .exec("sed '2{s/b/B/}' /test.txt")
+                .stdout,
+            "a\nB\nc\n"
+        );
+        // :647 `-n '2{s/b/B/;p}'` runs multiple `;`-separated group commands.
+        assert_eq!(
+            session(&[("/test.txt", "a\nb\nc\n")])
+                .exec("sed -n '2{s/b/B/;p}' /test.txt")
+                .stdout,
+            "B\n"
+        );
+
+        // ---- P / D commands — sed.test.ts ----
+        // :658 `-n 'N;P'` prints up to the first newline of the joined pair.
+        assert_eq!(
+            session(&[("/test.txt", "line1\nline2\n")])
+                .exec("sed -n 'N;P' /test.txt")
+                .stdout,
+            "line1\n"
+        );
+        // :670 `-n 'N;P;D'` is the sliding window: every line except the last.
+        assert_eq!(
+            session(&[("/test.txt", "a\nb\nc\n")])
+                .exec("sed -n 'N;P;D' /test.txt")
+                .stdout,
+            "a\nb\n"
+        );
+        // :682 `N;D` auto-prints the remaining line when N has no more input.
+        assert_eq!(
+            session(&[("/test.txt", "a\nb\nc\n")])
+                .exec("sed 'N;D' /test.txt")
+                .stdout,
+            "c\n"
+        );
+
+        // ---- sed.commands.test.ts ----
+        // A session matching the upstream `createEnv` for sed.commands.test.ts.
+        let commands_env = || {
+            Bash::with_options(BashOptions {
+                files: BTreeMap::from([
+                    (
+                        "/test/file.txt".to_string(),
+                        "line 1\nline 2\nline 3\nline 4\nline 5\n".to_string(),
+                    ),
+                    (
+                        "/test/alpha.txt".to_string(),
+                        "alpha\nbeta\ngamma\ndelta\n".to_string(),
+                    ),
+                ]),
+                cwd: Some("/test".to_string()),
+                ..BashOptions::default()
+            })
+        };
+        // :216 multiple `-e` scripts run in sequence on each line.
+        assert_eq!(
+            commands_env()
+                .exec("sed -e 's/a/1/' -e 's/e/2/' -e 's/i/3/' /test/alpha.txt")
+                .stdout,
+            "1lpha\nb2t1\ng1mma\nd2lt1\n"
+        );
+        // :249 `-n '/alpha/,+2p'` prints the match and the next two lines.
+        assert_eq!(
+            commands_env()
+                .exec("sed -n '/alpha/,+2p' /test/alpha.txt")
+                .stdout,
+            "alpha\nbeta\ngamma\n"
+        );
+    }
+
     #[test]
     fn awk_upstream_core_rows_cover_blocks_patterns_printf_stdin_and_errors() {
         let env = Bash::with_options(BashOptions {

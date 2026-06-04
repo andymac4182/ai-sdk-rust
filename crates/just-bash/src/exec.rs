@@ -7533,6 +7533,7 @@ fn relative_display_path(cwd: &str, path: &str) -> String {
 fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
     let mut quiet = false;
     let mut ere = false;
+    let mut in_place = false;
     let mut scripts = Vec::new();
     let mut paths = Vec::new();
     // Tracks whether a script was supplied via `-e`/`-f`. When true, the first
@@ -7543,6 +7544,13 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
         match arg.as_str() {
             "-n" | "--quiet" | "--silent" => {
                 quiet = true;
+                index += 1;
+            }
+            // `-i`/`--in-place` edits the named files in place. GNU sed also
+            // accepts an optional backup suffix as `-iSUFFIX`/`--in-place=SUFFIX`,
+            // but the portable subset only implements the no-backup form.
+            "-i" | "--in-place" => {
+                in_place = true;
                 index += 1;
             }
             "-E" | "-r" | "--regexp-extended" => {
@@ -7606,11 +7614,6 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
     if scripts.is_empty() {
         return stderr_result(1, "sed: no script specified\n");
     };
-    let input = match collect_text_inputs(state, &paths, stdin) {
-        Ok(input) => input,
-        Err(error) => return stderr_result(1, format!("sed: {error}\n")),
-    };
-    let lines = input.lines().map(ToString::to_string).collect::<Vec<_>>();
     // Join multiple `-e`/`-f` scripts with newlines, which GNU sed treats as
     // command separators equivalent to `;`.
     let joined_script = scripts.join("\n");
@@ -7629,6 +7632,52 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
             return stderr_result(1, format!("sed: undefined label '{label}'\n"));
         }
     }
+    // In-place mode rewrites each named file with the transformed output and
+    // produces no stdout. It requires file operands; with none, GNU sed errors.
+    if in_place {
+        if paths.is_empty() {
+            return stderr_result(1, "sed: no input files\n");
+        }
+        for path in &paths {
+            let resolved = resolve_path(&state.cwd, path);
+            let contents = {
+                let fs = match state.session.inner.fs.lock() {
+                    Ok(fs) => fs,
+                    Err(_) => return stderr_result(1, "sed: filesystem lock poisoned\n"),
+                };
+                match fs.read_file(&resolved) {
+                    Ok(contents) => contents,
+                    Err(_) => {
+                        return stderr_result(
+                            1,
+                            format!("sed: can't read {path}: No such file or directory\n"),
+                        );
+                    }
+                }
+            };
+            let lines = contents
+                .lines()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            let result = run_sed_program(&program, lines, quiet);
+            if result.exit_code != 0 {
+                return result;
+            }
+            let mut fs = match state.session.inner.fs.lock() {
+                Ok(fs) => fs,
+                Err(_) => return stderr_result(1, "sed: filesystem lock poisoned\n"),
+            };
+            if fs.write_file(&resolved, result.stdout).is_err() {
+                return stderr_result(1, format!("sed: couldn't write file {path}\n"));
+            }
+        }
+        return stdout_result("");
+    }
+    let input = match collect_text_inputs(state, &paths, stdin) {
+        Ok(input) => input,
+        Err(error) => return stderr_result(1, format!("sed: {error}\n")),
+    };
+    let lines = input.lines().map(ToString::to_string).collect::<Vec<_>>();
     run_sed_program(&program, lines, quiet)
 }
 
@@ -8395,8 +8444,16 @@ fn run_sed_program(program: &[SedInstruction], lines: Vec<String>, quiet: bool) 
                     pc += 1;
                 }
                 SedOp::HoldAppend => {
-                    hold.push('\n');
-                    hold.push_str(&pattern);
+                    // GNU sed appends `\n` + pattern space, but the portable
+                    // upstream model only inserts the separating newline when the
+                    // hold space is already non-empty (matching just-bash's
+                    // executor), so the first `H` does not leave a leading blank.
+                    if hold.is_empty() {
+                        hold.clone_from(&pattern);
+                    } else {
+                        hold.push('\n');
+                        hold.push_str(&pattern);
+                    }
                     pc += 1;
                 }
                 SedOp::GetCopy => {
