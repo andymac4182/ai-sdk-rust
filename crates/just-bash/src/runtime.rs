@@ -846,6 +846,302 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn r10jb_uniq_and_tee_comparison_rows_match_real_bash() {
+        // Maps comparison rows from uniq.comparison.test.ts and tee.comparison.test.ts
+        // that are expressible through the command-and-pipeline runtime layer.
+        let env = Bash::with_options(BashOptions {
+            cwd: Some("/".to_string()),
+            files: BTreeMap::from([
+                (
+                    "/dups.txt".to_string(),
+                    "apple\napple\nbanana\nbanana\nbanana\ncherry\n".to_string(),
+                ),
+                ("/single.txt".to_string(), "a\nb\nc\n".to_string()),
+                ("/cd.txt".to_string(), "a\na\nb\nc\nc\nc\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // uniq -c counts consecutive occurrences (columns normalized).
+        let uniq_c = env.exec("uniq -c /dups.txt");
+        let uniq_c_rows: Vec<Vec<&str>> = uniq_c
+            .stdout
+            .lines()
+            .map(|l| l.split_whitespace().collect())
+            .collect();
+        assert_eq!(
+            uniq_c_rows,
+            vec![vec!["2", "apple"], vec!["3", "banana"], vec!["1", "cherry"]]
+        );
+        // uniq -c with all-single lines.
+        let uniq_single = env.exec("uniq -c /single.txt");
+        let uniq_single_rows: Vec<Vec<&str>> = uniq_single
+            .stdout
+            .lines()
+            .map(|l| l.split_whitespace().collect())
+            .collect();
+        assert_eq!(
+            uniq_single_rows,
+            vec![vec!["1", "a"], vec!["1", "b"], vec!["1", "c"]]
+        );
+        // uniq -c from a sorted pipe.
+        let uniq_after_sort = env.exec("sort /dups.txt | uniq -c");
+        let after_sort_rows: Vec<Vec<&str>> = uniq_after_sort
+            .stdout
+            .lines()
+            .map(|l| l.split_whitespace().collect())
+            .collect();
+        assert_eq!(
+            after_sort_rows,
+            vec![vec!["2", "apple"], vec!["3", "banana"], vec!["1", "cherry"]]
+        );
+        // uniq -c from stdin.
+        let uniq_stdin = env.exec("echo -e \"a\\na\\nb\\nb\\nb\" | uniq -c");
+        let uniq_stdin_rows: Vec<Vec<&str>> = uniq_stdin
+            .stdout
+            .lines()
+            .map(|l| l.split_whitespace().collect())
+            .collect();
+        assert_eq!(uniq_stdin_rows, vec![vec!["2", "a"], vec!["3", "b"]]);
+        // uniq -cd shows only duplicated lines with counts.
+        let uniq_cd = env.exec("uniq -cd /cd.txt");
+        let uniq_cd_rows: Vec<Vec<&str>> = uniq_cd
+            .stdout
+            .lines()
+            .map(|l| l.split_whitespace().collect())
+            .collect();
+        assert_eq!(uniq_cd_rows, vec![vec!["2", "a"], vec!["3", "c"]]);
+
+        // tee passes stdin through to stdout and writes the same content to files.
+        let tee = Bash::with_options(BashOptions {
+            cwd: Some("/".to_string()),
+            files: BTreeMap::from([(
+                "/existing.txt".to_string(),
+                "existing content\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        assert_eq!(tee.exec("echo hello | tee").stdout, "hello\n");
+        assert_eq!(tee.exec("echo hello | tee /out.txt").stdout, "hello\n");
+        assert_eq!(tee.read_file("/out.txt").unwrap(), "hello\n");
+        tee.exec("echo hello | tee /f1.txt /f2.txt");
+        assert_eq!(tee.read_file("/f1.txt").unwrap(), "hello\n");
+        assert_eq!(tee.read_file("/f2.txt").unwrap(), "hello\n");
+        tee.exec("echo appended | tee -a /existing.txt");
+        assert_eq!(
+            tee.read_file("/existing.txt").unwrap(),
+            "existing content\nappended\n"
+        );
+        let tee_multi = tee.exec("echo -e \"line1\\nline2\\nline3\" | tee /ml.txt");
+        assert_eq!(tee_multi.stdout, "line1\nline2\nline3\n");
+        assert_eq!(tee.read_file("/ml.txt").unwrap(), "line1\nline2\nline3\n");
+    }
+
+    #[test]
+    fn r10jb_wc_comparison_rows_match_real_bash() {
+        // Maps packages/just-bash/src/comparison-tests/wc.comparison.test.ts rows
+        // for default/-l/-w/-c/-lw/-wc output, multiple files, and stdin.
+        let env = Bash::with_options(BashOptions {
+            cwd: Some("/".to_string()),
+            files: BTreeMap::from([
+                (
+                    "/lines.txt".to_string(),
+                    "line 1\nline 2\nline 3\n".to_string(),
+                ),
+                ("/nonl.txt".to_string(), "no newline".to_string()),
+                ("/empty.txt".to_string(), String::new()),
+                (
+                    "/words.txt".to_string(),
+                    "one two three\nfour five\n".to_string(),
+                ),
+                (
+                    "/spaces.txt".to_string(),
+                    "one    two   three\n".to_string(),
+                ),
+                ("/hello.txt".to_string(), "hello world\n".to_string()),
+                ("/a.txt".to_string(), "file a\n".to_string()),
+                (
+                    "/b.txt".to_string(),
+                    "file b line 1\nfile b line 2\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // Default output: lines, words, chars, then the file name argument verbatim.
+        assert_eq!(
+            env.exec("wc /lines.txt")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["3", "6", "21", "/lines.txt"]
+        );
+        assert_eq!(
+            env.exec("wc /nonl.txt")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["0", "2", "10", "/nonl.txt"]
+        );
+        assert_eq!(
+            env.exec("wc /empty.txt")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["0", "0", "0", "/empty.txt"]
+        );
+
+        // -l line count.
+        assert_eq!(
+            env.exec("wc -l /lines.txt")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["3", "/lines.txt"]
+        );
+
+        // -w word count (collapses runs of whitespace).
+        assert_eq!(
+            env.exec("wc -w /words.txt")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["5", "/words.txt"]
+        );
+        assert_eq!(
+            env.exec("wc -w /spaces.txt")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["3", "/spaces.txt"]
+        );
+
+        // -c byte count.
+        assert_eq!(
+            env.exec("wc -c /hello.txt")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["12", "/hello.txt"]
+        );
+
+        // Multiple files emit a total row.
+        let multi = env.exec("wc /a.txt /b.txt");
+        let multi_lines: Vec<Vec<&str>> = multi
+            .stdout
+            .lines()
+            .map(|l| l.split_whitespace().collect())
+            .collect();
+        assert_eq!(multi_lines[0], vec!["1", "2", "7", "/a.txt"]);
+        assert_eq!(multi_lines[1], vec!["2", "8", "28", "/b.txt"]);
+        assert_eq!(multi_lines[2], vec!["3", "10", "35", "total"]);
+
+        let multi_l = env.exec("wc -l /a.txt /b.txt");
+        let multi_l_lines: Vec<Vec<&str>> = multi_l
+            .stdout
+            .lines()
+            .map(|l| l.split_whitespace().collect())
+            .collect();
+        assert_eq!(multi_l_lines[0], vec!["1", "/a.txt"]);
+        assert_eq!(multi_l_lines[1], vec!["2", "/b.txt"]);
+        assert_eq!(multi_l_lines[2], vec!["3", "total"]);
+
+        // Combined flags preserve canonical lines/words/chars ordering.
+        assert_eq!(
+            env.exec("wc -lw /words.txt")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["2", "5", "/words.txt"]
+        );
+        assert_eq!(
+            env.exec("wc -wc /hello.txt")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["2", "12", "/hello.txt"]
+        );
+
+        // Stdin (no file name column).
+        assert_eq!(
+            env.exec("echo \"hello world\" | wc")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["1", "2", "12"]
+        );
+        assert_eq!(env.exec("echo -e \"a\\nb\\nc\" | wc -l").stdout.trim(), "3");
+    }
+
+    #[test]
+    fn r10jb_sort_and_redirection_comparison_rows_match_real_bash() {
+        // Maps comparison rows from sort.comparison.test.ts (empty-lines, numeric)
+        // and pipes-redirections.comparison.test.ts (>, >>, pipe+redirect).
+        let env = Bash::with_options(BashOptions {
+            cwd: Some("/".to_string()),
+            files: BTreeMap::from([
+                ("/blanks.txt".to_string(), "b\n\na\n\nc\n".to_string()),
+                ("/nums.txt".to_string(), "10\n2\n1\n20\n5\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // sort: empty lines collate before non-empty lines.
+        assert_eq!(env.exec("sort blanks.txt").stdout, "\n\na\nb\nc\n");
+        // sort -n: numeric ascending order.
+        assert_eq!(env.exec("sort -n nums.txt").stdout, "1\n2\n5\n10\n20\n");
+
+        // stdout redirection (>) writes the command output to a file.
+        let redir = Bash::with_options(BashOptions {
+            cwd: Some("/".to_string()),
+            files: BTreeMap::from([
+                (
+                    "/input.txt".to_string(),
+                    "hello\nworld\nhello again\n".to_string(),
+                ),
+                ("/existing.txt".to_string(), "old content\n".to_string()),
+                (
+                    "/sortin.txt".to_string(),
+                    "cherry\napple\nbanana\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+        redir.exec("echo \"hello world\" > out.txt");
+        assert_eq!(redir.read_file("out.txt").unwrap(), "hello world\n");
+        // Overwrite replaces prior content.
+        redir.exec("echo \"new content\" > existing.txt");
+        assert_eq!(redir.read_file("existing.txt").unwrap(), "new content\n");
+        // Redirect a filtered command's output.
+        redir.exec("grep hello input.txt > grepout.txt");
+        assert_eq!(
+            redir.read_file("grepout.txt").unwrap(),
+            "hello\nhello again\n"
+        );
+
+        // Append redirection (>>): append to existing, create if missing, repeat.
+        let append = Bash::with_options(BashOptions {
+            cwd: Some("/".to_string()),
+            files: BTreeMap::from([("/log.txt".to_string(), "line 1\n".to_string())]),
+            ..BashOptions::default()
+        });
+        append.exec("echo \"line 2\" >> log.txt");
+        assert_eq!(append.read_file("log.txt").unwrap(), "line 1\nline 2\n");
+        append.exec("echo \"new line\" >> created.txt");
+        assert_eq!(append.read_file("created.txt").unwrap(), "new line\n");
+        append.exec("echo \"line 1\" >> multi.txt");
+        append.exec("echo \"line 2\" >> multi.txt");
+        assert_eq!(append.read_file("multi.txt").unwrap(), "line 1\nline 2\n");
+
+        // Pipe combined with redirection: cat | sort > file.
+        redir.exec("cat sortin.txt | sort > sorted.txt");
+        assert_eq!(
+            redir.read_file("sorted.txt").unwrap(),
+            "apple\nbanana\ncherry\n"
+        );
+    }
+
+    #[test]
     fn coreutils_upstream_file_commands_use_virtual_fs() {
         // maps cat/ls/mkdir/rm/cp/mv/touch upstream command smoke cases
         let env = Bash::with_options(BashOptions {

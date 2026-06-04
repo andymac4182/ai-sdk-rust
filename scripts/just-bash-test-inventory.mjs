@@ -2677,6 +2677,51 @@ const jbc20CaseGroups = [
       'JBC-20 verifies portable comparison rows for unknown-command diagnostics, missing-file statuses, exit/true/false status, &&/||/semicolon behavior, quoting, and empty/whitespace commands.',
   },
   {
+    file: 'packages/just-bash/src/comparison-tests/wc.comparison.test.ts',
+    lines: [25, 32, 39, 48, 67, 74, 83, 92, 100, 110, 117, 126, 131],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::comparison-core',
+    rustTest: 'r10jb_wc_comparison_rows_match_real_bash',
+    notes:
+      'R10JB verifies portable wc comparison rows: default lines/words/chars output, files without trailing newline, empty files, -l/-w/-c single-flag counts, multi-space word collapsing, multiple-file totals, -lw/-wc combined flags, and stdin counting against the Rust virtual command runtime.',
+  },
+  {
+    file: 'packages/just-bash/src/comparison-tests/sort.comparison.test.ts',
+    lines: [39, 57],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::comparison-core',
+    rustTest: 'r10jb_sort_and_redirection_comparison_rows_match_real_bash',
+    notes:
+      'R10JB verifies portable sort comparison rows: empty-line collation order and -n numeric ascending sort against the Rust virtual command runtime.',
+  },
+  {
+    file: 'packages/just-bash/src/comparison-tests/pipes-redirections.comparison.test.ts',
+    lines: [138, 154, 172, 192, 210, 226, 248],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::comparison-core',
+    rustTest: 'r10jb_sort_and_redirection_comparison_rows_match_real_bash',
+    notes:
+      'R10JB verifies portable redirection comparison rows: > redirect-to-file, overwrite, redirect a filtered command, >> append to existing/created/repeated files, and pipe-with-redirection (cat | sort > file) against the Rust virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/comparison-tests/uniq.comparison.test.ts',
+    lines: [55, 62, 117, 136, 148],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::comparison-core',
+    rustTest: 'r10jb_uniq_and_tee_comparison_rows_match_real_bash',
+    notes:
+      'R10JB verifies portable uniq comparison rows: -c counting of consecutive occurrences, single-occurrence counts, -c after a sort pipe, -c from stdin, and combined -cd duplicate-only counts against the Rust virtual command runtime.',
+  },
+  {
+    file: 'packages/just-bash/src/comparison-tests/tee.comparison.test.ts',
+    lines: [23, 33, 53],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::comparison-core',
+    rustTest: 'r10jb_uniq_and_tee_comparison_rows_match_real_bash',
+    notes:
+      'R10JB verifies portable tee comparison rows: stdin pass-through to stdout, write-to-file-and-stdout, and write-to-multiple-files against the Rust virtual filesystem.',
+  },
+  {
     file: 'packages/just-bash/src/commands/timeout/timeout.test.ts',
     lines: [7, 17, 29, 41, 50, 59, 68, 79, 87, 95, 103, 113, 123, 133, 145, 165, 177, 194],
     status: 'portable-verified',
