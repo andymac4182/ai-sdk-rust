@@ -5448,6 +5448,249 @@ mod tests {
         Interpreter::new(FakeCommands::default())
     }
 
+    /// Covers additional portable
+    /// `packages/just-bash/src/syntax/control-flow.test.ts` rows: if-body exit
+    /// code (L73), `local`-scope isolation/restore/declare-without-value/nested
+    /// (L222, L238, L261, L269), and `!` pipeline negation against grep
+    /// (L313, L321). Each tuple mirrors an upstream `it(...)` stdout/exit-code
+    /// assertion on `Bash().exec(...)`.
+    #[test]
+    fn jbpi_syntax_control_flow_function_local_and_negation_rows_match_upstream() {
+        // L73 if returns the exit code of the last command in its body.
+        let mut sh = shell();
+        let r = sh.exec("if true; then echo hello; false; fi");
+        assert_eq!(r.stdout, "hello\n", "L73 stdout");
+        assert_eq!(r.exit_code, 1, "L73 exit");
+
+        // L222 a `local x` inside a function does not leak to the outer scope.
+        let mut sh = shell().with_env([("x", "outer")]);
+        let r = sh.exec("test_func() { local x=inner; echo $x; }; test_func; echo $x");
+        assert_eq!(r.stdout, "inner\nouter\n", "L222 stdout");
+        assert_eq!(r.exit_code, 0, "L222 exit");
+
+        // L238 a variable first introduced as `local` is unset after the call.
+        let mut sh = shell();
+        let r = sh.exec(
+            "test_func() { local newvar=value; echo $newvar; }; test_func; echo \"[$newvar]\"",
+        );
+        assert_eq!(r.stdout, "value\n[]\n", "L238 stdout");
+        assert_eq!(r.exit_code, 0, "L238 exit");
+
+        // L261 `local x` without a value, then assigned in the same function.
+        let mut sh = shell();
+        let r = sh.exec("test_func() { local x; x=assigned; echo $x; }; test_func");
+        assert_eq!(r.stdout, "assigned\n", "L261 stdout");
+        assert_eq!(r.exit_code, 0, "L261 exit");
+
+        // L269 nested function calls each keep their own `local x`.
+        let mut sh = shell();
+        let r = sh.exec(
+            "inner() { local x=inner; echo $x; }; outer() { local x=outer; inner; echo $x; }; outer",
+        );
+        assert_eq!(r.stdout, "inner\nouter\n", "L269 stdout");
+        assert_eq!(r.exit_code, 0, "L269 exit");
+
+        // L313 `!` negates a failing grep to overall success.
+        let mut sh = shell().with_files(ShellVirtualFileSystem::with_files([(
+            "/test.txt",
+            "hello world",
+        )]));
+        let r = sh.exec("! grep missing /test.txt");
+        assert_eq!(r.exit_code, 0, "L313 exit");
+
+        // L321 `!` negates a succeeding grep to overall failure.
+        let mut sh = shell().with_files(ShellVirtualFileSystem::with_files([(
+            "/test.txt",
+            "hello world",
+        )]));
+        let r = sh.exec("! grep hello /test.txt > /dev/null");
+        assert_eq!(r.exit_code, 1, "L321 exit");
+    }
+
+    /// Covers portable `packages/just-bash/src/interpreter/control-flow.test.ts`
+    /// nested-control rows: quoted case pattern matches literally (L456), `if`
+    /// inside `for` (L471), `for` inside `if` (L484), and `while` inside `case`
+    /// (L513). Each tuple mirrors an upstream `it(...)` stdout/exit-code
+    /// assertion on `Bash().exec(...)`.
+    #[test]
+    fn jbpi_interpreter_control_flow_nested_and_quoted_case_rows_match_upstream() {
+        for (source, expected_stdout) in [
+            // L456 a single-quoted case pattern matches the literal `*` value.
+            (
+                "x='*'\ncase $x in\n  '*') echo \"literal star\" ;;\n  *) echo \"default\" ;;\nesac",
+                "literal star\n",
+            ),
+            // L471 `if` nested inside a `for` loop.
+            (
+                "for i in 1 2 3; do if [ $i -eq 2 ]; then echo \"found two\"; fi; done",
+                "found two\n",
+            ),
+            // L484 `for` loop nested inside an `if` branch.
+            (
+                "x=1\nif [ $x -eq 1 ]; then for i in a b c; do echo $i; done; fi",
+                "a\nb\nc\n",
+            ),
+            // L513 `while` loop nested inside a `case` arm.
+            (
+                "action=count\ncase $action in\n  count)\n    i=0\n    while [ $i -lt 3 ]; do\n      echo $i\n      i=$((i + 1))\n    done\n    ;;\nesac",
+                "0\n1\n2\n",
+            ),
+        ] {
+            let mut sh = shell();
+            let result = sh.exec(source);
+            assert_eq!(result.stderr, "", "stderr {source:?}");
+            assert_eq!(result.stdout, expected_stdout, "stdout {source:?}");
+            assert_eq!(result.exit_code, 0, "exit {source:?}");
+        }
+    }
+
+    /// Covers portable `packages/just-bash/src/syntax/loops.test.ts` rows: a
+    /// `for` loop without a semicolon before `do` (L184) and a malformed `for`
+    /// header that is a syntax error (L200), through the Rust shell.
+    #[test]
+    fn jbpi_syntax_loops_for_without_semicolon_and_malformed_rows_match_upstream() {
+        // L184 `for i in a b c do ...` (no `;` before `do`) still iterates.
+        let mut sh = shell();
+        let r = sh.exec("for i in a b c do echo $i; done");
+        assert_eq!(r.stdout, "a\nb\nc\n", "L184 stdout");
+        assert_eq!(r.exit_code, 0, "L184 exit");
+
+        // L200 `for i a b c; do ...` (missing `in`) is a syntax error.
+        let mut sh = shell();
+        let r = sh.exec("for i a b c; do echo $i; done");
+        assert_eq!(r.exit_code, 2, "L200 exit");
+        assert!(
+            r.stderr.contains("syntax error"),
+            "L200 stderr {}",
+            r.stderr
+        );
+    }
+
+    /// Covers portable `packages/just-bash/src/syntax/parser-edge-cases.test.ts`
+    /// rows for redirection without a space around the operator: `>` (L171) and
+    /// `>>` (L178), verifying the written file contents through the Rust shell
+    /// virtual filesystem.
+    #[test]
+    fn jbpi_syntax_parser_edge_cases_redirection_without_space_rows_match_upstream() {
+        // L171 `echo hello>/tmp/test.txt` truncates and writes.
+        let mut sh = shell();
+        sh.exec("echo hello>/tmp/test.txt");
+        assert_eq!(
+            sh.files().read_to_string("/tmp/test.txt"),
+            Some("hello\n"),
+            "L171 file contents"
+        );
+
+        // L178 `echo second>>/tmp/test.txt` appends to the existing file.
+        let mut sh = shell();
+        sh.exec("echo first > /tmp/test.txt");
+        sh.exec("echo second>>/tmp/test.txt");
+        assert_eq!(
+            sh.files().read_to_string("/tmp/test.txt"),
+            Some("first\nsecond\n"),
+            "L178 file contents"
+        );
+    }
+
+    /// Covers portable `packages/just-bash/src/syntax/here-document.test.ts`
+    /// whitespace-preservation rows: indented heredoc body (L173) and an
+    /// ASCII-art triangle with leading spaces under a quoted delimiter (L188),
+    /// through the Rust shell.
+    #[test]
+    fn jbpi_syntax_here_document_whitespace_preservation_rows_match_upstream() {
+        // L173 heredoc body keeps its own indentation, independent of the
+        // surrounding (indented) script.
+        let mut sh = shell();
+        let r = sh
+            .exec("\n        cat <<EOF\n    indented content\n        more indented\nEOF\n      ");
+        assert_eq!(
+            r.stdout, "    indented content\n        more indented\n",
+            "L173 stdout"
+        );
+        assert_eq!(r.exit_code, 0, "L173 exit");
+
+        // L188 a quoted-delimiter heredoc preserves an ASCII-art triangle
+        // with leading spaces verbatim.
+        let art = "                    *\n                   * *\n                  *   *\n                 *     *\n                *       *\n               *         *\n              *           *\n             *             *\n            *               *\n           *                 *\n          *                   *\n         *********************\n";
+        let mut sh = shell();
+        let r = sh.exec(&format!("cat <<'EOF'\n{art}EOF"));
+        assert_eq!(r.stdout, art, "L188 stdout");
+        assert_eq!(r.exit_code, 0, "L188 exit");
+    }
+
+    /// Covers the portable `packages/just-bash/src/interpreter/helpers/xtrace.test.ts`
+    /// L253 row: with `set -x`, commands run inside a command substitution are
+    /// traced to stderr while the substitution output still flows to stdout.
+    #[test]
+    fn jbpi_interpreter_xtrace_command_substitution_row_matches_upstream() {
+        let mut sh = shell();
+        let r = sh.exec("set -x\nx=$(echo hello)\necho $x");
+        assert_eq!(r.stdout, "hello\n", "L253 stdout");
+        assert!(
+            r.stderr.contains("echo hello"),
+            "L253 traces the substitution command, stderr {}",
+            r.stderr
+        );
+        assert_eq!(r.exit_code, 0, "L253 exit");
+    }
+
+    /// Covers the portable `packages/just-bash/src/interpreter/assoc-array.test.ts`
+    /// L143 row: declaring an indexed array with `declare -a` and reading two
+    /// numeric-index elements back, through the Rust shell.
+    #[test]
+    fn jbpi_interpreter_assoc_array_indexed_numeric_indices_row_matches_upstream() {
+        let mut sh = shell();
+        let r =
+            sh.exec("declare -a arr\narr[0]=first\narr[1]=second\necho \"${arr[0]} ${arr[1]}\"");
+        assert_eq!(r.stdout.trim(), "first second", "L143 stdout");
+        assert_eq!(r.exit_code, 0, "L143 exit");
+    }
+
+    /// Covers portable `packages/just-bash/src/interpreter/builtins/set.test.ts`
+    /// `set -u` (nounset) rows whose assertion is that NO unbound-variable error
+    /// occurs and output is correct: set variable (L44), empty-string value
+    /// (L55), disabled by `+u` (L66) and `+o nounset` (L87), special vars `$?`
+    /// (L100), `$#` (L120), and `$@` (L130) not erroring, default/assign/alt
+    /// parameter expansion (L170, L180, L191), and `set -eu` with a set variable
+    /// (L203). Each tuple mirrors an upstream `it(...)` stdout/exit-code
+    /// assertion on `Bash().exec(...)`.
+    #[test]
+    fn jbpi_interpreter_set_nounset_non_error_rows_match_upstream() {
+        for (source, expected_stdout) in [
+            // L44 a set variable is read without error under `set -u`.
+            ("set -u\nMYVAR=hello\necho $MYVAR", "hello\n"),
+            // L55 an empty-string value is a valid value, not "unbound".
+            ("set -u\nMYVAR=\"\"\necho \"value: $MYVAR\"", "value: \n"),
+            // L66 `set +u` disables nounset; unset var expands to empty.
+            ("set -u\nset +u\necho $UNDEFINED", "\n"),
+            // L87 `set +o nounset` likewise disables it.
+            ("set -o nounset\nset +o nounset\necho $UNDEFINED", "\n"),
+            // L100 `$?` is always defined and never triggers nounset.
+            ("set -u\necho $?", "0\n"),
+            // L120 `$#` is always defined and never triggers nounset.
+            ("set -u\necho $#", "0\n"),
+            // L130 `$@` with no positionals is empty, not "unbound".
+            ("set -u\necho \"$@\"", "\n"),
+            // L170 `${var:-default}` is allowed for an unset var under nounset.
+            ("set -u\necho ${UNSET:-default}", "default\n"),
+            // L180 `${var:=default}` assigns and is allowed under nounset.
+            (
+                "set -u\necho ${UNSET:=default}\necho $UNSET",
+                "default\ndefault\n",
+            ),
+            // L191 `${var:+alt}` yields empty for an unset var under nounset.
+            ("set -u\necho \":${UNSET:+alt}:\"", "::\n"),
+            // L203 `set -eu` with a set variable runs without error.
+            ("set -eu\nVAR=hello\necho $VAR", "hello\n"),
+        ] {
+            let mut sh = shell();
+            let result = sh.exec(source);
+            assert_eq!(result.stderr, "", "stderr {source:?}");
+            assert_eq!(result.stdout, expected_stdout, "stdout {source:?}");
+            assert_eq!(result.exit_code, 0, "exit {source:?}");
+        }
+    }
+
     /// Covers portable `packages/just-bash/src/interpreter/control-flow.test.ts`
     /// rows through the Rust shell interpreter. Each block mirrors one upstream
     /// `it(...)` assertion on `Bash().exec(...)` stdout/exit code. IFS-splitting,
