@@ -12997,6 +12997,12 @@ fn eval_path_selector(value: &JsonValue, selector: &str) -> Result<Vec<JsonValue
         if rest == "[]" {
             return Ok(json_iter_values(&current));
         }
+        // Postfix iterator `[]` followed by a further path (e.g. `.users[].name`):
+        // iterate the current collection and map the remaining selector over
+        // every element, flattening the results the way jq/yq do.
+        if let Some(tail) = rest.strip_prefix("[]") {
+            return map_remaining_selector(&json_iter_values(&current), tail);
+        }
         if let Some((inside, tail)) = rest.strip_prefix('[').and_then(|tail| tail.split_once(']')) {
             let inside = inside.trim();
             current = if inside.contains(':') {
@@ -13019,8 +13025,9 @@ fn eval_path_selector(value: &JsonValue, selector: &str) -> Result<Vec<JsonValue
         };
         let field = field.strip_suffix('?').unwrap_or(field);
         if let Some(field) = field.strip_suffix("[]") {
-            current = current.get(field).cloned().unwrap_or(JsonValue::Null);
-            return Ok(json_iter_values(&current));
+            let iterated =
+                json_iter_values(&current.get(field).cloned().unwrap_or(JsonValue::Null));
+            return map_remaining_selector(&iterated, tail);
         }
         if field.is_empty() {
             return Err("empty field selector".to_string());
@@ -13029,6 +13036,26 @@ fn eval_path_selector(value: &JsonValue, selector: &str) -> Result<Vec<JsonValue
         rest = tail.strip_prefix('.').unwrap_or(tail);
     }
     Ok(vec![current])
+}
+
+/// Apply the remaining path selector (`tail`, which may be empty or start with
+/// `.`/`[`) to every value produced by a preceding `[]` iterator, flattening
+/// the per-element results into a single stream.
+fn map_remaining_selector(values: &[JsonValue], tail: &str) -> Result<Vec<JsonValue>, String> {
+    let tail = tail.trim();
+    if tail.is_empty() {
+        return Ok(values.to_vec());
+    }
+    let selector = if tail.starts_with('.') || tail.starts_with('[') {
+        format!(".{}", tail.trim_start_matches('.'))
+    } else {
+        format!(".{tail}")
+    };
+    let mut output = Vec::new();
+    for value in values {
+        output.extend(eval_path_selector(value, &selector)?);
+    }
+    Ok(output)
 }
 
 fn has_invalid_dot_whitespace(selector: &str) -> bool {
@@ -14061,6 +14088,10 @@ fn collect_yq_inputs(
         "yaml" | "yml" => parse_simple_yaml(&input)
             .map(|value| vec![value])
             .map_err(|error| stderr_result(1, format!("yq: {error}\n"))),
+        "ini" => Ok(vec![parse_ini_input(&input)]),
+        "csv" | "tsv" => parse_csv_input(&input)
+            .map(|value| vec![value])
+            .map_err(|error| stderr_result(1, format!("yq: {error}\n"))),
         _ => Err(stderr_result(
             1,
             format!("yq: input format {format} is not implemented in the Rust backend\n"),
@@ -14096,6 +14127,167 @@ fn render_yq_output(value: &JsonValue, options: &YqOptions) -> String {
         JsonValue::Array(_) | JsonValue::Object(_) => render_yaml_value(value, 0, options.indent),
         _ => json_scalar_string(value),
     }
+}
+
+/// Parse INI text into a JSON object, mirroring the node `ini` package
+/// semantics exercised by yq.fixtures.test.ts: top-level keys live on the
+/// root object, `[section]` headers create nested objects, surrounding quotes
+/// are stripped, and the literal tokens `true`/`false` coerce to booleans
+/// while every other value stays a string.
+fn parse_ini_input(input: &str) -> JsonValue {
+    let mut root = JsonMap::new();
+    let mut current_section: Option<String> = None;
+    for raw_line in input.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('[') {
+            if let Some(name) = rest.strip_suffix(']') {
+                let name = name.trim().to_string();
+                root.entry(name.clone())
+                    .or_insert_with(|| JsonValue::Object(JsonMap::new()));
+                current_section = Some(name);
+                continue;
+            }
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = ini_strip_quotes(key.trim());
+        let value = parse_ini_scalar(value.trim());
+        match &current_section {
+            Some(section) => {
+                if let Some(JsonValue::Object(map)) = root.get_mut(section) {
+                    map.insert(key, value);
+                }
+            }
+            None => {
+                root.insert(key, value);
+            }
+        }
+    }
+    JsonValue::Object(root)
+}
+
+fn ini_strip_quotes(value: &str) -> String {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2
+        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
+    {
+        return value[1..value.len() - 1].to_string();
+    }
+    value.to_string()
+}
+
+fn parse_ini_scalar(value: &str) -> JsonValue {
+    let unquoted = ini_strip_quotes(value);
+    match unquoted.as_str() {
+        "true" => JsonValue::Bool(true),
+        "false" => JsonValue::Bool(false),
+        other => JsonValue::String(other.to_string()),
+    }
+}
+
+/// Parse CSV/TSV text into a JSON array of row objects, mirroring the
+/// papaparse configuration used by yq (`header: true`, `dynamicTyping: true`,
+/// `skipEmptyLines: true`, auto delimiter detection). Numeric fields become
+/// numbers and the case-insensitive tokens `true`/`false` become booleans;
+/// every other field stays a string.
+fn parse_csv_input(input: &str) -> Result<JsonValue, String> {
+    let trimmed = input.trim_matches(['\n', '\r']);
+    if trimmed.is_empty() {
+        return Ok(JsonValue::Array(Vec::new()));
+    }
+    let delimiter = detect_csv_delimiter(trimmed);
+    let mut records = parse_csv_records(trimmed, delimiter);
+    if records.is_empty() {
+        return Ok(JsonValue::Array(Vec::new()));
+    }
+    let headers = records.remove(0);
+    let mut rows = Vec::new();
+    for record in records {
+        if record.len() == 1 && record[0].is_empty() {
+            continue; // skipEmptyLines
+        }
+        let mut object = JsonMap::new();
+        for (column, header) in headers.iter().enumerate() {
+            let cell = record.get(column).cloned().unwrap_or_default();
+            object.insert(header.clone(), csv_dynamic_typing(&cell));
+        }
+        rows.push(JsonValue::Object(object));
+    }
+    Ok(JsonValue::Array(rows))
+}
+
+fn detect_csv_delimiter(input: &str) -> char {
+    let first_line = input.lines().next().unwrap_or("");
+    // papaparse guesses among these delimiters by field count on the first row.
+    for candidate in [',', '\t', '|', ';'] {
+        if first_line.contains(candidate) {
+            return candidate;
+        }
+    }
+    ','
+}
+
+fn parse_csv_records(input: &str, delimiter: char) -> Vec<Vec<String>> {
+    let mut records = Vec::new();
+    let mut field = String::new();
+    let mut record = Vec::new();
+    let mut in_quotes = false;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if in_quotes {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    field.push('"');
+                    chars.next();
+                } else {
+                    in_quotes = false;
+                }
+            } else {
+                field.push(ch);
+            }
+        } else if ch == '"' {
+            in_quotes = true;
+        } else if ch == delimiter {
+            record.push(std::mem::take(&mut field));
+        } else if ch == '\n' {
+            record.push(std::mem::take(&mut field));
+            records.push(std::mem::take(&mut record));
+        } else if ch == '\r' {
+            // swallow CR; CRLF handled by the following \n
+        } else {
+            field.push(ch);
+        }
+    }
+    if !field.is_empty() || !record.is_empty() {
+        record.push(field);
+        records.push(record);
+    }
+    records
+}
+
+fn csv_dynamic_typing(value: &str) -> JsonValue {
+    match value.to_ascii_lowercase().as_str() {
+        "true" => return JsonValue::Bool(true),
+        "false" => return JsonValue::Bool(false),
+        _ => {}
+    }
+    if value.is_empty() {
+        return JsonValue::String(String::new());
+    }
+    if let Ok(integer) = value.parse::<i64>() {
+        return json_integer(integer);
+    }
+    if let Ok(number) = value.parse::<f64>()
+        && number.is_finite()
+    {
+        return json_number(number);
+    }
+    JsonValue::String(value.to_string())
 }
 
 fn parse_simple_yaml(input: &str) -> Result<JsonValue, String> {

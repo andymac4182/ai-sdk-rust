@@ -4053,6 +4053,18 @@ const jbc37CaseGroups = [
   },
 ];
 
+const jbcYqFixturesCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.fixtures.test.ts',
+    lines: [103, 139, 149, 158, 167, 222, 231, 241, 252, 259, 273, 282, 291, 300, 310],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_yq_fixtures_yaml_json_ini_csv_rows',
+    notes:
+      'JBC-yq verifies portable yq fixture queries over YAML and JSON input (postfix `[]` projection, select/add aggregation), plus the Rust INI and CSV input parsers (section nesting, true/false coercion, papaparse-style dynamic typing) exercised by the fixtures suite.',
+  },
+];
+
 const jbc44CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/query-engine/safe-object.test.ts',
@@ -4688,6 +4700,7 @@ function caseOverrideFor(testCase) {
     ...jbR2CaseGroups,
     ...jbc37CaseGroups,
     ...jbc44CaseGroups,
+    ...jbcYqFixturesCaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&
