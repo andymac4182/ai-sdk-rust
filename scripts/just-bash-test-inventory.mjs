@@ -3734,6 +3734,87 @@ const jbR2CaseGroups = [
   },
 ];
 
+const jbpiParserInterpreterCaseGroups = [
+  {
+    file: 'packages/just-bash/src/syntax/control-flow.test.ts',
+    lines: [73, 222, 238, 261, 269, 313, 321],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'jbpi_syntax_control_flow_function_local_and_negation_rows_match_upstream',
+    notes:
+      'JB-PI verifies portable syntax control-flow rows through the Rust shell: an if body yields its last command exit code; `local` inside a function does not leak / is restored / can be declared without a value / is independent in nested calls; and `!` negates a failing grep to success and a succeeding grep to failure.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/control-flow.test.ts',
+    lines: [456, 471, 484, 513],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'jbpi_interpreter_control_flow_nested_and_quoted_case_rows_match_upstream',
+    notes:
+      'JB-PI verifies portable interpreter control-flow nested-structure rows through the Rust shell: a single-quoted case pattern matches a literal `*`, if-inside-for, for-inside-if, and while-inside-case.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/loops.test.ts',
+    lines: [184, 200],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'jbpi_syntax_loops_for_without_semicolon_and_malformed_rows_match_upstream',
+    notes:
+      'JB-PI verifies portable loops rows through the Rust shell: a `for` loop without a semicolon before `do` still iterates, and a `for` header missing `in` is a syntax error (exit 2).',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/parser-edge-cases.test.ts',
+    lines: [171, 178],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'jbpi_syntax_parser_edge_cases_redirection_without_space_rows_match_upstream',
+    notes:
+      'JB-PI verifies portable parser-edge-cases redirection rows through the Rust shell virtual filesystem: `>` and `>>` without a space around the operator truncate and append respectively.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/here-document.test.ts',
+    lines: [173, 188],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'jbpi_syntax_here_document_whitespace_preservation_rows_match_upstream',
+    notes:
+      'JB-PI verifies portable here-document whitespace-preservation rows through the Rust shell: an indented heredoc body keeps its own indentation, and a quoted-delimiter heredoc preserves a leading-space ASCII-art triangle verbatim.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/helpers/xtrace.test.ts',
+    lines: [253],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_interpreter_xtrace_command_substitution_row_matches_upstream',
+    notes:
+      'JB-PI verifies the portable xtrace row through the Rust shell: under `set -x` the command run inside a command substitution is traced to stderr while its output still flows to stdout.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/assoc-array.test.ts',
+    lines: [143],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'jbpi_interpreter_assoc_array_indexed_numeric_indices_row_matches_upstream',
+    notes:
+      'JB-PI verifies the portable indexed-array row through the Rust shell: `declare -a arr` with numeric-index element assignments reads back the correct values.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/set.test.ts',
+    lines: [44, 55, 66, 87, 100, 120, 130, 170, 180, 191, 203],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_interpreter_set_nounset_non_error_rows_match_upstream',
+    notes:
+      'JB-PI verifies the portable `set -u` (nounset) non-error rows through the Rust shell: a set variable and an empty-string value read without error, `+u` / `+o nounset` disable it, the `$?` / `$#` / `$@` special vars never trip it, `${var:-}` / `${var:=}` / `${var:+}` parameter expansion is allowed, and `set -eu` with a set variable runs cleanly. The unbound-variable error rows stay pending until nounset error reporting lands.',
+  },
+];
+
 const jbc35CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/awk/awk.fields.test.ts',
@@ -4698,6 +4779,7 @@ function caseOverrideFor(testCase) {
     ...jbr1CaseGroups,
     ...jbR3SyntaxCaseGroups,
     ...jbR2CaseGroups,
+    ...jbpiParserInterpreterCaseGroups,
     ...jbc37CaseGroups,
     ...jbc44CaseGroups,
     ...jbcYqFixturesCaseGroups,
