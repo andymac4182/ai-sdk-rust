@@ -960,6 +960,15 @@ const jbc09CaseGroups = [
     notes:
       'just-bash-command-awk verifies portable awk operator semantics: division-by-zero exit code, the <= and > comparisons, short-circuit && and ||, ~/!~ regex match in conditions and on fields, ternary with expressions/nesting/in print arguments, chained increments, and operator precedence including POSIX unary-minus vs exponent binding (-2^2 == -4).',
   },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.functions.test.ts',
+    lines: [412, 499, 510],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_gensub_backreference_and_printf_c_e_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk gensub() backreferences (\\2 \\1 reorder captured groups), printf %c printing the first character of a string argument, and printf %.2e scientific notation matching JS toExponential (1.23e+3).',
+  },
 ];
 
 const jbc10CaseGroups = [
