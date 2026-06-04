@@ -3476,6 +3476,87 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn rg_unsupported_upstream_skip_features_are_rejected_or_classified() {
+        // JBC-10: the upstream rg suite explicitly `it.skip`s a family of features
+        // that ripgrep itself or the just-bash JS port does not implement (alternate
+        // text encodings, PCRE2 look-around, max-columns, file preprocessing,
+        // non-gzip compression, the --no-include-zero/--no-column/--crlf/--no-unicode/
+        // --null-data flags, and timestamp-based sorting). The Rust rg port matches
+        // that contract by rejecting these features rather than silently mis-handling
+        // them. Each assertion fails if the Rust port ever started accepting the flag,
+        // which would make the upstream skip-classification wrong.
+        let unrecognized = |args: &str, opt: &str| {
+            let r = home_bash(&[("f.txt", "ab\nhello\n")]).exec(args);
+            assert_eq!(r.exit_code, 1, "{args}");
+            assert_eq!(r.stdout, "", "{args}");
+            assert_eq!(
+                r.stderr,
+                format!("rg: unrecognized option '{opt}'\n"),
+                "{args}"
+            );
+        };
+
+        // Alternate text encodings (-E / --encoding): Shift-JIS, UTF-16, EUC-JP, etc.
+        unrecognized("rg -E sjis hello f.txt", "-E");
+        unrecognized("rg --encoding utf-16 hello f.txt", "--encoding");
+
+        // -M / --max-columns truncation.
+        unrecognized("rg -M 10 hello f.txt", "-M");
+
+        // --no-include-zero count override.
+        unrecognized("rg --no-include-zero -c hello f.txt", "--no-include-zero");
+
+        // File preprocessing (--pre / --pre-glob).
+        unrecognized("rg --pre cat hello f.txt", "--pre");
+        unrecognized("rg --pre-glob '*.txt' hello f.txt", "--pre-glob");
+
+        // Non-gzip compression search (-z / --search-zip): only gzip is supported,
+        // and the Rust port does not wire up the -z flag at all.
+        unrecognized("rg -z hello f.txt", "-z");
+        unrecognized("rg --search-zip hello f.txt", "--search-zip");
+
+        // Output/format flags the upstream skip-suite documents as unimplemented.
+        unrecognized("rg --no-column --vimgrep hello f.txt", "--no-column");
+        unrecognized("rg --crlf hello f.txt", "--crlf");
+        unrecognized("rg --no-unicode hello f.txt", "--no-unicode");
+        unrecognized("rg --null-data hello f.txt", "--null-data");
+
+        // Timestamp-based sorting requires real system metadata; --sortr is not wired
+        // up and --sort accessed cannot order by access time deterministically.
+        unrecognized("rg --sortr accessed hello", "--sortr");
+
+        // PCRE2 / look-around (-P, raw look-ahead/look-behind) is rejected by the
+        // standard regex engine rather than silently matching.
+        let pcre = home_bash(&[("f.txt", "ab\nhello\n")]).exec("rg -P '(?<=a)b' f.txt");
+        assert_eq!(pcre.exit_code, 1, "rg -P");
+        assert_eq!(pcre.stdout, "", "rg -P");
+        assert!(
+            pcre.stderr.contains("PCRE2 is not supported"),
+            "rg -P stderr: {:?}",
+            pcre.stderr
+        );
+
+        let look_behind = home_bash(&[("f.txt", "ab\nhello\n")]).exec("rg '(?<=a)b' f.txt");
+        assert_eq!(look_behind.exit_code, 2, "look-behind");
+        assert_eq!(look_behind.stdout, "", "look-behind");
+        assert!(
+            look_behind.stderr.contains("look-around")
+                || look_behind.stderr.contains("look-behind"),
+            "look-behind stderr: {:?}",
+            look_behind.stderr
+        );
+
+        let look_ahead = home_bash(&[("f.txt", "ab\nhello\n")]).exec("rg '(?=a)' f.txt");
+        assert_eq!(look_ahead.exit_code, 2, "look-ahead");
+        assert_eq!(look_ahead.stdout, "", "look-ahead");
+        assert!(
+            look_ahead.stderr.contains("look-around") || look_ahead.stderr.contains("look-ahead"),
+            "look-ahead stderr: {:?}",
+            look_ahead.stderr
+        );
+    }
+
+    #[test]
     fn rg_upstream_basic_rows_are_portable() {
         assert_home_exec(
             &[("file.txt", "hello world\nfoo bar\n")],
@@ -10231,5 +10312,138 @@ be, to a very large extent, the result of luck. Sherlock Holmes\n",
         let length = env.exec("printf 'items:\\n  - a\\n  - b\\n  - c\\n' | yq '.items | length'");
         assert_eq!(length.exit_code, 0);
         assert_eq!(length.stdout, "3\n");
+    }
+
+    #[test]
+    fn awk_jbc_command_awk_expression_edge_and_error_rows() {
+        // Maps the portable pending rows of awk.expressions.test.ts,
+        // awk.edge-cases.test.ts, and awk.errors.test.ts that the Rust awk
+        // subset already implements 1:1. Each assertion mirrors the upstream
+        // vitest expectation exactly (strict stdout + exit code where the
+        // upstream test pins them; exit-code-only where the upstream only
+        // asserts the call does not crash).
+        let env = Bash::default();
+
+        // --- awk.expressions.test.ts: nested arithmetic ---
+        // deeply nested parentheses (:6) => ((((1+2)*3)-4)/5) == 1
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print ((((1 + 2) * 3) - 4) / 5) }'"#)
+                .stdout,
+            "1\n"
+        );
+        // complex formula (:15) => (2+3)*(4-1)/(6-3) == 5
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print (2 + 3) * (4 - 1) / (6 - 3) }'"#)
+                .stdout,
+            "5\n"
+        );
+        // quadratic expression (:24) => a*x*x + b*x + c == 16
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { a=1; b=2; c=1; x=3; print a*x*x + b*x + c }'"#)
+                .stdout,
+            "16\n"
+        );
+        // mixed operations with power (:34) => 2^3 + 4^2 - 3^2 == 15
+        assert_eq!(
+            env.exec(r#"echo "" | awk 'BEGIN { print 2^3 + 4^2 - 3^2 }'"#)
+                .stdout,
+            "15\n"
+        );
+
+        // --- awk.expressions.test.ts: nested conditionals ---
+        // if-else if-else chain (:46) => x=15 -> "medium"
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN {
+          x = 15
+          if (x < 10) print "small"
+          else if (x < 20) print "medium"
+          else print "large"
+        }'"#
+            )
+            .stdout,
+            "medium\n"
+        );
+        // nested if statements (:60) => "both positive"
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN {
+          x = 5; y = 10
+          if (x > 0)
+            if (y > 0)
+              print "both positive"
+        }'"#
+            )
+            .stdout,
+            "both positive\n"
+        );
+        // ternary in ternary (:74) => x=50 -> "medium"
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN {
+          x = 50
+          print x < 30 ? "low" : (x < 70 ? "medium" : "high")
+        }'"#
+            )
+            .stdout,
+            "medium\n"
+        );
+        // ternary with complex conditions (:86) => "both positive"
+        assert_eq!(
+            env.exec(
+                r#"echo "" | awk 'BEGIN {
+          a = 5; b = 10
+          print (a > 0 && b > 0) ? "both positive" : "not both positive"
+        }'"#
+            )
+            .stdout,
+            "both positive\n"
+        );
+
+        // --- awk.edge-cases.test.ts: control-flow / variable edges ---
+        // very long string built in a for loop (:150) => length 100
+        let very_long =
+            env.exec(r#"echo "" | awk 'BEGIN { for(i=0;i<100;i++) s=s"x"; print length(s) }'"#);
+        assert_eq!(very_long.exit_code, 0);
+        assert_eq!(very_long.stdout, "100\n");
+        // loop with zero iterations (:238)
+        let zero_loop =
+            env.exec(r#"echo "" | awk 'BEGIN { for(i=0; i<0; i++) print i; print "done" }'"#);
+        assert_eq!(zero_loop.exit_code, 0);
+        assert_eq!(zero_loop.stdout, "done\n");
+        // while with false condition (:247)
+        let false_while =
+            env.exec(r#"echo "" | awk 'BEGIN { while(0) print "never"; print "done" }'"#);
+        assert_eq!(false_while.exit_code, 0);
+        assert_eq!(false_while.stdout, "done\n");
+        // assignment in condition (:283) => if (x = 5) print x -> 5
+        let assign_cond = env.exec(r#"echo "" | awk 'BEGIN { if (x = 5) print x }'"#);
+        assert_eq!(assign_cond.exit_code, 0);
+        assert_eq!(assign_cond.stdout, "5\n");
+
+        // --- awk.errors.test.ts: field / function / special-var edges ---
+        // negative field index (:143): only requires exit 0 (empty or no error)
+        let neg_field = env.exec("echo 'a b c' | awk '{ print $-1 }'");
+        assert_eq!(neg_field.exit_code, 0);
+        // split with missing array argument (:179): only requires exit 0
+        let split_missing = env.exec("echo 'hello' | awk '{ print split($1) }'");
+        assert_eq!(split_missing.exit_code, 0);
+        // undefined function call returns empty string (:258)
+        let undef_fn = env.exec("echo '1' | awk '{ print undefined_func() }'");
+        assert_eq!(undef_fn.exit_code, 0);
+        assert_eq!(undef_fn.stdout, "\n");
+        // setting a high field index updates NF (:302) => NF becomes 10
+        let nf_extend = env.exec("echo 'a b c' | awk '{ $10 = \"x\"; print NF }'");
+        assert_eq!(nf_extend.exit_code, 0);
+        assert_eq!(nf_extend.stdout, "10\n");
+        // assigning to NF truncates fields (:311): only requires exit 0
+        let nf_assign = env.exec("echo 'a b c d e' | awk '{ NF = 2; print $0 }'");
+        assert_eq!(nf_assign.exit_code, 0);
+        // invalid format specifier %z handled gracefully (:322): exit 0
+        let bad_fmt = env.exec("echo '1' | awk '{ printf \"%z\", $1 }'");
+        assert_eq!(bad_fmt.exit_code, 0);
+        // width/precision with no specifier handled gracefully (:329): exit 0
+        let bad_prec = env.exec("echo '1' | awk '{ printf \"%10.5\", $1 }'");
+        assert_eq!(bad_prec.exit_code, 0);
     }
 }

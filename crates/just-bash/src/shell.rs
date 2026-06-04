@@ -5406,6 +5406,77 @@ mod tests {
         Interpreter::new(FakeCommands::default())
     }
 
+    /// Covers `packages/just-bash/src/syntax/parser-edge-cases.test.ts` quoting,
+    /// escape-sequence, variable-expansion, whitespace, and operator-parsing rows
+    /// through the Rust shell interpreter. Each tuple mirrors an upstream `it(...)`
+    /// assertion on `Bash().exec(...)` stdout/exit code/stderr.
+    #[test]
+    fn jbr1_syntax_parser_edge_cases_match_upstream() {
+        // Quoting rows (lines 6, 12, 18, 24, 36, 42) and escape rows
+        // (lines 50, 56, 62, 74, 80) plus operator rows without spaces
+        // (lines 208, 214, 220, 226) run on a fresh shell.
+        for (source, expected_stdout) in [
+            ("echo \"hello 'world'\"", "hello 'world'\n"),
+            ("echo 'hello \"world\"'", "hello \"world\"\n"),
+            ("echo \"\"", "\n"),
+            ("echo ''", "\n"),
+            ("echo foo'bar'baz", "foobarbaz\n"),
+            ("echo '* ? | > < && || ;'", "* ? | > < && || ;\n"),
+            ("echo \"hello \\\"world\\\"\"", "hello \"world\"\n"),
+            ("echo \"a\\\\b\"", "a\\b\n"),
+            ("echo \"\\$HOME\"", "$HOME\n"),
+            ("echo 'a\\b'", "a\\b\n"),
+            ("echo a\\|b", "a|b\n"),
+            ("echo a&&echo b", "a\nb\n"),
+            ("false||echo fallback", "fallback\n"),
+            ("echo a;echo b", "a\nb\n"),
+            ("echo hello|cat", "hello\n"),
+            ("echo test | grep test || echo fail", "test\n"),
+            ("true && echo success", "success\n"),
+        ] {
+            let mut sh = shell();
+            let result = sh.exec(source);
+            assert_eq!(result.stderr, "", "stderr {source}");
+            assert_eq!(result.stdout, expected_stdout, "stdout {source}");
+            assert_eq!(result.exit_code, 0, "exit {source}");
+        }
+
+        // Variable-expansion rows (lines 88, 94, 100, 106, 112, 118, 124, 130)
+        // each need their own environment.
+        let mut set_var = shell().with_env([("VAR", "value")]);
+        assert_eq!(set_var.exec("echo \"${VAR:-default}\"").stdout, "value\n");
+        let mut unset_var = shell();
+        assert_eq!(
+            unset_var.exec("echo \"${VAR:-default}\"").stdout,
+            "default\n"
+        );
+        assert_eq!(unset_var.exec("echo \"${VAR:-}\"").stdout, "\n");
+        let mut name_env = shell().with_env([("NAME", "test")]);
+        assert_eq!(name_env.exec("echo $NAME").stdout, "test\n");
+        let mut ab_env = shell().with_env([("A", "hello"), ("B", "world")]);
+        assert_eq!(ab_env.exec("echo \"$A$B\"").stdout, "helloworld\n");
+        let mut name_file = shell().with_env([("NAME", "test")]);
+        assert_eq!(
+            name_file.exec("echo \"${NAME}file.txt\"").stdout,
+            "testfile.txt\n"
+        );
+        let mut undef = shell();
+        assert_eq!(undef.exec("echo \"[$UNDEFINED]\"").stdout, "[]\n");
+        let mut status_var = shell().with_env([("?", "0")]);
+        assert_eq!(status_var.exec("echo \"$?\"").stdout, "0\n");
+
+        // Whitespace rows (lines 139, 145, 151, 157, 163).
+        let mut ws = shell();
+        assert_eq!(ws.exec("echo    a    b    c").stdout, "a b c\n");
+        assert_eq!(ws.exec("echo\ta\tb\tc").stdout, "a b c\n");
+        assert_eq!(ws.exec("   echo hello").stdout, "hello\n");
+        assert_eq!(ws.exec("echo hello   ").stdout, "hello\n");
+        assert_eq!(
+            ws.exec("echo \"  hello   world  \"").stdout,
+            "  hello   world  \n"
+        );
+    }
+
     #[test]
     fn just_bash_parser_edge_cases_handles_adjacent_quoted_strings() {
         let result = shell().exec("echo 'hello'\"world\"");
@@ -7481,6 +7552,66 @@ greet World",
         assert_eq!(non_capturing.get(0).unwrap().as_str(), "ab");
         assert_eq!(non_capturing.get(1).unwrap().as_str(), "b");
         assert!(non_capturing.get(2).is_none());
+    }
+
+    // JBC-33: additional portable user-regex rows mirroring the interleaved
+    // `test`/`it` cases in packages/just-bash/src/regex/user-regex.test.ts that
+    // exercise membership testing, zero-length global matching, multiline
+    // semantics, cached-matcher reuse, anchors, the empty pattern, Unicode
+    // literals/escapes, and the dotAll flag. The JavaScript-only lastIndex
+    // state and native RegExp wrapper rows stay documented separately; here we
+    // assert only the observable, portable regex semantics those rows verify.
+    #[test]
+    fn jbc33_user_regex_portable_membership_zero_length_multiline_and_unicode_rows() {
+        // test(): membership predicate (lines 33, 38, 43, 49, 249, 255, 393).
+        assert!(Regex::new("foo").unwrap().is_match("foobar"));
+        assert!(!Regex::new("foo").unwrap().is_match("bar"));
+        assert!(Regex::new("(?i)foo").unwrap().is_match("FOO"));
+        // Global `a` against "aaa" still reports a match regardless of any
+        // JS lastIndex bookkeeping; the portable result is a plain match.
+        assert!(Regex::new("a").unwrap().is_match("aaa"));
+        // ConstantRegex `/foo/` and `/a/g` rows observe the same membership.
+        assert!(Regex::new("foo").unwrap().is_match("foobar"));
+        assert!(Regex::new("a").unwrap().is_match("aaa"));
+        // RegexLike compatibility row: `\d+` against "a1b22c333" matches.
+        assert!(Regex::new("\\d+").unwrap().is_match("a1b22c333"));
+
+        // matchAll(): zero-length word-boundary matches (line 200). Boundaries
+        // surround each word: before/after 'a' and before/after 'b' = 4.
+        assert_eq!(Regex::new("\\b").unwrap().find_iter("a b").count(), 4);
+
+        // multiline (line 223): `^foo` with the multiline flag anchors to the
+        // start of each line, so it matches the second line here; without the
+        // flag the same pattern only anchors at the very start of the input.
+        assert!(Regex::new("(?m)^foo").unwrap().is_match("bar\nfoo"));
+        assert!(!Regex::new("^foo").unwrap().is_match("bar\nfoo"));
+
+        // acquireMatcher reuse (lines 404, 412): repeated calls on one compiled
+        // pattern keep returning correct independent results.
+        let o_plus = Regex::new("o+").unwrap();
+        assert_eq!(
+            o_plus
+                .find_iter("foooo bar ooo")
+                .map(|m| m.as_str())
+                .collect::<Vec<_>>(),
+            vec!["oooo", "ooo"]
+        );
+        assert!(o_plus.find("bar baz").is_none());
+        let foo_global = Regex::new("foo").unwrap();
+        assert_eq!(foo_global.replace_all("foo bar foo", "baz"), "baz bar baz");
+        assert_eq!(foo_global.replace_all("foo only once", "X"), "X only once");
+
+        // edge cases: escaped special chars (453), anchors (463/464),
+        // empty pattern (471), Unicode literal (483) and escape with the u
+        // flag (488), and the dotAll flag (495/500).
+        assert!(Regex::new("\\[\\]\\(\\)").unwrap().is_match("[]()"));
+        assert!(Regex::new("^foo$").unwrap().is_match("foo"));
+        assert!(!Regex::new("^foo$").unwrap().is_match("foobar"));
+        assert!(Regex::new("").unwrap().is_match("anything"));
+        assert!(Regex::new("café").unwrap().is_match("I love café"));
+        assert!(Regex::new("\\x{1F600}").unwrap().is_match("Hello 😀"));
+        assert!(Regex::new("(?s)a.b").unwrap().is_match("a\nb"));
+        assert!(!Regex::new("a.b").unwrap().is_match("a\nb"));
     }
 
     // JBC-13: portable break/continue conformance mirroring

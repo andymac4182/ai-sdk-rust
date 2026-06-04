@@ -858,6 +858,33 @@ const jbc09CaseGroups = [
     notes:
       'JBC-09 verifies portable awk special-variable edges: NF is 0 for an empty record and NR is 0 inside BEGIN before any record is read.',
   },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.expressions.test.ts',
+    lines: [6, 15, 24, 34, 46, 60, 74, 86],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_expression_edge_and_error_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk complex expressions: deeply nested parentheses, compound formulae, quadratic/power arithmetic, if/else-if/else chains, nested bodyless if statements, and nested/complex ternary conditions.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.edge-cases.test.ts',
+    lines: [150, 238, 247, 283],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_expression_edge_and_error_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk control-flow/variable edges: building a long string in a C-style for loop, a for loop with zero iterations, a while with a false condition, and assignment used as an if condition.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.errors.test.ts',
+    lines: [143, 179, 258, 302, 311, 322, 329],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_expression_edge_and_error_rows',
+    notes:
+      'just-bash-command-awk verifies portable awk error/edge handling: negative field index, split() with the array argument omitted, an undefined function call returning empty, NF growing when a high field is set, assigning to NF, and graceful printf handling of an unknown specifier and width/precision with no conversion.',
+  },
 ];
 
 const jbc10CaseGroups = [
@@ -1016,6 +1043,42 @@ const jbc10CaseGroups = [
     rustTest: 'rg_imported_regression_gitignore_regex_and_flag_rows_are_portable',
     notes:
       'JBC-10 verifies imported ripgrep regression rows: rooted/unanchored/nested/trailing-slash/double-star/dot-star gitignore patterns, --files with a path argument, IP-style repeated-group and cyrillic case-folding regex, smart-case bracket sensitivity, -e dash patterns, -q quiet exit, --only-matching, and --quiet --files glob exit codes over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/feature.test.ts',
+    lines: [965, 966, 967, 968, 969, 970, 1047],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_unsupported_upstream_skip_features_are_rejected_or_classified',
+    notes:
+      'JBC-10 classifies the upstream `it.skip` rg feature rows that ripgrep/just-bash leave unimplemented: alternate text encodings via -E/--encoding (Shift-JIS, UTF-16 auto/explicit, EUC-JP, unknown, replacement) and -M/--max-columns truncation. The Rust rg port rejects these flags as unrecognized options, matching the upstream skip contract; the Rust test asserts the rejection so it fails if support is ever silently added.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/json.test.ts',
+    lines: [186],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_unsupported_upstream_skip_features_are_rejected_or_classified',
+    notes:
+      'JBC-10 classifies the upstream `it.skip` JSON row r1412_look_behind_match_missing, which requires PCRE2 look-behind. The Rust rg port rejects PCRE2/look-around regex rather than matching, which the named Rust test asserts.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
+    lines: [666, 1071, 1074, 1075, 1097, 1098, 1099, 1100, 1101, 1102, 1103, 1104, 1200, 1201],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_unsupported_upstream_skip_features_are_rejected_or_classified',
+    notes:
+      'JBC-10 classifies the upstream `it.skip` misc rg rows for unimplemented features: --no-include-zero count override, --no-column vimgrep output, --pre/--pre-glob file preprocessing, non-gzip compression (bzip2/xz/lz4/lzma/brotli/zstd/uncompress/invalid-gzip via -z/--search-zip), and --sort/--sortr accessed-time ordering that requires real system timestamps. The Rust rg port rejects these flags as unrecognized options, asserted by the named Rust test so it fails if support is ever added.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [1091, 1092, 1095, 1140, 1190, 1378, 1381, 1519],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_unsupported_upstream_skip_features_are_rejected_or_classified',
+    notes:
+      'JBC-10 classifies the upstream `it.skip` regression rg rows that require unimplemented features: PCRE2 look-ahead/look-behind (r1401_x2, r1412, r1573, r3139), --crlf (r1765), --no-unicode (r2574), and --null-data (r2658). The Rust rg port rejects PCRE2/look-around regex and these flags as unrecognized options, asserted by the named Rust test.',
   },
 ];
 
@@ -3368,12 +3431,40 @@ const jbc33CaseGroups = [
   },
   {
     file: 'packages/just-bash/src/regex/user-regex.test.ts',
+    lines: [
+      33, 38, 43, 49, 200, 223, 249, 255, 393, 404, 412, 453, 463, 464,
+      471, 483, 488, 495, 500,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::regex',
+    rustTest:
+      'jbc33_user_regex_portable_membership_zero_length_multiline_and_unicode_rows',
+    notes:
+      'JBC-33 verifies portable user-regex membership testing, zero-length word-boundary global matching, multiline anchoring, cached-matcher reuse, escaped specials, anchors, the empty pattern, Unicode literal/escape matching, and the dotAll flag with Rust regex; JavaScript lastIndex state and native RegExp wrapper rows stay documented separately.',
+  },
+  {
+    file: 'packages/just-bash/src/regex/user-regex.test.ts',
     lines: jbc33RegexJsOnlyLines,
     status: 'js-only-documented',
     owner: 'crates/just-bash::regex::js-wrapper-exception',
     rustTest: 'js-only:user-regex-regexp-wrapper-callback-and-lastindex-api',
     notes:
       'JBC-33 classifies JavaScript RegExp wrapper identity, callback replacement, lastIndex state, native RegExp access, factory instance checks, and TypeScript RegexLike interface rows as JS-only API behavior; portable regex semantics are verified separately.',
+  },
+];
+
+const jbr1CaseGroups = [
+  {
+    file: 'packages/just-bash/src/syntax/parser-edge-cases.test.ts',
+    lines: [
+      6, 12, 18, 24, 36, 42, 50, 56, 62, 74, 80, 88, 94, 100, 106, 112,
+      118, 124, 130, 139, 145, 151, 157, 163, 208, 214, 220, 226, 232, 238,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbr1_syntax_parser_edge_cases_match_upstream',
+    notes:
+      'JBR-1 verifies portable parser edge cases — nested/empty/adjacent quoting, escape sequences, ${VAR:-default} expansion, $? and undefined-variable expansion, multi-space/tab/leading/trailing whitespace normalization, and operator parsing without spaces — through the Rust shell interpreter.',
   },
 ];
 
@@ -4251,6 +4342,7 @@ function caseOverrideFor(testCase) {
     ...jbc27CaseGroups,
     ...jbc30AgentExampleCaseGroups,
     ...jbc33CaseGroups,
+    ...jbr1CaseGroups,
     ...jbc37CaseGroups,
     ...jbc44CaseGroups,
   ].find(
