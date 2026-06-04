@@ -4971,6 +4971,157 @@ be, to a very large extent, the result of luck. Sherlock Holmes\n",
     }
 
     #[test]
+    fn rg_imported_binary_edge_case_and_flag_rows_are_portable() {
+        // binary.test.ts:56 - should not detect binary if NUL after 8KB sample
+        let late = format!("pattern\n{}\u{0}end\n", "a".repeat(9000));
+        assert_home_exec(
+            &[("late.txt", late.as_str())],
+            "rg pattern",
+            0,
+            "late.txt:1:pattern\n",
+        );
+        // binary.test.ts:134 - should handle file with only NUL bytes
+        assert_home_exec(
+            &[("nulls.bin", "\u{0}\u{0}\u{0}\u{0}")],
+            "rg anything",
+            1,
+            "",
+        );
+        // binary.test.ts:145 - should handle NUL at start of file
+        assert_home_exec(&[("start.bin", "\u{0}hello world\n")], "rg hello", 1, "");
+        // binary.test.ts:156 - should handle NUL at end of file
+        assert_home_exec(&[("end.bin", "hello world\n\u{0}")], "rg hello", 1, "");
+        // binary.test.ts:167 - should handle multiple NUL bytes
+        assert_home_exec(
+            &[("multi.bin", "a\u{0}b\u{0}c\u{0}d\n")],
+            "rg '[a-d]'",
+            1,
+            "",
+        );
+        // binary.test.ts:180 - should skip files with common binary signatures
+        assert_home_exec(
+            &[
+                ("image.png", "\u{89}PNG\r\n\u{1a}\n\u{0}data"),
+                ("doc.pdf", "%PDF-1.4\n\u{0}binary"),
+                ("archive.zip", "PK\u{3}\u{4}\u{0}\u{0}data"),
+                ("text.txt", "data\n"),
+            ],
+            "rg data",
+            0,
+            "text.txt:1:data\n",
+        );
+        // binary.test.ts:201 - should work with -i flag
+        assert_home_exec(
+            &[
+                ("text.txt", "HELLO world\n"),
+                ("binary.bin", "HELLO\u{0}world\n"),
+            ],
+            "rg -i hello",
+            0,
+            "text.txt:1:HELLO world\n",
+        );
+        // binary.test.ts:214 - should work with -v flag
+        assert_home_exec(
+            &[
+                ("text.txt", "keep\nremove\nkeep\n"),
+                ("binary.bin", "keep\u{0}remove\n"),
+            ],
+            "rg -v remove",
+            0,
+            "text.txt:1:keep\ntext.txt:3:keep\n",
+        );
+        // binary.test.ts:227 - should work with -w flag
+        assert_home_exec(
+            &[
+                ("text.txt", "foo bar\nfoobar\n"),
+                ("binary.bin", "foo bar\u{0}\n"),
+            ],
+            "rg -w foo",
+            0,
+            "text.txt:1:foo bar\n",
+        );
+        // binary.test.ts:240 - should work with context flags
+        assert_home_exec(
+            &[
+                ("text.txt", "before\nmatch\nafter\n"),
+                ("binary.bin", "before\u{0}match\nafter\n"),
+            ],
+            "rg -C1 match",
+            0,
+            "text.txt-1-before\ntext.txt:2:match\ntext.txt-3-after\n",
+        );
+        // binary.test.ts:255 - should work with -m flag
+        assert_home_exec(
+            &[
+                ("text.txt", "match\nmatch\nmatch\n"),
+                ("binary.bin", "match\u{0}match\n"),
+            ],
+            "rg -m1 match",
+            0,
+            "text.txt:1:match\n",
+        );
+        // binary.test.ts:270 - should skip binary files in subdirectories
+        assert_home_exec(
+            &[
+                ("src/code.ts", "export const x = 1;\n"),
+                ("assets/image.bin", "export\u{0}data\n"),
+                ("lib/util.ts", "export function foo() {}\n"),
+            ],
+            "rg --sort path export",
+            0,
+            "lib/util.ts:1:export function foo() {}\nsrc/code.ts:1:export const x = 1;\n",
+        );
+    }
+
+    #[test]
+    fn rg_flags_symlink_unrestricted_and_text_rows_are_portable() {
+        // rg.flags.test.ts:11 - should accept -L/--follow flag without error
+        assert_home_exec(
+            &[("file.txt", "hello world\n")],
+            "rg -L hello",
+            0,
+            "file.txt:1:hello world\n",
+        );
+        // rg.flags.test.ts:23 - should accept --follow flag without error
+        assert_home_exec(
+            &[("file.txt", "hello world\n")],
+            "rg --follow hello",
+            0,
+            "file.txt:1:hello world\n",
+        );
+        // rg.flags.test.ts:35 - should skip symlinks by default in directory search
+        let env = home_bash(&[("real.txt", "hello\n")]);
+        assert_eq!(env.exec("ln -s real.txt /home/user/link.txt").exit_code, 0);
+        let default = env.exec("rg hello");
+        assert_eq!(default.exit_code, 0);
+        assert_eq!(default.stdout, "real.txt:1:hello\n");
+        // rg.flags.test.ts:49 - should follow symlinks with -L in directory search
+        let followed = env.exec("rg -L --sort path hello");
+        assert_eq!(followed.exit_code, 0);
+        assert_eq!(followed.stdout, "link.txt:1:hello\nreal.txt:1:hello\n");
+        // rg.flags.test.ts:122 - -u should be equivalent to --no-ignore
+        let u_env = home_bash(&[(".gitignore", "ignored.txt\n"), ("ignored.txt", "hello\n")]);
+        let result_u = u_env.exec("rg -u hello");
+        let result_no_ignore = u_env.exec("rg --no-ignore hello");
+        assert_eq!(result_u.stdout, result_no_ignore.stdout);
+        assert!(result_u.stdout.contains("ignored.txt:1:hello"));
+        // rg.flags.test.ts:135 - -uu should be equivalent to --no-ignore --hidden
+        let uu_env = home_bash(&[(".hidden", "hello\n")]);
+        let result_uu = uu_env.exec("rg -uu hello");
+        let result_flags = uu_env.exec("rg --no-ignore --hidden hello");
+        assert_eq!(result_uu.stdout, result_flags.stdout);
+        assert!(result_uu.stdout.contains(".hidden:1:hello"));
+        // rg.flags.test.ts:149 - should search binary files as text with -a
+        let bin_env = home_bash(&[("binary.bin", "hello\u{0}world\n")]);
+        let without_a = bin_env.exec("rg hello");
+        assert_eq!(without_a.exit_code, 1);
+        assert_eq!(without_a.stdout, "");
+        let with_a = bin_env.exec("rg -a hello");
+        assert_eq!(with_a.exit_code, 0);
+        assert_eq!(with_a.stdout, "binary.bin:1:hello\u{0}world\n");
+    }
+
+    #[test]
     fn text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows() {
         let env = Bash::with_options(BashOptions {
             files: BTreeMap::from([

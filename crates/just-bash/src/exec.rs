@@ -6110,6 +6110,7 @@ struct RgOptions {
     no_ignore: bool,
     text: bool,
     files: bool,
+    follow_symlinks: bool,
     null_separator: bool,
     include_zero: bool,
     heading: bool,
@@ -6148,6 +6149,7 @@ impl Default for RgOptions {
             no_ignore: false,
             text: false,
             files: false,
+            follow_symlinks: false,
             null_separator: false,
             include_zero: false,
             heading: false,
@@ -6280,6 +6282,7 @@ fn parse_rg_option(
         "--quiet" => options.quiet = true,
         "--no-filename" => options.no_filename = true,
         "--text" => options.text = true,
+        "--follow" => options.follow_symlinks = true,
         "--include-zero" => options.include_zero = true,
         "--heading" => options.heading = true,
         "--stats" => options.stats = true,
@@ -6356,7 +6359,7 @@ fn parse_rg_option(
         "-I" => options.no_filename = true,
         "-a" => options.text = true,
         "-0" => options.null_separator = true,
-        "-L" => {}
+        "-L" => options.follow_symlinks = true,
         "-e" => patterns.push(rg_option_value(args, index, "-e")?),
         "-f" => pattern_files.push(rg_option_value(args, index, "-f")?),
         "-g" => options.globs.push(rg_option_value(args, index, "-g")?),
@@ -6473,7 +6476,7 @@ fn parse_rg_short_flags(arg: &str, options: &mut RgOptions) -> Result<(), Comman
             'I' => options.no_filename = true,
             'a' => options.text = true,
             '0' => options.null_separator = true,
-            'L' => {}
+            'L' => options.follow_symlinks = true,
             'u' => unrestricted += 1,
             _ => {
                 return Err(stderr_result(
@@ -6674,6 +6677,16 @@ fn rg_push_input(
     inputs: &mut Vec<RgInput>,
     candidate: RgCandidate<'_>,
 ) {
+    // Upstream rg skips symlinks during directory traversal unless -L/--follow
+    // is set (rg-search.ts followSymlinks). Explicit file arguments are always
+    // dereferenced.
+    if !candidate.explicit_file && !request.options.follow_symlinks {
+        if let Ok(link_stat) = fs.lstat(candidate.path) {
+            if link_stat.is_symbolic_link {
+                return;
+            }
+        }
+    }
     let Ok(stat) = fs.stat(candidate.path) else {
         return;
     };
@@ -6694,7 +6707,10 @@ fn rg_push_input(
     let Ok(text) = fs.read_file(candidate.path) else {
         return;
     };
-    if !request.options.text && text.contains('\0') {
+    // Upstream rg samples only the first 8192 chars when detecting binary
+    // files (rg-search.ts: `content.slice(0, 8192)`), so a NUL byte that
+    // appears after the sample window does not mark the file as binary.
+    if !request.options.text && text.chars().take(8192).any(|c| c == '\0') {
         return;
     }
     inputs.push(RgInput {

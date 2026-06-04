@@ -949,6 +949,15 @@ const jbc10CaseGroups = [
       'JBC-10 verifies imported rg binary-detection rows: NUL-containing files are skipped in directory and explicit-file search, in -c counts, in -l file lists, and in mixed-content directories.',
   },
   {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/binary.test.ts',
+    lines: [56, 134, 145, 156, 167, 180, 201, 214, 227, 240, 255, 270],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_binary_edge_case_and_flag_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported rg binary edge cases: NUL after the 8KB sample window is still searched, all-NUL/leading/trailing/multiple-NUL files are skipped, common binary signatures (PNG/PDF/ZIP) are skipped, and binary skipping holds under -i, -v, -w, -C, -m, and subdirectory search.',
+  },
+  {
     file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
     lines: [
       127, 144, 161, 178, 212, 231, 246, 331, 364, 486, 503, 538, 590,
@@ -2521,6 +2530,15 @@ const jbc34CaseGroups = [
     rustTest: 'text_search_jbc34_rg_patterns_gitignore_and_edge_rows',
     notes:
       'JBC-34 verifies portable rg -u no-ignore and -uu hidden-file search rows; symlink-follow and binary-as-text rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/rg.flags.test.ts',
+    lines: [11, 23, 35, 49, 122, 135, 149],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_flags_symlink_unrestricted_and_text_rows_are_portable',
+    notes:
+      'JBC-10 verifies portable rg -L/--follow acceptance, default symlink skipping, -L file-symlink following, -u/--no-ignore and -uu/--no-ignore --hidden equivalence, and -a binary-as-text search over the virtual filesystem.',
   },
   {
     file: 'packages/just-bash/src/commands/sed/sed.regex.test.ts',
