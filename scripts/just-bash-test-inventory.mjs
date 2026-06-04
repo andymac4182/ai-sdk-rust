@@ -2486,6 +2486,15 @@ const jbc19CaseGroups = [
     notes:
       'JBC-19 verifies transform plugin ordering, collector visibility after Tee rewrites, single/no-plugin pipeline behavior, metadata merging, rewrite plugins, and exception propagation.',
   },
+  {
+    file: 'packages/just-bash/src/transform/plugins/tee-plugin.test.ts',
+    lines: [9, 23, 48, 69, 97, 130, 161, 175, 187, 206, 222, 242, 262, 284],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::transform::tee',
+    rustTest: 'jbc19_tee_plugin_exec_describe_rows',
+    notes:
+      'JBC-19 verifies the TeePlugin exec describe-block AST-rewrite contract: single commands and compound/&&/|| chains are left unwrapped, each targeted pipeline stage records commandName/command/stdoutFile metadata, nested output dirs and persistent counters produce unique sanitized paths, targetCommandPattern filtering selects the right stages, and PIPESTATUS save/restore preserves pipeline exit semantics.',
+  },
 ];
 
 const jbc20CaseGroups = [
