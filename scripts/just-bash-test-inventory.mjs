@@ -5003,6 +5003,27 @@ const r10jbTarCaseGroups = [
   },
 ];
 
+const r11jbTarCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/tar/tar.security.test.ts',
+    lines: [93, 100, 107, 115],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'r11jb_tar_native_codec_decode_gates_and_utf8_stdin_pipe',
+    notes:
+      'R11JB verifies the archive-level native-codec gates at the tar command surface: xz/zstd encode (-cJf / --zstd) fail closed with "compression is disabled by default (native codec risk)", and extracting a payload carrying real xz (FD 37 7A 58 5A 00) or zstd (28 B5 2F FD) magic fails closed with "decompression is disabled by default (native codec risk)" instead of being handed to a native decoder.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tar/tar.utf8-stdin.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'r11jb_tar_native_codec_decode_gates_and_utf8_stdin_pipe',
+    notes:
+      'R11JB verifies multibyte file content round-trips through a `tar -cf - dir | tar -xOf - dir/k.txt` pipe: -xO decodes entry bytes as UTF-8 (mirroring upstream `new TextDecoder().decode(entry.content)`) so the Korean/accented/CJK content is reproduced exactly.',
+  },
+];
+
 const jbc47CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/sed/sed.errors.test.ts',
@@ -5512,6 +5533,7 @@ function caseOverrideFor(testCase) {
     ...jbc48CaseGroups,
     ...jbc46CaseGroups,
     ...r10jbTarCaseGroups,
+    ...r11jbTarCaseGroups,
     ...jbc47CaseGroups,
     ...jbc27CaseGroups,
     ...jbc30AgentExampleCaseGroups,
