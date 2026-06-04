@@ -8749,6 +8749,20 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
         Err(error) => return stderr_result(1, format!("awk: {error}\n")),
     };
     let mut stdout = String::new();
+    // Flatten every input file into a single record stream up front so a plain
+    // `getline` can advance the SAME cursor the main record loop walks. Each
+    // record remembers its owning file label and 1-based per-file index so
+    // FILENAME/FNR stay correct across file boundaries and getline reads.
+    let mut main_input = Vec::new();
+    for input in &inputs {
+        for (line_index, line) in input.text.lines().enumerate() {
+            main_input.push(AwkInputRecord {
+                label: input.label.clone(),
+                line: line.to_string(),
+                fnr: line_index + 1,
+            });
+        }
+    }
     let mut runtime = AwkRuntime {
         separator,
         ofs: " ".to_string(),
@@ -8757,6 +8771,8 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
         arrays: BTreeMap::new(),
         range_active: BTreeMap::new(),
         functions: program.functions.clone(),
+        main_input,
+        main_cursor: 0,
     };
     let mut nr = 0usize;
     let mut last_filename = String::new();
@@ -8788,58 +8804,57 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
         }
     }
 
-    for input in &inputs {
-        last_filename.clone_from(&input.label);
-        for (line_index, line) in input.text.lines().enumerate() {
-            nr += 1;
-            let fnr = line_index + 1;
-            let fields = awk_fields(line, &runtime.separator);
-            let mut context = AwkRecordContext {
-                line: line.to_string(),
-                fields,
-                nr,
-                fnr,
-                filename: input.label.clone(),
-            };
-            for (rule_index, rule) in program
-                .rules
-                .iter()
-                .enumerate()
-                .filter(|(_, rule)| rule.pattern.is_record())
-            {
-                let matches = match awk_pattern_matches(
-                    &rule.pattern,
-                    rule_index,
-                    &mut context,
-                    &mut runtime,
-                ) {
+    // Drive the main record loop off the shared cursor rather than a borrow of
+    // `inputs`, so a plain `getline` inside an action consumes the record the
+    // loop would visit next (and the loop then skips it).
+    while let Some(record) = runtime.next_main_record() {
+        nr += 1;
+        last_filename.clone_from(&record.label);
+        let fields = awk_fields(&record.line, &runtime.separator);
+        let mut context = AwkRecordContext {
+            line: record.line,
+            fields,
+            nr,
+            fnr: record.fnr,
+            filename: record.label,
+        };
+        for (rule_index, rule) in program
+            .rules
+            .iter()
+            .enumerate()
+            .filter(|(_, rule)| rule.pattern.is_record())
+        {
+            let matches =
+                match awk_pattern_matches(&rule.pattern, rule_index, &mut context, &mut runtime) {
                     Ok(matches) => matches,
                     Err(error) => return stderr_result(1, format!("awk: {error}\n")),
                 };
-                if matches {
-                    match execute_awk_actions(
-                        rule.actions.as_slice(),
-                        &mut context,
-                        &mut runtime,
-                        &mut stdout,
-                    ) {
-                        Ok(AwkFlow::Continue) => {}
-                        Ok(AwkFlow::Next) => break,
-                        Ok(AwkFlow::Exit(code)) => {
-                            return CommandResult {
-                                stdout,
-                                exit_code: code,
-                                ..CommandResult::default()
-                            };
-                        }
-                        Ok(AwkFlow::Return(_)) | Ok(AwkFlow::Break) | Ok(AwkFlow::LoopContinue) => {
-                            return stderr_result(1, "awk: unsupported program\n");
-                        }
-                        Err(error) => return stderr_result(1, format!("awk: {error}\n")),
+            if matches {
+                match execute_awk_actions(
+                    rule.actions.as_slice(),
+                    &mut context,
+                    &mut runtime,
+                    &mut stdout,
+                ) {
+                    Ok(AwkFlow::Continue) => {}
+                    Ok(AwkFlow::Next) => break,
+                    Ok(AwkFlow::Exit(code)) => {
+                        return CommandResult {
+                            stdout,
+                            exit_code: code,
+                            ..CommandResult::default()
+                        };
                     }
+                    Ok(AwkFlow::Return(_)) | Ok(AwkFlow::Break) | Ok(AwkFlow::LoopContinue) => {
+                        return stderr_result(1, "awk: unsupported program\n");
+                    }
+                    Err(error) => return stderr_result(1, format!("awk: {error}\n")),
                 }
             }
         }
+        // Keep the loop's NR aligned with any getline advances so the END block
+        // and subsequent records observe the post-getline record count.
+        nr = context.nr;
     }
 
     for rule in program
@@ -9442,6 +9457,16 @@ struct AwkRule {
     actions: Vec<AwkAction>,
 }
 
+/// A single record drawn from the flattened awk main input stream, retaining
+/// the owning file's label so `getline` can keep `FILENAME` / `FNR` accurate
+/// when advancing past the record the main loop is currently processing.
+#[derive(Clone, Debug)]
+struct AwkInputRecord {
+    label: String,
+    line: String,
+    fnr: usize,
+}
+
 #[derive(Clone, Debug)]
 struct AwkRuntime {
     separator: AwkSeparator,
@@ -9451,6 +9476,23 @@ struct AwkRuntime {
     arrays: BTreeMap<String, BTreeMap<String, String>>,
     range_active: BTreeMap<usize, bool>,
     functions: BTreeMap<String, AwkFunction>,
+    /// Flattened main-input records (all files concatenated, BEGIN/END excluded).
+    main_input: Vec<AwkInputRecord>,
+    /// Index of the NEXT unread record in `main_input`. The main record loop and
+    /// `getline` (plain / into-variable) share this cursor so a plain `getline`
+    /// consumes the line the loop would otherwise visit next.
+    main_cursor: usize,
+}
+
+impl AwkRuntime {
+    /// Advances the shared main-input cursor by one record, returning the
+    /// consumed record. Returns `None` at end of input. Used by plain `getline`
+    /// and `getline VAR`, which read the next record from the main stream.
+    fn next_main_record(&mut self) -> Option<AwkInputRecord> {
+        let record = self.main_input.get(self.main_cursor).cloned()?;
+        self.main_cursor += 1;
+        Some(record)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -9586,6 +9628,14 @@ enum AwkAction {
     },
     Break,
     Continue,
+    /// Plain `getline` / `getline VAR` reading the next record from the main
+    /// input stream. `target` is `None` for plain `getline` (updates `$0`,
+    /// re-splits fields, advances `NR`/`FNR`) and `Some(var)` for `getline VAR`
+    /// (updates the variable and `NR`/`FNR` but leaves `$0`/fields untouched).
+    /// At end of input it is a no-op, matching POSIX awk's getline-at-EOF.
+    Getline {
+        target: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -9833,6 +9883,25 @@ fn parse_awk_actions(body: &str) -> Result<Vec<AwkAction>, String> {
             actions.push(AwkAction::Continue);
             index += 1;
             continue;
+        }
+        // Plain `getline` and `getline VAR` reading from the main input stream.
+        // Redirected forms (`getline < file`, `cmd | getline`) are not handled
+        // here and fall through to the generic expression path, which rejects
+        // them as unsupported (those remain portable-pending).
+        if statement == "getline" {
+            actions.push(AwkAction::Getline { target: None });
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = strip_awk_keyword(statement, "getline") {
+            let rest = rest.trim();
+            if is_awk_identifier(rest) {
+                actions.push(AwkAction::Getline {
+                    target: Some(rest.to_string()),
+                });
+                index += 1;
+                continue;
+            }
         }
         if let Some((action, consumed)) = parse_awk_do_while_statement(&statements, index)? {
             actions.push(action);
@@ -10953,6 +11022,24 @@ fn execute_awk_actions(
             AwkAction::Next => return Ok(AwkFlow::Next),
             AwkAction::Break => return Ok(AwkFlow::Break),
             AwkAction::Continue => return Ok(AwkFlow::LoopContinue),
+            AwkAction::Getline { target } => {
+                // Read the next record from the shared main input stream. On
+                // success advance NR/FNR/FILENAME; at EOF leave everything
+                // unchanged (POSIX getline-at-EOF is a no-op for $0 and the
+                // current record). The record is split into fields only for the
+                // plain (`$0`) form; `getline VAR` leaves $0 and fields intact.
+                if let Some(record) = runtime.next_main_record() {
+                    context.nr += 1;
+                    context.fnr = record.fnr;
+                    context.filename = record.label;
+                    match target {
+                        None => context.replace_line(record.line, &runtime.separator),
+                        Some(name) => {
+                            runtime.variables.insert(name.clone(), record.line);
+                        }
+                    }
+                }
+            }
             AwkAction::Exit(code) => {
                 let code = match code {
                     Some(code) => awk_to_number(&eval_awk_expr(code, context, runtime)?) as i32,

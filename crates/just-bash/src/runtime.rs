@@ -13125,6 +13125,84 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         );
     }
 
+    // JBC-awk: plain `getline` and `getline VAR` reading the next record from
+    // the main input stream. Each assertion fails if the shared main-input
+    // cursor, NR bookkeeping, $0 re-split, or getline-at-EOF no-op behavior is
+    // wrong.
+    // Upstream: packages/just-bash/src/commands/awk/awk.getline.test.ts
+    //   :5 reads next line into $0, :21 reads next line into variable,
+    //   :37 updates NR when reading next line,
+    //   :54 skips lines when used in pattern match,
+    //   :74 handles getline at end of file gracefully,
+    //   :88 combines lines using getline.
+    #[test]
+    fn awk_jbc_command_awk_getline_main_input_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/header.txt".to_string(),
+                    "header\nvalue1\nvalue2\nvalue3".to_string(),
+                ),
+                (
+                    "/names.txt".to_string(),
+                    "name: Alice\nage: 30\nname: Bob\nage: 25".to_string(),
+                ),
+                ("/lines.txt".to_string(), "line1\nline2\nline3".to_string()),
+                (
+                    "/headers.txt".to_string(),
+                    "header1\ndata1\nheader2\ndata2\nheader3\ndata3".to_string(),
+                ),
+                ("/single.txt".to_string(), "only line".to_string()),
+                (
+                    "/keys.txt".to_string(),
+                    "key1\nvalue1\nkey2\nvalue2".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // :5 reads next line into $0
+        let into_line = env.exec(r#"awk '/header/ { getline; print }' /header.txt"#);
+        assert_eq!(into_line.exit_code, 0);
+        assert_eq!(into_line.stdout, "value1\n");
+
+        // :21 reads next line into variable (variable holds the record; $2 is
+        // still the matched record's second field, proving $0 is untouched).
+        assert_eq!(
+            env.exec(r#"awk '/^name:/ { getline age_line; print $2, age_line }' /names.txt"#)
+                .stdout,
+            "Alice age: 30\nBob age: 25\n"
+        );
+
+        // :37 updates NR when reading next line; getline at EOF leaves NR put.
+        assert_eq!(
+            env.exec(r#"awk '{ print NR; getline; print NR }' /lines.txt"#)
+                .stdout,
+            "1\n2\n3\n3\n"
+        );
+
+        // :54 skips lines when used in pattern match
+        assert_eq!(
+            env.exec(r#"awk '/^header/ { print; getline; print "  ->" $0 }' /headers.txt"#)
+                .stdout,
+            "header1\n  ->data1\nheader2\n  ->data2\nheader3\n  ->data3\n"
+        );
+
+        // :74 handles getline at end of file gracefully ($0 unchanged at EOF)
+        assert_eq!(
+            env.exec(r#"awk '{ print $0; getline; print "after: " $0 }' /single.txt"#)
+                .stdout,
+            "only line\nafter: only line\n"
+        );
+
+        // :88 combines lines using getline
+        assert_eq!(
+            env.exec(r#"awk 'NR % 2 == 1 { key = $0; getline; print key ": " $0 }' /keys.txt"#)
+                .stdout,
+            "key1: value1\nkey2: value2\n"
+        );
+    }
+
     // JBC-awk: special variables FILENAME/FNR and string functions
     // match()/RSTART/RLENGTH/gensub(), printf %x/%X/%o/%c, and the ^/** power
     // operators with a fractional exponent.
