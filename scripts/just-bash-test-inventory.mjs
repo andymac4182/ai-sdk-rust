@@ -1102,6 +1102,15 @@ const jbc10CaseGroups = [
       'JBC-10 verifies imported rg misc rows: -v/-n inverted, -i case-insensitive, -w word, -x whole-line, -F literal, -q quiet, -t/-T file-type filter, -g/--glob filters, --count/--count-matches/--include-zero counts, --files-with-matches/--files-without-match, -A/-B/-C context with line numbers, --files listing, and --sort path over the virtual filesystem.',
   },
   {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
+    lines: [89, 107, 348, 380, 398, 415, 434, 891, 906, 946, 965, 1004],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_misc_type_heading_ignore_and_symlink_rows_are_portable',
+    notes:
+      'JBC-10 verifies imported rg misc rows: -H forces the filename prefix on a single explicit file, --heading prints the file label heading then unprefixed lines, -t all / -T all match (or negate) any known file type, --type-clear empties a type so it matches nothing, --type-add registers a glob-based or include-composed type, the generic .ignore and ripgrep-specific .rgignore files exclude matching paths, file symlinks are skipped during traversal by default and followed with -L, and -uu (unrestricted2) includes hidden dotfiles over the virtual filesystem.',
+  },
+  {
     file: 'packages/just-bash/src/commands/rg/rg.no-filename.test.ts',
     lines: [222, 234, 246, 258, 276, 289, 304, 316, 328, 340, 353, 367, 379, 393],
     status: 'portable-verified',

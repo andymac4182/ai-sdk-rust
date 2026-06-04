@@ -4269,6 +4269,105 @@ and exhibited clearly, with a label attached.\n",
     }
 
     #[test]
+    fn rg_imported_misc_type_heading_ignore_and_symlink_rows_are_portable() {
+        // packages/just-bash/src/commands/rg/imported-tests/misc.test.ts
+        // 89 - with_filename: should show filename with -H even for single file
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg -H Sherlock sherlock",
+            0,
+            "sherlock:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+sherlock:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 107 - with_heading: should show heading format
+        assert_home_exec(
+            &[("sherlock", SHERLOCK)],
+            "rg --heading Sherlock sherlock",
+            0,
+            "sherlock\n\
+For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 348 - file_types_all: should filter type 'all' (only typed files)
+        assert_home_exec(
+            &[("sherlock", SHERLOCK), ("file.py", "Sherlock\n")],
+            "rg -t all Sherlock",
+            0,
+            "file.py:1:Sherlock\n",
+        );
+        // 380 - file_types_negate_all: should negate type 'all' (only untyped files)
+        assert_home_exec(
+            &[("sherlock", SHERLOCK), ("file.py", "Sherlock\n")],
+            "rg -T all Sherlock",
+            0,
+            "sherlock:1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+sherlock:3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+        // 398 - file_type_clear: should clear type patterns with --type-clear
+        assert_home_exec(
+            &[("file.py", "test\n"), ("file.rs", "test\n")],
+            "rg --type-clear py -t py test",
+            1,
+            "",
+        );
+        // 415 - file_type_add: should add type patterns with --type-add
+        assert_home_exec(
+            &[("file.foo", "test\n"), ("file.bar", "test\n")],
+            "rg --type-add 'custom:*.foo' -t custom test",
+            0,
+            "file.foo:1:test\n",
+        );
+        // 434 - file_type_add_compose: should compose types with include
+        assert_home_exec(
+            &[
+                ("file.js", "test\n"),
+                ("file.ts", "test\n"),
+                ("file.py", "test\n"),
+            ],
+            "rg --type-add 'web:include:js' -t web test",
+            0,
+            "file.js:1:test\n",
+        );
+        // 891 - ignore_generic: should respect .ignore
+        assert_home_exec(
+            &[("sherlock", SHERLOCK), (".ignore", "sherlock\n")],
+            "rg Sherlock",
+            1,
+            "",
+        );
+        // 906 - ignore_ripgrep: should respect .rgignore
+        assert_home_exec(
+            &[("sherlock", SHERLOCK), (".rgignore", "sherlock\n")],
+            "rg Sherlock",
+            1,
+            "",
+        );
+        // 946 - symlink_nofollow: should not follow file symlinks during traversal by default
+        assert_home_exec(
+            &[("searchdir/real.txt", "test content\n")],
+            "ln -s real.txt /home/user/searchdir/link.txt\nrg test searchdir",
+            0,
+            "searchdir/real.txt:1:test content\n",
+        );
+        // 965 - symlink_follow: should follow file symlinks during traversal with -L
+        assert_home_exec(
+            &[("searchdir/real.txt", "test content\n")],
+            "ln -s real.txt /home/user/searchdir/link.txt\nrg -L test searchdir",
+            0,
+            "searchdir/link.txt:1:test content\n\
+searchdir/real.txt:1:test content\n",
+        );
+        // 1004 - unrestricted2: should include hidden files with -uu
+        assert_home_exec(
+            &[(".sherlock", SHERLOCK)],
+            "rg -uu Sherlock",
+            0,
+            ".sherlock:1:For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+.sherlock:3:be, to a very large extent, the result of luck. Sherlock Holmes\n",
+        );
+    }
+
+    #[test]
     fn rg_upstream_filtering_rows_are_portable() {
         assert_home_exec(
             &[
