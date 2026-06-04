@@ -5347,6 +5347,110 @@ searchdir/real.txt:1:test content\n",
     }
 
     #[test]
+    fn rg_imported_regression_negation_symlink_anchored_and_exit_code_rows_are_portable() {
+        // Maps additional imported ripgrep regression cases in
+        // packages/just-bash/src/commands/rg/imported-tests/regression.test.ts
+        // (line numbers in comments). Each row exercises real portable rg
+        // behavior over the virtual filesystem.
+
+        // r137 :285 -L follows a file symlink and searches its target content.
+        {
+            let result = home_bash(&[("real.txt", "test content\n")])
+                .exec("ln -s real.txt /home/user/link.txt; rg -L test");
+            assert_eq!(result.exit_code, 0, "r137 symlink follow");
+            assert!(
+                result.stdout.contains("test content"),
+                "r137 stdout: {}",
+                result.stdout
+            );
+        }
+        // r404 :468 complex glob exclusion plus inclusion with --files.
+        assert_home_exec(
+            &[
+                (".git/.gitkeep", ""),
+                ("lock", ""),
+                ("bar.py", ""),
+                (".git/packed-refs", ""),
+                (".git/description", ""),
+            ],
+            "rg --no-ignore --hidden --follow --files --glob '!{.git,node_modules,plugged}/**' --glob '*.py'",
+            0,
+            "bar.py\n",
+        ); // :468
+        // r829_2778 :716 /parent/*.txt only ignores files directly in parent.
+        assert_home_exec(
+            &[
+                (".ignore", "/parent/*.txt\n"),
+                ("parent/ignore-me.txt", ""),
+                ("parent/subdir/dont-ignore-me.txt", ""),
+            ],
+            "rg --files",
+            0,
+            "parent/subdir/dont-ignore-me.txt\n",
+        ); // :716
+        // r829_2836 :730 trailing-slash anchored pattern ignores the whole dir.
+        assert_home_exec(
+            &[
+                (".ignore", "/testdir/sub/sub2/\n"),
+                ("testdir/sub/sub2/foo", ""),
+            ],
+            "rg --files",
+            1,
+            "",
+        ); // :730
+        // r829_2933 :742 files-with-matches honours .ignore from cwd subdir.
+        {
+            let result = home_bash(&[
+                (".ignore", "/testdir/sub/sub2/\n"),
+                ("testdir/sub/sub2/testfile", "needle\n"),
+            ])
+            .exec("cd testdir; rg --files-with-matches needle");
+            assert_eq!(result.exit_code, 1, "r829_2933 exit");
+            assert_eq!(result.stdout, "", "r829_2933 stdout");
+        }
+        // r1399 :1071 -L follows good symlinks and skips broken ones.
+        {
+            let result = home_bash(&[("real.txt", "test content\n")]).exec(
+                "ln -s real.txt /home/user/good_link.txt; ln -s nonexistent.txt /home/user/bad_link.txt; rg -L test",
+            );
+            assert_eq!(result.exit_code, 0, "r1399 exit");
+            assert!(
+                result.stdout.contains("test content"),
+                "r1399 stdout: {}",
+                result.stdout
+            );
+        }
+        // r2099 :1313 --no-ignore-dot disables .ignore/.rgignore filtering.
+        {
+            let env = home_bash(&[
+                (".ignore", "a\n"),
+                (".rgignore", "b\n"),
+                ("a", ""),
+                ("b", ""),
+                ("c", ""),
+            ]);
+            let r1 = env.exec("rg --files --sort path");
+            assert_eq!(r1.stdout, "c\n", "r2099 default ignore");
+            let r2 = env.exec("rg --files --sort path --no-ignore-dot");
+            assert_eq!(r2.stdout, "a\nb\nc\n", "r2099 no-ignore-dot");
+        }
+        // r2731 :1385 --hidden --files lists dotfiles honouring .ignore.
+        assert_home_exec(
+            &[("a/.ignore", ".foo\n"), ("a/b/.foo", "")],
+            "rg --hidden --files",
+            0,
+            "a/.ignore\n",
+        ); // :1385
+        // misc.test.ts :1135 -a (text) searches binary content literally.
+        assert_home_exec(
+            &[("file", "foo\u{0}bar\nfoo\u{0}baz\n")],
+            "rg -a foo file",
+            0,
+            "foo\u{0}bar\nfoo\u{0}baz\n",
+        ); // misc:1135
+    }
+
+    #[test]
     fn rg_upstream_ripgrep_compat_rows_are_portable() {
         assert_home_exec(
             &[("sherlock", SHERLOCK)],

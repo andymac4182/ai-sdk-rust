@@ -1174,6 +1174,26 @@ const jbc10CaseGroups = [
       'JBC-10 verifies imported ripgrep regression rows: rooted/unanchored/nested/trailing-slash/double-star/dot-star gitignore patterns, --files with a path argument, IP-style repeated-group and cyrillic case-folding regex, smart-case bracket sensitivity, -e dash patterns, -q quiet exit, --only-matching, and --quiet --files glob exit codes over the virtual filesystem.',
   },
   {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [285, 468, 716, 730, 742, 1071, 1313, 1385],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest:
+      'rg_imported_regression_negation_symlink_anchored_and_exit_code_rows_are_portable',
+    notes:
+      'JBC-10 verifies additional imported ripgrep regression rows: -L follows file symlinks and skips broken symlinks while searching targets, complex --files glob exclusion plus inclusion, anchored .ignore patterns (/parent/*.txt, trailing-slash /testdir/sub/sub2/) and files-with-matches honouring .ignore from a cwd subdirectory, --no-ignore-dot disabling .ignore/.rgignore filtering, and --hidden --files listing dotfiles while honouring .ignore over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
+    lines: [1135],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest:
+      'rg_imported_regression_negation_symlink_anchored_and_exit_code_rows_are_portable',
+    notes:
+      'JBC-10 verifies the imported rg misc -a (text) row searches binary (NUL-containing) file content literally and prints the matching lines over the virtual filesystem.',
+  },
+  {
     file: 'packages/just-bash/src/commands/rg/imported-tests/feature.test.ts',
     lines: [965, 966, 967, 968, 969, 970, 1047],
     status: 'js-only-documented',
