@@ -19652,11 +19652,153 @@ fn parse_sql_value(value: &str) -> SqlValue {
 }
 
 fn select_sql(db: &MiniSqlDb, statement: &str) -> Result<SqlResultSet, String> {
-    let body = statement["SELECT ".len()..].trim();
-    if let Some((projection, table)) = body.split_once(" FROM ") {
-        let table = table.trim();
-        let Some(source) = db.tables.get(table) else {
-            return Err(format!("no such table: {table}"));
+    select_sql_body(db, statement.trim())
+}
+
+/// Split an SQL fragment on a top-level keyword (case-insensitive, surrounded by
+/// spaces) that is not nested inside single quotes or parentheses. Returns the
+/// split point if found.
+fn find_top_level_keyword(fragment: &str, keyword: &str) -> Option<usize> {
+    let bytes = fragment.as_bytes();
+    let upper = fragment.to_ascii_uppercase();
+    let needle = format!(" {} ", keyword.to_ascii_uppercase());
+    let mut depth = 0_i32;
+    let mut in_single = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let ch = bytes[index] as char;
+        match ch {
+            '\'' => in_single = !in_single,
+            '(' if !in_single => depth += 1,
+            ')' if !in_single => depth -= 1,
+            _ if !in_single && depth == 0 && upper[index..].starts_with(&needle) => {
+                return Some(index);
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn select_sql_body(db: &MiniSqlDb, body: &str) -> Result<SqlResultSet, String> {
+    let body = body.trim();
+    // Peel a trailing top-level ORDER BY clause so it applies to the whole
+    // (possibly UNION-ed) result set.
+    if let Some(pos) = find_top_level_keyword(body, "ORDER BY") {
+        let head = &body[..pos];
+        let order_clause = body[pos..].trim_start();
+        let order_clause = order_clause["ORDER BY".len()..].trim();
+        let mut result = select_sql_set_ops(db, head)?;
+        sort_sql_result(&mut result, order_clause)?;
+        return Ok(result);
+    }
+    select_sql_set_ops(db, body)
+}
+
+/// Handle UNION / UNION ALL of SELECT terms.
+fn select_sql_set_ops(db: &MiniSqlDb, body: &str) -> Result<SqlResultSet, String> {
+    let body = body.trim();
+    if let Some(pos) = find_top_level_keyword(body, "UNION ALL") {
+        let left = body[..pos].trim();
+        let right = body[pos + " UNION ALL ".len() - 1..].trim();
+        let mut left_set = select_sql_term(db, left)?;
+        let right_set = select_sql_term(db, right)?;
+        left_set.rows.extend(right_set.rows);
+        return Ok(left_set);
+    }
+    if let Some(pos) = find_top_level_keyword(body, "UNION") {
+        let left = body[..pos].trim();
+        let right = body[pos + " UNION ".len() - 1..].trim();
+        let mut left_set = select_sql_term(db, left)?;
+        let right_set = select_sql_term(db, right)?;
+        for row in right_set.rows {
+            if !left_set.rows.contains(&row) {
+                left_set.rows.push(row);
+            }
+        }
+        return Ok(left_set);
+    }
+    select_sql_term(db, body)
+}
+
+/// A single SELECT term, which may itself begin with `SELECT` or be a
+/// parenthesised sub-select / sub-query in FROM.
+fn select_sql_term(db: &MiniSqlDb, term: &str) -> Result<SqlResultSet, String> {
+    let term = term.trim();
+    let rest = match term
+        .get(..7)
+        .map(|prefix| prefix.eq_ignore_ascii_case("SELECT "))
+    {
+        Some(true) => term[7..].trim(),
+        _ => return Err(format!("near \"{term}\": syntax error")),
+    };
+    select_sql_core(db, rest)
+}
+
+fn sort_sql_result(result: &mut SqlResultSet, order_clause: &str) -> Result<(), String> {
+    let mut descending = false;
+    let mut key = order_clause.trim();
+    if let Some(stripped) = key
+        .to_ascii_uppercase()
+        .strip_suffix(" DESC")
+        .map(|_| key[..key.len() - 5].trim())
+    {
+        descending = true;
+        key = stripped;
+    } else if let Some(_stripped) = key
+        .to_ascii_uppercase()
+        .strip_suffix(" ASC")
+        .map(|_| key[..key.len() - 4].trim())
+    {
+        key = key[..key.len() - 4].trim();
+    }
+    let column_index = result
+        .columns
+        .iter()
+        .position(|column| column == key)
+        .or_else(|| key.parse::<usize>().ok().map(|number| number - 1))
+        .unwrap_or(0);
+    result.rows.sort_by(|left, right| {
+        let left_value = left.get(column_index).and_then(|v| v.raw.clone());
+        let right_value = right.get(column_index).and_then(|v| v.raw.clone());
+        compare_sql_values(left_value.as_deref(), right_value.as_deref())
+    });
+    if descending {
+        result.rows.reverse();
+    }
+    Ok(())
+}
+
+fn compare_sql_values(left: Option<&str>, right: Option<&str>) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(left), Some(right)) => match (left.parse::<f64>(), right.parse::<f64>()) {
+            (Ok(left), Ok(right)) => left.partial_cmp(&right).unwrap_or(Ordering::Equal),
+            _ => left.cmp(right),
+        },
+    }
+}
+
+fn select_sql_core(db: &MiniSqlDb, body: &str) -> Result<SqlResultSet, String> {
+    let body = body.trim();
+    if let Some(from_pos) = find_top_level_keyword(body, "FROM") {
+        let projection = &body[..from_pos];
+        let table = body[from_pos + " FROM ".len() - 1..].trim();
+        // A parenthesised sub-query stands in for a real table.
+        let owned_source;
+        let source = if table.starts_with('(') {
+            let inner = match_parenthesised_subquery(table)?;
+            owned_source = select_sql_body(db, inner)?;
+            &owned_source
+        } else {
+            let Some(source) = db.tables.get(table) else {
+                return Err(format!("no such table: {table}"));
+            };
+            source
         };
         if projection.trim() == "*" {
             return Ok(source.clone());
@@ -19695,12 +19837,128 @@ fn select_sql(db: &MiniSqlDb, statement: &str) -> Result<SqlResultSet, String> {
     for (index, value) in values.iter().enumerate() {
         let (raw_value, alias) = split_sql_alias(value);
         columns.push(alias.unwrap_or_else(|| (index + 1).to_string()));
-        row.push(parse_sql_value(raw_value));
+        row.push(eval_sql_scalar(raw_value));
     }
     Ok(SqlResultSet {
         columns,
         rows: vec![row],
     })
+}
+
+/// Given a string that begins with `(`, return the slice between the matching
+/// outermost parentheses (single-quote aware).
+fn match_parenthesised_subquery(text: &str) -> Result<&str, String> {
+    let bytes = text.as_bytes();
+    let mut depth = 0_i32;
+    let mut in_single = false;
+    let mut start = None;
+    for (index, &byte) in bytes.iter().enumerate() {
+        match byte as char {
+            '\'' => in_single = !in_single,
+            '(' if !in_single => {
+                if depth == 0 {
+                    start = Some(index + 1);
+                }
+                depth += 1;
+            }
+            ')' if !in_single => {
+                depth -= 1;
+                if depth == 0 {
+                    let start = start.unwrap_or(0);
+                    return Ok(text[start..index].trim());
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(format!("near \"{text}\": syntax error"))
+}
+
+/// Evaluate a constant scalar expression in a SELECT projection. Supports plain
+/// literals and a single-branch `CASE WHEN <cond> THEN <a> ELSE <b> END` where
+/// the condition is a constant equality comparison.
+fn eval_sql_scalar(expr: &str) -> SqlValue {
+    let trimmed = expr.trim();
+    let upper = trimmed.to_ascii_uppercase();
+    if upper.starts_with("CASE ") && upper.ends_with(" END") {
+        if let Some(value) = eval_sql_case(trimmed) {
+            return value;
+        }
+    }
+    parse_sql_value(trimmed)
+}
+
+fn eval_sql_case(expr: &str) -> Option<SqlValue> {
+    // Strip leading "CASE " and trailing " END".
+    let inner = expr.get(5..expr.len() - 4)?.trim();
+    // Expect the form: WHEN <cond> THEN <a> [ELSE <b>]
+    let rest = strip_leading_keyword(inner, "WHEN")?;
+    let then_pos = find_keyword_at_top_level(rest, "THEN")?;
+    let condition = rest[..then_pos].trim();
+    let after_then = rest[then_pos + "THEN".len()..].trim();
+    let (then_value, else_value) = match find_keyword_at_top_level(after_then, "ELSE") {
+        Some(else_pos) => (
+            after_then[..else_pos].trim(),
+            after_then[else_pos + "ELSE".len()..].trim(),
+        ),
+        None => (after_then, ""),
+    };
+    if eval_sql_condition(condition) {
+        Some(parse_sql_value(then_value))
+    } else {
+        Some(parse_sql_value(else_value))
+    }
+}
+
+fn strip_leading_keyword<'a>(text: &'a str, keyword: &str) -> Option<&'a str> {
+    let text = text.trim_start();
+    if text.len() >= keyword.len() && text[..keyword.len()].eq_ignore_ascii_case(keyword) {
+        Some(text[keyword.len()..].trim_start())
+    } else {
+        None
+    }
+}
+
+/// Find a top-level (not nested in quotes/parens) occurrence of a keyword that
+/// is bounded by whitespace, returning the byte index of the keyword start.
+fn find_keyword_at_top_level(text: &str, keyword: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let upper = text.to_ascii_uppercase();
+    let needle = keyword.to_ascii_uppercase();
+    let mut depth = 0_i32;
+    let mut in_single = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] as char {
+            '\'' => in_single = !in_single,
+            '(' if !in_single => depth += 1,
+            ')' if !in_single => depth -= 1,
+            _ if !in_single && depth == 0 && upper[index..].starts_with(&needle) => {
+                let before_ok = index == 0 || bytes[index - 1].is_ascii_whitespace();
+                let after_index = index + needle.len();
+                let after_ok =
+                    after_index >= bytes.len() || bytes[after_index].is_ascii_whitespace();
+                if before_ok && after_ok {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Evaluate a constant equality / inequality condition such as `1=1`.
+fn eval_sql_condition(condition: &str) -> bool {
+    for (operator, expected) in [("=", true), ("!=", false), ("<>", false)] {
+        if let Some((left, right)) = condition.split_once(operator) {
+            let left = parse_sql_value(left.trim());
+            let right = parse_sql_value(right.trim());
+            return (left == right) == expected;
+        }
+    }
+    false
 }
 
 fn split_sql_alias(value: &str) -> (&str, Option<String>) {
@@ -19913,7 +20171,7 @@ fn format_sql_json(result_set: &SqlResultSet) -> String {
                         value
                             .raw
                             .as_ref()
-                            .map(|value| serde_json::to_string(&csv_json_value(value)).unwrap())
+                            .map(|value| sqlite_json_scalar(value))
                             .unwrap_or_else(|| "null".to_string())
                     )
                 })
@@ -19926,12 +20184,78 @@ fn format_sql_json(result_set: &SqlResultSet) -> String {
     format!("[{rows}]\n")
 }
 
+/// Serialize a sqlite cell value into a JSON scalar literal, matching real
+/// sqlite3 `-json` mode: integers and strings serialize normally, but a real
+/// (floating-point) literal is rendered with full IEEE-754 round-trip
+/// precision (e.g. `3.14` becomes `3.1400000000000001`).
+fn sqlite_json_scalar(value: &str) -> String {
+    if value.parse::<i64>().is_ok() {
+        return value.to_string();
+    }
+    // A value is treated as a REAL only when it carries a decimal point or
+    // exponent and parses as a float; integers were handled above.
+    if (value.contains('.') || value.contains('e') || value.contains('E'))
+        && let Ok(float) = value.parse::<f64>()
+    {
+        return format_sqlite_real(float);
+    }
+    serde_json::to_string(value).unwrap()
+}
+
+/// Format an f64 the way the upstream sqlite3 port renders a REAL, mirroring
+/// JavaScript `value.toPrecision(17).replace(/\.?0+$/, "")`: 17 significant
+/// digits, then strip trailing zeroes (and a dangling decimal point). So `3.14`
+/// renders as `3.1400000000000001`.
+fn format_sqlite_real(value: f64) -> String {
+    let rendered = to_precision_17(value);
+    trim_real_zeroes(&rendered)
+}
+
+/// Render an f64 with exactly 17 significant digits in plain (non-exponential)
+/// notation for the value ranges sqlite emits for `-json`. Mirrors JS
+/// `Number.prototype.toPrecision(17)` for finite, non-exponential magnitudes.
+fn to_precision_17(value: f64) -> String {
+    if value == 0.0 {
+        return "0.0000000000000000".to_string();
+    }
+    let magnitude = value.abs();
+    let exponent = magnitude.log10().floor() as i32;
+    let integer_digits = exponent + 1;
+    let decimals = (17 - integer_digits).max(0) as usize;
+    format!("{value:.decimals$}")
+}
+
+fn trim_real_zeroes(rendered: &str) -> String {
+    if !rendered.contains('.') {
+        return rendered.to_string();
+    }
+    let trimmed = rendered.trim_end_matches('0');
+    let trimmed = trimmed.trim_end_matches('.');
+    if trimmed.is_empty() {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn format_sql_line(result_set: &SqlResultSet, options: &SqliteOptions) -> String {
+    // SQLite line mode right-aligns column names to the widest column name
+    // (minimum width is the longest name) and separates rows with a blank line.
+    let name_width = result_set
+        .columns
+        .iter()
+        .map(|column| column.len())
+        .max()
+        .unwrap_or(0)
+        .max(5);
     let mut output = String::new();
-    for row in &result_set.rows {
+    for (row_index, row) in result_set.rows.iter().enumerate() {
+        if row_index > 0 {
+            output.push('\n');
+        }
         for (column, value) in result_set.columns.iter().zip(row) {
             output.push_str(&format!(
-                "{column:>5} = {}\n",
+                "{column:>name_width$} = {}\n",
                 sql_value_text(value, &options.null_value)
             ));
         }
