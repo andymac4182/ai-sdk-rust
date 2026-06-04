@@ -3586,6 +3586,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
             }
             "break" | "continue" => Some(self.execute_loop_control(name, args)),
             "return" => Some(self.execute_return(args)),
+            "shift" => Some(self.execute_shift(args)),
             "eval" => Some(self.execute_eval(args)),
             _ => None,
         }
@@ -3624,6 +3625,44 @@ impl<D: CommandDispatcher> Interpreter<D> {
             stderr: String::new(),
             exit_code: code,
         }
+    }
+
+    /// `shift [n]` builtin. Shifts the positional parameters left by `n`
+    /// (default 1): `$(n+1)` becomes `$1`, and `$#` is decremented by `n`.
+    /// A non-numeric or negative argument is a "numeric argument required"
+    /// error (status 1); a count greater than the current parameter count is
+    /// a "shift count out of range" error (status 1). `shift 0` is a no-op.
+    /// (Mirrors `interpreter/builtins/shift.ts`; the POSIX-mode fatal variant
+    /// is not modeled because Just Bash does not track `set -o posix`.)
+    fn execute_shift(&mut self, args: &[String]) -> ExecOutput {
+        let mut n: usize = 1;
+        if let Some(arg) = args.first() {
+            match arg.parse::<i64>() {
+                Ok(value) if value >= 0 => n = value as usize,
+                _ => {
+                    return ExecOutput {
+                        stdout: String::new(),
+                        stderr: format!("bash: shift: {arg}: numeric argument required\n"),
+                        exit_code: 1,
+                    };
+                }
+            }
+        }
+
+        if n > self.state.positionals.len() {
+            return ExecOutput {
+                stdout: String::new(),
+                stderr: "bash: shift: shift count out of range\n".to_string(),
+                exit_code: 1,
+            };
+        }
+
+        if n == 0 {
+            return ExecOutput::default();
+        }
+
+        self.state.positionals.drain(0..n);
+        ExecOutput::default()
     }
 
     /// `eval [arg ...]` builtin. The arguments are joined with single spaces,
@@ -7579,6 +7618,118 @@ mod tests {
         );
     }
 
+    /// Mirrors every row of
+    /// `packages/just-bash/src/interpreter/builtins/shift.test.ts` 1:1 through
+    /// the Rust parser/interpreter `Bash().exec`. Covers basic shift by 1 and
+    /// the resulting `$1 $2 $3`/`$#`/`$@` updates (L6/L19/L32), shift with an
+    /// explicit count and `shift 0` no-op (L47/L60/L72), the count-out-of-range
+    /// and numeric-argument-required error rows (L87/L99/L111), consecutive
+    /// shifts and the `while [ $# -gt 0 ]` loop (L125/L140), function-scope
+    /// isolation in nested functions (L156), and the no-parameter and
+    /// single-parameter edge rows (L174/L186).
+    #[test]
+    fn jbpi_interpreter_builtin_shift_matches_upstream() {
+        // L6 shift positional parameters by 1.
+        assert_eq!(
+            shell()
+                .exec("myfunc() {\necho \"before: $1 $2 $3\"\nshift\necho \"after: $1 $2 $3\"\n}\nmyfunc a b c")
+                .stdout,
+            "before: a b c\nafter: b c \n"
+        );
+        // L19 $# is updated after shift.
+        assert_eq!(
+            shell()
+                .exec("myfunc() {\necho \"count: $#\"\nshift\necho \"count: $#\"\n}\nmyfunc a b c")
+                .stdout,
+            "count: 3\ncount: 2\n"
+        );
+        // L32 $@ is updated after shift.
+        assert_eq!(
+            shell()
+                .exec("myfunc() {\necho \"args: $@\"\nshift\necho \"args: $@\"\n}\nmyfunc a b c")
+                .stdout,
+            "args: a b c\nargs: b c\n"
+        );
+        // L47 shift by a specified count.
+        assert_eq!(
+            shell()
+                .exec("myfunc() {\necho \"before: $1 $2 $3 $4\"\nshift 2\necho \"after: $1 $2\"\n}\nmyfunc a b c d")
+                .stdout,
+            "before: a b c d\nafter: c d\n"
+        );
+        // L60 shift all parameters.
+        assert_eq!(
+            shell()
+                .exec("myfunc() {\nshift 3\necho \"count: $#\"\n}\nmyfunc a b c")
+                .stdout,
+            "count: 0\n"
+        );
+        // L72 shift 0 is a no-op with status 0.
+        let r = shell().exec("myfunc() {\nshift 0\necho \"$1 $2\"\n}\nmyfunc a b");
+        assert_eq!(r.stdout, "a b\n");
+        assert_eq!(r.exit_code, 0);
+        // L87 shift count exceeding the parameter count is an error.
+        let r = shell().exec("myfunc() {\nshift 5\n}\nmyfunc a b c");
+        assert!(
+            r.stderr.contains("shift count out of range"),
+            "{:?}",
+            r.stderr
+        );
+        assert_eq!(r.exit_code, 1);
+        // L99 negative count is a numeric-argument error.
+        let r = shell().exec("myfunc() {\nshift -1\n}\nmyfunc a b");
+        assert!(
+            r.stderr.contains("numeric argument required"),
+            "{:?}",
+            r.stderr
+        );
+        assert_eq!(r.exit_code, 1);
+        // L111 non-numeric argument is a numeric-argument error.
+        let r = shell().exec("myfunc() {\nshift abc\n}\nmyfunc a b");
+        assert!(
+            r.stderr.contains("numeric argument required"),
+            "{:?}",
+            r.stderr
+        );
+        assert_eq!(r.exit_code, 1);
+        // L125 consecutive shifts walk the parameter list.
+        assert_eq!(
+            shell()
+                .exec("myfunc() {\necho $1\nshift\necho $1\nshift\necho $1\n}\nmyfunc a b c")
+                .stdout,
+            "a\nb\nc\n"
+        );
+        // L140 shift in a while loop drains the parameters.
+        assert_eq!(
+            shell()
+                .exec("myfunc() {\nwhile [ $# -gt 0 ]; do\necho $1\nshift\ndone\n}\nmyfunc x y z")
+                .stdout,
+            "x\ny\nz\n"
+        );
+        // L156 shift only affects the current function scope.
+        assert_eq!(
+            shell()
+                .exec("outer() {\ninner() {\nshift\necho \"inner: $1\"\n}\ninner x y z\necho \"outer: $1\"\n}\nouter a b c")
+                .stdout,
+            "inner: y\nouter: a\n"
+        );
+        // L174 shift with no parameters is a count-out-of-range error.
+        let r = shell().exec("myfunc() {\nshift\n}\nmyfunc");
+        assert!(
+            r.stderr.contains("shift count out of range"),
+            "{:?}",
+            r.stderr
+        );
+        assert_eq!(r.exit_code, 1);
+        // L186 shift with a single parameter leaves $1 empty.
+        assert_eq!(
+            shell()
+                .exec("myfunc() {\necho \"before: $1\"\nshift\necho \"after: $1\"\n}\nmyfunc only")
+                .stdout,
+            "before: only\nafter: \n"
+        );
+    }
+
     /// Mirrors the previously-pending rows of
     /// `packages/just-bash/src/interpreter/builtins/exit.test.ts` through the
     /// Rust parser/interpreter `Bash().exec`: exit from inside a for loop
@@ -7989,6 +8140,57 @@ esac"#,
             "(echo sub)",
             "{ echo group; }",
             "myfunc() { echo hello; }",
+        ] {
+            assert_round_trip(source);
+        }
+    }
+
+    /// Closes the just-bash-core `serialize.test.ts` round-trip rows for
+    /// c-style/fallthrough/empty compound commands, compound-with-redirection
+    /// forms, arithmetic commands, and nested-substitution / group-in-pipeline
+    /// complex scripts. Each source is parsed, serialized, and reparsed; the
+    /// reparsed AST must equal the original, so a serializer regression on any
+    /// of these node shapes fails the assertion.
+    #[test]
+    fn just_bash_core_serialize_round_trips_arithmetic_and_compound_redirection_rows() {
+        fn assert_round_trip(source: &str) {
+            let script = parse(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            let serialized = serialize(&script);
+            let reparsed = parse(&serialized)
+                .unwrap_or_else(|error| panic!("{source} -> {serialized}: {error}"));
+            assert_eq!(reparsed, script, "{source} -> {serialized}");
+        }
+
+        for source in [
+            // compound commands: c-style for, fallthrough/empty case
+            // (serialize.test.ts:151,159,161)
+            "for ((i=0; i<10; i++)); do echo $i; done",
+            "case $x in a) echo a;& b) echo b;; esac",
+            "case $x in a) ;; esac",
+            // compound commands with redirections
+            // (serialize.test.ts:168,170,172,174)
+            "if true; then echo yes; fi > out.txt",
+            "for i in 1 2 3; do echo $i; done > out.txt",
+            "while true; do echo loop; done > out.txt",
+            "case $x in a) echo a;; esac > out.txt",
+            // arithmetic command (serialize.test.ts:181..190,192,194,195)
+            "((x = 1 + 2))",
+            "((x > 5))",
+            "((x = a > b ? a : b))",
+            "((x++))",
+            "((--x))",
+            "(((x + y) * z))",
+            "((arr[0] + arr[1]))",
+            "((arr[0] = 5))",
+            "((assoc[key] + 1))",
+            "echo $((1 + $((2 + 3))))",
+            "echo $((1 + $(echo 2)))",
+            "echo $(( ${base}#ff ))",
+            "echo $(( ${zero}11 ))",
+            // complex scripts: nested command sub, group in pipeline
+            // (serialize.test.ts:424,427)
+            "echo $(echo $(echo hi))",
+            "{ echo a; echo b; } | cat",
         ] {
             assert_round_trip(source);
         }

@@ -142,6 +142,95 @@ mod tests {
         Bash::new()
     }
 
+    /// Closes the just-bash-core `tee-plugin.test.ts` "TeePlugin semantics
+    /// preservation" rows that the portable Rust interpreter reproduces
+    /// verbatim. Upstream registers a `TeePlugin` and asserts the wrapped run's
+    /// stdout/stderr/exitCode equal the plain run — i.e. the transform never
+    /// perturbs observable shell semantics. The Rust port carries no tee
+    /// transform layer, so the equivalent proof is that `Bash::exec` produces
+    /// the exact bash-correct output for each script. Each assertion fails if
+    /// the pipeline, redirection, command-substitution, or chain semantics
+    /// regress.
+    #[test]
+    fn just_bash_core_tee_semantics_preservation_pipeline_rows_match_plain_exec() {
+        struct Case {
+            script: &'static str,
+            stdout: &'static str,
+            stderr: &'static str,
+            exit_code: i32,
+        }
+
+        let cases = [
+            // tee-plugin.test.ts:337 pipeline success: cat file | grep match | sort
+            Case {
+                script: "cat /data/input.txt | grep hello | sort",
+                stdout: "hello\nhello world\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:405 stderr preserved for unwrapped commands (|| chain)
+            Case {
+                script: "ls /no_such_path_xyz 2>&1 || echo fallback",
+                stdout: "ls: /no_such_path_xyz: No such file or directory\nfallback\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:423 command substitution in variable, then use in pipeline
+            Case {
+                script: "X=$(echo hello); echo \"$X world\" | cat",
+                stdout: "hello world\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:533 complex redirect: stderr to stdout into pipeline
+            Case {
+                script: "ls /no_such_xyz 2>&1 | cat",
+                stdout: "ls: /no_such_xyz: No such file or directory\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:551 complex pipeline: generate, filter, transform, count
+            Case {
+                script: "printf '%s\\n' apple banana avocado blueberry apricot | grep ^a | sort | wc -l",
+                stdout: "3\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:608 mixed && || ; chains with pipelines between
+            Case {
+                script: "echo start && echo hello | cat && echo end || echo fail",
+                stdout: "start\nhello\nend\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:622 string manipulation pipeline: tr | sed | cat
+            Case {
+                script: "echo \"Hello World FOO\" | tr A-Z a-z | sed \"s/foo/bar/\" | cat",
+                stdout: "hello world bar\n",
+                stderr: "",
+                exit_code: 0,
+            },
+        ];
+
+        for case in cases {
+            let b = Bash::with_options(BashOptions {
+                files: BTreeMap::from([(
+                    "/data/input.txt".to_string(),
+                    "hello\nworld\nhello world\n".to_string(),
+                )]),
+                ..Default::default()
+            });
+            let r = b.exec(case.script);
+            assert_eq!(r.stdout, case.stdout, "stdout for: {}", case.script);
+            assert_eq!(r.stderr, case.stderr, "stderr for: {}", case.script);
+            assert_eq!(
+                r.exit_code, case.exit_code,
+                "exit code for: {}",
+                case.script
+            );
+        }
+    }
+
     const SHERLOCK: &str = "For the Doctor Watsons of this world, as opposed to the Sherlock\n\
 Holmeses, success in the province of detective work must always\n\
 be, to a very large extent, the result of luck. Sherlock Holmes\n\
@@ -843,6 +932,302 @@ and exhibited clearly, with a label attached.\n";
         assert_eq!(empty.exit_code, 0);
         assert_eq!(empty.stdout, "");
         assert_eq!(status.exec("   ").exit_code, 0);
+    }
+
+    #[test]
+    fn r10jb_uniq_and_tee_comparison_rows_match_real_bash() {
+        // Maps comparison rows from uniq.comparison.test.ts and tee.comparison.test.ts
+        // that are expressible through the command-and-pipeline runtime layer.
+        let env = Bash::with_options(BashOptions {
+            cwd: Some("/".to_string()),
+            files: BTreeMap::from([
+                (
+                    "/dups.txt".to_string(),
+                    "apple\napple\nbanana\nbanana\nbanana\ncherry\n".to_string(),
+                ),
+                ("/single.txt".to_string(), "a\nb\nc\n".to_string()),
+                ("/cd.txt".to_string(), "a\na\nb\nc\nc\nc\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // uniq -c counts consecutive occurrences (columns normalized).
+        let uniq_c = env.exec("uniq -c /dups.txt");
+        let uniq_c_rows: Vec<Vec<&str>> = uniq_c
+            .stdout
+            .lines()
+            .map(|l| l.split_whitespace().collect())
+            .collect();
+        assert_eq!(
+            uniq_c_rows,
+            vec![vec!["2", "apple"], vec!["3", "banana"], vec!["1", "cherry"]]
+        );
+        // uniq -c with all-single lines.
+        let uniq_single = env.exec("uniq -c /single.txt");
+        let uniq_single_rows: Vec<Vec<&str>> = uniq_single
+            .stdout
+            .lines()
+            .map(|l| l.split_whitespace().collect())
+            .collect();
+        assert_eq!(
+            uniq_single_rows,
+            vec![vec!["1", "a"], vec!["1", "b"], vec!["1", "c"]]
+        );
+        // uniq -c from a sorted pipe.
+        let uniq_after_sort = env.exec("sort /dups.txt | uniq -c");
+        let after_sort_rows: Vec<Vec<&str>> = uniq_after_sort
+            .stdout
+            .lines()
+            .map(|l| l.split_whitespace().collect())
+            .collect();
+        assert_eq!(
+            after_sort_rows,
+            vec![vec!["2", "apple"], vec!["3", "banana"], vec!["1", "cherry"]]
+        );
+        // uniq -c from stdin.
+        let uniq_stdin = env.exec("echo -e \"a\\na\\nb\\nb\\nb\" | uniq -c");
+        let uniq_stdin_rows: Vec<Vec<&str>> = uniq_stdin
+            .stdout
+            .lines()
+            .map(|l| l.split_whitespace().collect())
+            .collect();
+        assert_eq!(uniq_stdin_rows, vec![vec!["2", "a"], vec!["3", "b"]]);
+        // uniq -cd shows only duplicated lines with counts.
+        let uniq_cd = env.exec("uniq -cd /cd.txt");
+        let uniq_cd_rows: Vec<Vec<&str>> = uniq_cd
+            .stdout
+            .lines()
+            .map(|l| l.split_whitespace().collect())
+            .collect();
+        assert_eq!(uniq_cd_rows, vec![vec!["2", "a"], vec!["3", "c"]]);
+
+        // tee passes stdin through to stdout and writes the same content to files.
+        let tee = Bash::with_options(BashOptions {
+            cwd: Some("/".to_string()),
+            files: BTreeMap::from([(
+                "/existing.txt".to_string(),
+                "existing content\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        assert_eq!(tee.exec("echo hello | tee").stdout, "hello\n");
+        assert_eq!(tee.exec("echo hello | tee /out.txt").stdout, "hello\n");
+        assert_eq!(tee.read_file("/out.txt").unwrap(), "hello\n");
+        tee.exec("echo hello | tee /f1.txt /f2.txt");
+        assert_eq!(tee.read_file("/f1.txt").unwrap(), "hello\n");
+        assert_eq!(tee.read_file("/f2.txt").unwrap(), "hello\n");
+        tee.exec("echo appended | tee -a /existing.txt");
+        assert_eq!(
+            tee.read_file("/existing.txt").unwrap(),
+            "existing content\nappended\n"
+        );
+        let tee_multi = tee.exec("echo -e \"line1\\nline2\\nline3\" | tee /ml.txt");
+        assert_eq!(tee_multi.stdout, "line1\nline2\nline3\n");
+        assert_eq!(tee.read_file("/ml.txt").unwrap(), "line1\nline2\nline3\n");
+    }
+
+    #[test]
+    fn r10jb_wc_comparison_rows_match_real_bash() {
+        // Maps packages/just-bash/src/comparison-tests/wc.comparison.test.ts rows
+        // for default/-l/-w/-c/-lw/-wc output, multiple files, and stdin.
+        let env = Bash::with_options(BashOptions {
+            cwd: Some("/".to_string()),
+            files: BTreeMap::from([
+                (
+                    "/lines.txt".to_string(),
+                    "line 1\nline 2\nline 3\n".to_string(),
+                ),
+                ("/nonl.txt".to_string(), "no newline".to_string()),
+                ("/empty.txt".to_string(), String::new()),
+                (
+                    "/words.txt".to_string(),
+                    "one two three\nfour five\n".to_string(),
+                ),
+                (
+                    "/spaces.txt".to_string(),
+                    "one    two   three\n".to_string(),
+                ),
+                ("/hello.txt".to_string(), "hello world\n".to_string()),
+                ("/a.txt".to_string(), "file a\n".to_string()),
+                (
+                    "/b.txt".to_string(),
+                    "file b line 1\nfile b line 2\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // Default output: lines, words, chars, then the file name argument verbatim.
+        assert_eq!(
+            env.exec("wc /lines.txt")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["3", "6", "21", "/lines.txt"]
+        );
+        assert_eq!(
+            env.exec("wc /nonl.txt")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["0", "2", "10", "/nonl.txt"]
+        );
+        assert_eq!(
+            env.exec("wc /empty.txt")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["0", "0", "0", "/empty.txt"]
+        );
+
+        // -l line count.
+        assert_eq!(
+            env.exec("wc -l /lines.txt")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["3", "/lines.txt"]
+        );
+
+        // -w word count (collapses runs of whitespace).
+        assert_eq!(
+            env.exec("wc -w /words.txt")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["5", "/words.txt"]
+        );
+        assert_eq!(
+            env.exec("wc -w /spaces.txt")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["3", "/spaces.txt"]
+        );
+
+        // -c byte count.
+        assert_eq!(
+            env.exec("wc -c /hello.txt")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["12", "/hello.txt"]
+        );
+
+        // Multiple files emit a total row.
+        let multi = env.exec("wc /a.txt /b.txt");
+        let multi_lines: Vec<Vec<&str>> = multi
+            .stdout
+            .lines()
+            .map(|l| l.split_whitespace().collect())
+            .collect();
+        assert_eq!(multi_lines[0], vec!["1", "2", "7", "/a.txt"]);
+        assert_eq!(multi_lines[1], vec!["2", "8", "28", "/b.txt"]);
+        assert_eq!(multi_lines[2], vec!["3", "10", "35", "total"]);
+
+        let multi_l = env.exec("wc -l /a.txt /b.txt");
+        let multi_l_lines: Vec<Vec<&str>> = multi_l
+            .stdout
+            .lines()
+            .map(|l| l.split_whitespace().collect())
+            .collect();
+        assert_eq!(multi_l_lines[0], vec!["1", "/a.txt"]);
+        assert_eq!(multi_l_lines[1], vec!["2", "/b.txt"]);
+        assert_eq!(multi_l_lines[2], vec!["3", "total"]);
+
+        // Combined flags preserve canonical lines/words/chars ordering.
+        assert_eq!(
+            env.exec("wc -lw /words.txt")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["2", "5", "/words.txt"]
+        );
+        assert_eq!(
+            env.exec("wc -wc /hello.txt")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["2", "12", "/hello.txt"]
+        );
+
+        // Stdin (no file name column).
+        assert_eq!(
+            env.exec("echo \"hello world\" | wc")
+                .stdout
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            vec!["1", "2", "12"]
+        );
+        assert_eq!(env.exec("echo -e \"a\\nb\\nc\" | wc -l").stdout.trim(), "3");
+    }
+
+    #[test]
+    fn r10jb_sort_and_redirection_comparison_rows_match_real_bash() {
+        // Maps comparison rows from sort.comparison.test.ts (empty-lines, numeric)
+        // and pipes-redirections.comparison.test.ts (>, >>, pipe+redirect).
+        let env = Bash::with_options(BashOptions {
+            cwd: Some("/".to_string()),
+            files: BTreeMap::from([
+                ("/blanks.txt".to_string(), "b\n\na\n\nc\n".to_string()),
+                ("/nums.txt".to_string(), "10\n2\n1\n20\n5\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // sort: empty lines collate before non-empty lines.
+        assert_eq!(env.exec("sort blanks.txt").stdout, "\n\na\nb\nc\n");
+        // sort -n: numeric ascending order.
+        assert_eq!(env.exec("sort -n nums.txt").stdout, "1\n2\n5\n10\n20\n");
+
+        // stdout redirection (>) writes the command output to a file.
+        let redir = Bash::with_options(BashOptions {
+            cwd: Some("/".to_string()),
+            files: BTreeMap::from([
+                (
+                    "/input.txt".to_string(),
+                    "hello\nworld\nhello again\n".to_string(),
+                ),
+                ("/existing.txt".to_string(), "old content\n".to_string()),
+                (
+                    "/sortin.txt".to_string(),
+                    "cherry\napple\nbanana\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+        redir.exec("echo \"hello world\" > out.txt");
+        assert_eq!(redir.read_file("out.txt").unwrap(), "hello world\n");
+        // Overwrite replaces prior content.
+        redir.exec("echo \"new content\" > existing.txt");
+        assert_eq!(redir.read_file("existing.txt").unwrap(), "new content\n");
+        // Redirect a filtered command's output.
+        redir.exec("grep hello input.txt > grepout.txt");
+        assert_eq!(
+            redir.read_file("grepout.txt").unwrap(),
+            "hello\nhello again\n"
+        );
+
+        // Append redirection (>>): append to existing, create if missing, repeat.
+        let append = Bash::with_options(BashOptions {
+            cwd: Some("/".to_string()),
+            files: BTreeMap::from([("/log.txt".to_string(), "line 1\n".to_string())]),
+            ..BashOptions::default()
+        });
+        append.exec("echo \"line 2\" >> log.txt");
+        assert_eq!(append.read_file("log.txt").unwrap(), "line 1\nline 2\n");
+        append.exec("echo \"new line\" >> created.txt");
+        assert_eq!(append.read_file("created.txt").unwrap(), "new line\n");
+        append.exec("echo \"line 1\" >> multi.txt");
+        append.exec("echo \"line 2\" >> multi.txt");
+        assert_eq!(append.read_file("multi.txt").unwrap(), "line 1\nline 2\n");
+
+        // Pipe combined with redirection: cat | sort > file.
+        redir.exec("cat sortin.txt | sort > sorted.txt");
+        assert_eq!(
+            redir.read_file("sorted.txt").unwrap(),
+            "apple\nbanana\ncherry\n"
+        );
     }
 
     #[test]
@@ -13201,6 +13586,195 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
                 .stdout,
             "key1: value1\nkey2: value2\n"
         );
+    }
+
+    // JBC-awk: `getline [VAR] < FILE` reading from an external file, including
+    // the 1/0/-1 return value, EOF handling, $0 re-split, and getline-into-var
+    // not re-splitting. Each assertion fails if the per-file cursor, return
+    // value, or field re-split is wrong.
+    // Upstream: packages/just-bash/src/commands/awk/awk.getline.test.ts
+    //   :104 reads from external file with getline < file,
+    //   :121 reads entire file line by line with getline < file,
+    //   :136 returns -1 for nonexistent file in getline,
+    //   :270 returns 1 on successful read, :281 returns 0 on EOF,
+    //   :296 returns -1 on error, :307 re-splits $0 after getline,
+    //   :318 does not re-split when getline into variable,
+    //   :332 reads all lines in while loop, :343 counts lines with getline loop.
+    // Also packages/just-bash/src/commands/awk/awk.errors.test.ts:277 handle
+    // getline from non-existent file.
+    #[test]
+    fn awk_jbc_command_awk_getline_from_file_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/test/main.txt".to_string(), "line1\nline2".to_string()),
+                (
+                    "/test/other.txt".to_string(),
+                    "external1\nexternal2\nexternal3".to_string(),
+                ),
+                ("/test/seq.txt".to_string(), "a\nb\nc".to_string()),
+                ("/test/colon.txt".to_string(), "a:b:c".to_string()),
+                ("/test/single.txt".to_string(), "single".to_string()),
+                ("/test/nums.txt".to_string(), "1\n2\n3\n4\n5".to_string()),
+                ("/test/abcd.txt".to_string(), "a\nb\nc\nd".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // :104 reads from external file with getline < file (a fresh cursor per
+        // file; each main record pulls the next external line).
+        assert_eq!(
+            env.exec(r#"awk '{ getline ext < "/test/other.txt"; print $0, ext }' /test/main.txt"#)
+                .stdout,
+            "line1 external1\nline2 external2\n"
+        );
+
+        // :121 reads entire file line by line with getline < file in a while
+        // loop over the redirect's return value.
+        assert_eq!(
+            env.exec(
+                r#"awk 'BEGIN { while ((getline line < "/test/seq.txt") > 0) print "got:", line }'"#
+            )
+            .stdout,
+            "got: a\ngot: b\ngot: c\n"
+        );
+
+        // :136 returns -1 for nonexistent file in getline.
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { ret = getline x < "/nonexistent"; print "ret:", ret }'"#)
+                .stdout,
+            "ret: -1\n"
+        );
+
+        // :270 returns 1 on successful read.
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { ret = (getline < "/test/main.txt"); print "ret:", ret }'"#)
+                .stdout,
+            "ret: 1\n"
+        );
+
+        // :281 returns 0 on EOF after reading the single available line.
+        assert_eq!(
+            env.exec(
+                "awk 'BEGIN {\n  getline < \"/test/single.txt\"\n  ret = (getline < \"/test/single.txt\")\n  print \"ret:\", ret\n}'"
+            )
+            .stdout,
+            "ret: 0\n"
+        );
+
+        // :296 returns -1 on error (unopenable path).
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { ret = (getline < "/nonexistent/file"); print "ret:", ret }'"#)
+                .stdout,
+            "ret: -1\n"
+        );
+
+        // :307 re-splits $0 after getline (FS applies to the read line).
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { FS=":"; getline < "/test/colon.txt"; print $2 }'"#)
+                .stdout,
+            "b\n"
+        );
+
+        // :318 does not re-split when getline into variable (NF stays 0).
+        assert_eq!(
+            env.exec(r#"awk 'BEGIN { FS=":"; getline x < "/test/colon.txt"; print x; print NF }'"#)
+                .stdout,
+            "a:b:c\n0\n"
+        );
+
+        // :332 reads all lines in while loop, summing numeric values.
+        assert_eq!(
+            env.exec(
+                r#"awk 'BEGIN { sum=0; while ((getline n < "/test/nums.txt") > 0) sum += n; print sum }'"#
+            )
+            .stdout,
+            "15\n"
+        );
+
+        // :343 counts lines with a plain getline loop.
+        assert_eq!(
+            env.exec(
+                r#"awk 'BEGIN { count=0; while ((getline < "/test/abcd.txt") > 0) count++; print count }'"#
+            )
+            .stdout,
+            "4\n"
+        );
+
+        // awk.errors.test.ts:277 should handle getline from non-existent file
+        // (stdin is ignored; the redirect returns -1).
+        let from_missing =
+            env.exec(r#"echo '1' | awk '{ ret = (getline x < "/nonexistent"); print ret }'"#);
+        assert_eq!(from_missing.stdout, "-1\n");
+        assert_eq!(from_missing.exit_code, 0);
+    }
+
+    // JBC-awk: `print`/`printf` redirected to a file with `>` (truncate) and
+    // `>>` (append). Each assertion fails if the redirect buffer, append seed,
+    // or printf formatting to file is wrong.
+    // Upstream: packages/just-bash/src/commands/awk/awk.getline.test.ts
+    //   :200 writes to file with print > file,
+    //   :217 overwrites then appends with > on same file,
+    //   :234 appends with print >> file, :251 printf writes to file.
+    #[test]
+    fn awk_jbc_command_awk_print_to_file_rows() {
+        // :200 writes to file with print > file (stdout stays empty).
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/test/input.txt".to_string(), "hello\nworld".to_string())]),
+            ..BashOptions::default()
+        });
+        let result = env.exec(r#"awk '{ print $0 > "/test/output.txt" }' /test/input.txt"#);
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "");
+        assert_eq!(env.read_file("/test/output.txt").unwrap(), "hello\nworld\n");
+
+        // :217 overwrites the file: the open `>` stream appends each record so
+        // every line lands in order.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/test/input.txt".to_string(),
+                "line1\nline2\nline3".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            env.exec(r#"awk '{ print $0 > "/test/out.txt" }' /test/input.txt"#)
+                .exit_code,
+            0
+        );
+        assert_eq!(
+            env.read_file("/test/out.txt").unwrap(),
+            "line1\nline2\nline3\n"
+        );
+
+        // :234 appends with print >> file (existing content is preserved).
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/test/existing.txt".to_string(), "existing\n".to_string()),
+                ("/test/input.txt".to_string(), "new1\nnew2".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            env.exec(r#"awk '{ print $0 >> "/test/existing.txt" }' /test/input.txt"#)
+                .exit_code,
+            0
+        );
+        assert_eq!(
+            env.read_file("/test/existing.txt").unwrap(),
+            "existing\nnew1\nnew2\n"
+        );
+
+        // :251 printf writes to file with %03d zero-padding.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/test/input.txt".to_string(), "1\n2\n3".to_string())]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            env.exec(r#"awk '{ printf "%03d\n", $1 > "/test/out.txt" }' /test/input.txt"#)
+                .exit_code,
+            0
+        );
+        assert_eq!(env.read_file("/test/out.txt").unwrap(), "001\n002\n003\n");
     }
 
     // JBC-awk: special variables FILENAME/FNR and string functions

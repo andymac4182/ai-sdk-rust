@@ -1015,7 +1015,34 @@ const jbc09CaseGroups = [
     owner: 'crates/just-bash::runtime::awk',
     rustTest: 'awk_jbc_command_awk_getline_main_input_rows',
     notes:
-      'just-bash-command-awk verifies plain `getline` and `getline VAR` reading the next record from the main input stream: getline into $0 re-splits fields, getline into a variable leaves $0/fields intact, NR advances on each successful read and getline-at-EOF is a no-op, getline inside a pattern-matched action skips the consumed record from the main loop, and combining adjacent records with getline. Redirected forms (getline < file, cmd | getline) and getline used as a return-valued expression remain pending.',
+      'just-bash-command-awk verifies plain `getline` and `getline VAR` reading the next record from the main input stream: getline into $0 re-splits fields, getline into a variable leaves $0/fields intact, NR advances on each successful read and getline-at-EOF is a no-op, getline inside a pattern-matched action skips the consumed record from the main loop, and combining adjacent records with getline. The command-pipe form (cmd | getline) remains pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.getline.test.ts',
+    lines: [104, 121, 136, 270, 281, 296, 307, 318, 332, 343],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_getline_from_file_rows',
+    notes:
+      'just-bash-command-awk verifies `getline [VAR] < FILE` reading the next line from an external file: a per-file cursor advances one line per read, getline < file re-splits $0 with the current FS, getline VAR < file assigns the whole line and leaves $0/NF intact, and the redirect evaluates to 1 on a successful read, 0 at EOF, and -1 when the file cannot be opened (used in both `ret = (getline ...)` and `while ((getline ...) > 0)` forms). The command-pipe form (cmd | getline) remains pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.errors.test.ts',
+    lines: [277],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_getline_from_file_rows',
+    notes:
+      'just-bash-command-awk verifies `getline VAR < FILE` returns -1 for a non-existent file while the surrounding program continues and exits 0.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/awk/awk.getline.test.ts',
+    lines: [200, 217, 234, 251],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::awk',
+    rustTest: 'awk_jbc_command_awk_print_to_file_rows',
+    notes:
+      'just-bash-command-awk verifies `print`/`printf` redirected to a virtual file: `print > FILE` truncates then keeps the stream open so each record appends in order, `print >> FILE` appends to existing content, and `printf "%03d\\n" > FILE` writes formatted output to the file while stdout stays empty.',
   },
 ];
 
@@ -2675,6 +2702,51 @@ const jbc20CaseGroups = [
     rustTest: 'jbc20_cd_env_and_status_comparison_rows_match_core_runtime',
     notes:
       'JBC-20 verifies portable comparison rows for unknown-command diagnostics, missing-file statuses, exit/true/false status, &&/||/semicolon behavior, quoting, and empty/whitespace commands.',
+  },
+  {
+    file: 'packages/just-bash/src/comparison-tests/wc.comparison.test.ts',
+    lines: [25, 32, 39, 48, 67, 74, 83, 92, 100, 110, 117, 126, 131],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::comparison-core',
+    rustTest: 'r10jb_wc_comparison_rows_match_real_bash',
+    notes:
+      'R10JB verifies portable wc comparison rows: default lines/words/chars output, files without trailing newline, empty files, -l/-w/-c single-flag counts, multi-space word collapsing, multiple-file totals, -lw/-wc combined flags, and stdin counting against the Rust virtual command runtime.',
+  },
+  {
+    file: 'packages/just-bash/src/comparison-tests/sort.comparison.test.ts',
+    lines: [39, 57],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::comparison-core',
+    rustTest: 'r10jb_sort_and_redirection_comparison_rows_match_real_bash',
+    notes:
+      'R10JB verifies portable sort comparison rows: empty-line collation order and -n numeric ascending sort against the Rust virtual command runtime.',
+  },
+  {
+    file: 'packages/just-bash/src/comparison-tests/pipes-redirections.comparison.test.ts',
+    lines: [138, 154, 172, 192, 210, 226, 248],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::comparison-core',
+    rustTest: 'r10jb_sort_and_redirection_comparison_rows_match_real_bash',
+    notes:
+      'R10JB verifies portable redirection comparison rows: > redirect-to-file, overwrite, redirect a filtered command, >> append to existing/created/repeated files, and pipe-with-redirection (cat | sort > file) against the Rust virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/comparison-tests/uniq.comparison.test.ts',
+    lines: [55, 62, 117, 136, 148],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::comparison-core',
+    rustTest: 'r10jb_uniq_and_tee_comparison_rows_match_real_bash',
+    notes:
+      'R10JB verifies portable uniq comparison rows: -c counting of consecutive occurrences, single-occurrence counts, -c after a sort pipe, -c from stdin, and combined -cd duplicate-only counts against the Rust virtual command runtime.',
+  },
+  {
+    file: 'packages/just-bash/src/comparison-tests/tee.comparison.test.ts',
+    lines: [23, 33, 53],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::comparison-core',
+    rustTest: 'r10jb_uniq_and_tee_comparison_rows_match_real_bash',
+    notes:
+      'R10JB verifies portable tee comparison rows: stdin pass-through to stdout, write-to-file-and-stdout, and write-to-multiple-files against the Rust virtual filesystem.',
   },
   {
     file: 'packages/just-bash/src/commands/timeout/timeout.test.ts',
@@ -4946,6 +5018,15 @@ const jbR5ParserInterpreterCaseGroups = [
       'R10JB verifies the portable `return` builtin 1:1 with return.test.ts through the Rust parser/interpreter: default/explicit/last-command/zero exit codes, modulo-256 wrapping (256->0, 257->1, -1->255), the not-in-a-function error (exit 1) and non-numeric-argument error (exit 2), innermost-only return in nested functions, propagation through control flow inside the function body, and stdout preservation before return.',
   },
   {
+    file: 'packages/just-bash/src/interpreter/builtins/shift.test.ts',
+    lines: [6, 19, 32, 47, 60, 72, 87, 99, 111, 125, 140, 156, 174, 186],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::builtins::shift',
+    rustTest: 'jbpi_interpreter_builtin_shift_matches_upstream',
+    notes:
+      'R10JB verifies the portable `shift` builtin 1:1 with shift.test.ts through the Rust parser/interpreter: shift by 1 with the resulting $1/$2/$3, $#, and $@ updates, shift by an explicit count, shift-all, the `shift 0` no-op, the shift-count-out-of-range and numeric-argument-required (negative and non-numeric) errors at exit 1, consecutive shifts, the `while [ $# -gt 0 ]` drain loop, function-scope isolation in nested functions, and the no-parameter and single-parameter edge rows. The POSIX-mode fatal variant is not modeled because Just Bash does not track `set -o posix` here.',
+  },
+  {
     file: 'packages/just-bash/src/interpreter/builtins/exit.test.ts',
     lines: [72, 85, 101, 110],
     status: 'portable-verified',
@@ -5072,6 +5153,19 @@ const justBashCoreSerializeCaseGroups = [
     notes:
       'just-bash-core verifies Rust AST parse/serialize/parse equivalence for the timed-pipeline, parameter-operation (error-if-unset, substring, prefix/suffix removal, pattern replacement, case modification, indirection, prefix listing, transform @Q), and subshell/group-with-redirection serialize rows.',
   },
+  {
+    file: 'packages/just-bash/src/transform/serialize.test.ts',
+    lines: [
+      151, 159, 161, 168, 170, 172, 174, 181, 182, 183, 184, 185, 186, 187,
+      188, 189, 190, 192, 194, 195, 424, 427,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::transform::serialize',
+    rustTest:
+      'just_bash_core_serialize_round_trips_arithmetic_and_compound_redirection_rows',
+    notes:
+      'just-bash-core verifies Rust AST parse/serialize/parse equivalence for c-style/fallthrough/empty case compound commands, compound-with-redirection (if/for/while/case > file), arithmetic command rows (assignment, comparison, ternary, increment/decrement, nested parens, array element get/set/assoc, nested and command-substitution arithmetic, dynamic base/octal), and nested-command-substitution / group-in-pipeline complex scripts.',
+  },
 ];
 
 const justBashTransformPluginsTeeCaseGroups = [
@@ -5087,6 +5181,28 @@ const justBashTransformPluginsTeeCaseGroups = [
     rustTest: 'just_bash_transform_plugins_tee_semantics_match_upstream',
     notes:
       'just-bash-transform-plugins verifies that the Rust interpreter produces the exact stdout/stderr/exit code the TeePlugin exec/semantics-preservation rows assert for plain runs: simple success/failure, pipelines, &&/||/; chains, $? propagation, subshell/group output and exit-code isolation, for/if/elif/case control flow, arithmetic conditionals, and negated pipelines.',
+  },
+  {
+    file: 'packages/just-bash/src/transform/plugins/tee-plugin.test.ts',
+    lines: [337, 405, 423, 533, 551, 608, 622],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime',
+    rustTest:
+      'just_bash_core_tee_semantics_preservation_pipeline_rows_match_plain_exec',
+    notes:
+      'just-bash-core verifies the TeePlugin semantics-preservation rows whose scripts the real-command Rust interpreter reproduces verbatim (the Rust port has no tee transform, so equivalence means the plain exec yields the documented bytes): cat|grep|sort pipeline, ls stderr redirected through ||/| chains, command substitution into a pipeline, printf|grep|sort|wc -l count, mixed &&/||/| chains, and tr|sed|cat string manipulation.',
+  },
+];
+
+const justBashEncodingPipelineByteEmitCaseGroups = [
+  {
+    file: 'packages/just-bash/src/encoding-pipeline.test.ts',
+    lines: [178],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'jbc45_encoding_pipeline_byte_text_contract_rows_are_byte_safe',
+    notes:
+      'just-bash-core verifies that a byte-emitting custom command pipes downstream without double encoding: the emitter carries "안녕\\n" as its stdout byte string and `wc -c` reports exactly 7 bytes, never the 11 a second UTF-8 round-trip of the multibyte codepoints would produce.',
   },
 ];
 
@@ -5142,6 +5258,7 @@ function caseOverrideFor(testCase) {
     ...jbcYqFixturesCaseGroups,
     ...justBashCoreSerializeCaseGroups,
     ...justBashTransformPluginsTeeCaseGroups,
+    ...justBashEncodingPipelineByteEmitCaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&
