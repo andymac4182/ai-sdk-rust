@@ -5448,6 +5448,249 @@ mod tests {
         Interpreter::new(FakeCommands::default())
     }
 
+    /// Covers additional portable
+    /// `packages/just-bash/src/syntax/control-flow.test.ts` rows: if-body exit
+    /// code (L73), `local`-scope isolation/restore/declare-without-value/nested
+    /// (L222, L238, L261, L269), and `!` pipeline negation against grep
+    /// (L313, L321). Each tuple mirrors an upstream `it(...)` stdout/exit-code
+    /// assertion on `Bash().exec(...)`.
+    #[test]
+    fn jbpi_syntax_control_flow_function_local_and_negation_rows_match_upstream() {
+        // L73 if returns the exit code of the last command in its body.
+        let mut sh = shell();
+        let r = sh.exec("if true; then echo hello; false; fi");
+        assert_eq!(r.stdout, "hello\n", "L73 stdout");
+        assert_eq!(r.exit_code, 1, "L73 exit");
+
+        // L222 a `local x` inside a function does not leak to the outer scope.
+        let mut sh = shell().with_env([("x", "outer")]);
+        let r = sh.exec("test_func() { local x=inner; echo $x; }; test_func; echo $x");
+        assert_eq!(r.stdout, "inner\nouter\n", "L222 stdout");
+        assert_eq!(r.exit_code, 0, "L222 exit");
+
+        // L238 a variable first introduced as `local` is unset after the call.
+        let mut sh = shell();
+        let r = sh.exec(
+            "test_func() { local newvar=value; echo $newvar; }; test_func; echo \"[$newvar]\"",
+        );
+        assert_eq!(r.stdout, "value\n[]\n", "L238 stdout");
+        assert_eq!(r.exit_code, 0, "L238 exit");
+
+        // L261 `local x` without a value, then assigned in the same function.
+        let mut sh = shell();
+        let r = sh.exec("test_func() { local x; x=assigned; echo $x; }; test_func");
+        assert_eq!(r.stdout, "assigned\n", "L261 stdout");
+        assert_eq!(r.exit_code, 0, "L261 exit");
+
+        // L269 nested function calls each keep their own `local x`.
+        let mut sh = shell();
+        let r = sh.exec(
+            "inner() { local x=inner; echo $x; }; outer() { local x=outer; inner; echo $x; }; outer",
+        );
+        assert_eq!(r.stdout, "inner\nouter\n", "L269 stdout");
+        assert_eq!(r.exit_code, 0, "L269 exit");
+
+        // L313 `!` negates a failing grep to overall success.
+        let mut sh = shell().with_files(ShellVirtualFileSystem::with_files([(
+            "/test.txt",
+            "hello world",
+        )]));
+        let r = sh.exec("! grep missing /test.txt");
+        assert_eq!(r.exit_code, 0, "L313 exit");
+
+        // L321 `!` negates a succeeding grep to overall failure.
+        let mut sh = shell().with_files(ShellVirtualFileSystem::with_files([(
+            "/test.txt",
+            "hello world",
+        )]));
+        let r = sh.exec("! grep hello /test.txt > /dev/null");
+        assert_eq!(r.exit_code, 1, "L321 exit");
+    }
+
+    /// Covers portable `packages/just-bash/src/interpreter/control-flow.test.ts`
+    /// nested-control rows: quoted case pattern matches literally (L456), `if`
+    /// inside `for` (L471), `for` inside `if` (L484), and `while` inside `case`
+    /// (L513). Each tuple mirrors an upstream `it(...)` stdout/exit-code
+    /// assertion on `Bash().exec(...)`.
+    #[test]
+    fn jbpi_interpreter_control_flow_nested_and_quoted_case_rows_match_upstream() {
+        for (source, expected_stdout) in [
+            // L456 a single-quoted case pattern matches the literal `*` value.
+            (
+                "x='*'\ncase $x in\n  '*') echo \"literal star\" ;;\n  *) echo \"default\" ;;\nesac",
+                "literal star\n",
+            ),
+            // L471 `if` nested inside a `for` loop.
+            (
+                "for i in 1 2 3; do if [ $i -eq 2 ]; then echo \"found two\"; fi; done",
+                "found two\n",
+            ),
+            // L484 `for` loop nested inside an `if` branch.
+            (
+                "x=1\nif [ $x -eq 1 ]; then for i in a b c; do echo $i; done; fi",
+                "a\nb\nc\n",
+            ),
+            // L513 `while` loop nested inside a `case` arm.
+            (
+                "action=count\ncase $action in\n  count)\n    i=0\n    while [ $i -lt 3 ]; do\n      echo $i\n      i=$((i + 1))\n    done\n    ;;\nesac",
+                "0\n1\n2\n",
+            ),
+        ] {
+            let mut sh = shell();
+            let result = sh.exec(source);
+            assert_eq!(result.stderr, "", "stderr {source:?}");
+            assert_eq!(result.stdout, expected_stdout, "stdout {source:?}");
+            assert_eq!(result.exit_code, 0, "exit {source:?}");
+        }
+    }
+
+    /// Covers portable `packages/just-bash/src/syntax/loops.test.ts` rows: a
+    /// `for` loop without a semicolon before `do` (L184) and a malformed `for`
+    /// header that is a syntax error (L200), through the Rust shell.
+    #[test]
+    fn jbpi_syntax_loops_for_without_semicolon_and_malformed_rows_match_upstream() {
+        // L184 `for i in a b c do ...` (no `;` before `do`) still iterates.
+        let mut sh = shell();
+        let r = sh.exec("for i in a b c do echo $i; done");
+        assert_eq!(r.stdout, "a\nb\nc\n", "L184 stdout");
+        assert_eq!(r.exit_code, 0, "L184 exit");
+
+        // L200 `for i a b c; do ...` (missing `in`) is a syntax error.
+        let mut sh = shell();
+        let r = sh.exec("for i a b c; do echo $i; done");
+        assert_eq!(r.exit_code, 2, "L200 exit");
+        assert!(
+            r.stderr.contains("syntax error"),
+            "L200 stderr {}",
+            r.stderr
+        );
+    }
+
+    /// Covers portable `packages/just-bash/src/syntax/parser-edge-cases.test.ts`
+    /// rows for redirection without a space around the operator: `>` (L171) and
+    /// `>>` (L178), verifying the written file contents through the Rust shell
+    /// virtual filesystem.
+    #[test]
+    fn jbpi_syntax_parser_edge_cases_redirection_without_space_rows_match_upstream() {
+        // L171 `echo hello>/tmp/test.txt` truncates and writes.
+        let mut sh = shell();
+        sh.exec("echo hello>/tmp/test.txt");
+        assert_eq!(
+            sh.files().read_to_string("/tmp/test.txt"),
+            Some("hello\n"),
+            "L171 file contents"
+        );
+
+        // L178 `echo second>>/tmp/test.txt` appends to the existing file.
+        let mut sh = shell();
+        sh.exec("echo first > /tmp/test.txt");
+        sh.exec("echo second>>/tmp/test.txt");
+        assert_eq!(
+            sh.files().read_to_string("/tmp/test.txt"),
+            Some("first\nsecond\n"),
+            "L178 file contents"
+        );
+    }
+
+    /// Covers portable `packages/just-bash/src/syntax/here-document.test.ts`
+    /// whitespace-preservation rows: indented heredoc body (L173) and an
+    /// ASCII-art triangle with leading spaces under a quoted delimiter (L188),
+    /// through the Rust shell.
+    #[test]
+    fn jbpi_syntax_here_document_whitespace_preservation_rows_match_upstream() {
+        // L173 heredoc body keeps its own indentation, independent of the
+        // surrounding (indented) script.
+        let mut sh = shell();
+        let r = sh
+            .exec("\n        cat <<EOF\n    indented content\n        more indented\nEOF\n      ");
+        assert_eq!(
+            r.stdout, "    indented content\n        more indented\n",
+            "L173 stdout"
+        );
+        assert_eq!(r.exit_code, 0, "L173 exit");
+
+        // L188 a quoted-delimiter heredoc preserves an ASCII-art triangle
+        // with leading spaces verbatim.
+        let art = "                    *\n                   * *\n                  *   *\n                 *     *\n                *       *\n               *         *\n              *           *\n             *             *\n            *               *\n           *                 *\n          *                   *\n         *********************\n";
+        let mut sh = shell();
+        let r = sh.exec(&format!("cat <<'EOF'\n{art}EOF"));
+        assert_eq!(r.stdout, art, "L188 stdout");
+        assert_eq!(r.exit_code, 0, "L188 exit");
+    }
+
+    /// Covers the portable `packages/just-bash/src/interpreter/helpers/xtrace.test.ts`
+    /// L253 row: with `set -x`, commands run inside a command substitution are
+    /// traced to stderr while the substitution output still flows to stdout.
+    #[test]
+    fn jbpi_interpreter_xtrace_command_substitution_row_matches_upstream() {
+        let mut sh = shell();
+        let r = sh.exec("set -x\nx=$(echo hello)\necho $x");
+        assert_eq!(r.stdout, "hello\n", "L253 stdout");
+        assert!(
+            r.stderr.contains("echo hello"),
+            "L253 traces the substitution command, stderr {}",
+            r.stderr
+        );
+        assert_eq!(r.exit_code, 0, "L253 exit");
+    }
+
+    /// Covers the portable `packages/just-bash/src/interpreter/assoc-array.test.ts`
+    /// L143 row: declaring an indexed array with `declare -a` and reading two
+    /// numeric-index elements back, through the Rust shell.
+    #[test]
+    fn jbpi_interpreter_assoc_array_indexed_numeric_indices_row_matches_upstream() {
+        let mut sh = shell();
+        let r =
+            sh.exec("declare -a arr\narr[0]=first\narr[1]=second\necho \"${arr[0]} ${arr[1]}\"");
+        assert_eq!(r.stdout.trim(), "first second", "L143 stdout");
+        assert_eq!(r.exit_code, 0, "L143 exit");
+    }
+
+    /// Covers portable `packages/just-bash/src/interpreter/builtins/set.test.ts`
+    /// `set -u` (nounset) rows whose assertion is that NO unbound-variable error
+    /// occurs and output is correct: set variable (L44), empty-string value
+    /// (L55), disabled by `+u` (L66) and `+o nounset` (L87), special vars `$?`
+    /// (L100), `$#` (L120), and `$@` (L130) not erroring, default/assign/alt
+    /// parameter expansion (L170, L180, L191), and `set -eu` with a set variable
+    /// (L203). Each tuple mirrors an upstream `it(...)` stdout/exit-code
+    /// assertion on `Bash().exec(...)`.
+    #[test]
+    fn jbpi_interpreter_set_nounset_non_error_rows_match_upstream() {
+        for (source, expected_stdout) in [
+            // L44 a set variable is read without error under `set -u`.
+            ("set -u\nMYVAR=hello\necho $MYVAR", "hello\n"),
+            // L55 an empty-string value is a valid value, not "unbound".
+            ("set -u\nMYVAR=\"\"\necho \"value: $MYVAR\"", "value: \n"),
+            // L66 `set +u` disables nounset; unset var expands to empty.
+            ("set -u\nset +u\necho $UNDEFINED", "\n"),
+            // L87 `set +o nounset` likewise disables it.
+            ("set -o nounset\nset +o nounset\necho $UNDEFINED", "\n"),
+            // L100 `$?` is always defined and never triggers nounset.
+            ("set -u\necho $?", "0\n"),
+            // L120 `$#` is always defined and never triggers nounset.
+            ("set -u\necho $#", "0\n"),
+            // L130 `$@` with no positionals is empty, not "unbound".
+            ("set -u\necho \"$@\"", "\n"),
+            // L170 `${var:-default}` is allowed for an unset var under nounset.
+            ("set -u\necho ${UNSET:-default}", "default\n"),
+            // L180 `${var:=default}` assigns and is allowed under nounset.
+            (
+                "set -u\necho ${UNSET:=default}\necho $UNSET",
+                "default\ndefault\n",
+            ),
+            // L191 `${var:+alt}` yields empty for an unset var under nounset.
+            ("set -u\necho \":${UNSET:+alt}:\"", "::\n"),
+            // L203 `set -eu` with a set variable runs without error.
+            ("set -eu\nVAR=hello\necho $VAR", "hello\n"),
+        ] {
+            let mut sh = shell();
+            let result = sh.exec(source);
+            assert_eq!(result.stderr, "", "stderr {source:?}");
+            assert_eq!(result.stdout, expected_stdout, "stdout {source:?}");
+            assert_eq!(result.exit_code, 0, "exit {source:?}");
+        }
+    }
+
     /// Covers portable `packages/just-bash/src/interpreter/control-flow.test.ts`
     /// rows through the Rust shell interpreter. Each block mirrors one upstream
     /// `it(...)` assertion on `Bash().exec(...)` stdout/exit code. IFS-splitting,
@@ -7000,6 +7243,168 @@ esac"#,
         );
         assert!(!multi_result.script.contains("10:30:45"));
         assert!(multi_result.script.contains("10-30-45"));
+    }
+
+    #[test]
+    fn jbc19_tee_plugin_exec_describe_rows() {
+        // Mirrors packages/just-bash/src/transform/plugins/tee-plugin.test.ts
+        // "TeePlugin exec" describe block. Each block asserts the observable
+        // AST-rewrite contract: which commands are wrapped in `tee`, the
+        // recorded metadata (commandName/command/stdoutFile), and the counter.
+        let fixed_ts = "2024-01-15T10:30:45.123Z";
+        let sanitized_ts = "2024-01-15T10-30-45.123Z";
+
+        let new_tee =
+            || BashTransformPipeline::new().use_plugin(TeePlugin::new("/tmp/logs", fixed_ts));
+
+        // line 9: does not wrap single commands (no existing pipe).
+        let mut single = new_tee();
+        let single_result = single.transform("echo hello").unwrap();
+        assert_eq!(single_result.script, "echo hello");
+        assert!(single_result.metadata.tee_files.is_empty());
+
+        // line 23: captures stdout for each command in pipeline.
+        let mut two = new_tee();
+        let two_result = two.transform("cat /data/input.txt | grep hello").unwrap();
+        assert_eq!(two_result.metadata.tee_files.len(), 2);
+        assert_eq!(two_result.metadata.tee_files[0].command_name, "cat");
+        assert_eq!(
+            two_result.metadata.tee_files[0].command,
+            "cat /data/input.txt"
+        );
+        assert_eq!(two_result.metadata.tee_files[1].command_name, "grep");
+        assert_eq!(two_result.metadata.tee_files[1].command, "grep hello");
+
+        // line 48: only captures targeted commands in pipeline.
+        let mut echo_only = BashTransformPipeline::new().use_plugin(
+            TeePlugin::new("/tmp/logs", fixed_ts)
+                .with_target_command_pattern(Regex::new("^echo$").unwrap()),
+        );
+        let echo_only_result = echo_only.transform("echo hello | cat").unwrap();
+        assert_eq!(echo_only_result.metadata.tee_files.len(), 1);
+        assert_eq!(echo_only_result.metadata.tee_files[0].command_name, "echo");
+        assert_eq!(echo_only_result.metadata.tee_files[0].command, "echo hello");
+
+        // line 69: captures output from pipeline with multiple stages.
+        let mut three = new_tee();
+        let three_result = three
+            .transform("cat /data/words.txt | grep ^a | sort")
+            .unwrap();
+        assert_eq!(
+            three_result
+                .metadata
+                .tee_files
+                .iter()
+                .map(|file| file.command_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cat", "grep", "sort"]
+        );
+
+        // line 97: writes to nested output directory.
+        let mut nested =
+            BashTransformPipeline::new().use_plugin(TeePlugin::new("/tmp/logs/deep/dir", fixed_ts));
+        let nested_result = nested.transform("echo test | cat").unwrap();
+        assert_eq!(nested_result.metadata.tee_files[0].command_name, "echo");
+        assert_eq!(
+            nested_result.metadata.tee_files[0].stdout_file,
+            format!("/tmp/logs/deep/dir/{sanitized_ts}-000-echo.stdout.txt")
+        );
+
+        // line 130: preserves pipeline semantics (PIPESTATUS save/restore) so the
+        // last command exit code wins even with tee wrapping inserted.
+        let mut grep_fail = new_tee();
+        let grep_fail_result = grep_fail.transform("echo hello | grep nomatch").unwrap();
+        assert_eq!(grep_fail_result.metadata.tee_files.len(), 2);
+        assert!(grep_fail_result.script.contains("__tps0=${PIPESTATUS[0]}"));
+        assert!(
+            grep_fail_result
+                .script
+                .contains("(exit $__tps0) | (exit $__tps1)")
+        );
+
+        // line 161: skips single commands in && and || chains.
+        let mut chain = new_tee();
+        let chain_result = chain
+            .transform("echo first && echo second; false || echo fallback")
+            .unwrap();
+        assert!(chain_result.metadata.tee_files.is_empty());
+
+        // line 175: skips compound commands (if/for/while/subshell/group).
+        let mut compound = new_tee();
+        let compound_result = compound.transform("if true; then echo y; fi").unwrap();
+        assert!(compound_result.metadata.tee_files.is_empty());
+
+        // line 187: wraps pipelines inside && chains when a pipe exists, but the
+        // trailing single command is left untouched.
+        let mut chain_pipe = new_tee();
+        let chain_pipe_result = chain_pipe
+            .transform("cat /data/f.txt | grep hello && echo found")
+            .unwrap();
+        assert_eq!(chain_pipe_result.metadata.tee_files.len(), 2);
+        assert_eq!(chain_pipe_result.metadata.tee_files[0].command_name, "cat");
+        assert_eq!(chain_pipe_result.metadata.tee_files[1].command_name, "grep");
+
+        // line 206: returns empty teeFiles when targetCommandPattern matches nothing.
+        let mut no_match = BashTransformPipeline::new().use_plugin(
+            TeePlugin::new("/tmp/logs", fixed_ts)
+                .with_target_command_pattern(Regex::new("^nonexistent_command$").unwrap()),
+        );
+        let no_match_result = no_match.transform("echo hello | cat").unwrap();
+        assert!(no_match_result.metadata.tee_files.is_empty());
+
+        // line 222: targetCommandPattern matches multiple different commands.
+        let mut multi_target = BashTransformPipeline::new().use_plugin(
+            TeePlugin::new("/tmp/logs", fixed_ts)
+                .with_target_command_pattern(Regex::new("^(cat|sort)$").unwrap()),
+        );
+        let multi_target_result = multi_target
+            .transform("cat /data/file.txt | grep hello | sort")
+            .unwrap();
+        assert_eq!(multi_target_result.metadata.tee_files.len(), 2);
+        assert_eq!(
+            multi_target_result.metadata.tee_files[0].command_name,
+            "cat"
+        );
+        assert_eq!(
+            multi_target_result.metadata.tee_files[1].command_name,
+            "sort"
+        );
+
+        // line 242: multiple transform calls produce unique file paths via the
+        // persistent counter.
+        let mut persistent = new_tee();
+        let first = persistent.transform("echo first | cat").unwrap();
+        let second = persistent.transform("echo second | cat").unwrap();
+        assert!(!first.metadata.tee_files.is_empty());
+        assert!(!second.metadata.tee_files.is_empty());
+        assert_ne!(
+            first.metadata.tee_files[0].stdout_file,
+            second.metadata.tee_files[0].stdout_file
+        );
+
+        // line 262: mixed targeted and non-targeted commands in one pipeline.
+        let mut mixed = BashTransformPipeline::new().use_plugin(
+            TeePlugin::new("/tmp/logs", fixed_ts)
+                .with_target_command_pattern(Regex::new("^cat$").unwrap()),
+        );
+        let mixed_result = mixed.transform("cat /data/file.txt | wc -l").unwrap();
+        assert_eq!(mixed_result.metadata.tee_files.len(), 1);
+        assert_eq!(mixed_result.metadata.tee_files[0].command_name, "cat");
+
+        // line 284: compound command (while loop) inside a pipeline is skipped,
+        // while the leading simple command is captured exactly once.
+        let mut while_pipe = new_tee();
+        let while_pipe_result = while_pipe
+            .transform("echo -e 'a\\nb\\nc' | while read line; do echo \"got: $line\"; done")
+            .unwrap();
+        let echo_entries: Vec<&TeeFileInfo> = while_pipe_result
+            .metadata
+            .tee_files
+            .iter()
+            .filter(|file| file.command_name == "echo")
+            .collect();
+        assert_eq!(echo_entries.len(), 1);
+        assert_eq!(echo_entries[0].command, "echo -e 'a\\nb\\nc'");
     }
 
     #[test]

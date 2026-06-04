@@ -11404,7 +11404,49 @@ fn awk_expand_replacement(replacement: &str, captures: &regex::Captures<'_>) -> 
         .get(0)
         .map(|matched| matched.as_str())
         .unwrap_or("");
-    replacement.replace('&', matched)
+    let mut output = String::new();
+    let chars = replacement.chars().collect::<Vec<_>>();
+    let mut cursor = 0usize;
+    while cursor < chars.len() {
+        match chars[cursor] {
+            // `&` is the whole match (sub/gsub/gensub). `\&` is a literal `&`.
+            '&' => {
+                output.push_str(matched);
+                cursor += 1;
+            }
+            '\\' => {
+                match chars.get(cursor + 1).copied() {
+                    // `\N` (gensub backreference) inserts capture group N, the
+                    // empty string when that group did not participate.
+                    Some(digit @ '0'..='9') => {
+                        let group = digit as usize - '0' as usize;
+                        if let Some(text) = captures.get(group).map(|m| m.as_str()) {
+                            output.push_str(text);
+                        }
+                        cursor += 2;
+                    }
+                    // `\&` is a literal ampersand, `\\` a literal backslash.
+                    Some('&') => {
+                        output.push('&');
+                        cursor += 2;
+                    }
+                    Some('\\') => {
+                        output.push('\\');
+                        cursor += 2;
+                    }
+                    _ => {
+                        output.push('\\');
+                        cursor += 1;
+                    }
+                }
+            }
+            other => {
+                output.push(other);
+                cursor += 1;
+            }
+        }
+    }
+    output
 }
 
 fn awk_pattern_matches(
@@ -11523,6 +11565,35 @@ fn awk_numeric_value(value: &str) -> Option<f64> {
         }
     }
     value[..end].parse().ok()
+}
+
+/// Format a value in scientific notation matching the upstream awk port, which
+/// delegates to JavaScript's `Number.prototype.toExponential(prec)`. Rust's
+/// `{:.*e}` formatter rounds the mantissa identically but writes the exponent
+/// without an explicit sign and without leading zeros (e.g. `1.23e3`), whereas
+/// JS always emits a sign and at least one exponent digit (`1.23e+3`). This
+/// helper normalizes the exponent to the JS form and uppercases for `%E`.
+fn format_awk_scientific(value: f64, precision: usize, uppercase: bool) -> String {
+    let formatted = format!("{value:.precision$e}");
+    let normalized = match formatted.split_once('e') {
+        Some((mantissa, exponent)) => {
+            let (sign, digits) = match exponent.strip_prefix('-') {
+                Some(rest) => ('-', rest),
+                None => ('+', exponent),
+            };
+            // `digits` never has leading zeros from Rust, but guard anyway and
+            // keep at least one digit so `e+0` renders as `e+0`.
+            let trimmed = digits.trim_start_matches('0');
+            let digits = if trimmed.is_empty() { "0" } else { trimmed };
+            format!("{mantissa}e{sign}{digits}")
+        }
+        None => formatted,
+    };
+    if uppercase {
+        normalized.to_uppercase()
+    } else {
+        normalized
+    }
 }
 
 fn format_awk_number(value: f64) -> String {
@@ -11684,7 +11755,7 @@ fn format_awk_printf(format: &str, args: &[String]) -> Result<String, String> {
         cursor += 1;
         if !matches!(
             specifier,
-            's' | 'd' | 'i' | 'f' | 'x' | 'X' | 'o' | 'c' | 'e'
+            's' | 'd' | 'i' | 'f' | 'x' | 'X' | 'o' | 'c' | 'e' | 'E'
         ) {
             // Unknown conversion specifier (e.g. `%z`): emit the directive text
             // verbatim and consume no argument, matching upstream's graceful
@@ -11712,14 +11783,28 @@ fn format_awk_printf(format: &str, args: &[String]) -> Result<String, String> {
             'X' => format!("{:X}", awk_to_number(&value) as i64),
             'o' => format!("{:o}", awk_to_number(&value) as i64),
             'c' => {
-                let number = awk_to_number(&value) as u32;
-                char::from_u32(number)
-                    .map(|ch| ch.to_string())
-                    .unwrap_or_default()
+                // POSIX awk %c: a numeric argument is treated as a character
+                // code, a string argument prints its first character. A
+                // numeric string like "65" coming from a record field counts
+                // as numeric, but a non-numeric string prints its first char.
+                if value.is_empty() {
+                    String::new()
+                } else if awk_numeric_value(&value).is_some() {
+                    let number = awk_to_number(&value) as u32;
+                    char::from_u32(number)
+                        .map(|ch| ch.to_string())
+                        .unwrap_or_default()
+                } else {
+                    value
+                        .chars()
+                        .next()
+                        .map(|ch| ch.to_string())
+                        .unwrap_or_default()
+                }
             }
-            'e' => {
+            'e' | 'E' => {
                 let precision = precision.unwrap_or(6);
-                format!("{:.*e}", precision, awk_to_number(&value))
+                format_awk_scientific(awk_to_number(&value), precision, specifier == 'E')
             }
             // Unsupported specifiers are handled by the pass-through guard above
             // before any argument is consumed, so this arm is never reached.
