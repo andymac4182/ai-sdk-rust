@@ -27418,6 +27418,382 @@ mod tests {
     }
 
     #[test]
+    fn r10jb_tar_bundle_create_list_extract_codecs_and_option_rows() {
+        // tar.bundle.test.ts: behavior of the bundled tar binary mirrored on the
+        // in-process Rust session (the bundle drives the same command surface).
+        let bash = JustBashSession::new();
+
+        // should show help
+        let help = bash.exec("tar --help", JustBashExecOptions::new());
+        assert_eq!(help.exit_code, 0);
+        assert!(help.stdout.contains("Usage:"));
+        assert!(help.stdout.contains("tar"));
+
+        // should create and list a tar archive
+        let list = bash.exec(
+            "mkdir -p /tartest; echo hello > /tartest/file1.txt; echo world > /tartest/file2.txt; \
+             tar -cf /test.tar -C /tartest file1.txt file2.txt; tar -tf /test.tar",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(list.exit_code, 0);
+        assert!(list.stdout.contains("file1.txt"));
+        assert!(list.stdout.contains("file2.txt"));
+
+        // should create and extract a tar archive
+        let extract = bash.exec(
+            "mkdir -p /src; echo content123 > /src/data.txt; \
+             tar -cf /archive.tar -C /src data.txt; mkdir -p /dest; \
+             tar -xf /archive.tar -C /dest; cat /dest/data.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(extract.exit_code, 0);
+        assert!(extract.stdout.contains("content123"));
+
+        // should create and extract a gzip-compressed archive
+        let gzip = bash.exec(
+            "mkdir -p /gztest; echo 'gzip content' > /gztest/file.txt; \
+             tar -czf /test.tar.gz -C /gztest file.txt; mkdir -p /gzout; \
+             tar -xzf /test.tar.gz -C /gzout; cat /gzout/file.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(gzip.exit_code, 0);
+        assert!(gzip.stdout.contains("gzip content"));
+
+        // should create and extract a bzip2-compressed archive
+        let bzip2 = bash.exec(
+            "mkdir -p /bz2test; echo 'bzip2 content' > /bz2test/file.txt; \
+             tar -cjf /test.tar.bz2 -C /bz2test file.txt; mkdir -p /bz2out; \
+             tar -xjf /test.tar.bz2 -C /bz2out; cat /bz2out/file.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(bzip2.exit_code, 0);
+        assert!(bzip2.stdout.contains("bzip2 content"));
+
+        // should reject xz native codec by default
+        let xz = bash.exec(
+            "tar -cJf /test.tar.xz -C / file.txt 2>&1 || echo XZ_REJECTED",
+            JustBashExecOptions::new(),
+        );
+        assert!(xz.stdout.contains("XZ_REJECTED"));
+
+        // should reject zstd native codec by default
+        let zstd = bash.exec(
+            "tar --zstd -cf /test.tar.zst -C / file.txt 2>&1 || echo ZSTD_REJECTED",
+            JustBashExecOptions::new(),
+        );
+        assert!(zstd.stdout.contains("ZSTD_REJECTED"));
+
+        // should auto-detect compression from filename (-a)
+        let auto = bash.exec(
+            "mkdir -p /autotest; echo 'auto content' > /autotest/file.txt; \
+             tar -caf /auto.tar.gz -C /autotest file.txt; mkdir -p /autoout; \
+             tar -xf /auto.tar.gz -C /autoout; cat /autoout/file.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(auto.exit_code, 0);
+        assert!(auto.stdout.contains("auto content"));
+
+        // should use files-from (-T)
+        let from = bash.exec(
+            "mkdir -p /ttest; echo file1 > /ttest/a.txt; echo file2 > /ttest/b.txt; \
+             echo file3 > /ttest/c.txt; printf 'a.txt\\nc.txt\\n' > /filelist.txt; \
+             tar -cf /ttest.tar -C /ttest -T /filelist.txt; tar -tf /ttest.tar",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(from.exit_code, 0);
+        assert!(from.stdout.contains("a.txt"));
+        assert!(from.stdout.contains("c.txt"));
+        assert!(!from.stdout.contains("b.txt"));
+
+        // should use exclude-from (-X)
+        let exclude_from = bash.exec(
+            "mkdir -p /xtest; echo file1 > /xtest/a.txt; echo file2 > /xtest/b.txt; \
+             echo file3 > /xtest/c.txt; echo b.txt > /excludelist.txt; \
+             tar -cf /xtest.tar -C /xtest -X /excludelist.txt .; tar -tf /xtest.tar",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(exclude_from.exit_code, 0);
+        assert!(exclude_from.stdout.contains("a.txt"));
+        assert!(exclude_from.stdout.contains("c.txt"));
+        assert!(!exclude_from.stdout.contains("b.txt"));
+
+        // should preserve file permissions (tar -tvf surfaces the mode column)
+        let perms = bash.exec(
+            "mkdir -p /permtest; echo script > /permtest/run.sh; chmod 755 /permtest/run.sh; \
+             tar -cf /perm.tar -C /permtest run.sh; tar -tvf /perm.tar",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(perms.exit_code, 0);
+        assert!(perms.stdout.contains("rwxr-xr-x"));
+
+        // should handle verbose output (-v) on stderr
+        let verbose = bash.exec(
+            "mkdir -p /vtest; echo data > /vtest/file.txt; \
+             tar -cvf /verbose.tar -C /vtest file.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(verbose.exit_code, 0);
+        assert!(verbose.stderr.contains("file.txt"));
+    }
+
+    #[test]
+    fn r10jb_tar_security_traversal_leading_slash_symlink_and_codec_gates() {
+        // tar.security.test.ts: parent-traversal entries are blocked on extract by default.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/cage/secret.txt", "escape-attempt"),
+        );
+        // Archive a `../secret.txt` entry name by creating from a nested cwd.
+        let create = bash.exec(
+            "mkdir -p /cage/inner; tar -cf /attack.tar -C /cage/inner ../secret.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(create.exit_code, 0);
+        let listed = bash.exec("tar -tf /attack.tar", JustBashExecOptions::new());
+        assert!(listed.stdout.contains("../secret.txt"));
+        let blocked = bash.exec(
+            "mkdir /safe && tar -xf /attack.tar -C /safe",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(blocked.exit_code, 2);
+        assert!(blocked.stderr.contains("Path contains '..'"));
+        assert!(!bash.file_exists("/safe/secret.txt"));
+
+        // strips leading slash from archive entries by default
+        let abs_bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/abs.txt", "abs"),
+        );
+        let abs_create = abs_bash.exec("tar -cf /abs.tar /abs.txt", JustBashExecOptions::new());
+        assert_eq!(abs_create.exit_code, 0);
+        assert!(
+            abs_bash
+                .exec("tar -tf /abs.tar", JustBashExecOptions::new())
+                .stdout
+                .contains("abs.txt")
+        );
+        let stripped = abs_bash.exec(
+            "mkdir /safe && tar -xf /abs.tar -C /safe",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(stripped.exit_code, 0);
+        assert_eq!(stripped.stderr, "");
+        assert!(abs_bash.file_exists("/safe/abs.txt"));
+
+        // allows absolute archive extraction with -P/--absolute-names
+        let p_bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/abs.txt", "abs"),
+        );
+        p_bash.exec("tar -cf /abs.tar /abs.txt", JustBashExecOptions::new());
+        p_bash.exec("rm /abs.txt", JustBashExecOptions::new());
+        let absolute = p_bash.exec(
+            "mkdir /safe && tar -xPf /abs.tar -C /safe",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(absolute.exit_code, 0);
+        assert_eq!(absolute.stderr, "");
+        assert!(p_bash.file_exists("/abs.txt"));
+        assert!(!p_bash.file_exists("/safe/abs.txt"));
+
+        // blocks unsafe symlink targets by default
+        let link_bash = JustBashSession::new();
+        let link_create = link_bash.exec(
+            "mkdir -p /work; ln -s ../outside /work/link.txt; tar -cf /link.tar -C /work link.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(link_create.exit_code, 0);
+        let link_blocked = link_bash.exec(
+            "mkdir /safe && tar -xf /link.tar -C /safe",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(link_blocked.exit_code, 2);
+        assert!(link_blocked.stderr.contains("unsafe symlink target"));
+        assert!(!link_bash.file_exists("/safe/link.txt"));
+
+        // blocks xz encode by default (native codec risk)
+        let xz_bash = JustBashSession::new();
+        xz_bash
+            .inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file(
+                "/payload.bin",
+                vec![0x00, 0x01, 0x02, 0x03, 0x7f, 0x80, 0xff, 0xfe],
+            )
+            .unwrap();
+        let xz_create = xz_bash.exec(
+            "tar -cJf /payload.tar.xz /payload.bin",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(xz_create.exit_code, 2);
+        assert!(
+            xz_create
+                .stderr
+                .contains("xz compression is disabled by default (native codec risk)")
+        );
+    }
+
+    #[test]
+    fn r10jb_tar_binary_null_all_bytes_pipe_and_special_filename_rows() {
+        // tar.binary.test.ts: archive and extract a file with embedded null bytes.
+        let null_bash = JustBashSession::new();
+        null_bash
+            .inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file("/src/nulls.bin", vec![0x41, 0x00, 0x42, 0x00, 0x43])
+            .unwrap();
+        null_bash.exec(
+            "tar -cf /archive.tar -C /src nulls.bin; tar -xf /archive.tar -C /dest",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(
+            null_bash.read_file_buffer("/dest/nulls.bin").unwrap(),
+            vec![0x41, 0x00, 0x42, 0x00, 0x43]
+        );
+
+        // archive and extract a file with all 256 byte values
+        let all_bash = JustBashSession::new();
+        let all_bytes: Vec<u8> = (0u16..256).map(|v| v as u8).collect();
+        all_bash
+            .inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file("/src/allbytes.bin", all_bytes.clone())
+            .unwrap();
+        all_bash.exec(
+            "tar -cf /archive.tar -C /src allbytes.bin; tar -xf /archive.tar -C /dest",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(
+            all_bash.read_file_buffer("/dest/allbytes.bin").unwrap(),
+            all_bytes
+        );
+
+        // list archive piped through cat (binary stdin)
+        let pipe_bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/src/file.txt", "content"),
+        );
+        pipe_bash.exec(
+            "tar -cf /archive.tar -C /src file.txt",
+            JustBashExecOptions::new(),
+        );
+        let piped_list = pipe_bash.exec("cat /archive.tar | tar -t", JustBashExecOptions::new());
+        assert_eq!(piped_list.exit_code, 0);
+        assert!(piped_list.stdout.contains("file.txt"));
+
+        // extract archive piped through cat
+        let extract_bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/src/data.txt", "hello world"),
+        );
+        extract_bash.exec(
+            "tar -cf /archive.tar -C /src data.txt",
+            JustBashExecOptions::new(),
+        );
+        extract_bash.exec(
+            "cat /archive.tar | tar -x -C /dest",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(
+            extract_bash
+                .exec("cat /dest/data.txt", JustBashExecOptions::new())
+                .stdout,
+            "hello world"
+        );
+
+        // gzip archive piped through cat
+        let gz_bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/src/file.txt", "compressed content"),
+        );
+        gz_bash.exec(
+            "tar -czf /archive.tar.gz -C /src file.txt",
+            JustBashExecOptions::new(),
+        );
+        gz_bash.exec(
+            "cat /archive.tar.gz | tar -xz -C /dest",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(
+            gz_bash
+                .exec("cat /dest/file.txt", JustBashExecOptions::new())
+                .stdout,
+            "compressed content"
+        );
+
+        // bzip2 archive piped through cat
+        let bz_bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/src/file.txt", "bzip2 content"),
+        );
+        bz_bash.exec(
+            "tar -cjf /archive.tar.bz2 -C /src file.txt",
+            JustBashExecOptions::new(),
+        );
+        bz_bash.exec(
+            "cat /archive.tar.bz2 | tar -xj -C /dest",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(
+            bz_bash
+                .exec("cat /dest/file.txt", JustBashExecOptions::new())
+                .stdout,
+            "bzip2 content"
+        );
+
+        // reject xz compression by default (binary stdin section)
+        let xz_bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/src/file.txt", "xz content"),
+        );
+        let xz = xz_bash.exec(
+            "tar -cJf /archive.tar.xz -C /src file.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(xz.exit_code, 2);
+        assert!(xz.stderr.contains("disabled by default"));
+
+        // reject zstd compression by default (binary stdin section)
+        let zstd_bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/src/file.txt", "zstd content"),
+        );
+        let zstd = zstd_bash.exec(
+            "tar --zstd -cf /archive.tar.zst -C /src file.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(zstd.exit_code, 2);
+        assert!(zstd.stderr.contains("disabled by default"));
+
+        // UTF-8 archive and extract with gzip
+        let utf8_gz_bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/src/data.txt", "compressed data"),
+        );
+        utf8_gz_bash.exec(
+            "tar -czf /archive.tar.gz -C /src data.txt; tar -xzf /archive.tar.gz -C /dest",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(
+            utf8_gz_bash
+                .exec("cat /dest/data.txt", JustBashExecOptions::new())
+                .stdout,
+            "compressed data"
+        );
+
+        // filenames with special characters survive the listing
+        let special_bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/src/file-name_123.txt", "special filename"),
+        );
+        special_bash.exec(
+            "tar -cf /archive.tar -C /src file-name_123.txt",
+            JustBashExecOptions::new(),
+        );
+        assert!(
+            special_bash
+                .exec("tar -tf /archive.tar", JustBashExecOptions::new())
+                .stdout
+                .contains("file-name_123.txt")
+        );
+    }
+
+    #[test]
     fn jbc46_small_command_leftovers_od_tac_help_touch_pwd_true_sleep_rows() {
         let bash = JustBashSession::with_options(
             JustBashSessionOptions::new()
