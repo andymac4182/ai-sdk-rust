@@ -8027,6 +8027,170 @@ esac"#,
         }
     }
 
+    /// Mirrors portable `packages/just-bash/src/syntax/composition.test.ts`,
+    /// `operators.test.ts`, and `loops.test.ts` syntax-feature-composition rows
+    /// 1:1 through the Rust parser/interpreter. Each tuple is the exact upstream
+    /// `Bash().exec(...)` source and its asserted stdout, exercising command
+    /// substitution, here documents, arithmetic-in-here-doc, case words and
+    /// branches, nested case, pipes inside blocks, for/function composition,
+    /// nested command substitution, and the empty-here-doc/no-match edge rows.
+    /// Rows requiring `mkdir`/`uniq`/`head`/`tail` command families or
+    /// `[[ ]]` arithmetic comparison stay pending with their command owners.
+    #[test]
+    fn r10jb_syntax_composition_operator_and_loop_rows_match_upstream() {
+        // composition.test.ts default-env rows.
+        let plain: &[(&str, &str)] = &[
+            // L6 command substitution in if condition
+            (
+                "\nif [[ $(echo hello) == \"hello\" ]]; then\necho \"matched\"\nfi\n",
+                "matched\n",
+            ),
+            // L27 here document inside if block
+            (
+                "\nif [[ 1 -eq 1 ]]; then\ncat <<EOF\nhello from if\nEOF\nfi\n",
+                "hello from if\n",
+            ),
+            // L53 pipes inside if block
+            (
+                "\nif [[ 1 -eq 1 ]]; then\necho -e \"line1\\nline2\\nline3\" | grep line2\nfi\n",
+                "line2\n",
+            ),
+            // L65 pipe here document through multiple commands
+            (
+                "cat <<EOF | grep hello | wc -l\nhello world\ngoodbye world\nhello again\nEOF",
+                "2\n",
+            ),
+            // L84 command substitution in here document
+            (
+                "cat <<EOF\nThe answer is $(echo 42)\nEOF",
+                "The answer is 42\n",
+            ),
+            // L92 arithmetic expansion in here document
+            ("cat <<EOF\n5 + 3 = $((5 + 3))\nEOF", "5 + 3 = 8\n"),
+            // L114 command substitution as case word
+            (
+                "\ncase $(echo test) in\ntest) echo \"matched command output\";;\n*) echo \"no match\";;\nesac\n",
+                "matched command output\n",
+            ),
+            // L125 arithmetic result as case word
+            (
+                "\ncase $((2 + 3)) in\n5) echo \"five\";;\n*) echo \"other\";;\nesac\n",
+                "five\n",
+            ),
+            // L136 pipes inside case branch
+            (
+                "\ncase \"process\" in\nprocess)\necho -e \"a\\nb\\nc\" | wc -l\n;;\nesac\n",
+                "3\n",
+            ),
+            // L148 here document inside case branch
+            (
+                "\ncase \"heredoc\" in\nheredoc)\ncat <<EOF\ninside case\nEOF\n;;\nesac\n",
+                "inside case\n",
+            ),
+            // L162 nest case in case
+            (
+                "\ncase \"outer\" in\nouter)\ncase \"inner\" in\ninner) echo \"nested match\";;\nesac\n;;\nesac\n",
+                "nested match\n",
+            ),
+            // L178 test command substitution result
+            (
+                "\nif [[ $(echo \"yes\") == \"yes\" ]]; then\necho \"command output matched\"\nfi\n",
+                "command output matched\n",
+            ),
+            // L222 command substitution in for loop
+            (
+                "\nfor item in $(echo \"a b c\"); do\necho \"item: $item\"\ndone\n",
+                "item: a\nitem: b\nitem: c\n",
+            ),
+            // L244 case statement inside loop
+            (
+                "\nfor fruit in apple banana cherry; do\ncase $fruit in\napple) echo \"red\";;\nbanana) echo \"yellow\";;\ncherry) echo \"red\";;\nesac\ndone\n",
+                "red\nyellow\nred\n",
+            ),
+            // L258 here document inside loop
+            (
+                "\nfor i in 1 2; do\ncat <<EOF\niteration $i\nEOF\ndone\n",
+                "iteration 1\niteration 2\n",
+            ),
+            // L270 pipe loop output
+            ("\nfor i in 3 1 2; do\necho $i\ndone | sort\n", "1\n2\n3\n"),
+            // L282 command substitution in function
+            (
+                "\ngreet() {\nlocal name=$(echo \"World\")\necho \"Hello, $name!\"\n}\ngreet\n",
+                "Hello, World!\n",
+            ),
+            // L294 arithmetic in function
+            ("\nadd() {\necho $(($1 + $2))\n}\nadd 5 3\n", "8\n"),
+            // L305 case statement in function
+            (
+                "\nget_color() {\ncase $1 in\napple) echo \"red\";;\nbanana) echo \"yellow\";;\n*) echo \"unknown\";;\nesac\n}\nget_color apple\nget_color banana\nget_color grape\n",
+                "red\nyellow\nunknown\n",
+            ),
+            // L339 here document in function
+            (
+                "\ngenerate_config() {\ncat <<EOF\nname=$1\nvalue=$2\nEOF\n}\ngenerate_config mykey myvalue\n",
+                "name=mykey\nvalue=myvalue\n",
+            ),
+            // L353 call function with command substitution
+            (
+                "\ndouble() {\necho $(($1 * 2))\n}\nresult=$(double 5)\necho \"Result: $result\"\n",
+                "Result: 10\n",
+            ),
+            // L367 combine if, case, and command substitution
+            (
+                "\nexport TYPE=$(echo \"fruit\")\nif [[ $TYPE == \"fruit\" ]]; then\ncase $(echo apple) in\napple) echo \"it's an apple\";;\n*) echo \"unknown fruit\";;\nesac\nfi\n",
+                "it's an apple\n",
+            ),
+            // L381 here doc with command substitution and pipes
+            (
+                "\nexport PREFIX=\">>>\"\ncat <<EOF | grep world\n$PREFIX hello\n$PREFIX world\n$PREFIX $(echo \"dynamic\")\nEOF",
+                ">>> world\n",
+            ),
+            // L455 nested command substitution
+            (
+                "\necho \"Result: $(echo \"inner: $(echo deep)\")\"\n",
+                "Result: inner: deep\n",
+            ),
+            // L479 failed command in command substitution
+            (
+                "\nresult=$(cat /nonexistent/file 2>/dev/null)\nif [[ -z \"$result\" ]]; then\necho \"no result\"\nfi\n",
+                "no result\n",
+            ),
+            // L490 empty here document in pipe
+            ("cat <<EOF | wc -l\nEOF", "0\n"),
+            // L497 case with no matching pattern
+            (
+                "\ncase \"nomatch\" in\na) echo \"a\";;\nb) echo \"b\";;\nesac\necho \"done\"\n",
+                "done\n",
+            ),
+            // operators.test.ts L241 count lines with wc in pipe
+            ("echo -e \"a\\nb\\nc\" | wc -l", "3\n"),
+        ];
+        for (source, expected) in plain {
+            let mut env_shell = shell();
+            let result = env_shell.exec(source);
+            assert_eq!(result.stdout, *expected, "{source}");
+            assert_eq!(result.exit_code, 0, "{source}");
+        }
+
+        // composition.test.ts L75 uses a PATTERN env entry.
+        let mut pattern_shell = shell().with_env([("PATTERN", "world")]);
+        let result =
+            pattern_shell.exec("cat <<EOF | grep $PATTERN\nhello world\ngoodbye moon\nEOF");
+        assert_eq!(result.stdout, "hello world\n");
+        assert_eq!(result.exit_code, 0);
+
+        // loops.test.ts L124 until loop executes when condition is initially
+        // false: a separate-exec pattern that seeds the file, then runs one
+        // iteration before the until condition becomes true.
+        let mut until_shell = shell();
+        until_shell.exec("echo no > /check.txt");
+        let result = until_shell
+            .exec("until grep -q yes /check.txt; do echo step; echo yes > /check.txt; done");
+        assert_eq!(result.stdout, "step\n");
+        assert_eq!(result.exit_code, 0);
+    }
+
     #[test]
     fn jbc33_syntax_control_flow_functions_and_local_rows_match_upstream() {
         let mut interp = shell();

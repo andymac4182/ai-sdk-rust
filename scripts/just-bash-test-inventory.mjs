@@ -3956,6 +3956,36 @@ const jbpiParserInterpreterCaseGroups = [
     notes:
       'JB-PI verifies portable set -e (errexit) rows through the Rust parser/interpreter: `set -e` exits on the first failure, execution continues without it, success does not exit, `set +e` disables and `set -e` re-enables, and `set -o errexit` enables it. The same test also exercises the &&/||, if/elif-condition, while/until-condition and -body, negated-command, and preserve-exit-code exemptions; the unimplemented combined-flag (`-ee`/`-ze`/`-ez`) and `set` help/list/invalid-option rows stay pending.',
   },
+  {
+    file: 'packages/just-bash/src/syntax/composition.test.ts',
+    lines: [
+      6, 27, 53, 65, 75, 84, 92, 114, 125, 136, 148, 162, 178, 222, 244,
+      258, 270, 282, 294, 305, 339, 353, 367, 381, 455, 479, 490, 497,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r10jb_syntax_composition_operator_and_loop_rows_match_upstream',
+    notes:
+      'R10JB verifies portable syntax-feature composition rows through the Rust shell: command substitution in if/case words and for lists, here documents inside if/case/loop blocks and with command/arithmetic expansion, pipes inside if/case branches, here-doc-through-pipe counting, case-in-function and case-in-loop, command substitution and arithmetic in functions, nested command substitution, the failed-command-in-substitution / empty-here-doc / no-matching-case edge rows. Rows requiring mkdir/uniq/head/tail command families or `[[ ]]` arithmetic comparison stay pending with their command owners.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/operators.test.ts',
+    lines: [241],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r10jb_syntax_composition_operator_and_loop_rows_match_upstream',
+    notes:
+      'R10JB verifies the portable `echo -e | wc -l` line-count pipe row through the Rust shell. The head/tail/mkdir mixed-operator rows stay pending with their command owners.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/loops.test.ts',
+    lines: [124],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r10jb_syntax_composition_operator_and_loop_rows_match_upstream',
+    notes:
+      'R10JB verifies the portable until-loop row that executes once when its condition is initially false (a grep -q over a virtual file) through the Rust shell.',
+  },
 ];
 
 const jbc35CaseGroups = [
