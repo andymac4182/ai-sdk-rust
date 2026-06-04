@@ -15,7 +15,7 @@
     "expectedFailures": 0
   },
   "summary": {
-    "totalCases": 474,
+    "totalCases": 504,
     "byKind": {
       "comparison-fixture": 474
     },
@@ -42,10 +42,11 @@
       "test": 1,
       "tr": 14,
       "uniq": 10,
-      "yq": 12
+      "yq": 12,
+      "xan": 30
     },
     "byStatus": {
-      "portable-verified": 474
+      "portable-verified": 504
     }
   },
   "cases": [
@@ -24767,6 +24768,1349 @@
       "rustTestName": "just_bash_runs_shared_conformance_corpus::expr_awk_l487",
       "runnerProof": {
         "source": "JBC-35",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:2cb96be5",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts",
+        "line": 12,
+        "suite": "xan",
+        "testName": "selects columns by prefix glob",
+        "declaration": "it"
+      },
+      "command": "xan select 'vec_*' /data.csv",
+      "script": "xan select 'vec_*' /data.csv",
+      "initialFiles": {
+        "/data.csv": "name,vec_1,vec_2,count_1,count_2\njohn,1,2,3,4\nmary,5,6,7,8\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "vec_1,vec_2\n1,2\n5,6\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts:12:it:selects columns by prefix glob",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_2cb96be5",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_2cb96be5",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:4a19d753",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts",
+        "line": 19,
+        "suite": "xan",
+        "testName": "selects columns by suffix glob",
+        "declaration": "it"
+      },
+      "command": "xan select '*_1' /data.csv",
+      "script": "xan select '*_1' /data.csv",
+      "initialFiles": {
+        "/data.csv": "name,vec_1,vec_2,count_1,count_2\njohn,1,2,3,4\nmary,5,6,7,8\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "vec_1,count_1\n1,3\n5,7\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts:19:it:selects columns by suffix glob",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_4a19d753",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_4a19d753",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:4944961b",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts",
+        "line": 26,
+        "suite": "xan",
+        "testName": "combines glob with regular column",
+        "declaration": "it"
+      },
+      "command": "xan select 'name,vec_*' /data.csv",
+      "script": "xan select 'name,vec_*' /data.csv",
+      "initialFiles": {
+        "/data.csv": "name,vec_1,vec_2,count_1,count_2\njohn,1,2,3,4\nmary,5,6,7,8\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "name,vec_1,vec_2\njohn,1,2\nmary,5,6\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts:26:it:combines glob with regular column",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_4944961b",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_4944961b",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:ec8c0a19",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts",
+        "line": 33,
+        "suite": "xan",
+        "testName": "selects all with *",
+        "declaration": "it"
+      },
+      "command": "xan select '*' /data.csv",
+      "script": "xan select '*' /data.csv",
+      "initialFiles": {
+        "/data.csv": "a,b,c\n1,2,3\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "a,b,c\n1,2,3\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts:33:it:selects all with *",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_ec8c0a19",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_ec8c0a19",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:814b950a",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts",
+        "line": 42,
+        "suite": "xan",
+        "testName": "combines * with additional column",
+        "declaration": "it"
+      },
+      "command": "xan select '*,a' /data.csv",
+      "script": "xan select '*,a' /data.csv",
+      "initialFiles": {
+        "/data.csv": "a,b\n1,2\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "a,b,a\n1,2,1\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts:42:it:combines * with additional column",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_814b950a",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_814b950a",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:39b26d09",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts",
+        "line": 55,
+        "suite": "xan",
+        "testName": "selects column range a:c",
+        "declaration": "it"
+      },
+      "command": "xan select 'a:c' /data.csv",
+      "script": "xan select 'a:c' /data.csv",
+      "initialFiles": {
+        "/data.csv": "a,b,c,d,e\n1,2,3,4,5\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "a,b,c\n1,2,3\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts:55:it:selects column range a:c",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_39b26d09",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_39b26d09",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:6722f6a3",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts",
+        "line": 62,
+        "suite": "xan",
+        "testName": "selects reverse range c:a",
+        "declaration": "it"
+      },
+      "command": "xan select 'c:a' /data.csv",
+      "script": "xan select 'c:a' /data.csv",
+      "initialFiles": {
+        "/data.csv": "a,b,c,d,e\n1,2,3,4,5\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "c,b,a\n3,2,1\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts:62:it:selects reverse range c:a",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_6722f6a3",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_6722f6a3",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:e8a94df4",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts",
+        "line": 69,
+        "suite": "xan",
+        "testName": "selects range to end d:",
+        "declaration": "it"
+      },
+      "command": "xan select 'd:' /data.csv",
+      "script": "xan select 'd:' /data.csv",
+      "initialFiles": {
+        "/data.csv": "a,b,c,d,e\n1,2,3,4,5\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "d,e\n4,5\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts:69:it:selects range to end d:",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_e8a94df4",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_e8a94df4",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:8a552c6a",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts",
+        "line": 76,
+        "suite": "xan",
+        "testName": "selects range from start :b",
+        "declaration": "it"
+      },
+      "command": "xan select ':b' /data.csv",
+      "script": "xan select ':b' /data.csv",
+      "initialFiles": {
+        "/data.csv": "a,b,c,d,e\n1,2,3,4,5\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "a,b\n1,2\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts:76:it:selects range from start :b",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_8a552c6a",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_8a552c6a",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:02b96ede",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts",
+        "line": 83,
+        "suite": "xan",
+        "testName": "combines ranges",
+        "declaration": "it"
+      },
+      "command": "xan select 'a:b,d:e' /data.csv",
+      "script": "xan select 'a:b,d:e' /data.csv",
+      "initialFiles": {
+        "/data.csv": "a,b,c,d,e\n1,2,3,4,5\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "a,b,d,e\n1,2,4,5\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts:83:it:combines ranges",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_02b96ede",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_02b96ede",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:faba9793",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts",
+        "line": 94,
+        "suite": "xan",
+        "testName": "excludes single column",
+        "declaration": "it"
+      },
+      "command": "xan select '*,!b' /data.csv",
+      "script": "xan select '*,!b' /data.csv",
+      "initialFiles": {
+        "/data.csv": "a,b,c,d\n1,2,3,4\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "a,c,d\n1,3,4\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts:94:it:excludes single column",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_faba9793",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_faba9793",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:7968855b",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts",
+        "line": 101,
+        "suite": "xan",
+        "testName": "excludes multiple columns",
+        "declaration": "it"
+      },
+      "command": "xan select '*,!b,!d' /data.csv",
+      "script": "xan select '*,!b,!d' /data.csv",
+      "initialFiles": {
+        "/data.csv": "a,b,c,d\n1,2,3,4\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "a,c\n1,3\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts:101:it:excludes multiple columns",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_7968855b",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_7968855b",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:161ac1fa",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts",
+        "line": 108,
+        "suite": "xan",
+        "testName": "excludes range",
+        "declaration": "it"
+      },
+      "command": "xan select '*,!b:c' /data.csv",
+      "script": "xan select '*,!b:c' /data.csv",
+      "initialFiles": {
+        "/data.csv": "a,b,c,d\n1,2,3,4\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "a,d\n1,4\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts:108:it:excludes range",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_161ac1fa",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_161ac1fa",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:0b007e63",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts",
+        "line": 119,
+        "suite": "xan",
+        "testName": "selects by numeric index",
+        "declaration": "it"
+      },
+      "command": "xan select '0,2' /data.csv",
+      "script": "xan select '0,2' /data.csv",
+      "initialFiles": {
+        "/data.csv": "a,b,c,d\n1,2,3,4\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "a,c\n1,3\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts:119:it:selects by numeric index",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_0b007e63",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_0b007e63",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:5efc8114",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts",
+        "line": 126,
+        "suite": "xan",
+        "testName": "selects by numeric range",
+        "declaration": "it"
+      },
+      "command": "xan select '1-3' /data.csv",
+      "script": "xan select '1-3' /data.csv",
+      "initialFiles": {
+        "/data.csv": "a,b,c,d\n1,2,3,4\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "b,c,d\n2,3,4\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts:126:it:selects by numeric range",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_5efc8114",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_5efc8114",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:1a7f3217",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts",
+        "line": 133,
+        "suite": "xan",
+        "testName": "handles duplicate selections",
+        "declaration": "it"
+      },
+      "command": "xan select 'a,a' /data.csv",
+      "script": "xan select 'a,a' /data.csv",
+      "initialFiles": {
+        "/data.csv": "a,b,c,d\n1,2,3,4\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "a,a\n1,1\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.select-advanced.test.ts:133:it:handles duplicate selections",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_1a7f3217",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_1a7f3217",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:8f0b0776",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.prototype-pollution.test.ts",
+        "line": 30,
+        "suite": "xan",
+        "testName": "should handle CSV header '${keyword}' in select",
+        "declaration": "it"
+      },
+      "command": "echo 'constructor,value\ntest,data' | xan select constructor",
+      "script": "echo 'constructor,value\ntest,data' | xan select constructor",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "constructor\ntest\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.prototype-pollution.test.ts:30:it:should handle CSV header '${keyword}' in select",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_8f0b0776",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_8f0b0776",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:e9c4718e",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.prototype-pollution.test.ts",
+        "line": 44,
+        "suite": "xan",
+        "testName": "should handle CSV header '${keyword}' in drop",
+        "declaration": "it"
+      },
+      "command": "echo 'prototype,value,normal\ntest,data,keep' | xan drop prototype",
+      "script": "echo 'prototype,value,normal\ntest,data,keep' | xan drop prototype",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "value,normal\ndata,keep\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.prototype-pollution.test.ts:44:it:should handle CSV header '${keyword}' in drop",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_e9c4718e",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_e9c4718e",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:3001f8aa",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.prototype-pollution.test.ts",
+        "line": 58,
+        "suite": "xan",
+        "testName": "should sort by column named '${keyword}'",
+        "declaration": "it"
+      },
+      "command": "echo 'constructor,data\nz,1\na,2' | xan sort -s constructor",
+      "script": "echo 'constructor,data\nz,1\na,2' | xan sort -s constructor",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "constructor,data\na,2\nz,1\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.prototype-pollution.test.ts:58:it:should sort by column named '${keyword}'",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_3001f8aa",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_3001f8aa",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:4688f6ae",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.prototype-pollution.test.ts",
+        "line": 74,
+        "suite": "xan",
+        "testName": "should show headers including all dangerous keywords",
+        "declaration": "it"
+      },
+      "command": "echo 'constructor,prototype,hasOwnProperty,isPrototypeOf,propertyIsEnumerable' | xan headers",
+      "script": "echo 'constructor,prototype,hasOwnProperty,isPrototypeOf,propertyIsEnumerable' | xan headers",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "0   constructor\n1   prototype\n2   hasOwnProperty\n3   isPrototypeOf\n4   propertyIsEnumerable\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.prototype-pollution.test.ts:74:it:should show headers including all dangerous keywords",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_4688f6ae",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_4688f6ae",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:6272d8e3",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.prototype-pollution.test.ts",
+        "line": 102,
+        "suite": "xan",
+        "testName": "should transpose with dangerous keyword headers",
+        "declaration": "it"
+      },
+      "command": "echo 'constructor,a,b\nprototype,1,2' | xan transpose",
+      "script": "echo 'constructor,a,b\nprototype,1,2' | xan transpose",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "constructor,prototype\na,1\nb,2\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.prototype-pollution.test.ts:102:it:should transpose with dangerous keyword headers",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_6272d8e3",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_6272d8e3",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:a495fc11",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.prototype-pollution.test.ts",
+        "line": 115,
+        "suite": "xan",
+        "testName": "should add index column named constructor",
+        "declaration": "it"
+      },
+      "command": "printf 'value\\na\\nb\\n' | xan enum -c constructor",
+      "script": "printf 'value\\na\\nb\\n' | xan enum -c constructor",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "constructor,value\n0,a\n1,b\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.prototype-pollution.test.ts:115:it:should add index column named constructor",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_a495fc11",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_a495fc11",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:935d3c89",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.multifile.test.ts",
+        "line": 10,
+        "suite": "xan",
+        "testName": "concatenates multiple files with same headers",
+        "declaration": "it"
+      },
+      "command": "xan cat /a.csv /b.csv",
+      "script": "xan cat /a.csv /b.csv",
+      "initialFiles": {
+        "/a.csv": "id,name\n1,alice\n2,bob\n",
+        "/b.csv": "id,name\n3,charlie\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "id,name\n1,alice\n2,bob\n3,charlie\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.multifile.test.ts:10:it:concatenates multiple files with same headers",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_935d3c89",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_935d3c89",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:6f60cd8f",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.multifile.test.ts",
+        "line": 22,
+        "suite": "xan",
+        "testName": "errors on mismatched headers without -p",
+        "declaration": "it"
+      },
+      "command": "xan cat /a.csv /b.csv",
+      "script": "xan cat /a.csv /b.csv",
+      "initialFiles": {
+        "/a.csv": "id,name\n1,alice\n",
+        "/b.csv": "id,email\n2,bob@x.com\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "",
+        "stderr": "xan cat: headers do not match (use -p to pad)\n",
+        "exitCode": 1
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.multifile.test.ts:22:it:errors on mismatched headers without -p",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_6f60cd8f",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_6f60cd8f",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:80753346",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.multifile.test.ts",
+        "line": 34,
+        "suite": "xan",
+        "testName": "pads missing columns with -p",
+        "declaration": "it"
+      },
+      "command": "xan cat -p /a.csv /b.csv",
+      "script": "xan cat -p /a.csv /b.csv",
+      "initialFiles": {
+        "/a.csv": "id,name\n1,alice\n",
+        "/b.csv": "id,email\n2,bob@x.com\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "id,name,email\n1,alice,\n2,,bob@x.com\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.multifile.test.ts:34:it:pads missing columns with -p",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_80753346",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_80753346",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:2bc938cc",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.multifile.test.ts",
+        "line": 46,
+        "suite": "xan",
+        "testName": "errors with no files",
+        "declaration": "it"
+      },
+      "command": "xan cat",
+      "script": "xan cat",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "",
+        "stderr": "xan cat: no files specified\n",
+        "exitCode": 1
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.multifile.test.ts:46:it:errors with no files",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_2bc938cc",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_2bc938cc",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:348923e3",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.multifile.test.ts",
+        "line": 55,
+        "suite": "xan",
+        "testName": "performs inner join",
+        "declaration": "it"
+      },
+      "command": "xan join id /left.csv user_id /right.csv",
+      "script": "xan join id /left.csv user_id /right.csv",
+      "initialFiles": {
+        "/left.csv": "id,name\n1,alice\n2,bob\n3,charlie\n",
+        "/right.csv": "user_id,score\n1,100\n2,85\n4,90\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "id,name,user_id,score\n1,alice,1,100\n2,bob,2,85\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.multifile.test.ts:55:it:performs inner join",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_348923e3",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_348923e3",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:af929b8e",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.multifile.test.ts",
+        "line": 69,
+        "suite": "xan",
+        "testName": "performs left join with --left",
+        "declaration": "it"
+      },
+      "command": "xan join --left id /left.csv user_id /right.csv",
+      "script": "xan join --left id /left.csv user_id /right.csv",
+      "initialFiles": {
+        "/left.csv": "id,name\n1,alice\n2,bob\n3,charlie\n",
+        "/right.csv": "user_id,score\n1,100\n2,85\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "id,name,user_id,score\n1,alice,1,100\n2,bob,2,85\n3,charlie,,\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.multifile.test.ts:69:it:performs left join with --left",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_af929b8e",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_af929b8e",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:6889123e",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.multifile.test.ts",
+        "line": 85,
+        "suite": "xan",
+        "testName": "performs right join with --right",
+        "declaration": "it"
+      },
+      "command": "xan join --right id /left.csv user_id /right.csv",
+      "script": "xan join --right id /left.csv user_id /right.csv",
+      "initialFiles": {
+        "/left.csv": "id,name\n1,alice\n",
+        "/right.csv": "user_id,score\n1,100\n2,85\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "id,name,user_id,score\n1,alice,1,100\n,,2,85\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.multifile.test.ts:85:it:performs right join with --right",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_6889123e",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_6889123e",
+      "runnerProof": {
+        "source": "JBC-XAN",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:xan:38d2338e",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "xan",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/xan/xan.multifile.test.ts",
+        "line": 101,
+        "suite": "xan",
+        "testName": "performs full outer join with --full",
+        "declaration": "it"
+      },
+      "command": "xan join --full id /left.csv user_id /right.csv",
+      "script": "xan join --full id /left.csv user_id /right.csv",
+      "initialFiles": {
+        "/left.csv": "id,name\n1,alice\n2,bob\n",
+        "/right.csv": "user_id,score\n2,85\n3,90\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "id,name,user_id,score\n1,alice,,\n2,bob,2,85\n,,3,90\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/xan/xan.multifile.test.ts:101:it:performs full outer join with --full",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::exec::xan",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_xan_38d2338e",
+        "notes": "JBC-XAN Rust corpus runner exact match for xan select/cat/join/prototype-keyword behavior (stdout, stderr, exit code).",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_xan_38d2338e",
+      "runnerProof": {
+        "source": "JBC-XAN",
         "engine": "rust-just-bash",
         "assertion": "stdout-stderr-exit-code-exact"
       }
