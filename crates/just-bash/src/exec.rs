@@ -2238,11 +2238,24 @@ fn command_grep(
         return stderr_result(2, "grep: missing pattern\n");
     };
     paths.extend(args[index..].iter().cloned());
+    // grep expands glob operands itself (the shell leaves them literal). The
+    // recursive path keeps the raw operands so its existing directory walk and
+    // `--include`/`--exclude` filtering are unaffected.
+    let had_explicit_paths = !paths.is_empty();
+    if !recursive {
+        paths = grep_expand_glob_paths(state, &paths);
+    }
     let inputs = if paths.is_empty() {
-        vec![NamedTextInput {
-            label: String::new(),
-            text: stdin.to_string(),
-        }]
+        if had_explicit_paths {
+            // Every file operand was a glob that matched nothing: grep searches
+            // no files (it does not fall back to stdin), so there are no inputs.
+            Vec::new()
+        } else {
+            vec![NamedTextInput {
+                label: String::new(),
+                text: stdin.to_string(),
+            }]
+        }
     } else {
         match grep_inputs(
             state,
@@ -2864,6 +2877,74 @@ fn fixed_line_matches(
 
 fn is_word_char(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+/// True when a grep file operand carries a glob metacharacter that grep itself
+/// expands against the virtual filesystem (the shell leaves such operands
+/// literal). A `[` only counts when a closing `]` follows it.
+fn grep_path_has_glob(path: &str) -> bool {
+    path.chars()
+        .enumerate()
+        .any(|(index, character)| match character {
+            '*' | '?' => true,
+            '[' => path[index + 1..].contains(']'),
+            _ => false,
+        })
+}
+
+/// Expands the grep file operands, resolving any operand that contains a glob
+/// metacharacter against the virtual filesystem.
+///
+/// Mirrors upstream just-bash `expandGlobPatternWithTypes`: the operand is split
+/// at its last `/` into a directory part and a glob part, the directory is read,
+/// and every entry whose name matches the glob part contributes a path (the bare
+/// entry name when the operand had no slash, otherwise `dir/entry`). Matches are
+/// returned sorted. A glob operand that matches nothing expands to no paths
+/// (grep then searches one fewer file), exactly like the upstream command, while
+/// non-glob operands pass through unchanged. `**` recursive globs are left to the
+/// existing recursive path and are not handled here.
+fn grep_expand_glob_paths(state: &ExecState<'_>, paths: &[String]) -> Vec<String> {
+    if !paths.iter().any(|path| grep_path_has_glob(path)) {
+        return paths.to_vec();
+    }
+    let fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return paths.to_vec(),
+    };
+    let mut expanded = Vec::with_capacity(paths.len());
+    for path in paths {
+        if !grep_path_has_glob(path) || path.contains("**") {
+            expanded.push(path.clone());
+            continue;
+        }
+        let (dir_part, glob_part, had_slash) = match path.rfind('/') {
+            None => (state.cwd.clone(), path.as_str(), false),
+            Some(slash) => {
+                let dir = &path[..slash];
+                let dir = if dir.is_empty() { "/" } else { dir };
+                (dir.to_string(), &path[slash + 1..], true)
+            }
+        };
+        let full_dir = resolve_path(&state.cwd, &dir_part);
+        let Ok(entries) = fs.readdir_with_file_types(&full_dir) else {
+            // A missing directory yields no matches, dropping the operand.
+            continue;
+        };
+        let mut matched = Vec::new();
+        for entry in entries {
+            if rg_glob_match(glob_part, &entry.name) {
+                let full_path = if had_slash {
+                    format!("{dir_part}/{}", entry.name)
+                } else {
+                    entry.name.clone()
+                };
+                matched.push(full_path);
+            }
+        }
+        matched.sort();
+        expanded.extend(matched);
+    }
+    expanded
 }
 
 fn grep_inputs(
