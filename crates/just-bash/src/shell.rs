@@ -5406,6 +5406,77 @@ mod tests {
         Interpreter::new(FakeCommands::default())
     }
 
+    /// Covers `packages/just-bash/src/syntax/parser-edge-cases.test.ts` quoting,
+    /// escape-sequence, variable-expansion, whitespace, and operator-parsing rows
+    /// through the Rust shell interpreter. Each tuple mirrors an upstream `it(...)`
+    /// assertion on `Bash().exec(...)` stdout/exit code/stderr.
+    #[test]
+    fn jbr1_syntax_parser_edge_cases_match_upstream() {
+        // Quoting rows (lines 6, 12, 18, 24, 36, 42) and escape rows
+        // (lines 50, 56, 62, 74, 80) plus operator rows without spaces
+        // (lines 208, 214, 220, 226) run on a fresh shell.
+        for (source, expected_stdout) in [
+            ("echo \"hello 'world'\"", "hello 'world'\n"),
+            ("echo 'hello \"world\"'", "hello \"world\"\n"),
+            ("echo \"\"", "\n"),
+            ("echo ''", "\n"),
+            ("echo foo'bar'baz", "foobarbaz\n"),
+            ("echo '* ? | > < && || ;'", "* ? | > < && || ;\n"),
+            ("echo \"hello \\\"world\\\"\"", "hello \"world\"\n"),
+            ("echo \"a\\\\b\"", "a\\b\n"),
+            ("echo \"\\$HOME\"", "$HOME\n"),
+            ("echo 'a\\b'", "a\\b\n"),
+            ("echo a\\|b", "a|b\n"),
+            ("echo a&&echo b", "a\nb\n"),
+            ("false||echo fallback", "fallback\n"),
+            ("echo a;echo b", "a\nb\n"),
+            ("echo hello|cat", "hello\n"),
+            ("echo test | grep test || echo fail", "test\n"),
+            ("true && echo success", "success\n"),
+        ] {
+            let mut sh = shell();
+            let result = sh.exec(source);
+            assert_eq!(result.stderr, "", "stderr {source}");
+            assert_eq!(result.stdout, expected_stdout, "stdout {source}");
+            assert_eq!(result.exit_code, 0, "exit {source}");
+        }
+
+        // Variable-expansion rows (lines 88, 94, 100, 106, 112, 118, 124, 130)
+        // each need their own environment.
+        let mut set_var = shell().with_env([("VAR", "value")]);
+        assert_eq!(set_var.exec("echo \"${VAR:-default}\"").stdout, "value\n");
+        let mut unset_var = shell();
+        assert_eq!(
+            unset_var.exec("echo \"${VAR:-default}\"").stdout,
+            "default\n"
+        );
+        assert_eq!(unset_var.exec("echo \"${VAR:-}\"").stdout, "\n");
+        let mut name_env = shell().with_env([("NAME", "test")]);
+        assert_eq!(name_env.exec("echo $NAME").stdout, "test\n");
+        let mut ab_env = shell().with_env([("A", "hello"), ("B", "world")]);
+        assert_eq!(ab_env.exec("echo \"$A$B\"").stdout, "helloworld\n");
+        let mut name_file = shell().with_env([("NAME", "test")]);
+        assert_eq!(
+            name_file.exec("echo \"${NAME}file.txt\"").stdout,
+            "testfile.txt\n"
+        );
+        let mut undef = shell();
+        assert_eq!(undef.exec("echo \"[$UNDEFINED]\"").stdout, "[]\n");
+        let mut status_var = shell().with_env([("?", "0")]);
+        assert_eq!(status_var.exec("echo \"$?\"").stdout, "0\n");
+
+        // Whitespace rows (lines 139, 145, 151, 157, 163).
+        let mut ws = shell();
+        assert_eq!(ws.exec("echo    a    b    c").stdout, "a b c\n");
+        assert_eq!(ws.exec("echo\ta\tb\tc").stdout, "a b c\n");
+        assert_eq!(ws.exec("   echo hello").stdout, "hello\n");
+        assert_eq!(ws.exec("echo hello   ").stdout, "hello\n");
+        assert_eq!(
+            ws.exec("echo \"  hello   world  \"").stdout,
+            "  hello   world  \n"
+        );
+    }
+
     #[test]
     fn just_bash_parser_edge_cases_handles_adjacent_quoted_strings() {
         let result = shell().exec("echo 'hello'\"world\"");
