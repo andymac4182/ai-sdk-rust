@@ -6319,6 +6319,11 @@ fn parse_rg_option(
         "--sort" => {
             rg_option_value(args, index, "--sort")?;
         }
+        // `-j`/`--threads` is a ripgrep compatibility flag. It consumes the
+        // thread-count value but is a no-op: it must NOT clobber maxDepth.
+        "-j" | "--threads" => {
+            rg_option_value(args, index, arg)?;
+        }
         "--glob" => options.globs.push(rg_option_value(args, index, "--glob")?),
         "--type" => options
             .type_includes
@@ -6417,6 +6422,8 @@ fn parse_rg_option(
                 .type_excludes
                 .push(arg["--type-not=".len()..].to_string());
         }
+        // `--threads=N` compatibility flag: value consumed, no-op (ignored).
+        _ if arg.starts_with("--threads=") => {}
         _ if arg.starts_with("--max-count=") => {
             options.max_count = Some(rg_parse_usize(&arg["--max-count=".len()..]));
         }
@@ -6467,16 +6474,36 @@ fn parse_rg_option(
         _ if arg.starts_with("-T") && arg.len() > 2 => {
             options.type_excludes.push(arg[2..].to_string());
         }
-        _ if arg.starts_with('-') => parse_rg_short_flags(arg, options)?,
+        _ if arg.starts_with('-') => parse_rg_short_flags(args, index, options)?,
         _ => {}
     }
     *index += 1;
     Ok(None)
 }
 
-fn parse_rg_short_flags(arg: &str, options: &mut RgOptions) -> Result<(), CommandResult> {
+fn parse_rg_short_flags(
+    args: &[String],
+    index: &mut usize,
+    options: &mut RgOptions,
+) -> Result<(), CommandResult> {
+    let arg = args[*index].clone();
     let mut unrestricted = 0;
-    for flag in arg[1..].chars() {
+    let mut chars = arg[1..].chars().peekable();
+    while let Some(flag) = chars.next() {
+        // `-j`/threads is a ripgrep compatibility flag: it consumes a value but
+        // is intentionally ignored. When bundled (e.g. `-Iij 4`) it must be the
+        // last flag in the group, taking the following positional as its value.
+        if flag == 'j' {
+            // Attached form (`-j4`, or bundled `-Iij4`): the remaining chars are
+            // the thread-count value and are discarded.
+            if chars.peek().is_some() {
+                break;
+            }
+            // Separated form (`-j 4`, `-Iij 4`): consume the next positional as
+            // the thread-count value without touching maxDepth.
+            rg_option_value(args, index, "-j")?;
+            break;
+        }
         match flag {
             'n' => options.line_number = Some(true),
             'N' => options.line_number = Some(false),

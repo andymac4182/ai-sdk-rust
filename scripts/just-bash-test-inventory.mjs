@@ -1080,6 +1080,42 @@ const jbc10CaseGroups = [
     notes:
       'JBC-10 classifies the upstream `it.skip` regression rg rows that require unimplemented features: PCRE2 look-ahead/look-behind (r1401_x2, r1412, r1573, r3139), --crlf (r1765), --no-unicode (r2574), and --null-data (r2658). The Rust rg port rejects PCRE2/look-around regex and these flags as unrecognized options, asserted by the named Rust test.',
   },
+  {
+    file: 'packages/just-bash/src/commands/rg/rg-parser-threads.test.ts',
+    lines: [30, 35, 40, 45, 50, 57],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_parser_threads_compat_flag_never_clobbers_max_depth',
+    notes:
+      'JBC-10 verifies the `-j`/`--threads` ripgrep compatibility flag is a value-consuming no-op that never clobbers max-depth: the Rust port preserves the default depth and any explicit --max-depth set before or after -j, accepts the long --threads form (including --threads=N), and handles the combined short form -Iij <n>. The named Rust test exercises deep virtual-filesystem traversal so it fails if -j ever mutates depth.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/binary.test.ts',
+    lines: [292, 293, 294, 295, 296, 297, 298, 299],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_unsupported_upstream_skip_features_are_rejected_or_classified',
+    notes:
+      'JBC-10 classifies the upstream `it.skip` rg binary mmap rows (memory map not supported). The virtual-filesystem Rust port has no memory-mapped search path and rejects --mmap/--no-mmap as unrecognized options, asserted by the named Rust test so it fails if mmap support is ever added.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
+    lines: [1124, 1125, 1128, 1131],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_unsupported_upstream_skip_features_are_rejected_or_classified',
+    notes:
+      'JBC-10 classifies the upstream `it.skip` misc binary rows: binary_convert_mmap, binary_search_mmap, binary_quit_mmap (mmap not relevant) and binary_quit (binary-quit behavior not implemented). The Rust port rejects --mmap/--no-mmap and --binary as unrecognized options, asserted by the named Rust test.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [504, 505, 639, 880, 988, 1220, 1239, 1293, 1309],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_unsupported_upstream_skip_features_are_rejected_or_classified',
+    notes:
+      'JBC-10 classifies the upstream `it.skip` regression rg rows for unimplemented features: color output (r428 color context path / unrecognized style, r599 color with empty matches via --color/--colors), case-insensitive ignore-file matching (r1164 via --ignore-file-case-insensitive), and multiline/vimgrep/passthru/replacement rows (--multiline/-U, --vimgrep, --passthru, --replace/-r). The Rust port rejects each of these flags as unrecognized options, asserted by the named Rust test so it fails if support is ever added.',
+  },
 ];
 
 const jbc12SourceGroups = [
