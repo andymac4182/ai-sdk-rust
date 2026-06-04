@@ -4862,6 +4862,33 @@ const jbR5ParserInterpreterCaseGroups = [
     notes:
       'R5 verifies the portable `continue` builtin 1:1 with continue.test.ts: skipping to the next iteration of for/while/until loops, `continue n` multi-level and single-level continues, level exceeding loop depth, silent no-op outside a loop, fatal numeric-argument-required errors (non-numeric/zero/negative) with exit 1, fatal too-many-arguments error with exit 1, and continue inside case/if/function nested in a loop. The two C-style `for (( ))` rows (L197, L208) stay pending until C-style for loops are implemented.',
   },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/eval.test.ts',
+    lines: [6, 13, 19, 26, 35, 44, 54, 66, 81, 89, 95, 101, 112, 122, 131, 142, 148],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::builtins::eval',
+    rustTest: 'jbpi_interpreter_builtin_eval_matches_upstream',
+    notes:
+      'R10JB verifies the portable `eval` builtin 1:1 with eval.test.ts through the Rust parser/interpreter: simple/multi-word commands, empty/no-argument no-ops, variable expansion before execution (including dynamic names and dynamic assignment), command construction over expanded word lists, command substitution, exit-code propagation of the executed/last command, the parse-error row (exit 1 with "Parse error"), current-environment execution, function visibility and persistent definition, and single/double quote handling. The piped row (L75) stays pending because `tr` is not provided by the parser/interpreter command seam.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/return.test.ts',
+    lines: [6, 21, 33, 46, 60, 72, 84, 98, 107],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::builtins::return',
+    rustTest: 'jbpi_interpreter_builtin_return_matches_upstream',
+    notes:
+      'R10JB verifies the portable `return` builtin 1:1 with return.test.ts through the Rust parser/interpreter: default/explicit/last-command/zero exit codes, modulo-256 wrapping (256->0, 257->1, -1->255), the not-in-a-function error (exit 1) and non-numeric-argument error (exit 2), innermost-only return in nested functions, propagation through control flow inside the function body, and stdout preservation before return.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/exit.test.ts',
+    lines: [72, 85, 101, 110],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::builtins::exit',
+    rustTest: 'jbpi_interpreter_builtin_exit_context_and_last_status_rows',
+    notes:
+      'R10JB verifies the previously-pending exit.test.ts rows through the Rust parser/interpreter: exit from inside a for loop and from inside an if block both stop the script with the requested code, and no-argument `exit` resolves to the last command status (1 after `false`, 0 after `true`).',
+  },
 ];
 
 const jbExecOptionsLoggingCaseGroups = [

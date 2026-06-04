@@ -2857,6 +2857,15 @@ pub struct ShellState {
     errexit_suppressed: u32,
     xtrace: bool,
     exited: Option<i32>,
+    /// Pending `return` signal raised by the `return` builtin. Carries the
+    /// status the enclosing function call should resolve to. Cleared once the
+    /// nearest `call_function` consumes it. Only valid while `function_depth`
+    /// is greater than 0.
+    returning: Option<i32>,
+    /// Number of shell functions currently executing on the call stack. The
+    /// `return` builtin is only valid (and only sets `returning`) when this is
+    /// greater than 0; otherwise it is an error.
+    function_depth: u32,
     /// Pending loop-control signal raised by the `break`/`continue` builtins.
     /// Carries the number of loop levels still to unwind (bash `break n` /
     /// `continue n`). Cleared once the target loop consumes it.
@@ -3011,6 +3020,8 @@ impl<D: CommandDispatcher> Interpreter<D> {
         let old_functions = std::mem::take(&mut self.state.functions);
         let old_aliases = self.state.aliases.clone();
         self.state.exited = None;
+        self.state.returning = None;
+        self.state.function_depth = 0;
         self.state.loop_control = None;
         self.state.loop_depth = 0;
         self.state.subshell_depth = 0;
@@ -3038,7 +3049,10 @@ impl<D: CommandDispatcher> Interpreter<D> {
     fn execute_statements(&mut self, statements: &[Statement]) -> ExecOutput {
         let mut output = ExecOutput::default();
         for statement in statements {
-            if self.state.exited.is_some() || self.state.loop_control.is_some() {
+            if self.state.exited.is_some()
+                || self.state.loop_control.is_some()
+                || self.state.returning.is_some()
+            {
                 break;
             }
             let result = self.execute_statement(statement);
@@ -3051,6 +3065,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 && self.state.errexit_suppressed == 0
                 && self.state.exited.is_none()
                 && self.state.loop_control.is_none()
+                && self.state.returning.is_none()
                 && status != 0
             {
                 self.state.exited = Some(status);
@@ -3445,19 +3460,82 @@ impl<D: CommandDispatcher> Interpreter<D> {
             "alias" => Some(self.execute_alias(args)),
             "unalias" => Some(self.execute_unalias(args)),
             "exit" => {
-                let code = args
-                    .first()
-                    .and_then(|arg| arg.parse::<i32>().ok())
-                    .unwrap_or(0);
+                // With no argument, `exit` resolves to the most recent command's
+                // status (bash semantics). With an argument, parse it and wrap
+                // modulo 256; a non-numeric argument is a status-2 error (the
+                // shell still exits, like bash).
+                let (code, stderr) = match args.first() {
+                    None => (self.state.last_status, String::new()),
+                    Some(arg) => match arg.parse::<i64>() {
+                        Ok(value) => (value.rem_euclid(256) as i32, String::new()),
+                        Err(_) => (2, format!("bash: exit: {arg}: numeric argument required\n")),
+                    },
+                };
                 self.state.exited = Some(code);
                 Some(ExecOutput {
                     stdout: String::new(),
-                    stderr: String::new(),
+                    stderr,
                     exit_code: code,
                 })
             }
             "break" | "continue" => Some(self.execute_loop_control(name, args)),
+            "return" => Some(self.execute_return(args)),
+            "eval" => Some(self.execute_eval(args)),
             _ => None,
+        }
+    }
+
+    /// `return [n]` builtin. Outside a function (and outside a sourced script,
+    /// which Just Bash does not model) it is an error. With no argument it
+    /// resolves to the last command's status; otherwise it parses `n` and wraps
+    /// it modulo 256 (matching `exit`). A non-numeric argument is a status-2
+    /// error and does not raise the return signal.
+    fn execute_return(&mut self, args: &[String]) -> ExecOutput {
+        if self.state.function_depth == 0 {
+            return ExecOutput {
+                stdout: String::new(),
+                stderr: "bash: return: can only `return' from a function or sourced script\n"
+                    .to_string(),
+                exit_code: 1,
+            };
+        }
+        let code = match args.first() {
+            None => self.state.last_status,
+            Some(arg) => match arg.parse::<i64>() {
+                Ok(value) => value.rem_euclid(256) as i32,
+                Err(_) => {
+                    return ExecOutput {
+                        stdout: String::new(),
+                        stderr: format!("bash: return: {arg}: numeric argument required\n"),
+                        exit_code: 2,
+                    };
+                }
+            },
+        };
+        self.state.returning = Some(code);
+        ExecOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: code,
+        }
+    }
+
+    /// `eval [arg ...]` builtin. The arguments are joined with single spaces,
+    /// re-parsed, and executed in the current environment. An empty program (no
+    /// args or an empty string) is a success no-op. A parse error reports
+    /// "Parse error" on stderr and resolves to status 1.
+    fn execute_eval(&mut self, args: &[String]) -> ExecOutput {
+        let program = args.join(" ");
+        if program.trim().is_empty() {
+            return ExecOutput::default();
+        }
+        match parse(&program) {
+            Ok(script) => self.exec_script(&script),
+            Err(error) => ExecOutput {
+                stdout: String::new(),
+                stderr: format!("bash: eval: Parse error: {error}\n"),
+                exit_code: 1,
+            },
         }
     }
 
@@ -3692,7 +3770,14 @@ impl<D: CommandDispatcher> Interpreter<D> {
     fn call_function(&mut self, function: FunctionDef, args: Vec<String>) -> ExecOutput {
         let saved_positionals = std::mem::replace(&mut self.state.positionals, args);
         self.state.local_scopes.push(BTreeMap::new());
-        let output = self.execute_command(&function.body, String::new());
+        self.state.function_depth += 1;
+        let mut output = self.execute_command(&function.body, String::new());
+        self.state.function_depth -= 1;
+        // A `return` raised inside this function stops at its own frame: consume
+        // the pending signal and resolve the call's status to the returned code.
+        if let Some(code) = self.state.returning.take() {
+            output.exit_code = code;
+        }
         self.state.local_scopes.pop();
         self.state.positionals = saved_positionals;
         output
@@ -3737,7 +3822,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
             }
             self.state.assign_var(command.variable.clone(), value);
             output.append(self.execute_statements(&command.body));
-            if self.state.exited.is_some() {
+            if self.state.exited.is_some() || self.state.returning.is_some() {
                 break;
             }
             match self.consume_loop_control() {
@@ -3797,7 +3882,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 return output;
             }
             output.append(self.execute_statements(&command.body));
-            if self.state.exited.is_some() {
+            if self.state.exited.is_some() || self.state.returning.is_some() {
                 self.state.loop_depth -= 1;
                 return output;
             }
@@ -6703,6 +6788,228 @@ mod tests {
                 .stdout,
             "done\n"
         );
+    }
+
+    /// Mirrors `packages/just-bash/src/interpreter/builtins/eval.test.ts`
+    /// portable rows 1:1 through the Rust parser/interpreter `Bash().exec`.
+    /// Covers basic evaluation (L6/L13/L19/L26), variable expansion before
+    /// execution including dynamic names and dynamic assignment
+    /// (L35/L44/L54), command construction over expanded word lists and
+    /// command substitution (L66/L81), exit-code propagation of the last
+    /// command (L91/L97), the parse-error row (L101), current-environment and
+    /// function visibility/definition (L112/L122/L131), and single/double
+    /// quote handling (L142/L148). The piped row (L75) stays pending because
+    /// `tr` is not provided by the parser/interpreter command seam.
+    #[test]
+    fn jbpi_interpreter_builtin_eval_matches_upstream() {
+        // L6 simple command.
+        let r = shell().exec("eval \"echo hello\"");
+        assert_eq!(r.stdout, "hello\n");
+        assert_eq!(r.exit_code, 0);
+        // L13 multiple words as a single command.
+        assert_eq!(
+            shell().exec("eval echo hello world").stdout,
+            "hello world\n"
+        );
+        // L19 empty argument is a success no-op.
+        let r = shell().exec("eval \"\"");
+        assert_eq!(r.stdout, "");
+        assert_eq!(r.exit_code, 0);
+        // L26 no arguments is a success no-op.
+        let r = shell().exec("eval");
+        assert_eq!(r.stdout, "");
+        assert_eq!(r.exit_code, 0);
+        // L35 expands variables before execution.
+        assert_eq!(
+            shell().exec("cmd=\"echo hello\"\neval $cmd").stdout,
+            "hello\n"
+        );
+        // L44 dynamic variable names.
+        assert_eq!(
+            shell()
+                .exec("name=\"FOO\"\nFOO=\"bar\"\neval \"echo \\$$name\"")
+                .stdout,
+            "bar\n"
+        );
+        // L54 dynamic variable assignment.
+        assert_eq!(
+            shell()
+                .exec("name=\"MYVAR\"\neval \"$name=hello\"\necho $MYVAR")
+                .stdout,
+            "hello\n"
+        );
+        // L66 command construction over an expanded word list.
+        assert_eq!(
+            shell()
+                .exec("args=\"a b c\"\neval \"for x in $args; do echo item: \\$x; done\"")
+                .stdout,
+            "item: a\nitem: b\nitem: c\n"
+        );
+        // L81 command substitution inside eval.
+        assert_eq!(
+            shell().exec("eval \"echo $(echo nested)\"").stdout,
+            "nested\n"
+        );
+        // L91 returns the exit code of the executed command.
+        assert_eq!(shell().exec("eval false").exit_code, 1);
+        // L97 returns the exit code of the last command.
+        assert_eq!(shell().exec("eval \"true; false; true\"").exit_code, 0);
+        // L101 parse error: exit 1 and "Parse error" on stderr.
+        let r = shell().exec("eval \"for do done\"");
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("Parse error"), "stderr: {:?}", r.stderr);
+        // L112 executes in the current environment.
+        assert_eq!(
+            shell()
+                .exec("FOO=original\neval \"FOO=modified\"\necho $FOO")
+                .stdout,
+            "modified\n"
+        );
+        // L122 has access to existing functions.
+        assert_eq!(
+            shell()
+                .exec("myfunc() { echo \"called\"; }\neval \"myfunc\"")
+                .stdout,
+            "called\n"
+        );
+        // L131 defines functions that persist after eval.
+        assert_eq!(
+            shell()
+                .exec("eval 'greet() { echo \"hello $1\"; }'\ngreet world")
+                .stdout,
+            "hello world\n"
+        );
+        // L142 single quotes.
+        assert_eq!(
+            shell().exec("eval \"echo 'single quoted'\"").stdout,
+            "single quoted\n"
+        );
+        // L148 double quotes.
+        assert_eq!(
+            shell().exec("eval 'echo \"double quoted\"'").stdout,
+            "double quoted\n"
+        );
+    }
+
+    /// Mirrors `packages/just-bash/src/interpreter/builtins/return.test.ts`
+    /// portable rows 1:1 through the Rust parser/interpreter `Bash().exec`.
+    /// Covers basic return with the default/explicit/last-command status and
+    /// status 0 (L6/L20/L31/L43), modulo-256 wrapping including the negative
+    /// row (L57/L69/L80), the not-in-a-function and non-numeric error rows
+    /// (L94/L101), innermost-only return and propagation through control flow
+    /// (L116/L132), and stdout preservation before return (L148).
+    #[test]
+    fn jbpi_interpreter_builtin_return_matches_upstream() {
+        // L6 default exit code stops the function body but not the caller.
+        assert_eq!(
+            shell()
+                .exec("myfunc() {\necho before\nreturn\necho after\n}\nmyfunc\necho done")
+                .stdout,
+            "before\ndone\n"
+        );
+        // L20 explicit return code surfaces via $?.
+        assert_eq!(
+            shell()
+                .exec("myfunc() { return 42; }\nmyfunc\necho $?")
+                .stdout,
+            "42\n"
+        );
+        // L31 no argument uses the last command's exit code.
+        assert_eq!(
+            shell()
+                .exec("myfunc() { false; return; }\nmyfunc\necho $?")
+                .stdout,
+            "1\n"
+        );
+        // L43 explicit return 0.
+        assert_eq!(
+            shell()
+                .exec("myfunc() { return 0; }\nmyfunc\necho $?")
+                .stdout,
+            "0\n"
+        );
+        // L57 return 256 wraps to 0.
+        assert_eq!(
+            shell()
+                .exec("myfunc() { return 256; }\nmyfunc\necho $?")
+                .stdout,
+            "0\n"
+        );
+        // L69 return 257 wraps to 1.
+        assert_eq!(
+            shell()
+                .exec("myfunc() { return 257; }\nmyfunc\necho $?")
+                .stdout,
+            "1\n"
+        );
+        // L80 return -1 wraps to 255.
+        assert_eq!(
+            shell()
+                .exec("myfunc() { return -1; }\nmyfunc\necho $?")
+                .stdout,
+            "255\n"
+        );
+        // L94 return outside a function is an error (exit 1).
+        let r = shell().exec("return");
+        assert!(
+            r.stderr
+                .contains("can only `return' from a function or sourced script"),
+            "stderr: {:?}",
+            r.stderr
+        );
+        assert_eq!(r.exit_code, 1);
+        // L101 non-numeric argument is a status-2 error.
+        let r = shell().exec("myfunc() { return abc; }\nmyfunc");
+        assert!(
+            r.stderr.contains("numeric argument required"),
+            "stderr: {:?}",
+            r.stderr
+        );
+        assert_eq!(r.exit_code, 2);
+        // L116 only the innermost function returns.
+        assert_eq!(
+            shell()
+                .exec("outer() {\necho outer-start\ninner() {\necho inner\nreturn 5\n}\ninner\necho \"inner returned $?\"\n}\nouter\necho \"outer returned $?\"")
+                .stdout,
+            "outer-start\ninner\ninner returned 5\nouter returned 0\n"
+        );
+        // L132 return propagates through control flow inside the function.
+        assert_eq!(
+            shell()
+                .exec("myfunc() { for i in 1 2 3; do if [ $i -eq 2 ]; then return 42; fi; echo $i; done; echo never; }\nmyfunc\necho $?")
+                .stdout,
+            "1\n42\n"
+        );
+        // L148 stdout produced before return is preserved.
+        assert_eq!(
+            shell()
+                .exec("myfunc() { echo line1; echo line2; return 3; }\nmyfunc\necho \"exit: $?\"")
+                .stdout,
+            "line1\nline2\nexit: 3\n"
+        );
+    }
+
+    /// Mirrors the previously-pending rows of
+    /// `packages/just-bash/src/interpreter/builtins/exit.test.ts` through the
+    /// Rust parser/interpreter `Bash().exec`: exit from inside a for loop
+    /// (L72), exit from inside an if block (L85), and the no-argument rows
+    /// that resolve to the last command's status (L101 after `false`, L110
+    /// after `true`). The remaining exit rows are covered by the exec-engine
+    /// `builtins_exit_*` tests.
+    #[test]
+    fn jbpi_interpreter_builtin_exit_context_and_last_status_rows() {
+        // L72 exit from a loop stops the loop and the script.
+        let r = shell().exec("for i in 1 2 3; do echo $i; exit 10; done\necho never");
+        assert_eq!(r.stdout, "1\n");
+        assert_eq!(r.exit_code, 10);
+        // L85 exit from an if block stops the script.
+        let r = shell().exec("if true; then echo in; exit 7; echo never; fi\necho never2");
+        assert_eq!(r.stdout, "in\n");
+        assert_eq!(r.exit_code, 7);
+        // L101 no-arg exit uses the last status (false -> 1).
+        assert_eq!(shell().exec("false\nexit").exit_code, 1);
+        // L110 no-arg exit uses the last status (true -> 0).
+        assert_eq!(shell().exec("true\nexit").exit_code, 0);
     }
 
     #[test]
