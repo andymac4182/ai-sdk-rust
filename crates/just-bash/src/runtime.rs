@@ -12096,6 +12096,332 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn structured_data_xan_map_rows() {
+        // Ports packages/just-bash/src/commands/xan/xan.map.test.ts:10,19,30,39,50,
+        // 63,76,102,113,126,139,150 (the "uses trim function" case at :89 requires
+        // CSV quote preservation, which the in-memory CSV reader does not model).
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/ab.csv".to_string(), "a,b\n1,2\n2,3\n".to_string()),
+                ("/n.csv".to_string(), "n\n10\n15\n".to_string()),
+                ("/ob.csv".to_string(), "a,b\n1,4\n5,2\n".to_string()),
+                (
+                    "/names.csv".to_string(),
+                    "full_name\njohn landis\nbéatrice babka\n".to_string(),
+                ),
+                (
+                    "/names2.csv".to_string(),
+                    "full_name\njohn landis\nmary smith\n".to_string(),
+                ),
+                ("/case.csv".to_string(), "name\nJohn\nmary\n".to_string()),
+                (
+                    "/words.csv".to_string(),
+                    "word\ncat\ndog\nelephant\n".to_string(),
+                ),
+                ("/xy.csv".to_string(), "x,y\n10,3\n20,4\n".to_string()),
+                ("/neg.csv".to_string(), "n\n-5.7\n3.2\n".to_string()),
+                ("/score.csv".to_string(), "score\n85\n55\n70\n".to_string()),
+                (
+                    "/coalesce.csv".to_string(),
+                    "name,id\njohn,1\n,2\nmary,3\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // adds computed column
+        assert_eq!(
+            env.exec("xan map 'add(a, b) as c' /ab.csv").stdout,
+            "a,b,c\n1,2,3\n2,3,5\n"
+        );
+        // adds multiple computed columns
+        assert_eq!(
+            env.exec("xan map 'add(a, b) as c, mul(a, b) as d' /ab.csv")
+                .stdout,
+            "a,b,c,d\n1,2,3,2\n2,3,5,6\n"
+        );
+        // uses index() function
+        assert_eq!(
+            env.exec("xan map 'index() as r' /n.csv").stdout,
+            "n,r\n10,0\n15,1\n"
+        );
+        // overwrites columns with -O
+        assert_eq!(
+            env.exec("xan map -O 'b * 10 as b, a * b as c' /ob.csv")
+                .stdout,
+            "a,b,c\n1,40,4\n5,20,10\n"
+        );
+        // filters rows with --filter
+        assert_eq!(
+            env.exec(
+                "xan map \"if(startswith(full_name, 'j'), split(full_name, ' ')[0]) as first_name\" --filter /names.csv"
+            )
+            .stdout,
+            "full_name,first_name\njohn landis,john\n"
+        );
+        // uses split function
+        assert_eq!(
+            env.exec("xan map \"split(full_name, ' ')[0] as first\" /names2.csv")
+                .stdout,
+            "full_name,first\njohn landis,john\nmary smith,mary\n"
+        );
+        // uses upper and lower
+        assert_eq!(
+            env.exec("xan map 'upper(name) as upper, lower(name) as lower' /case.csv")
+                .stdout,
+            "name,upper,lower\nJohn,JOHN,john\nmary,MARY,mary\n"
+        );
+        // uses len function
+        assert_eq!(
+            env.exec("xan map 'len(word) as length' /words.csv").stdout,
+            "word,length\ncat,3\ndog,3\nelephant,8\n"
+        );
+        // computes arithmetic expressions
+        assert_eq!(
+            env.exec("xan map 'x + y as sum, x - y as diff, x * y as prod, x / y as quot' /xy.csv")
+                .stdout,
+            "x,y,sum,diff,prod,quot\n10,3,13,7,30,3.3333333333333335\n20,4,24,16,80,5\n"
+        );
+        // uses abs and round
+        assert_eq!(
+            env.exec("xan map 'abs(n) as absolute, round(n) as rounded' /neg.csv")
+                .stdout,
+            "n,absolute,rounded\n-5.7,5.7,-6\n3.2,3.2,3\n"
+        );
+        // uses if expression
+        assert_eq!(
+            env.exec("xan map \"if(score >= 60, 'pass', 'fail') as result\" /score.csv")
+                .stdout,
+            "score,result\n85,pass\n55,fail\n70,pass\n"
+        );
+        // uses coalesce for defaults
+        assert_eq!(
+            env.exec("xan map \"coalesce(name, 'unknown') as name_safe\" /coalesce.csv")
+                .stdout,
+            "name,id,name_safe\njohn,1,john\n,2,unknown\nmary,3,mary\n"
+        );
+    }
+
+    #[test]
+    fn structured_data_xan_reshape_rows() {
+        // Ports packages/just-bash/src/commands/xan/xan.reshape.test.ts:
+        // explode (12,21,30,39,48,58), implode (70,80,90,100), pivot (113,127,
+        // 140,153,166).
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/tags.csv".to_string(),
+                    "id,tags\n1,a|b|c\n2,x|y\n".to_string(),
+                ),
+                ("/items.csv".to_string(), "id,items\n1,a;b;c\n".to_string()),
+                ("/tags2.csv".to_string(), "id,tags\n1,a|b\n".to_string()),
+                (
+                    "/tagsempty.csv".to_string(),
+                    "id,tags\n1,a|b\n2,\n3,c\n".to_string(),
+                ),
+                ("/missing.csv".to_string(), "id,tags\n1,a\n".to_string()),
+                (
+                    "/impl.csv".to_string(),
+                    "id,tag\n1,a\n1,b\n1,c\n2,x\n2,y\n".to_string(),
+                ),
+                ("/impl2.csv".to_string(), "id,val\n1,a\n1,b\n".to_string()),
+                ("/impl3.csv".to_string(), "id,tag\n1,a\n1,b\n".to_string()),
+                (
+                    "/impl4.csv".to_string(),
+                    "id,tag\n1,a\n2,x\n1,b\n".to_string(),
+                ),
+                (
+                    "/pivot.csv".to_string(),
+                    "region,product,amount\nnorth,A,10\nnorth,B,20\nsouth,A,15\nsouth,B,25\n"
+                        .to_string(),
+                ),
+                (
+                    "/pivot2.csv".to_string(),
+                    "region,product,amount\nnorth,A,10\nnorth,B,20\nsouth,A,15\nsouth,A,5\n"
+                        .to_string(),
+                ),
+                (
+                    "/pivot3.csv".to_string(),
+                    "cat,type,val\nX,a,10\nX,a,20\nX,b,30\n".to_string(),
+                ),
+                (
+                    "/pivot4.csv".to_string(),
+                    "year,quarter,sales\n2023,Q1,100\n2023,Q2,150\n2024,Q1,120\n".to_string(),
+                ),
+                ("/pivot5.csv".to_string(), "a,b,c\n1,2,3\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // explode: splits delimited values into rows
+        assert_eq!(
+            env.exec("xan explode tags /tags.csv").stdout,
+            "id,tags\n1,a\n1,b\n1,c\n2,x\n2,y\n"
+        );
+        // explode: custom separator with -s
+        assert_eq!(
+            env.exec("xan explode items -s ';' /items.csv").stdout,
+            "id,items\n1,a\n1,b\n1,c\n"
+        );
+        // explode: renames column with -r
+        assert_eq!(
+            env.exec("xan explode tags -r tag /tags2.csv").stdout,
+            "id,tag\n1,a\n1,b\n"
+        );
+        // explode: handles empty values
+        assert_eq!(
+            env.exec("xan explode tags /tagsempty.csv").stdout,
+            "id,tags\n1,a\n1,b\n2,\n3,c\n"
+        );
+        // explode: drops empty rows with --drop-empty
+        assert_eq!(
+            env.exec("xan explode tags --drop-empty /tagsempty.csv")
+                .stdout,
+            "id,tags\n1,a\n1,b\n3,c\n"
+        );
+        // explode: errors on missing column
+        let err = env.exec("xan explode nonexistent /missing.csv");
+        assert_eq!(err.exit_code, 1);
+        assert!(err.stderr.contains("not found"));
+
+        // implode: combines consecutive rows with same key
+        assert_eq!(
+            env.exec("xan implode tag /impl.csv").stdout,
+            "id,tag\n1,a|b|c\n2,x|y\n"
+        );
+        // implode: custom separator with -s
+        assert_eq!(
+            env.exec("xan implode val -s ';' /impl2.csv").stdout,
+            "id,val\n1,a;b\n"
+        );
+        // implode: renames column with -r
+        assert_eq!(
+            env.exec("xan implode tag -r tags /impl3.csv").stdout,
+            "id,tags\n1,a|b\n"
+        );
+        // implode: only groups consecutive rows with same key
+        assert_eq!(
+            env.exec("xan implode tag /impl4.csv").stdout,
+            "id,tag\n1,a\n2,x\n1,b\n"
+        );
+
+        // pivot: count aggregation
+        assert_eq!(
+            env.exec("xan pivot product 'count(amount)' -g region /pivot.csv")
+                .stdout,
+            "region,A,B\nnorth,1,1\nsouth,1,1\n"
+        );
+        // pivot: sum aggregation (south has no B -> 0)
+        assert_eq!(
+            env.exec("xan pivot product 'sum(amount)' -g region /pivot2.csv")
+                .stdout,
+            "region,A,B\nnorth,10,20\nsouth,20,0\n"
+        );
+        // pivot: mean aggregation
+        assert_eq!(
+            env.exec("xan pivot type 'mean(val)' -g cat /pivot3.csv")
+                .stdout,
+            "cat,a,b\nX,15,30\n"
+        );
+        // pivot: auto-determines group columns when not specified
+        assert_eq!(
+            env.exec("xan pivot quarter 'sum(sales)' /pivot4.csv")
+                .stdout,
+            "year,Q1,Q2\n2023,100,150\n2024,120,0\n"
+        );
+        // pivot: errors on invalid aggregation expression
+        let err = env.exec("xan pivot b 'invalid syntax' /pivot5.csv");
+        assert_eq!(err.exit_code, 1);
+        assert!(err.stderr.contains("invalid aggregation"));
+    }
+
+    #[test]
+    fn structured_data_xan_multifile_join_merge_rows() {
+        // Ports packages/just-bash/src/commands/xan/xan.multifile.test.ts:
+        // join (117,133,149,165) and merge (183,195,207,219).
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/left.csv".to_string(),
+                    "id,name\n1,alice\n2,bob\n".to_string(),
+                ),
+                (
+                    "/right.csv".to_string(),
+                    "user_id,score\n1,100\n".to_string(),
+                ),
+                ("/users.csv".to_string(), "id,name\n1,alice\n".to_string()),
+                (
+                    "/orders.csv".to_string(),
+                    "user_id,item\n1,book\n1,pen\n1,paper\n".to_string(),
+                ),
+                (
+                    "/dl.csv".to_string(),
+                    "id,name,status\n1,alice,active\n2,bob,inactive\n".to_string(),
+                ),
+                (
+                    "/dr.csv".to_string(),
+                    "id,status,score\n1,verified,100\n2,pending,85\n".to_string(),
+                ),
+                ("/a.csv".to_string(), "id,name\n1,alice\n".to_string()),
+                ("/b.csv".to_string(), "user_id,score\n1,100\n".to_string()),
+                ("/m1.csv".to_string(), "id,val\n1,a\n3,c\n".to_string()),
+                ("/m2.csv".to_string(), "id,val\n2,b\n4,d\n".to_string()),
+                ("/mh1.csv".to_string(), "id,name\n1,alice\n".to_string()),
+                (
+                    "/mh2.csv".to_string(),
+                    "id,email\n2,bob@x.com\n".to_string(),
+                ),
+                ("/m3.csv".to_string(), "id,val\n1,a\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // join: uses default value with -D
+        assert_eq!(
+            env.exec("xan join --left -D 'N/A' id /left.csv user_id /right.csv")
+                .stdout,
+            "id,name,user_id,score\n1,alice,1,100\n2,bob,N/A,N/A\n"
+        );
+        // join: handles one-to-many joins
+        assert_eq!(
+            env.exec("xan join id /users.csv user_id /orders.csv")
+                .stdout,
+            "id,name,user_id,item\n1,alice,1,book\n1,alice,1,pen\n1,alice,1,paper\n"
+        );
+        // join: deduplicates shared column names
+        assert_eq!(
+            env.exec("xan join id /dl.csv id /dr.csv").stdout,
+            "id,name,status,score\n1,alice,active,100\n2,bob,inactive,85\n"
+        );
+        // join: errors on missing key column
+        let err = env.exec("xan join nonexistent /a.csv user_id /b.csv");
+        assert_eq!(err.exit_code, 1);
+        assert_eq!(
+            err.stderr,
+            "xan join: column 'nonexistent' not found in first file\n"
+        );
+
+        // merge: merges multiple files with same headers
+        assert_eq!(
+            env.exec("xan merge /m1.csv /m2.csv").stdout,
+            "id,val\n1,a\n3,c\n2,b\n4,d\n"
+        );
+        // merge: sorts merged data with -s
+        assert_eq!(
+            env.exec("xan merge -s id /m1.csv /m2.csv").stdout,
+            "id,val\n1,a\n2,b\n3,c\n4,d\n"
+        );
+        // merge: errors on mismatched headers
+        let err = env.exec("xan merge /mh1.csv /mh2.csv");
+        assert_eq!(err.exit_code, 1);
+        assert!(err.stderr.contains("same headers"));
+        // merge: requires at least 2 files
+        let err = env.exec("xan merge /m3.csv");
+        assert_eq!(err.exit_code, 1);
+        assert!(err.stderr.contains("usage"));
+    }
+
+    #[test]
     fn structured_data_sqlite3_options_errors_and_simple_select_rows() {
         let env = bash();
 
