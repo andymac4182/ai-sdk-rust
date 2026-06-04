@@ -6691,6 +6691,31 @@ fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
     } else {
         GrepMode::ExtendedRegex
     };
+    // Multiline mode (`-U`/`--multiline`): the pattern is matched against the
+    // whole file content rather than line-by-line, so `\n` in the pattern can
+    // span lines. ripgrep keeps `^`/`$` line-anchored (multi-line flag `m`) and
+    // by default `.` still does NOT match `\n` (dotall only with
+    // `--multiline-dotall`).
+    if request.options.multiline {
+        let multiline = match rg_build_multiline_regexes(&patterns, ignore_case, &request.options) {
+            Ok(regexes) => regexes,
+            Err(error) => return stderr_result(2, format!("rg: {error}\n")),
+        };
+        let inputs = if request.roots.is_empty() && !stdin.is_empty() {
+            vec![RgInput {
+                label: "<stdin>".to_string(),
+                text: stdin.to_string(),
+                explicit_file: false,
+            }]
+        } else {
+            match rg_inputs(state, &request) {
+                Ok(inputs) => inputs,
+                Err(error) => return stderr_result(2, format!("rg: {error}\n")),
+            }
+        };
+        return rg_render_multiline(&request, &multiline, &inputs);
+    }
+
     let matchers = match patterns
         .iter()
         .map(|pattern| {
@@ -6784,6 +6809,8 @@ struct RgOptions {
     explicit_after: Option<usize>,
     explicit_before: Option<usize>,
     explicit_context: Option<usize>,
+    multiline: bool,
+    multiline_dotall: bool,
 }
 
 impl Default for RgOptions {
@@ -6835,6 +6862,8 @@ impl Default for RgOptions {
             explicit_after: None,
             explicit_before: None,
             explicit_context: None,
+            multiline: false,
+            multiline_dotall: false,
         }
     }
 }
@@ -6968,6 +6997,13 @@ fn parse_rg_option(
             options.line_number = Some(true);
         }
         "--passthru" | "--passthrough" => options.passthru = true,
+        "--multiline" => options.multiline = true,
+        "--multiline-dotall" => {
+            // ripgrep: --multiline-dotall implies --multiline and makes `.`
+            // match newlines as well.
+            options.multiline = true;
+            options.multiline_dotall = true;
+        }
         "--glob-case-insensitive" => options.glob_case_insensitive = true,
         "--replace" => options.replace = Some(rg_option_value(args, index, "--replace")?),
         "--iglob" => options
@@ -7267,6 +7303,7 @@ fn parse_rg_short_flags(
             '0' => options.null_separator = true,
             'b' => options.byte_offset = true,
             'L' => options.follow_symlinks = true,
+            'U' => options.multiline = true,
             'u' => unrestricted += 1,
             _ => {
                 return Err(stderr_result(
@@ -8134,6 +8171,176 @@ struct RgGroupValues {
     numbered: Vec<String>,
     /// Named capture groups.
     named: BTreeMap<String, String>,
+}
+
+/// Compile the multiline (`-U`/`--multiline`) search patterns. ripgrep treats
+/// the whole file content as one haystack with the multi-line flag (`m`) so
+/// `^`/`$` anchor at line boundaries; `.` does NOT match a newline unless
+/// `--multiline-dotall` (the `s` flag) is also given. Word/line boundary flags
+/// wrap each pattern just as the line matcher does.
+fn rg_build_multiline_regexes(
+    patterns: &[String],
+    ignore_case: bool,
+    options: &RgOptions,
+) -> Result<Vec<Regex>, String> {
+    patterns
+        .iter()
+        .map(|pattern| {
+            let normalized = if options.fixed {
+                regex::escape(pattern)
+            } else {
+                normalize_grep_regex(pattern, GrepMode::ExtendedRegex)
+            };
+            let wrapped = if options.line_regexp {
+                format!("^(?:{normalized})$")
+            } else if options.word_regexp {
+                format!(r"\b(?:{normalized})\b")
+            } else {
+                normalized
+            };
+            RegexBuilder::new(&wrapped)
+                .case_insensitive(ignore_case)
+                .multi_line(true)
+                .dot_matches_new_line(options.multiline_dotall)
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .collect()
+}
+
+/// Run the multiline matchers against the whole file and project each match
+/// span back onto the (1-based) lines it covers, producing the same
+/// `RgLineMatch` records the line-by-line path emits so the downstream
+/// renderers (`-n`, headings, file labels) behave identically. Every line the
+/// match touches is reported once, in order, mirroring ripgrep's multiline
+/// line output.
+fn rg_multiline_matches(
+    input: &RgInput,
+    regexes: &[Regex],
+    options: &RgOptions,
+) -> Vec<RgLineMatch> {
+    // Precompute the byte offset at which each line starts plus its text.
+    let text = input.text.as_str();
+    let mut line_starts: Vec<usize> = vec![0];
+    for (offset, ch) in text.char_indices() {
+        if ch == '\n' {
+            line_starts.push(offset + 1);
+        }
+    }
+    let line_for_byte = |byte: usize| -> usize {
+        match line_starts.binary_search(&byte) {
+            Ok(index) => index,
+            Err(index) => index.saturating_sub(1),
+        }
+    };
+
+    // Collect the set of 0-based line indices any match covers.
+    let mut covered: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    let mut any_match = false;
+    for regex in regexes {
+        for m in regex.find_iter(text) {
+            any_match = true;
+            let start_line = line_for_byte(m.start());
+            // A zero-length or end-anchored match ending exactly at a line start
+            // belongs to the line it began on.
+            let end_byte = if m.end() > m.start() {
+                m.end() - 1
+            } else {
+                m.start()
+            };
+            let end_line = line_for_byte(end_byte);
+            for line in start_line..=end_line {
+                covered.insert(line);
+            }
+        }
+    }
+
+    // Compute per-line character offsets for downstream byte-offset rendering.
+    let lines: Vec<&str> = text.lines().collect();
+    let mut char_offsets: Vec<usize> = Vec::with_capacity(lines.len());
+    let mut acc = 0usize;
+    for line in &lines {
+        char_offsets.push(acc);
+        acc += line.chars().count() + 1;
+    }
+
+    let invert = options.invert;
+    let max_count = options.max_count.filter(|count| *count > 0);
+    let mut matches = Vec::new();
+    if !any_match && !invert {
+        return matches;
+    }
+    for (index, line) in lines.iter().enumerate() {
+        let is_covered = covered.contains(&index);
+        if is_covered ^ invert {
+            matches.push(RgLineMatch {
+                index,
+                line: (*line).to_string(),
+                only_matches: vec![(*line).to_string()],
+                ranges: vec![(0, line.chars().count(), (*line).to_string())],
+                group_values: BTreeMap::new(),
+                line_offset: char_offsets[index],
+            });
+            if max_count.is_some_and(|limit| matches.len() >= limit) {
+                break;
+            }
+        }
+    }
+    matches
+}
+
+/// Render a multiline (`-U`) search. Mirrors the simple-output portion of
+/// `rg_render_search`: per-file labels, `-n` line numbers, counts, quiet, and
+/// the file-list modes. Context flags are not combined with multiline by the
+/// upstream suite, so the common simple path is reused.
+fn rg_render_multiline(
+    request: &RgRequest,
+    regexes: &[Regex],
+    inputs: &[RgInput],
+) -> CommandResult {
+    let mut stdout = String::new();
+    let mut total_matches = 0usize;
+    for input in inputs {
+        let line_matches = rg_multiline_matches(input, regexes, &request.options);
+        let file_match_count = line_matches.len();
+        if !request.options.files_without_match {
+            total_matches += file_match_count;
+        }
+        if request.options.quiet && file_match_count > 0 && !request.options.files_without_match {
+            return CommandResult {
+                exit_code: 0,
+                ..CommandResult::default()
+            };
+        }
+        if request.options.files_with_matches {
+            if file_match_count > 0 {
+                rg_push_file_label(&mut stdout, input, &request.options);
+            }
+            continue;
+        }
+        if request.options.files_without_match {
+            if file_match_count == 0 {
+                rg_push_file_label(&mut stdout, input, &request.options);
+                total_matches += 1;
+            }
+            continue;
+        }
+        if request.options.count || request.options.count_matches {
+            if file_match_count > 0 || request.options.include_zero {
+                rg_push_count(&mut stdout, request, input, file_match_count);
+            }
+            continue;
+        }
+        rg_push_matches(&mut stdout, request, input, &line_matches);
+    }
+    if request.options.quiet {
+        stdout.clear();
+    }
+    CommandResult {
+        exit_code: if total_matches == 0 { 1 } else { 0 },
+        stdout,
+        ..CommandResult::default()
+    }
 }
 
 fn rg_render_search(

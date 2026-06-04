@@ -5180,12 +5180,6 @@ and exhibited clearly, with a label attached.\n";
             "--ignore-file-case-insensitive",
         );
 
-        // Multiline matching (--multiline / -U) is unimplemented; upstream skips the
-        // multiline regression rows. (vimgrep/passthru/replacement ARE now
-        // implemented and verified by their own dedicated tests.)
-        unrecognized("rg --multiline 'a\\nb' f.txt", "--multiline");
-        unrecognized("rg -U 'a\\nb' f.txt", "-U");
-
         // PCRE2 / look-around (-P, raw look-ahead/look-behind) is rejected by the
         // standard regex engine rather than silently matching.
         let pcre = home_bash(&[("f.txt", "ab\nhello\n")]).exec("rg -P '(?<=a)b' f.txt");
@@ -5214,6 +5208,96 @@ and exhibited clearly, with a label attached.\n";
             look_ahead.stderr.contains("look-around") || look_ahead.stderr.contains("look-ahead"),
             "look-ahead stderr: {:?}",
             look_ahead.stderr
+        );
+    }
+
+    #[test]
+    fn rg_multiline_search_spans_lines_and_anchors_per_line() {
+        // JBC-10: ports the portable `-U`/`--multiline` rows from
+        // packages/just-bash/src/commands/rg/imported-tests/multiline.test.ts
+        // (overlap1, overlap2, dot_no_newline, --multiline-dotall) plus the
+        // ripgrep-compat (-U) and regression r1878 (^ anchor) multiline rows.
+        // Multiline matches the pattern against the whole file; `\n` in the
+        // pattern spans lines, and every line a match touches is printed.
+
+        // overlap1: multiline matches spanning lines where multiple matches may
+        // begin and end on the same line.
+        let r = home_bash(&[("test", "xxx\nabc\ndefxxxabc\ndefxxx\nxxx")])
+            .exec("rg -n -U 'abc\\ndef' test");
+        assert_eq!(r.exit_code, 0, "overlap1");
+        assert_eq!(r.stdout, "2:abc\n3:defxxxabc\n4:defxxx\n", "overlap1");
+
+        // overlap2: one match ends exactly where the next begins.
+        let r = home_bash(&[("test", "xxx\nabc\ndefabc\ndefxxx\nxxx")])
+            .exec("rg -n -U 'abc\\ndef' test");
+        assert_eq!(r.exit_code, 0, "overlap2");
+        assert_eq!(r.stdout, "2:abc\n3:defabc\n4:defxxx\n", "overlap2");
+
+        // dot_no_newline: even in multiline search, `.` does NOT match a newline
+        // (no --multiline-dotall), so this cross-line `.+` pattern finds nothing.
+        let sherlock = "For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+Holmeses, success in the province of detective work must always\n\
+be, to a very large extent, the result of luck. Sherlock Holmes\n\
+can extract a clew from a wisp of straw or a flake of cigar ash;\n\
+but Doctor Watson has to have it taken out for him and dusted,\n\
+and exhibited clearly, with a label attached.\n";
+        let r = home_bash(&[("sherlock", sherlock)])
+            .exec("rg -n -U 'of this world.+detective work' sherlock");
+        assert_eq!(r.exit_code, 1, "dot_no_newline exit");
+        assert_eq!(r.stdout, "", "dot_no_newline stdout");
+
+        // --multiline-dotall: `.` now matches newlines, so foo.bar spans the gap.
+        let r = home_bash(&[("test", "foo\nbar\n")]).exec("rg --multiline-dotall 'foo.bar' test");
+        assert_eq!(r.exit_code, 0, "dotall exit");
+        assert!(r.stdout.contains("foo"), "dotall stdout: {:?}", r.stdout);
+
+        // ripgrep-compat (-U): `foo\nbar` matches across the two lines (default
+        // search of the cwd, single file).
+        let r = home_bash(&[("file", "foo\nbar\n")]).exec("rg -U 'foo\\nbar'");
+        assert_eq!(r.exit_code, 0, "compat -U exit");
+
+        // r1878: `^` anchors at line start in multiline mode, so `^baz` matches
+        // the standalone `baz` line.
+        let r = home_bash(&[("test", "a\nbaz\nabc\n")]).exec("rg -U '^baz' test");
+        assert_eq!(r.exit_code, 0, "r1878 exit");
+        assert_eq!(r.stdout, "baz\n", "r1878 stdout");
+    }
+
+    #[test]
+    fn rg_multiline_combined_with_replace_passthru_vimgrep_is_unimplemented() {
+        // JBC-10: the upstream suite `it.skip`s the rows that combine multiline
+        // (`-U`/`--multiline`) with --replace, --passthru, or --vimgrep
+        // (regression r1311/r1866/r2094/r2095). The Rust `-U` port implements
+        // plain multiline line output but does NOT apply replacement,
+        // passthrough, or vimgrep formatting in multiline mode, so it cannot
+        // produce the upstream-expected output. This test pins that boundary:
+        // it asserts the combos do NOT yield the upstream output, so it fails if
+        // someone wires up the combination without updating the classification.
+
+        // r1311: `-U -r '?' -n '\n'` upstream replaces newlines, expecting
+        // "1:hello?world?\n". The Rust port does not apply -r in multiline mode.
+        let r = home_bash(&[("input", "hello\nworld\n")]).exec("rg -U -r '?' -n '\\n' input");
+        assert_ne!(r.stdout, "1:hello?world?\n", "r1311 multiline replace");
+
+        // r1866: `--multiline --vimgrep` upstream collapses to first-line vimgrep
+        // output. The Rust port does not apply vimgrep formatting in multiline.
+        let r = home_bash(&[("test", "foobar\nfoobar\nfoo quux\n")])
+            .exec("rg --multiline --vimgrep 'foobar\\nfoobar\\nfoo|quux' test");
+        assert!(
+            !r.stdout.contains("test:1:1:foobar"),
+            "r1866 multiline vimgrep stdout: {:?}",
+            r.stdout
+        );
+
+        // r2094: multiline + max-count + passthru + replace upstream prints the
+        // whole file with one replacement. The Rust port does not apply
+        // passthru/replace in multiline mode.
+        let r = home_bash(&[("haystack", "a\nb\nc\na\nb\nc\n")]).exec(
+            "rg --no-line-number --no-filename --multiline --max-count=1 --passthru --replace=B b haystack",
+        );
+        assert_ne!(
+            r.stdout, "a\nB\nc\na\nb\nc\n",
+            "r2094 multiline passthru replace"
         );
     }
 

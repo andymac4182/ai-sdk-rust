@@ -1354,12 +1354,48 @@ const jbc10CaseGroups = [
   },
   {
     file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
-    lines: [504, 505, 639, 880, 988, 1220, 1239, 1293, 1309],
+    lines: [504, 505, 639, 880, 1239],
     status: 'js-only-documented',
     owner: 'crates/just-bash::runtime::rg',
     rustTest: 'rg_unsupported_upstream_skip_features_are_rejected_or_classified',
     notes:
-      'JBC-10 classifies the upstream `it.skip` regression rg rows for unimplemented features: color output (r428 color context path / unrecognized style, r599 color with empty matches via --color/--colors), case-insensitive ignore-file matching (r1164 via --ignore-file-case-insensitive), and multiline/vimgrep/passthru/replacement rows (--multiline/-U, --vimgrep, --passthru, --replace/-r). The Rust port rejects each of these flags as unrecognized options, asserted by the named Rust test so it fails if support is ever added.',
+      'JBC-10 classifies the upstream `it.skip` regression rg rows for unimplemented features: color output (r428 color context path / unrecognized style, r599 color with empty matches via --color/--colors), case-insensitive ignore-file matching (r1164 via --ignore-file-case-insensitive), and order-dependent context-vs-passthru override (r1868). The Rust port rejects the color/ignore-file flags as unrecognized options, asserted by the named Rust test so it fails if support is ever added.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/multiline.test.ts',
+    lines: [17, 31, 54, 86],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_multiline_search_spans_lines_and_anchors_per_line',
+    notes:
+      'JBC-10 verifies portable rg multiline (`-U`/`--multiline`) rows: overlap1/overlap2 cross-line matches that begin and end on the same line, dot_no_newline (a `.` does NOT match a newline without --multiline-dotall), and --multiline-dotall making `.` span newlines over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/rg.ripgrep-compat.test.ts',
+    lines: [845],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_multiline_search_spans_lines_and_anchors_per_line',
+    notes:
+      'JBC-10 verifies the ripgrep-compat `-U` row matches a `foo\\nbar` pattern across two lines of a single file over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [1262],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_multiline_search_spans_lines_and_anchors_per_line',
+    notes:
+      'JBC-10 verifies regression r1878: in multiline (`-U`) mode `^` anchors at each line start, so `^baz` matches the standalone `baz` line over the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [988, 1220, 1293, 1309],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_multiline_combined_with_replace_passthru_vimgrep_is_unimplemented',
+    notes:
+      'JBC-10 classifies the upstream `it.skip` regression rows that combine multiline (`-U`/`--multiline`) with --replace (r1311), --vimgrep (r1866), or --max-count/--passthru/--replace (r2094, r2095). The Rust `-U` port implements plain multiline line output but does NOT apply replacement, passthrough, or vimgrep formatting in multiline mode, so it cannot produce the upstream-expected output; the named Rust test asserts each combo does NOT yield the upstream output so it fails if the combination is ever wired up without updating this classification.',
   },
   {
     file: 'packages/just-bash/src/commands/rg/imported-tests/misc.test.ts',
