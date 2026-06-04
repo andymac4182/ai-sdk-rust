@@ -5448,6 +5448,252 @@ mod tests {
         Interpreter::new(FakeCommands::default())
     }
 
+    /// Mirrors the `TeePlugin exec` / `TeePlugin semantics preservation`
+    /// describe blocks in upstream
+    /// `packages/just-bash/src/transform/plugins/tee-plugin.test.ts`. Those
+    /// suites run each script through `Bash().exec(...)` and assert that the
+    /// TeePlugin-wrapped run yields byte-identical stdout/stderr/exitCode to a
+    /// plain run. The TeePlugin wrapper exists only to mirror pipeline output to
+    /// log files, so the contract being verified is purely that the interpreter
+    /// produces the documented stdout/stderr/exit code for each construct. This
+    /// Rust test asserts that exact interpreter output for the mapped rows; it
+    /// fails if any control-flow, pipeline, `$?`, negation, arithmetic, or
+    /// case-statement semantics regress.
+    #[test]
+    fn just_bash_transform_plugins_tee_semantics_match_upstream() {
+        struct Case {
+            script: &'static str,
+            stdout: &'static str,
+            stderr: &'static str,
+            exit_code: i32,
+        }
+
+        let cases = [
+            // tee-plugin.test.ts:329 simple success: echo hello
+            Case {
+                script: "echo hello",
+                stdout: "hello\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:333 simple failure: false
+            Case {
+                script: "false",
+                stdout: "",
+                stderr: "",
+                exit_code: 1,
+            },
+            // tee-plugin.test.ts:343 pipeline failure (last cmd): echo hello | grep nomatch
+            Case {
+                script: "echo hello | grep nomatch",
+                stdout: "",
+                stderr: "",
+                exit_code: 1,
+            },
+            // tee-plugin.test.ts:347 multiple statements: echo a; echo b; echo c
+            Case {
+                script: "echo a; echo b; echo c",
+                stdout: "a\nb\nc\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:351 logical AND: echo first && echo second
+            Case {
+                script: "echo first && echo second",
+                stdout: "first\nsecond\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:355 logical OR: false || echo fallback
+            Case {
+                script: "false || echo fallback",
+                stdout: "fallback\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:359 AND with failure: false && echo unreachable
+            Case {
+                script: "false && echo unreachable",
+                stdout: "",
+                stderr: "",
+                exit_code: 1,
+            },
+            // tee-plugin.test.ts:363 variable assignment then use: VAR=hello; echo $VAR
+            Case {
+                script: "VAR=hello; echo $VAR",
+                stdout: "hello\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:367 compound commands: if true; then echo yes; fi
+            Case {
+                script: "if true; then echo yes; fi",
+                stdout: "yes\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:371 for loop: for i in a b c; do echo $i; done
+            Case {
+                script: "for i in a b c; do echo $i; done",
+                stdout: "a\nb\nc\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:375 subshell: (echo sub)
+            Case {
+                script: "(echo sub)",
+                stdout: "sub\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:379 group: { echo grp; }
+            Case {
+                script: "{ echo grp; }",
+                stdout: "grp\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:389 exit code via $?: false; echo $?
+            Case {
+                script: "false; echo $?",
+                stdout: "1\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:393 multiline output: printf 'a\nb\nc\n'
+            Case {
+                script: "printf 'a\\nb\\nc\\n'",
+                stdout: "a\nb\nc\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:397 no-output command: true
+            Case {
+                script: "true",
+                stdout: "",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:427 chained exit codes with $? across statements
+            Case {
+                script: "true; A=$?; false; B=$?; echo $A $B",
+                stdout: "0 1\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:431 for loop piping into command
+            Case {
+                script: "for i in 3 1 2; do echo $i; done | sort",
+                stdout: "1\n2\n3\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:445 arithmetic and conditionals mixed with commands
+            Case {
+                script: "x=5; y=3; echo $(( x + y )); (( x > y )) && echo bigger",
+                stdout: "8\nbigger\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:463 nested subshells with variable isolation
+            Case {
+                script: "X=outer; (X=inner; echo $X); echo $X",
+                stdout: "inner\nouter\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:467 case statement with fallthrough patterns
+            Case {
+                script: "for f in foo.txt bar.sh baz.py; do case \"$f\" in *.txt) echo text;; *.sh) echo shell;; *) echo other;; esac; done",
+                stdout: "text\nshell\nother\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:503 pipeline exit code propagation through $?
+            Case {
+                script: "echo hello | grep hello; A=$?; echo hello | grep nope; B=$?; echo $A $B",
+                stdout: "hello\n0 1\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:541 multi-pipeline with mixed success/failure and $?
+            Case {
+                script: "true; echo $?; false; echo $?; true; echo $?",
+                stdout: "0\n1\n0\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:557 variable in loop body used after loop
+            Case {
+                script: "total=0; for n in 1 2 3 4 5; do total=$(( total + n )); done; echo $total",
+                stdout: "15\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:563 nested if/else with commands
+            Case {
+                script: "X=42\nif [ $X -gt 100 ]; then\n  echo big\nelif [ $X -gt 10 ]; then\n  echo medium\nelse\n  echo small\nfi",
+                stdout: "medium\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:618 subshell exit code does not leak
+            Case {
+                script: "(exit 42); echo $?",
+                stdout: "42\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:637 exit code from last command in multi-statement script
+            Case {
+                script: "echo a; echo b; echo c; false",
+                stdout: "a\nb\nc\n",
+                stderr: "",
+                exit_code: 1,
+            },
+            // tee-plugin.test.ts:645 empty pipeline commands
+            Case {
+                script: "true | true | true; echo $?",
+                stdout: "0\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:685 negated pipeline: ! false | true
+            Case {
+                script: "! false | true; echo $?",
+                stdout: "1\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:689 negated pipeline: ! true | false
+            Case {
+                script: "! true | false; echo $?",
+                stdout: "0\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:703 $? after wrapped pipeline
+            Case {
+                script: "echo hello | grep nope; echo exit:$?",
+                stdout: "exit:1\n",
+                stderr: "",
+                exit_code: 0,
+            },
+        ];
+
+        for case in cases {
+            let mut shell = Interpreter::new(FakeCommands::default());
+            let result = shell.exec(case.script);
+            assert_eq!(result.stdout, case.stdout, "stdout for: {}", case.script);
+            assert_eq!(result.stderr, case.stderr, "stderr for: {}", case.script);
+            assert_eq!(
+                result.exit_code, case.exit_code,
+                "exit code for: {}",
+                case.script
+            );
+        }
+    }
+
     /// Mirrors portable `packages/just-bash/src/syntax/parse-errors.test.ts`
     /// rows 1:1 through the Rust parser/interpreter. Each block asserts the
     /// upstream `it(...)` expectation on `Bash().exec(...)`: a syntax/parse error

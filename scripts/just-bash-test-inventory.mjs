@@ -4982,6 +4982,22 @@ const justBashCoreSerializeCaseGroups = [
   },
 ];
 
+const justBashTransformPluginsTeeCaseGroups = [
+  {
+    file: 'packages/just-bash/src/transform/plugins/tee-plugin.test.ts',
+    lines: [
+      329, 333, 343, 347, 351, 355, 359, 363, 367, 371, 375, 379, 389, 393,
+      397, 427, 431, 445, 463, 467, 503, 541, 557, 563, 618, 637, 645, 685,
+      689, 703,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell',
+    rustTest: 'just_bash_transform_plugins_tee_semantics_match_upstream',
+    notes:
+      'just-bash-transform-plugins verifies that the Rust interpreter produces the exact stdout/stderr/exit code the TeePlugin exec/semantics-preservation rows assert for plain runs: simple success/failure, pipelines, &&/||/; chains, $? propagation, subshell/group output and exit-code isolation, for/if/elif/case control flow, arithmetic conditionals, and negated pipelines.',
+  },
+];
+
 function caseOverrideFor(testCase) {
   const group = [
     ...jbSedTestTsCaseGroups,
@@ -5032,6 +5048,7 @@ function caseOverrideFor(testCase) {
     ...jbcXanGroupbyTransformCaseGroups,
     ...jbcYqFixturesCaseGroups,
     ...justBashCoreSerializeCaseGroups,
+    ...justBashTransformPluginsTeeCaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&
