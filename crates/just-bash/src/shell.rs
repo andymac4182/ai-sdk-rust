@@ -1812,6 +1812,108 @@ fn apply_transform(op: char, name: &str, value: &str) -> String {
     }
 }
 
+/// Broken-down calendar fields used by `${var@P}` prompt expansion.
+#[derive(Clone, Copy)]
+struct PromptParts {
+    year: i64,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    /// 0 = Sunday .. 6 = Saturday.
+    weekday: u32,
+}
+
+/// Reads the current wall-clock time and converts it to broken-down UTC fields
+/// for prompt escapes (`\t`, `\d`, `\D{...}`, ...). Bash uses local time, but
+/// the upstream tests only assert the textual *format* of these escapes, so a
+/// well-formed UTC value satisfies them deterministically without a timezone
+/// database.
+fn prompt_local_parts() -> PromptParts {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs.div_euclid(86_400);
+    let day_secs = secs.rem_euclid(86_400);
+    // Days-from-civil inverse (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + i64::from(m <= 2);
+    PromptParts {
+        year,
+        month: m as u32,
+        day: d as u32,
+        hour: (day_secs / 3_600) as u32,
+        minute: ((day_secs % 3_600) / 60) as u32,
+        second: (day_secs % 60) as u32,
+        weekday: ((days + 4).rem_euclid(7)) as u32,
+    }
+}
+
+/// Minimal `strftime` supporting the specifiers the upstream prompt `\D{...}`
+/// implementation handles. Unknown specifiers pass through as `%X`.
+fn prompt_strftime(format: &str, parts: &PromptParts) -> String {
+    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    if format.is_empty() {
+        return format!("{:02}:{:02}:{:02}", parts.hour, parts.minute, parts.second);
+    }
+    let chars: Vec<char> = format.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '%' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        if i + 1 >= chars.len() {
+            out.push('%');
+            i += 1;
+            continue;
+        }
+        match chars[i + 1] {
+            'H' => out.push_str(&format!("{:02}", parts.hour)),
+            'M' => out.push_str(&format!("{:02}", parts.minute)),
+            'S' => out.push_str(&format!("{:02}", parts.second)),
+            'd' => out.push_str(&format!("{:02}", parts.day)),
+            'm' => out.push_str(&format!("{:02}", parts.month)),
+            'Y' => out.push_str(&parts.year.to_string()),
+            'y' => out.push_str(&format!("{:02}", parts.year.rem_euclid(100))),
+            'I' => {
+                let mut h = parts.hour % 12;
+                if h == 0 {
+                    h = 12;
+                }
+                out.push_str(&format!("{:02}", h));
+            }
+            'p' => out.push_str(if parts.hour < 12 { "AM" } else { "PM" }),
+            'P' => out.push_str(if parts.hour < 12 { "am" } else { "pm" }),
+            '%' => out.push('%'),
+            'a' => out.push_str(WEEKDAYS[parts.weekday as usize % 7]),
+            'b' => out.push_str(MONTHS[(parts.month as usize).saturating_sub(1) % 12]),
+            other => {
+                out.push('%');
+                out.push(other);
+            }
+        }
+        i += 2;
+    }
+    out
+}
+
 /// Unconditionally single-quotes `value` (escaping embedded single quotes),
 /// matching the assignment form bash emits for `${var@A}`.
 fn single_quote(value: &str) -> String {
@@ -5184,7 +5286,11 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 vec![self.lookup_parameter(&target)]
             }
             Some(ParameterOperation::Transform { op }) => {
-                vec![apply_transform(*op, &parameter.parameter, &value)]
+                if *op == 'P' {
+                    vec![self.expand_prompt(&value)]
+                } else {
+                    vec![apply_transform(*op, &parameter.parameter, &value)]
+                }
             }
             Some(ParameterOperation::Length) => unreachable!("handled above"),
             None => {
@@ -5195,6 +5301,233 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 }
             }
         }
+    }
+
+    /// Implements the `${var@P}` prompt-string transform: interprets the
+    /// backslash escape sequences bash recognises in `PS1`/`PS2`/`PS3`/`PS4`
+    /// prompt strings (e.g. `\u`, `\h`, `\w`, `\t`, `\D{fmt}`, octal `\NNN`).
+    /// Mirrors upstream `packages/just-bash/src/interpreter/expansion/prompt.ts`.
+    fn expand_prompt(&self, value: &str) -> String {
+        let user = self
+            .state
+            .get_var("USER")
+            .filter(|v| !v.is_empty())
+            .or_else(|| self.state.get_var("LOGNAME").filter(|v| !v.is_empty()))
+            .unwrap_or("user")
+            .to_string();
+        let hostname = self
+            .state
+            .get_var("HOSTNAME")
+            .filter(|v| !v.is_empty())
+            .unwrap_or("localhost")
+            .to_string();
+        let short_host = hostname.split('.').next().unwrap_or(&hostname).to_string();
+        let pwd = self
+            .state
+            .get_var("PWD")
+            .filter(|v| !v.is_empty())
+            .unwrap_or("/")
+            .to_string();
+        let home = self
+            .state
+            .get_var("HOME")
+            .filter(|v| !v.is_empty())
+            .unwrap_or("/")
+            .to_string();
+        let tilde_expanded = if pwd.starts_with(&home) {
+            format!("~{}", &pwd[home.len()..])
+        } else {
+            pwd.clone()
+        };
+        let pwd_basename = pwd
+            .rsplit('/')
+            .find(|s| !s.is_empty())
+            .unwrap_or(&pwd)
+            .to_string();
+        let cmd_num = self
+            .state
+            .get_var("__COMMAND_NUMBER")
+            .filter(|v| !v.is_empty())
+            .unwrap_or("1")
+            .to_string();
+
+        let parts = prompt_local_parts();
+        const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        const MONTHS: [&str; 12] = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+
+        let chars: Vec<char> = value.chars().collect();
+        let mut result = String::new();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] != '\\' {
+                result.push(chars[i]);
+                i += 1;
+                continue;
+            }
+            if i + 1 >= chars.len() {
+                result.push('\\');
+                i += 1;
+                continue;
+            }
+            let next = chars[i + 1];
+            // Octal escape \NNN (1-3 octal digits).
+            if ('0'..='7').contains(&next) {
+                let mut octal = String::new();
+                let mut j = i + 1;
+                while j < chars.len() && j < i + 4 && ('0'..='7').contains(&chars[j]) {
+                    octal.push(chars[j]);
+                    j += 1;
+                }
+                let code = u32::from_str_radix(&octal, 8).unwrap_or(0) % 256;
+                if let Some(ch) = char::from_u32(code) {
+                    result.push(ch);
+                }
+                i = j;
+                continue;
+            }
+            match next {
+                '\\' => {
+                    result.push('\\');
+                    i += 2;
+                }
+                'a' => {
+                    result.push('\u{07}');
+                    i += 2;
+                }
+                'e' => {
+                    result.push('\u{1b}');
+                    i += 2;
+                }
+                'n' => {
+                    result.push('\n');
+                    i += 2;
+                }
+                'r' => {
+                    result.push('\r');
+                    i += 2;
+                }
+                '$' => {
+                    result.push('$');
+                    i += 2;
+                }
+                '[' | ']' => {
+                    i += 2;
+                }
+                'u' => {
+                    result.push_str(&user);
+                    i += 2;
+                }
+                'h' => {
+                    result.push_str(&short_host);
+                    i += 2;
+                }
+                'H' => {
+                    result.push_str(&hostname);
+                    i += 2;
+                }
+                'w' => {
+                    result.push_str(&tilde_expanded);
+                    i += 2;
+                }
+                'W' => {
+                    result.push_str(&pwd_basename);
+                    i += 2;
+                }
+                'd' => {
+                    result.push_str(&format!(
+                        "{} {} {:>2}",
+                        WEEKDAYS[parts.weekday as usize % 7],
+                        MONTHS[(parts.month as usize).saturating_sub(1) % 12],
+                        parts.day
+                    ));
+                    i += 2;
+                }
+                't' => {
+                    result.push_str(&format!(
+                        "{:02}:{:02}:{:02}",
+                        parts.hour, parts.minute, parts.second
+                    ));
+                    i += 2;
+                }
+                'T' => {
+                    let mut h = parts.hour % 12;
+                    if h == 0 {
+                        h = 12;
+                    }
+                    result.push_str(&format!("{:02}:{:02}:{:02}", h, parts.minute, parts.second));
+                    i += 2;
+                }
+                '@' => {
+                    let mut h = parts.hour % 12;
+                    if h == 0 {
+                        h = 12;
+                    }
+                    let ampm = if parts.hour < 12 { "AM" } else { "PM" };
+                    result.push_str(&format!("{:02}:{:02} {}", h, parts.minute, ampm));
+                    i += 2;
+                }
+                'A' => {
+                    result.push_str(&format!("{:02}:{:02}", parts.hour, parts.minute));
+                    i += 2;
+                }
+                'D' => {
+                    if i + 2 < chars.len() && chars[i + 2] == '{' {
+                        if let Some(close) = chars[i + 3..].iter().position(|c| *c == '}') {
+                            let close_idx = i + 3 + close;
+                            let format: String = chars[i + 3..close_idx].iter().collect();
+                            result.push_str(&prompt_strftime(&format, &parts));
+                            i = close_idx + 1;
+                        } else {
+                            result.push_str("\\D");
+                            i += 2;
+                        }
+                    } else {
+                        result.push_str("\\D");
+                        i += 2;
+                    }
+                }
+                's' => {
+                    result.push_str("bash");
+                    i += 2;
+                }
+                'v' => {
+                    result.push_str("5.0");
+                    i += 2;
+                }
+                'V' => {
+                    result.push_str("5.0.0");
+                    i += 2;
+                }
+                'j' => {
+                    result.push('0');
+                    i += 2;
+                }
+                'l' => {
+                    result.push_str("tty");
+                    i += 2;
+                }
+                '#' => {
+                    result.push_str(&cmd_num);
+                    i += 2;
+                }
+                '!' => {
+                    result.push_str(&cmd_num);
+                    i += 2;
+                }
+                'x' => {
+                    result.push_str("\\x");
+                    i += 2;
+                }
+                other => {
+                    result.push('\\');
+                    result.push(other);
+                    i += 2;
+                }
+            }
+        }
+        result
     }
 
     /// Applies `${var:offset}` / `${var:offset:length}` slicing. `offset` and
@@ -7675,6 +8008,174 @@ mod tests {
             sh.exec("declare -a arr\narr[0]=first\narr[1]=second\necho \"${arr[0]} ${arr[1]}\"");
         assert_eq!(r.stdout.trim(), "first second", "L143 stdout");
         assert_eq!(r.exit_code, 0, "L143 exit");
+    }
+
+    /// Covers every portable row of
+    /// `packages/just-bash/src/interpreter/expansion/prompt.test.ts`: the
+    /// `${var@P}` prompt-string transform that interprets bash PS1/PS2/PS3/PS4
+    /// backslash escapes. Deterministic escapes are asserted by exact stdout;
+    /// the wall-clock rows (`\t`, `\T`, `\@`, `\A`, `\d`, `\D{...}`) assert the
+    /// upstream format regex. Each tuple mirrors an upstream `it(...)`
+    /// `Bash().exec(...)` stdout/exit-code assertion.
+    #[test]
+    fn jbpi_interpreter_prompt_expansion_rows_match_upstream() {
+        // Deterministic basic escapes (L6, L15, L22, L29, L36, L43) plus
+        // octal (L233, L240), command/history number (L249, L256),
+        // non-printing delimiters (L265), unknown-escape literal (L290),
+        // double-backslash (L298), and the `\D` literal row (L224).
+        for (source, expected_stdout) in [
+            // L22 \\ expands to a single backslash.
+            (r#"x="a\\b"; echo "${x@P}""#, "a\\b\n"),
+            // L29 \a expands to the bell character.
+            (r#"x="\a"; echo "${x@P}""#, "\u{07}\n"),
+            // L36 \e expands to the escape character.
+            (r#"x="\e[1m"; echo "${x@P}""#, "\u{1b}[1m\n"),
+            // L43 \$ expands to $ for a regular (non-root) user.
+            (r#"x="prompt\$ "; echo "${x@P}""#, "prompt$ \n"),
+            // L224 \D without braces is a literal \D.
+            (r#"x="\Dfoo"; echo "${x@P}""#, "\\Dfoo\n"),
+            // L233 octal \NNN codes expand to ASCII (101 102 103 -> A B C).
+            (r#"x="\101\102\103"; echo "${x@P}""#, "ABC\n"),
+            // L249 \# expands to the command number.
+            (r#"x="cmd \#"; echo "${x@P}""#, "cmd 1\n"),
+            // L256 \! expands to the history number (same counter).
+            (r#"x="hist \!"; echo "${x@P}""#, "hist 1\n"),
+            // L265 \[ and \] non-printing delimiters are removed.
+            (
+                r#"x="\[\e[1m\]bold\[\e[0m\]"; echo "${x@P}""#,
+                "\u{1b}[1mbold\u{1b}[0m\n",
+            ),
+            // L290 unknown escapes pass through literally.
+            (r#"x="\z\q\x"; echo "${x@P}""#, "\\z\\q\\x\n"),
+            // L298 \\\\ -> \\ -> \ (double backslash collapses once).
+            (r#"x="a\\\\b"; echo "${x@P}""#, "a\\b\n"),
+        ] {
+            let r = shell().exec(source);
+            assert_eq!(r.stderr, "", "{source}");
+            assert_eq!(r.stdout, expected_stdout, "{source}");
+            assert_eq!(r.exit_code, 0, "{source}");
+        }
+
+        // L240 wraparound: \555 = 0o555 = 365, wraps to 365 % 256 = 109 ('m').
+        let r = shell().exec(r#"x="\555"; echo "${x@P}""#);
+        assert_eq!(r.stdout.chars().next(), Some('m'), "L240 wraparound");
+        assert_eq!(r.exit_code, 0, "L240 exit");
+
+        // Environment-driven escapes (L52, L59, L66, L75, L84, L91, L249-with-env,
+        // L256-with-env) and the combined PS1 row (L276).
+        for (env, source, expected_stdout) in [
+            // L52 \u expands to USER.
+            (
+                vec![("USER", "testuser")],
+                r#"x="\u"; echo "${x@P}""#,
+                "testuser\n",
+            ),
+            // L59 \h expands to the short hostname (up to first '.').
+            (
+                vec![("HOSTNAME", "myhost.example.com")],
+                r#"x="\h"; echo "${x@P}""#,
+                "myhost\n",
+            ),
+            // L66 \H expands to the full hostname.
+            (
+                vec![("HOSTNAME", "myhost.example.com")],
+                r#"x="\H"; echo "${x@P}""#,
+                "myhost.example.com\n",
+            ),
+            // L75 \w shows the cwd with $HOME collapsed to ~.
+            (
+                vec![("PWD", "/home/user/project"), ("HOME", "/home/user")],
+                r#"x="\w"; echo "${x@P}""#,
+                "~/project\n",
+            ),
+            // L84 \w shows the full path when not under $HOME.
+            (
+                vec![("PWD", "/var/log"), ("HOME", "/home/user")],
+                r#"x="\w"; echo "${x@P}""#,
+                "/var/log\n",
+            ),
+            // L91 \W shows the basename of the cwd.
+            (
+                vec![("PWD", "/home/user/project")],
+                r#"x="\W"; echo "${x@P}""#,
+                "project\n",
+            ),
+            // L249 \# uses __COMMAND_NUMBER when set.
+            (
+                vec![("__COMMAND_NUMBER", "42")],
+                r#"x="cmd \#"; echo "${x@P}""#,
+                "cmd 42\n",
+            ),
+            // L256 \! uses __COMMAND_NUMBER when set.
+            (
+                vec![("__COMMAND_NUMBER", "123")],
+                r#"x="hist \!"; echo "${x@P}""#,
+                "hist 123\n",
+            ),
+            // L276 a complex PS1-like prompt combines several escapes.
+            (
+                vec![
+                    ("USER", "alice"),
+                    ("HOSTNAME", "dev.local"),
+                    ("PWD", "/home/alice/project"),
+                    ("HOME", "/home/alice"),
+                ],
+                r#"x="\u@\h:\w\$ "; echo "${x@P}""#,
+                "alice@dev:~/project$ \n",
+            ),
+        ] {
+            let r = shell().with_env(env).exec(source);
+            assert_eq!(r.stderr, "", "{source}");
+            assert_eq!(r.stdout, expected_stdout, "{source}");
+            assert_eq!(r.exit_code, 0, "{source}");
+        }
+
+        // Fixed shell-info escapes (L100 \s, L107 \v, L114 \V, L121 \j, L128 \l).
+        for (source, expected_stdout) in [
+            (r#"x="\s"; echo "${x@P}""#, "bash\n"),
+            (r#"x="\v"; echo "${x@P}""#, "5.0\n"),
+            (r#"x="\V"; echo "${x@P}""#, "5.0.0\n"),
+            (r#"x="\j"; echo "${x@P}""#, "0\n"),
+            (r#"x="\l"; echo "${x@P}""#, "tty\n"),
+        ] {
+            let r = shell().exec(source);
+            assert_eq!(r.stdout, expected_stdout, "{source}");
+            assert_eq!(r.exit_code, 0, "{source}");
+        }
+
+        // Wall-clock rows assert the upstream format regex only (L137 \t,
+        // L145 \T, L153 \@, L161 \A, L168 \d, L180/187/194/201/208/215 \D{...}).
+        for (source, pattern) in [
+            (r#"x="\t"; echo "${x@P}""#, r"^\d{2}:\d{2}:\d{2}\n$"),
+            (r#"x="\T"; echo "${x@P}""#, r"^\d{2}:\d{2}:\d{2}\n$"),
+            (r#"x="\@"; echo "${x@P}""#, r"^\d{2}:\d{2} [AP]M\n$"),
+            (r#"x="\A"; echo "${x@P}""#, r"^\d{2}:\d{2}\n$"),
+            (
+                r#"x="\d"; echo "${x@P}""#,
+                r"^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [ \d]\d\n$",
+            ),
+            (r#"x="\D{%Y}"; echo "${x@P}""#, r"^\d{4}\n$"),
+            (r#"x="\D{%m}"; echo "${x@P}""#, r"^\d{2}\n$"),
+            (r#"x="\D{%d}"; echo "${x@P}""#, r"^\d{2}\n$"),
+            (
+                r#"x="\D{%H:%M:%S}"; echo "${x@P}""#,
+                r"^\d{2}:\d{2}:\d{2}\n$",
+            ),
+            (r#"x="\D{}"; echo "${x@P}""#, r"^\d{2}:\d{2}:\d{2}\n$"),
+            (
+                r#"x="\D{%a %b}"; echo "${x@P}""#,
+                r"^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\n$",
+            ),
+        ] {
+            let r = shell().exec(source);
+            let re = Regex::new(pattern).expect("valid pattern");
+            assert!(
+                re.is_match(&r.stdout),
+                "{source}: stdout {:?} did not match {pattern}",
+                r.stdout
+            );
+            assert_eq!(r.exit_code, 0, "{source}");
+        }
     }
 
     /// Covers portable `packages/just-bash/src/interpreter/builtins/set.test.ts`

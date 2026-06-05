@@ -4597,6 +4597,19 @@ const jbpiParserInterpreterCaseGroups = [
       'JB-PI verifies portable parser-protection rows through the Rust parser/interpreter: oversized input above MAX_INPUT_SIZE is rejected before tokenizing, every pathological shape (long names/strings, deeply nested parens/braces/command-substitutions/arithmetic, many tokens/semicolons/pipes/redirections, repeated brace patterns, alternating quotes) parses in bounded time without hanging, and brace/range expansion during execution stays bounded (clean exit, output length bound).',
   },
   {
+    file: 'packages/just-bash/src/interpreter/expansion/prompt.test.ts',
+    lines: [
+      22, 29, 36, 43, 52, 59, 66, 75, 84, 91, 100, 107, 114, 121, 128,
+      137, 145, 153, 161, 168, 180, 187, 194, 201, 208, 215, 224, 233,
+      240, 249, 256, 265, 276, 290, 298,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_interpreter_prompt_expansion_rows_match_upstream',
+    notes:
+      'R14JB verifies portable `${var@P}` prompt-string transform rows through the Rust shell (crates/just-bash/src/shell.rs expand_prompt): the deterministic backslash escapes (\\\\, \\a, \\e, \\$, octal \\NNN with 256-wraparound, \\# / \\! command/history number from __COMMAND_NUMBER, \\[ / \\] non-printing-delimiter removal, unknown-escape and \\D literal passthrough), the environment-driven escapes (\\u, \\h short / \\H full hostname, \\w tilde-collapsed / full path, \\W basename), fixed shell-info escapes (\\s bash, \\v 5.0, \\V 5.0.0, \\j 0, \\l tty), the combined PS1-like prompt, and the wall-clock escapes (\\t, \\T, \\@, \\A, \\d, \\D{strftime}) asserted by the upstream format regex. The two `$\'...\'` ANSI-C-quoting rows (L6 \\n, L15 \\r) stay pending until ANSI-C `$\'...\'` quoting lands in the lexer.',
+  },
+  {
     file: 'packages/just-bash/src/syntax/execution-protection.test.ts',
     lines: [
       35, 44, 52, 60, 72, 84, 94, 104, 118, 131, 139, 147, 157, 171, 180,
