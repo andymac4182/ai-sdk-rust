@@ -3428,6 +3428,33 @@ const jbc34CaseGroups = [
       'JBC-34 verifies selected UTF-8 byte/codepoint rows for wc, cut, tr, uniq, and uniq-to-wc paths; rev, base64, split, tee, expand/unexpand, and sed newline-sensitive byte rows remain pending.',
   },
   {
+    file: 'packages/just-bash/src/commands/utf8-bytestring.test.ts',
+    lines: [143, 154, 168, 182],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_pipeline_utf8_bytestring_decoded_to_byte_consumer_rows',
+    notes:
+      'r22jb closes the decoded-text -> byte-consumer pipe-boundary rows: rev | base64 re-encodes the reversed codepoints to UTF-8 bytes (7ZWc), grep -o | md5sum hashes the original UTF-8 bytes, split -l 1 chunks a multibyte file without truncation, and sort -f -o writes UTF-8 bytes to the output file. The printf-hex byte-string source rows (38, 81, 95, 134, 201, 208) and the non-UTF-8 raw file stay pending where latin1-shaped byte-buffer stdin/files are not yet seedable through the portable Bash facade.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/wc/wc.binary.test.ts',
+    lines: [5, 17, 29],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'jbc_wc_binary_byte_and_codepoint_counts_match_upstream_rows',
+    notes:
+      'r22jb closes the wc binary byte/codepoint rows: wc -c reports the raw byte length of a NUL-bearing file (5), wc -l counts newline-terminated lines across embedded NUL bytes (3), and over a UTF-8 file wc -c (6 bytes) and wc -m (2 codepoints) genuinely diverge. The non-UTF-8 raw-byte file row (line 50, 0xFF/0xFE) stays pending because BashOptions::files seeds UTF-8 strings and cannot carry invalid-UTF-8 bytes.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/registry.test.ts',
+    lines: [14, 32, 43, 56, 68],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::registry',
+    rustTest: 'command_registry_lazy_commands_names_and_execution_match_upstream_rows',
+    notes:
+      'r22jb closes the command-registry rows against the observable contract: the registry exposes >30 named commands including echo/cat/grep/sed/awk/find/ls/mkdir/bash/sh, commands execute on first run (echo hello world), the same command re-runs deterministically (cache), different commands run independently (echo then cat), and two fresh sessions resolve the registry identically (clear-cache analogue). The JS-internal createLazyCommands/getLoadedCommandCount/clearCommandCache loader counters have no Rust equivalent since commands register eagerly.',
+  },
+  {
     file: 'packages/just-bash/src/commands/utf8-across-commands.test.ts',
     lines: [
       21, 28, 38, 48, 60, 71, 77, 84, 95, 101, 110, 121, 128, 138, 147, 159, 168,
