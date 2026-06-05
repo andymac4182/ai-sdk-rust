@@ -6358,6 +6358,18 @@ const justBashCoreSerializeCaseGroups = [
   },
 ];
 
+const justBashInterpreterSetNounsetErrorCaseGroups = [
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/set.test.ts',
+    lines: [34, 77, 142, 214],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell',
+    rustTest: 'jbpi_interpreter_set_nounset_error_rows_match_upstream',
+    notes:
+      'just-bash-interpreter-builtins implements `set -u`/`set -o nounset` fatal "unbound variable" semantics in the Rust shell interpreter: expanding an unset scalar (L34 `set -u`, L77 `set -o nounset`) or an unset positional parameter inside a function (L142) prints `NAME: unbound variable` on stderr, runs no command, and aborts the script with exit 1; `set -eu` (L214) likewise aborts before the following statement runs. Positive controls assert set values/positionals do not trigger the error.',
+  },
+];
+
 const justBashTransformPluginsTeeCaseGroups = [
   {
     file: 'packages/just-bash/src/transform/plugins/tee-plugin.test.ts',
@@ -6847,6 +6859,7 @@ function caseOverrideFor(testCase) {
     ...r14jbXanReshapeMoonbladeCaseGroups,
     ...jbcYqFixturesCaseGroups,
     ...justBashCoreSerializeCaseGroups,
+    ...justBashInterpreterSetNounsetErrorCaseGroups,
     ...justBashTransformPluginsTeeCaseGroups,
     ...justBashEncodingPipelineByteEmitCaseGroups,
     ...r16jbClearHostnameCaseGroups,
