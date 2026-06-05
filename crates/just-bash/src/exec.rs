@@ -34025,6 +34025,289 @@ mod tests {
     }
 
     #[test]
+    fn just_bash_file_magic_byte_detection_rows() {
+        // Mirrors file/file.test.ts "binary files" group: the `file` command
+        // detects PNG/GIF/ZIP/PDF from leading magic bytes and emits the right
+        // MIME under -i, reading raw bytes so non-UTF-8 leaders are preserved.
+
+        // file.test.ts:6 should detect PNG files from magic bytes.
+        let png = vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xde,
+        ];
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_binary_file("/tmp/test.png", png.clone()),
+        );
+        let r = bash.exec("file /tmp/test.png", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "/tmp/test.png: PNG image data\n");
+
+        // file.test.ts:22 should detect GIF files from magic bytes (GIF89a).
+        let gif = vec![
+            0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x21,
+            0xf9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+            0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b,
+        ];
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_binary_file("/tmp/test.gif", gif),
+        );
+        let r = bash.exec("file /tmp/test.gif", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "/tmp/test.gif: GIF image data\n");
+
+        // file.test.ts:37 should detect ZIP files from magic bytes (PK\x03\x04).
+        let zip = vec![
+            0x50, 0x4b, 0x03, 0x04, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_binary_file("/tmp/test.zip", zip),
+        );
+        let r = bash.exec("file /tmp/test.zip", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "/tmp/test.zip: Zip archive data\n");
+
+        // file.test.ts:51 should detect PDF files from magic bytes (%PDF-).
+        let pdf = vec![0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0x0a];
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_binary_file("/tmp/test.pdf", pdf),
+        );
+        let r = bash.exec("file /tmp/test.pdf", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "/tmp/test.pdf: PDF document\n");
+
+        // file.test.ts:63 should return correct MIME type for binary files with -i.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_binary_file("/tmp/test.png", png.clone()),
+        );
+        let r = bash.exec("file -i /tmp/test.png", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "/tmp/test.png: image/png\n");
+
+        // file.test.ts:77 should not corrupt binary data when detecting file type:
+        // the non-UTF-8 PNG leader round-trips through the buffer API unchanged.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_binary_file("/binary.png", png.clone()),
+        );
+        let r = bash.exec("file /binary.png", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "/binary.png: PNG image data\n");
+        assert_eq!(bash.read_file_buffer("/binary.png").unwrap(), png);
+    }
+
+    #[test]
+    fn just_bash_binary_text_command_byte_clean_rows() {
+        // Mirrors the *.binary.test.ts / *.utf8-stdin.test.ts rows for the text
+        // utilities: cut/tr/head/tail/cp/base64/column/env operate on raw bytes
+        // and codepoints, so non-UTF-8 and multibyte content survives intact.
+
+        // cut.binary.test.ts:5 should cut fields from binary file (a:b:c\n).
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_binary_file("/data.bin", vec![0x61, 0x3a, 0x62, 0x3a, 0x63, 0x0a]),
+        );
+        let r = bash.exec("cut -d: -f2 /data.bin", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "b\n");
+
+        // cut.binary.test.ts:24 -c slices by codepoint over a UTF-8 binary file.
+        // 漢字 = 6 UTF-8 bytes, 2 codepoints; -c 1-2 keeps both codepoints.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_binary_file("/data.bin", vec![0xe6, 0xbc, 0xa2, 0xe5, 0xad, 0x97, 0x0a]),
+        );
+        let r = bash.exec("cut -c 1-2 /data.bin", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "\u{6f22}\u{5b57}\n");
+
+        // cut.binary.test.ts:46 -f stays byte-clean over an ASCII-only binary file.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_binary_file("/data.bin", vec![0x61, 0x3a, 0x62, 0x3a, 0x63]),
+        );
+        let r = bash.exec("cut -d: -f1,3 /data.bin", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "a:c\n");
+
+        // tr.binary.test.ts:5 should translate characters in binary content.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_binary_file("/data.bin", vec![0x61, 0x62, 0x63]),
+        );
+        let r = bash.exec("cat /data.bin | tr a-z A-Z", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "ABC");
+
+        // tr.binary.test.ts:17 translates by codepoint when input is UTF-8 binary.
+        // bytes c, é (0xc3 0xa9), \n -> tr 'é' 'X' matches the codepoint é.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_binary_file("/data.bin", vec![0x63, 0xc3, 0xa9, 0x0a]),
+        );
+        let r = bash.exec(
+            "cat /data.bin | tr '\u{e9}' 'X'",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "cX\n");
+
+        // tr.binary.test.ts:29 ASCII passthrough doesn't touch high bytes.
+        // a->A, é stays é, b->B, NUL stays, c->C.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_binary_file("/data.bin", vec![0x61, 0xc3, 0xa9, 0x62, 0x00, 0x63]),
+        );
+        let r = bash.exec("cat /data.bin | tr 'a-z' 'A-Z'", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "A\u{e9}B\u{0}C");
+
+        // head.binary.test.ts:5 should read first n lines from binary file.
+        let lines3 = vec![0x4c, 0x31, 0x0a, 0x4c, 0x32, 0x0a, 0x4c, 0x33, 0x0a];
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_binary_file("/binary.bin", lines3.clone()),
+        );
+        let r = bash.exec("head -n 2 /binary.bin", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "L1\nL2\n");
+
+        // head.binary.test.ts:27 should read first n bytes with -c (ABCDE).
+        let abcde = vec![0x41, 0x42, 0x43, 0x44, 0x45];
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_binary_file("/binary.bin", abcde.clone()),
+        );
+        let r = bash.exec("head -c 3 /binary.bin", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "ABC");
+
+        // head.utf8-stdin.test.ts:19 tac preserves multibyte lines (reversed).
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/in.txt", "\u{d55c}\u{ae00}\n\u{6f22}\u{5b57}\n"),
+        );
+        let r = bash.exec("cat /in.txt | tac", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "\u{6f22}\u{5b57}\n\u{d55c}\u{ae00}\n");
+
+        // tail.binary.test.ts:5 should read last n lines from binary file.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_binary_file("/binary.bin", lines3),
+        );
+        let r = bash.exec("tail -n 2 /binary.bin", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "L2\nL3\n");
+
+        // tail.binary.test.ts:27 should read last n bytes with -c (ABCDE).
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_binary_file("/binary.bin", abcde),
+        );
+        let r = bash.exec("tail -c 3 /binary.bin", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "CDE");
+
+        // tac.test.ts:41 should resolve relative paths correctly.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/home/user/project/data.txt", "a\nb\nc\n")
+                .with_cwd("/home/user/project"),
+        );
+        let r = bash.exec("tac data.txt", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "c\nb\na\n");
+
+        // tac.test.ts:51 should resolve paths with .. correctly.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/home/user/data.txt", "x\ny\n")
+                .with_cwd("/home/user/project"),
+        );
+        let r = bash.exec("tac ../data.txt", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "y\nx\n");
+
+        // cp.binary.test.ts:5 should copy binary file preserving content.
+        let src = vec![0x00, 0xff, 0x00, 0xff, 0x7f];
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_binary_file("/src.bin", src.clone()),
+        );
+        let r = bash.exec("cp /src.bin /dst.bin", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(bash.read_file_buffer("/dst.bin").unwrap(), src);
+
+        // env.utf8-stdin.test.ts:5 byte-clean passthrough to the wrapped command.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/in.txt", "\u{d55c}\u{ae00} / caf\u{e9}\n"),
+        );
+        let r = bash.exec("cat /in.txt | env cat", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "\u{d55c}\u{ae00} / caf\u{e9}\n");
+
+        // column.utf8-stdin.test.ts:5 preserves multibyte content piped through column.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/in.txt", "\u{d55c}\u{ae00} caf\u{e9} \u{6f22}\u{5b57}\n"),
+        );
+        let r = bash.exec("cat /in.txt | column -t", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.contains("\u{d55c}\u{ae00}"));
+        assert!(r.stdout.contains("caf\u{e9}"));
+        assert!(r.stdout.contains("\u{6f22}\u{5b57}"));
+    }
+
+    #[test]
+    fn just_bash_mkdir_create_directory_and_multiple_rows() {
+        // Mirrors mkdir/mkdir.test.ts:5,16: plain `mkdir` (no -p) creates a
+        // single directory and several directories in one invocation. The
+        // upstream test pins the exact `ls /` listing; the Rust default layout
+        // seeds a few extra always-present directories (e.g. /home, /tmp), so we
+        // assert the newly created entries appear in the sorted listing while
+        // still proving the directories were created and silently (no output).
+
+        // mkdir.test.ts:5 should create directory.
+        let bash = JustBashSession::with_options(JustBashSessionOptions::new().with_cwd("/"));
+        let before: Vec<String> = bash
+            .exec("ls /", JustBashExecOptions::new())
+            .stdout
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert!(!before.contains(&"newdir".to_string()));
+        let r = bash.exec("mkdir /newdir", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "");
+        assert_eq!(r.stderr, "");
+        assert_eq!(r.exit_code, 0);
+        let ls = bash.exec("ls /", JustBashExecOptions::new());
+        let mut expected = before.clone();
+        expected.push("newdir".to_string());
+        expected.sort();
+        assert_eq!(
+            ls.stdout,
+            format!("{}\n", expected.join("\n")),
+            "mkdir must add exactly /newdir to the root listing"
+        );
+        // The directory really exists and is empty.
+        assert_eq!(
+            bash.exec("ls /newdir", JustBashExecOptions::new()).stdout,
+            ""
+        );
+
+        // mkdir.test.ts:16 should create multiple directories.
+        let bash = JustBashSession::with_options(JustBashSessionOptions::new().with_cwd("/"));
+        let before: Vec<String> = bash
+            .exec("ls /", JustBashExecOptions::new())
+            .stdout
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let r = bash.exec("mkdir /dir1 /dir2 /dir3", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        let ls = bash.exec("ls /", JustBashExecOptions::new());
+        let mut expected = before.clone();
+        expected.extend(["dir1".to_string(), "dir2".to_string(), "dir3".to_string()]);
+        expected.sort();
+        assert_eq!(ls.stdout, format!("{}\n", expected.join("\n")));
+    }
+
+    #[test]
     fn just_bash_bash_general_export_does_not_persist_functions_reset_and_filesystem_persists() {
         let bash = JustBashSession::new();
 
