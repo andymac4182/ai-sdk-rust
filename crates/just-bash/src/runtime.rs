@@ -11391,6 +11391,208 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         );
     }
 
+    // Mirrors packages/just-bash/src/commands/utf8-across-commands.test.ts.
+    // UTF-8 text spanning Latin-1 supplement, Latin Extended/Greek/Cyrillic,
+    // CJK, and emoji code points must round-trip through tee, sort -o, sed
+    // (substitution, redirect, w command), awk (passthrough, redirect, print
+    // > file), printf, heredoc, here-string, variable assignment, command
+    // substitution, cp, and split/reassembly.
+    #[test]
+    fn text_stream_jbc_utf8_across_commands_file_and_redirect_roundtrips() {
+        const UTF8_TEXT: &str = "Ü ö ß é ñ Ω Д 漢字 🎉";
+        const UTF8_CAFE: &str = "café résumé naïve";
+
+        // tee: write through tee preserves UTF-8 (utf8-across-commands.test.ts:21).
+        let env = bash();
+        env.exec(&format!(
+            "echo \"{UTF8_TEXT}\" | tee /tmp/tee_out.txt > /dev/null"
+        ));
+        assert_eq!(
+            env.exec("cat /tmp/tee_out.txt").stdout,
+            format!("{UTF8_TEXT}\n")
+        );
+
+        // tee -a append mode (utf8-across-commands.test.ts:28).
+        let env = bash();
+        env.exec("echo \"line1\" > /tmp/tee_append.txt");
+        env.exec(&format!(
+            "echo \"{UTF8_CAFE}\" | tee -a /tmp/tee_append.txt > /dev/null"
+        ));
+        assert_eq!(
+            env.exec("cat /tmp/tee_append.txt").stdout,
+            format!("line1\n{UTF8_CAFE}\n")
+        );
+
+        // tee readFileBuffer roundtrip (utf8-across-commands.test.ts:38).
+        let env = bash();
+        env.exec("echo \"Ü\" | tee /tmp/tee_buf.txt > /dev/null");
+        let buffer = env.read_file_buffer("/tmp/tee_buf.txt").unwrap();
+        assert_eq!(String::from_utf8(buffer).unwrap(), "Ü\n");
+
+        // sort -o output to file preserves all three umlauts
+        // (utf8-across-commands.test.ts:48).
+        let env = bash();
+        env.exec("printf \"Ü\\nÄ\\nÖ\\n\" > /tmp/sort_in.txt");
+        env.exec("sort -o /tmp/sort_out.txt /tmp/sort_in.txt");
+        let sorted = env.exec("cat /tmp/sort_out.txt").stdout;
+        assert!(sorted.contains('Ä'));
+        assert!(sorted.contains('Ö'));
+        assert!(sorted.contains('Ü'));
+        assert_eq!(sorted.split('\n').filter(|l| !l.is_empty()).count(), 3);
+
+        // sort -o readFileBuffer roundtrip (utf8-across-commands.test.ts:60).
+        let env = bash();
+        env.exec("printf \"Ü\\n\" > /tmp/sort_in2.txt");
+        env.exec("sort -o /tmp/sort_out2.txt /tmp/sort_in2.txt");
+        let buffer = env.read_file_buffer("/tmp/sort_out2.txt").unwrap();
+        assert_eq!(String::from_utf8(buffer).unwrap(), "Ü\n");
+
+        // sed substitution preserves surrounding UTF-8
+        // (utf8-across-commands.test.ts:71).
+        let env = bash();
+        assert_eq!(
+            env.exec("echo \"Ü Ö ß\" | sed 's/ß/ss/'").stdout,
+            "Ü Ö ss\n"
+        );
+
+        // sed output redirect (utf8-across-commands.test.ts:77).
+        let env = bash();
+        env.exec("echo \"café résumé\" | sed 's/é/e/g' > /tmp/sed_out.txt");
+        assert_eq!(env.exec("cat /tmp/sed_out.txt").stdout, "cafe resume\n");
+
+        // sed w command writes UTF-8 to a file (utf8-across-commands.test.ts:84).
+        let env = bash();
+        env.exec(&format!(
+            "echo \"{UTF8_TEXT}\" | sed 'w /tmp/sed_w_out.txt' > /dev/null"
+        ));
+        assert_eq!(
+            env.exec("cat /tmp/sed_w_out.txt").stdout,
+            format!("{UTF8_TEXT}\n")
+        );
+
+        // awk passthrough (utf8-across-commands.test.ts:95).
+        let env = bash();
+        assert_eq!(
+            env.exec(&format!("echo \"{UTF8_TEXT}\" | awk '{{print $0}}'"))
+                .stdout,
+            format!("{UTF8_TEXT}\n")
+        );
+
+        // awk output redirect (utf8-across-commands.test.ts:101).
+        let env = bash();
+        env.exec(&format!(
+            "echo \"{UTF8_TEXT}\" | awk '{{print $0}}' > /tmp/awk_out.txt"
+        ));
+        assert_eq!(
+            env.exec("cat /tmp/awk_out.txt").stdout,
+            format!("{UTF8_TEXT}\n")
+        );
+
+        // awk print > file (utf8-across-commands.test.ts:110).
+        let env = bash();
+        env.exec(&format!(
+            "echo \"{UTF8_CAFE}\" | awk '{{print > \"/tmp/awk_redir.txt\"}}'"
+        ));
+        assert_eq!(
+            env.exec("cat /tmp/awk_redir.txt").stdout,
+            format!("{UTF8_CAFE}\n")
+        );
+
+        // printf redirect (utf8-across-commands.test.ts:121).
+        let env = bash();
+        env.exec(&format!(
+            "printf \"%s\\n\" \"{UTF8_TEXT}\" > /tmp/printf_out.txt"
+        ));
+        assert_eq!(
+            env.exec("cat /tmp/printf_out.txt").stdout,
+            format!("{UTF8_TEXT}\n")
+        );
+
+        // printf readFileBuffer roundtrip (utf8-across-commands.test.ts:128).
+        let env = bash();
+        env.exec("printf \"Ü\" > /tmp/printf_buf.txt");
+        let buffer = env.read_file_buffer("/tmp/printf_buf.txt").unwrap();
+        assert_eq!(String::from_utf8(buffer).unwrap(), "Ü");
+
+        // heredoc redirect (utf8-across-commands.test.ts:138).
+        let env = bash();
+        env.exec(&format!(
+            "cat << 'EOF' > /tmp/heredoc_out.txt\n{UTF8_TEXT}\nEOF"
+        ));
+        assert_eq!(
+            env.exec("cat /tmp/heredoc_out.txt").stdout,
+            format!("{UTF8_TEXT}\n")
+        );
+
+        // heredoc readFileBuffer roundtrip (utf8-across-commands.test.ts:147).
+        let env = bash();
+        env.exec("cat << 'EOF' > /tmp/heredoc_buf.txt\nÜ\nEOF");
+        let buffer = env.read_file_buffer("/tmp/heredoc_buf.txt").unwrap();
+        assert_eq!(String::from_utf8(buffer).unwrap(), "Ü\n");
+
+        // here-string redirect (utf8-across-commands.test.ts:159).
+        let env = bash();
+        env.exec(&format!("cat <<< \"{UTF8_TEXT}\" > /tmp/herestr_out.txt"));
+        assert_eq!(
+            env.exec("cat /tmp/herestr_out.txt").stdout,
+            format!("{UTF8_TEXT}\n")
+        );
+
+        // variable assignment and echo redirect (utf8-across-commands.test.ts:168).
+        let env = bash();
+        env.exec(&format!(
+            "x=\"{UTF8_TEXT}\"; echo \"$x\" > /tmp/var_out.txt"
+        ));
+        assert_eq!(
+            env.exec("cat /tmp/var_out.txt").stdout,
+            format!("{UTF8_TEXT}\n")
+        );
+
+        // variable readFileBuffer roundtrip (utf8-across-commands.test.ts:175).
+        let env = bash();
+        env.exec("x=\"Ü\"; echo \"$x\" > /tmp/var_buf.txt");
+        let buffer = env.read_file_buffer("/tmp/var_buf.txt").unwrap();
+        assert_eq!(String::from_utf8(buffer).unwrap(), "Ü\n");
+
+        // command substitution (utf8-across-commands.test.ts:185).
+        let env = bash();
+        assert_eq!(
+            env.exec(&format!("x=$(echo \"{UTF8_TEXT}\"); echo \"$x\""))
+                .stdout,
+            format!("{UTF8_TEXT}\n")
+        );
+
+        // command substitution to file (utf8-across-commands.test.ts:191).
+        let env = bash();
+        env.exec(&format!(
+            "x=$(echo \"{UTF8_TEXT}\"); echo \"$x\" > /tmp/cmdsub_out.txt"
+        ));
+        assert_eq!(
+            env.exec("cat /tmp/cmdsub_out.txt").stdout,
+            format!("{UTF8_TEXT}\n")
+        );
+
+        // cp preserves UTF-8 file content (utf8-across-commands.test.ts:232).
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/src.txt".to_string(), format!("{UTF8_TEXT}\n"))]),
+            ..BashOptions::default()
+        });
+        env.exec("cp /src.txt /dst.txt");
+        assert_eq!(env.exec("cat /dst.txt").stdout, format!("{UTF8_TEXT}\n"));
+
+        // split and reassembly (utf8-across-commands.test.ts:267).
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/split_in.txt".to_string(), "Ü\nÖ\nÄ\n".to_string())]),
+            ..BashOptions::default()
+        });
+        env.exec("split -l 1 /split_in.txt /tmp/chunk_");
+        assert_eq!(
+            env.exec("cat /tmp/chunk_aa /tmp/chunk_ab /tmp/chunk_ac")
+                .stdout,
+            "Ü\nÖ\nÄ\n"
+        );
+    }
+
     #[test]
     fn structured_data_jq_basic_rows_access_and_iteration() {
         let env = bash();
