@@ -1619,6 +1619,7 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
         "whoami" => stdout_result("user\n"),
         "hostname" => stdout_result("localhost\n"),
         "clear" => command_clear(&tokens[1..]),
+        "history" => command_history(state, &tokens[1..]),
         "sleep" => command_sleep(state, &tokens[1..]),
         "timeout" => command_timeout(state, &tokens[1..], stdin),
         "bash" | "sh" => command_bash(command, state, &tokens[1..], stdin),
@@ -31131,6 +31132,60 @@ fn command_which(state: &ExecState<'_>, args: &[String]) -> CommandResult {
         stdout,
         exit_code,
         ..CommandResult::default()
+    }
+}
+
+/// `history` - display or clear the command history. Mirrors upstream
+/// `packages/just-bash/src/commands/history/history.ts`: history entries are
+/// stored as a JSON array in the `BASH_HISTORY` environment variable, listed
+/// with right-aligned 5-width line numbers, optionally limited to the last `n`
+/// entries, cleared with `-c`, or replaced by help under `--help`.
+fn command_history(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(concat!(
+            "history - display command history\n",
+            "\n",
+            "Usage: history [n]\n",
+            "\n",
+            "Options:\n",
+            "  -c      clear the history list\n",
+            "      --help display this help and exit\n",
+        ));
+    }
+
+    let history = parse_bash_history(state.env.get("BASH_HISTORY").map(String::as_str));
+
+    // `-c` clears the stored history and prints nothing.
+    if args.first().map(String::as_str) == Some("-c") {
+        state.env.insert("BASH_HISTORY".to_string(), "[]".to_string());
+        return CommandResult::default();
+    }
+
+    // Optional numeric argument limits output to the last `n` entries.
+    let mut count = history.len();
+    if let Some(first) = args.first() {
+        if !first.is_empty() && first.bytes().all(|b| b.is_ascii_digit()) {
+            count = first.parse::<usize>().unwrap_or(count).min(history.len());
+        }
+    }
+
+    let start = history.len() - count;
+    let mut stdout = String::new();
+    for (offset, entry) in history[start..].iter().enumerate() {
+        let line_num = start + offset + 1;
+        stdout.push_str(&format!("{line_num:>5}  {entry}\n"));
+    }
+    stdout_result(stdout)
+}
+
+/// Parses the `BASH_HISTORY` JSON string array into history entries, mirroring
+/// the upstream `JSON.parse` of a list of strings; any parse failure yields an
+/// empty history.
+fn parse_bash_history(raw: Option<&str>) -> Vec<String> {
+    let raw = raw.unwrap_or("[]").trim();
+    match serde_json::from_str::<Vec<String>>(raw) {
+        Ok(entries) => entries,
+        Err(_) => Vec::new(),
     }
 }
 

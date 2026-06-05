@@ -182,6 +182,7 @@ const PORTABLE_BUILTINS: &[(&str, Builtin)] = &[
     ("whoami", Builtin::Whoami),
     ("hostname", Builtin::Hostname),
     ("clear", Builtin::Clear),
+    ("history", Builtin::History),
 ];
 
 const NETWORK_BUILTINS: &[(&str, Builtin)] = &[("curl", Builtin::Curl)];
@@ -272,6 +273,7 @@ pub enum Builtin {
     Whoami,
     Hostname,
     Clear,
+    History,
     Curl,
 }
 
