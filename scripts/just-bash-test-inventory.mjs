@@ -4566,6 +4566,25 @@ const jbpiParserInterpreterCaseGroups = [
       'JB-PI verifies the portable indexed-array row through the Rust shell: `declare -a arr` with numeric-index element assignments reads back the correct values.',
   },
   {
+    file: 'packages/just-bash/src/interpreter/assoc-array.test.ts',
+    lines: [13, 24, 34, 47, 57, 69, 83, 93, 106, 119, 130, 182, 196, 220, 234],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_interpreter_assoc_array_rows_match_upstream',
+    notes:
+      'JB-PI verifies the portable associative-array rows through the Rust shell: `declare -A` declaration and string-key assignment (single/double quoted, spaces), literal `declare -A A=(...)` initialisation, redeclare-without-reset, arithmetic-context reads/writes that key on the LITERAL subscript (`A[K]` -> "K"), string-to-int coercion, compound assignment, post-increment, `${A[@]}` value enumeration, unset-key empty expansion, and variable-key lookup `${A[$key]}`/`${A["$i$i"]}`.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/assoc-array.test.ts',
+    lines: [154, 167],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'jbpi_interpreter_indexed_array_arithmetic_subscript_rows_match_upstream',
+    notes:
+      'JB-PI verifies the portable indexed-array arithmetic-subscript rows through the Rust shell: `${arr[i]}`/`${arr[i+1]}` evaluate the subscript as arithmetic, and `(( x = arr[K] ))` uses K\'s VALUE as the index (unlike associative arrays, which key on literal text).',
+  },
+  {
     file: 'packages/just-bash/src/interpreter/builtins/set.test.ts',
     lines: [44, 55, 66, 87, 100, 120, 130, 170, 180, 191, 203],
     status: 'portable-verified',
