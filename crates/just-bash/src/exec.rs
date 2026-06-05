@@ -930,6 +930,8 @@ impl JustBashSession {
         let mut fs = VirtualFileSystem::new();
         fs.mkdir("/bin", MkdirOptions { recursive: true })
             .expect("default Just Bash /bin directory is valid");
+        fs.mkdir("/usr/bin", MkdirOptions { recursive: true })
+            .expect("default Just Bash /usr/bin directory is valid");
         for name in commands
             .names()
             .into_iter()
@@ -937,7 +939,20 @@ impl JustBashSession {
         {
             fs.write_file(&format!("/bin/{name}"), "")
                 .expect("command stub path is valid");
+            fs.write_file(&format!("/usr/bin/{name}"), "")
+                .expect("command stub path is valid");
         }
+        // Mirror upstream `initFilesystem`: always seed virtual `/dev` and
+        // `/proc` so a bare `ls` of the root lists the same system entries as
+        // the TypeScript implementation (bin, dev, proc, usr, ...).
+        fs.mkdir("/dev", MkdirOptions { recursive: true })
+            .expect("default Just Bash /dev directory is valid");
+        for dev in ["null", "zero", "stdin", "stdout", "stderr"] {
+            fs.write_file(&format!("/dev/{dev}"), "")
+                .expect("default Just Bash /dev file path is valid");
+        }
+        fs.mkdir("/proc/self/fd", MkdirOptions { recursive: true })
+            .expect("default Just Bash /proc directory is valid");
         let layout_dirs: Vec<&str> = if options.create_default_layout {
             vec!["/tmp", "/home", "/home/user", &cwd]
         } else if cwd == "/" {
@@ -3458,7 +3473,7 @@ fn command_ls(state: &ExecState<'_>, args: &[String]) -> CommandResult {
         let path = resolve_path(&state.cwd, raw_path);
         match fs.stat(&path) {
             Ok(stat) if stat.is_file || (options.directories_only && stat.is_directory) => {
-                stdout.push_str(&format_ls_name(raw_path, &path, &stat, &options));
+                stdout.push_str(&format_ls_name(&fs, raw_path, &path, &stat, &options));
                 stdout.push('\n');
             }
             Ok(_) => {
@@ -4546,6 +4561,8 @@ struct LsOptions {
     classify: bool,
     reverse: bool,
     directories_only: bool,
+    long: bool,
+    human: bool,
 }
 
 fn parse_ls_args(args: &[String]) -> (LsOptions, Vec<String>) {
@@ -4554,6 +4571,12 @@ fn parse_ls_args(args: &[String]) -> (LsOptions, Vec<String>) {
     for arg in args {
         match arg.as_str() {
             "--all" => options.all = true,
+            "--almost-all" => options.almost_all = true,
+            "--recursive" => options.recursive = true,
+            "--classify" => options.classify = true,
+            "--reverse" => options.reverse = true,
+            "--directory" => options.directories_only = true,
+            "--human-readable" => options.human = true,
             _ if arg.starts_with('-') && arg.len() > 1 => {
                 for flag in arg[1..].chars() {
                     match flag {
@@ -4563,7 +4586,9 @@ fn parse_ls_args(args: &[String]) -> (LsOptions, Vec<String>) {
                         'F' => options.classify = true,
                         'r' => options.reverse = true,
                         'd' => options.directories_only = true,
-                        '1' | 'l' => {}
+                        'l' => options.long = true,
+                        'h' => options.human = true,
+                        '1' => {}
                         _ => {}
                     }
                 }
@@ -4572,6 +4597,70 @@ fn parse_ls_args(args: &[String]) -> (LsOptions, Vec<String>) {
         }
     }
     (options, paths)
+}
+
+/// Format size in human-readable form (e.g. `1.5K`, `234M`, `2G`).
+fn format_ls_human_size(bytes: usize) -> String {
+    let bytes = bytes as f64;
+    if bytes < 1024.0 {
+        return format!("{}", bytes as usize);
+    }
+    if bytes < 1024.0 * 1024.0 {
+        let k = bytes / 1024.0;
+        return if k < 10.0 {
+            format!("{:.1}K", k)
+        } else {
+            format!("{}K", k.round() as usize)
+        };
+    }
+    if bytes < 1024.0 * 1024.0 * 1024.0 {
+        let m = bytes / (1024.0 * 1024.0);
+        return if m < 10.0 {
+            format!("{:.1}M", m)
+        } else {
+            format!("{}M", m.round() as usize)
+        };
+    }
+    let g = bytes / (1024.0 * 1024.0 * 1024.0);
+    if g < 10.0 {
+        format!("{:.1}G", g)
+    } else {
+        format!("{}G", g.round() as usize)
+    }
+}
+
+/// Classify suffix for `ls -F`: `/` directory, `@` symlink, `*` executable.
+fn ls_classify_suffix(stat: &FileStat) -> &'static str {
+    if stat.is_directory {
+        "/"
+    } else if stat.is_symbolic_link {
+        "@"
+    } else if stat.mode & 0o111 != 0 {
+        "*"
+    } else {
+        ""
+    }
+}
+
+/// Render the size column for `ls -l`, right-justified to width 5.
+fn ls_long_size(size: usize, human: bool) -> String {
+    let raw = if human {
+        format_ls_human_size(size)
+    } else {
+        size.to_string()
+    };
+    format!("{raw:>5}")
+}
+
+/// Render a single `ls -l` line for a directory entry given its lstat suffix.
+fn ls_long_line(name: &str, entry_stat: &FileStat, suffix: &str, options: &LsOptions) -> String {
+    let mode = if entry_stat.is_directory {
+        "drwxr-xr-x"
+    } else {
+        "-rw-r--r--"
+    };
+    let size = ls_long_size(entry_stat.size, options.human);
+    format!("{mode} 1 user user {size} Jan  1 00:00 {name}{suffix}\n")
 }
 
 fn format_ls_directory(fs: &VirtualFileSystem, path: &str, options: &LsOptions) -> String {
@@ -4603,9 +4692,42 @@ fn format_ls_directory(fs: &VirtualFileSystem, path: &str, options: &LsOptions) 
     if options.reverse {
         entries.reverse();
     }
+
+    if options.long {
+        let mut stdout = format!("total {}\n", entries.len());
+        for entry in &entries {
+            if entry.name == "." || entry.name == ".." {
+                stdout.push_str("drwxr-xr-x 1 user user     0 Jan  1 00:00 ");
+                stdout.push_str(&entry.name);
+                stdout.push('\n');
+                continue;
+            }
+            let entry_path = join_directory_child(path, &entry.name);
+            let stat = fs.stat(&entry_path).unwrap_or(FileStat {
+                is_file: true,
+                is_directory: false,
+                is_symbolic_link: false,
+                mode: 0,
+                size: 0,
+                mtime: 0,
+            });
+            let suffix = if options.classify {
+                fs.lstat(&entry_path)
+                    .map(|lstat| ls_classify_suffix(&lstat))
+                    .unwrap_or("")
+            } else if stat.is_directory {
+                "/"
+            } else {
+                ""
+            };
+            stdout.push_str(&ls_long_line(&entry.name, &stat, suffix, options));
+        }
+        return stdout;
+    }
+
     let mut stdout = entries
-        .into_iter()
-        .map(|entry| format_ls_entry_name(&entry, options))
+        .iter()
+        .map(|entry| format_ls_entry_name(fs, path, entry, options))
         .collect::<Vec<_>>()
         .join("\n");
     if !stdout.is_empty() {
@@ -4651,22 +4773,65 @@ fn format_ls_recursive_children(
     stdout
 }
 
-fn format_ls_entry_name(entry: &DirentEntry, options: &LsOptions) -> String {
-    if options.classify && entry.is_directory {
-        format!("{}/", entry.name)
-    } else if options.classify && entry.is_symbolic_link {
-        format!("{}@", entry.name)
-    } else {
-        entry.name.clone()
+fn format_ls_entry_name(
+    fs: &VirtualFileSystem,
+    dir_path: &str,
+    entry: &DirentEntry,
+    options: &LsOptions,
+) -> String {
+    if !options.classify {
+        return entry.name.clone();
     }
+    if entry.name == "." || entry.name == ".." {
+        return format!("{}/", entry.name);
+    }
+    let entry_path = join_directory_child(dir_path, &entry.name);
+    let fallback = if entry.is_directory {
+        "/"
+    } else if entry.is_symbolic_link {
+        "@"
+    } else {
+        ""
+    };
+    let suffix = fs
+        .lstat(&entry_path)
+        .map(|stat| ls_classify_suffix(&stat))
+        .unwrap_or(fallback);
+    format!("{}{suffix}", entry.name)
 }
 
-fn format_ls_name(raw_path: &str, path: &str, stat: &FileStat, options: &LsOptions) -> String {
-    let mut name = if raw_path == "." { path } else { raw_path }.to_string();
-    if options.classify && stat.is_directory {
-        name.push('/');
+fn format_ls_name(
+    fs: &VirtualFileSystem,
+    raw_path: &str,
+    path: &str,
+    stat: &FileStat,
+    options: &LsOptions,
+) -> String {
+    let display = if raw_path == "." { path } else { raw_path }.to_string();
+    let suffix = if options.classify {
+        // For directory-only / single-file operands, GNU `ls -F` uses lstat
+        // so a symlink keeps the `@` indicator.
+        fs.lstat(path)
+            .map(|lstat| ls_classify_suffix(&lstat))
+            .unwrap_or("")
+    } else if options.directories_only && stat.is_directory {
+        // `ls -d` without -F still appends no slash; the trailing slash only
+        // appears with -F. Keep behavior aligned with upstream which emits the
+        // bare path here.
+        ""
+    } else {
+        ""
+    };
+    if options.long {
+        let mode = if stat.is_directory {
+            "drwxr-xr-x"
+        } else {
+            "-rw-r--r--"
+        };
+        let size = ls_long_size(stat.size, options.human);
+        return format!("{mode} 1 user user {size} Jan  1 00:00 {display}{suffix}");
     }
-    name
+    format!("{display}{suffix}")
 }
 
 fn format_mkdir_error(path: &str, error: &JustBashError) -> String {

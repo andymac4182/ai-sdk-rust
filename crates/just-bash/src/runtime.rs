@@ -2017,6 +2017,240 @@ and exhibited clearly, with a label attached.\n";
         );
     }
 
+    #[test]
+    fn ls_upstream_command_covers_long_format_human_size_and_exec_classify_cases() {
+        // maps the remaining portable packages/just-bash/src/commands/ls/ls.test.ts
+        // rows (default root listing, -l long format, -la, -F exec/symlink, -lF, -dF)
+        // plus every packages/just-bash/src/commands/ls/ls.human.test.ts row.
+
+        // ls.test.ts:18 "should list current directory by default" — the virtual
+        // root always exposes the seeded system entries (bin, dev, proc, usr).
+        let root = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/file.txt".to_string(), String::new())]),
+            cwd: Some("/".to_string()),
+            ..BashOptions::default()
+        });
+        let root_ls = root.exec("ls");
+        assert_eq!(root_ls.stdout, "bin\ndev\nfile.txt\nproc\nusr\n");
+        assert_eq!(root_ls.stderr, "");
+
+        // ls.test.ts:62 "should support long format with -l"
+        let l = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/dir/test.txt".to_string(), String::new())]),
+            ..BashOptions::default()
+        });
+        let long = l.exec("ls -l /dir");
+        assert_eq!(
+            long.stdout,
+            "total 1\n-rw-r--r-- 1 user user     0 Jan  1 00:00 test.txt\n"
+        );
+        assert_eq!(long.stderr, "");
+
+        // ls.test.ts:73 "should show directory indicator in long format"
+        let ld = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/dir/subdir/file.txt".to_string(), String::new())]),
+            ..BashOptions::default()
+        });
+        let long_dir = ld.exec("ls -l /dir");
+        assert_eq!(
+            long_dir.stdout,
+            "total 1\ndrwxr-xr-x 1 user user     0 Jan  1 00:00 subdir/\n"
+        );
+        assert_eq!(long_dir.stderr, "");
+
+        // ls.test.ts:84 "should combine -la flags including . and .."
+        let la = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/dir/.hidden".to_string(), String::new()),
+                ("/dir/visible".to_string(), String::new()),
+            ]),
+            ..BashOptions::default()
+        });
+        let la_out = la.exec("ls -la /dir");
+        let la_lines: Vec<&str> = la_out.stdout.lines().collect();
+        assert_eq!(la_lines[0], "total 4");
+        assert_eq!(la_lines[1], "drwxr-xr-x 1 user user     0 Jan  1 00:00 .");
+        assert_eq!(la_lines[2], "drwxr-xr-x 1 user user     0 Jan  1 00:00 ..");
+        assert_eq!(
+            la_lines[3],
+            "-rw-r--r-- 1 user user     0 Jan  1 00:00 .hidden"
+        );
+        assert_eq!(
+            la_lines[4],
+            "-rw-r--r-- 1 user user     0 Jan  1 00:00 visible"
+        );
+        assert_eq!(la_out.stderr, "");
+
+        // ls.test.ts:225 "should append * to executable files"
+        let exec = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/dir/script.sh".to_string(), "#!/bin/bash".to_string()),
+                ("/dir/data.txt".to_string(), String::new()),
+            ]),
+            ..BashOptions::default()
+        });
+        exec.exec("chmod 755 /dir/script.sh");
+        let exec_out = exec.exec("ls -F /dir");
+        assert_eq!(exec_out.stdout, "data.txt\nscript.sh*\n");
+        assert_eq!(exec_out.stderr, "");
+
+        // ls.test.ts:237 "should append @ to symlinks"
+        let sym = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/dir/target.txt".to_string(), "content".to_string())]),
+            ..BashOptions::default()
+        });
+        sym.exec("ln -s /dir/target.txt /dir/link");
+        let sym_out = sym.exec("ls -F /dir");
+        assert_eq!(sym_out.stdout, "link@\ntarget.txt\n");
+        assert_eq!(sym_out.stderr, "");
+
+        // ls.test.ts:249 "should append @ to symlinks pointing to directories"
+        let symdir = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/dir/realdir/file.txt".to_string(), String::new())]),
+            ..BashOptions::default()
+        });
+        symdir.exec("ln -s /dir/realdir /dir/linkdir");
+        let symdir_out = symdir.exec("ls -F /dir");
+        assert_eq!(symdir_out.stdout, "linkdir@\nrealdir/\n");
+        assert_eq!(symdir_out.stderr, "");
+
+        // ls.test.ts:261 "should show directory mode for symlinks to directories in long format"
+        let symdir_long = symdir.exec("ls -lF /dir");
+        let symdir_lines: Vec<&str> = symdir_long.stdout.lines().collect();
+        assert_eq!(symdir_lines[0], "total 2");
+        assert!(
+            symdir_lines[1].starts_with("drwxr-xr-x") && symdir_lines[1].ends_with("linkdir@"),
+            "symlink-to-dir long line was {:?}",
+            symdir_lines[1]
+        );
+        assert!(
+            symdir_lines[2].starts_with("drwxr-xr-x") && symdir_lines[2].ends_with("realdir/"),
+            "real dir long line was {:?}",
+            symdir_lines[2]
+        );
+
+        // ls.test.ts:277 "should work with -l flag" (-lF mixed entries)
+        let lf = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/dir/subdir/file.txt".to_string(), String::new()),
+                ("/dir/script.sh".to_string(), "#!/bin/bash".to_string()),
+                ("/dir/regular.txt".to_string(), String::new()),
+            ]),
+            ..BashOptions::default()
+        });
+        lf.exec("chmod 755 /dir/script.sh");
+        let lf_out = lf.exec("ls -lF /dir");
+        let lf_lines: Vec<&str> = lf_out.stdout.lines().collect();
+        assert_eq!(lf_lines[0], "total 3");
+        assert!(lf_lines[1].ends_with("regular.txt"));
+        assert!(lf_lines[2].ends_with("script.sh*"));
+        assert!(lf_lines[3].ends_with("subdir/"));
+
+        // ls.test.ts:293 "should work with -a flag" (-aF)
+        let af = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/dir/.hidden".to_string(), String::new()),
+                ("/dir/subdir/file.txt".to_string(), String::new()),
+            ]),
+            ..BashOptions::default()
+        });
+        let af_out = af.exec("ls -aF /dir");
+        assert_eq!(af_out.stdout, "./\n../\n.hidden\nsubdir/\n");
+        assert_eq!(af_out.stderr, "");
+
+        // ls.test.ts:305 "should work with single file argument" (-F on a file)
+        let file_f = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/script.sh".to_string(), "#!/bin/bash".to_string())]),
+            ..BashOptions::default()
+        });
+        file_f.exec("chmod 755 /script.sh");
+        let file_f_out = file_f.exec("ls -F /script.sh");
+        assert_eq!(file_f_out.stdout, "/script.sh*\n");
+        assert_eq!(file_f_out.stderr, "");
+
+        // ls.test.ts:316 "should work with -d flag on directory" (-dF)
+        let df = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/dir/file.txt".to_string(), String::new())]),
+            ..BashOptions::default()
+        });
+        let df_out = df.exec("ls -dF /dir");
+        assert_eq!(df_out.stdout, "/dir/\n");
+        assert_eq!(df_out.stderr, "");
+
+        // ls.human.test.ts:5 "displays bytes for small files"
+        let h_small = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/test/small.txt".to_string(), "a".repeat(100))]),
+            ..BashOptions::default()
+        });
+        let h_small_out = h_small.exec("ls -lh /test");
+        assert_eq!(h_small_out.exit_code, 0);
+        assert!(h_small_out.stdout.contains("100"));
+        assert!(h_small_out.stdout.contains("small.txt"));
+
+        // ls.human.test.ts:17 "displays K for kilobyte-sized files"
+        let h_k = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/test/medium.txt".to_string(), "a".repeat(1536))]),
+            ..BashOptions::default()
+        });
+        let h_k_out = h_k.exec("ls -lh /test");
+        assert_eq!(h_k_out.exit_code, 0);
+        assert!(h_k_out.stdout.contains("1.5K"));
+        assert!(h_k_out.stdout.contains("medium.txt"));
+
+        // ls.human.test.ts:29 "displays rounded K for larger KB files"
+        let h_15k = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/test/data.txt".to_string(), "a".repeat(15 * 1024))]),
+            ..BashOptions::default()
+        });
+        let h_15k_out = h_15k.exec("ls -lh /test");
+        assert_eq!(h_15k_out.exit_code, 0);
+        assert!(h_15k_out.stdout.contains("15K"));
+        assert!(h_15k_out.stdout.contains("data.txt"));
+
+        // ls.human.test.ts:41 "displays M for megabyte-sized files"
+        let h_m = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/test/big.txt".to_string(), "a".repeat(2 * 1024 * 1024))]),
+            ..BashOptions::default()
+        });
+        let h_m_out = h_m.exec("ls -lh /test");
+        assert_eq!(h_m_out.exit_code, 0);
+        assert!(h_m_out.stdout.contains("2.0M"));
+        assert!(h_m_out.stdout.contains("big.txt"));
+
+        // ls.human.test.ts:53 "works with --human-readable long form"
+        let h_long = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/test/file.txt".to_string(), "a".repeat(2048))]),
+            ..BashOptions::default()
+        });
+        let h_long_out = h_long.exec("ls -l --human-readable /test");
+        assert_eq!(h_long_out.exit_code, 0);
+        assert!(h_long_out.stdout.contains("2.0K"));
+
+        // ls.human.test.ts:64 "displays exact bytes without -h flag"
+        let h_none = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/test/file.txt".to_string(), "a".repeat(1536))]),
+            ..BashOptions::default()
+        });
+        let h_none_out = h_none.exec("ls -l /test");
+        assert_eq!(h_none_out.exit_code, 0);
+        assert!(h_none_out.stdout.contains("1536"));
+        assert!(!h_none_out.stdout.contains("1.5K"));
+
+        // ls.human.test.ts:76 "can combine -h with other flags"
+        let h_combo = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/test/visible.txt".to_string(), "a".repeat(3072)),
+                ("/test/.hidden.txt".to_string(), "b".repeat(4096)),
+            ]),
+            ..BashOptions::default()
+        });
+        let h_combo_out = h_combo.exec("ls -lah /test");
+        assert_eq!(h_combo_out.exit_code, 0);
+        assert!(h_combo_out.stdout.contains("3.0K"));
+        assert!(h_combo_out.stdout.contains("4.0K"));
+        assert!(h_combo_out.stdout.contains(".hidden.txt"));
+    }
+
     fn sort_env(content: &str) -> Bash {
         Bash::with_options(BashOptions {
             files: BTreeMap::from([("/test.txt".to_string(), content.to_string())]),
