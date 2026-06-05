@@ -4923,6 +4923,11 @@ impl<D: CommandDispatcher> Interpreter<D> {
     fn execute_declare(&mut self, args: &[String]) -> ExecOutput {
         let mut declare_indexed = false;
         let mut declare_assoc = false;
+        // `-l` forces the value to lower case and `-u` forces it to upper case
+        // (bash case-modification attributes). The most recently seen of the two
+        // wins, matching bash where the later flag overrides the earlier one.
+        let mut force_lower = false;
+        let mut force_upper = false;
         let mut index = 0;
         while index < args.len() {
             let arg = &args[index];
@@ -4930,6 +4935,14 @@ impl<D: CommandDispatcher> Interpreter<D> {
             match arg.as_str() {
                 "-a" => declare_indexed = true,
                 "-A" => declare_assoc = true,
+                "-l" => {
+                    force_lower = true;
+                    force_upper = false;
+                }
+                "-u" => {
+                    force_upper = true;
+                    force_lower = false;
+                }
                 // Other single-flag attributes (`-i`, `-r`, `-x`, ...) do not
                 // affect array typing here; ignore them for the array path.
                 _ if arg.starts_with('-') && arg.len() == 2 => {}
@@ -4974,7 +4987,14 @@ impl<D: CommandDispatcher> Interpreter<D> {
                                 self.state.arrays.insert(name, values);
                             }
                         } else if is_valid_name(&name) {
-                            self.state.assign_var(name, rest.to_string());
+                            let value = if force_lower {
+                                rest.to_lowercase()
+                            } else if force_upper {
+                                rest.to_uppercase()
+                            } else {
+                                rest.to_string()
+                            };
+                            self.state.assign_var(name, value);
                         }
                     }
                 }
@@ -7494,26 +7514,31 @@ fn split_on_ifs(value: &str, ifs: Option<&str>) -> Vec<String> {
 
 fn eval_arith_binary(operator: &str, left: i64, right: i64) -> i64 {
     match operator {
-        "+" => left + right,
-        "-" => left - right,
-        "*" => left * right,
+        // Bash arithmetic is fixed-width 64-bit and wraps on overflow rather than
+        // trapping. Upstream Just Bash evaluates with JS doubles and never throws,
+        // so wrapping here keeps multiplications/additions of huge operands from
+        // panicking in debug builds while preserving the documented "exits
+        // cleanly" behavior.
+        "+" => left.wrapping_add(right),
+        "-" => left.wrapping_sub(right),
+        "*" => left.wrapping_mul(right),
         "/" => {
             if right == 0 {
                 0
             } else {
-                left / right
+                left.wrapping_div(right)
             }
         }
         "%" => {
             if right == 0 {
                 0
             } else {
-                left % right
+                left.wrapping_rem(right)
             }
         }
         "**" => left.saturating_pow(right.max(0) as u32),
-        "<<" => left << right.max(0),
-        ">>" => left >> right.max(0),
+        "<<" => left.wrapping_shl(right.max(0) as u32),
+        ">>" => left.wrapping_shr(right.max(0) as u32),
         "<" => i64::from(left < right),
         "<=" => i64::from(left <= right),
         ">" => i64::from(left > right),
@@ -13838,6 +13863,26 @@ greet World",
             ("L459", "__proto__=(a b c); echo ${__proto__[@]}", "a b c\n"),
             // L466 an indexed array named `constructor` reads element `[1]`.
             ("L466", "constructor=(1 2 3); echo ${constructor[1]}", "2\n"),
+            // L144 an associative array stores prototype-keyword keys and reads
+            // them back without collapsing into JS prototype slots.
+            (
+                "L144",
+                "declare -A arr; arr[constructor]=a; arr[__proto__]=b; arr[prototype]=c; echo ${arr[constructor]} ${arr[__proto__]} ${arr[prototype]}",
+                "a b c\n",
+            ),
+            // L478 a single prototype-keyword key round-trips through an
+            // associative array (representative of the parametrised upstream row).
+            (
+                "L478",
+                "declare -A arr; arr[__proto__]=value_for___proto__; echo ${arr[__proto__]}",
+                "value_for___proto__\n",
+            ),
+            // L488 an associative array *named* `__proto__` reads its element.
+            (
+                "L488",
+                "declare -A __proto__; __proto__[key]=val; echo ${__proto__[key]}",
+                "val\n",
+            ),
             // L655 a keyword-named scalar expands inside a double-quoted string.
             (
                 "L655",
@@ -13912,6 +13957,20 @@ greet World",
                 "L413",
                 "declare -i constructor=42; echo $constructor",
                 "42\n",
+            ),
+            // L431 `declare -l` lower-cases the assigned value, even for a
+            // JS-prototype keyword-named variable (`hasOwnProperty`).
+            (
+                "L431",
+                "declare -l hasOwnProperty=UPPERCASE; echo $hasOwnProperty",
+                "uppercase\n",
+            ),
+            // L440 `declare -u` upper-cases the assigned value for a keyword
+            // variable name (`toString`).
+            (
+                "L440",
+                "declare -u toString=lowercase; echo $toString",
+                "LOWERCASE\n",
             ),
             // L587 `eval` assigning a keyword-named variable.
             (
@@ -14641,6 +14700,16 @@ greet World",
         expect_protection_triggered(
             "recursive command substitution via function",
             &recursive_subst,
+        );
+
+        // :359 a multiplication of two near-i64::MAX operands must not trap: bash
+        // wraps fixed-width arithmetic and Just Bash evaluates with doubles, so
+        // the script exits cleanly (exit 0) rather than panicking.
+        let arith_overflow = shell().exec("echo $((999999999999999999 * 999999999999999999))");
+        assert_eq!(
+            arith_overflow.exit_code, 0,
+            "arith overflow stderr={:?}",
+            arith_overflow.stderr
         );
 
         // subshell protection ----------------------------------------------
