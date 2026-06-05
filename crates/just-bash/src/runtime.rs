@@ -10137,6 +10137,106 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn text_search_jbc51_grep_perl_other_features_and_combinations_rows() {
+        // JBC-51: grep Perl mode (-P) other features and complex feature
+        // combinations exercised by
+        // packages/just-bash/src/commands/grep/grep.perl.test.ts (lines 644-787):
+        // non-greedy quantifiers, atomic-style greedy matching, and combined
+        // \K / \Q...\E / \x{} / (?i:) real-world extraction patterns. The
+        // lookahead/lookbehind/possessive rows in the same describe blocks stay
+        // it.skip upstream (RE2 bounded engine rejects lookaround for ReDoS
+        // protection) and are documented as engine-limitation exceptions.
+        fn check(files: &[(&str, &str)], script: &str, exit_code: i32, stdout: &str) {
+            let result = home_bash(files).exec(script);
+            assert_eq!(result.exit_code, exit_code, "{script}");
+            assert_eq!(result.stdout, stdout, "{script}");
+        }
+
+        // ---- other Perl regex features ----
+        // grep.perl.test.ts:644 should support non-greedy quantifiers
+        check(
+            &[("/test.txt", "<a>text</a>\n")],
+            "grep -oP '<.*?>' /test.txt",
+            0,
+            "<a>\n</a>\n",
+        );
+        // grep.perl.test.ts:703 should support atomic groups (a+b greedy match)
+        check(
+            &[("/test.txt", "aaab\n")],
+            "grep -P 'a+b' /test.txt",
+            0,
+            "aaab\n",
+        );
+
+        // ---- complex feature combinations ----
+        // grep.perl.test.ts:718 should combine \K, \Q...\E, and \x{} in one pattern
+        check(
+            &[("/test.txt", "Price: \u{20AC}100.00\nCost: \u{20AC}50.50\n")],
+            "grep -oP '\\Q\u{20AC}\\E\\K\\d+\\Q.\\E\\d+' /test.txt",
+            0,
+            "100.00\n50.50\n",
+        );
+        // grep.perl.test.ts:729 should combine (?i:) and \K
+        check(
+            &[("/test.txt", "Name: John\nNAME: Jane\nname: Bob\n")],
+            "grep -oP '(?i:name): \\K\\w+' /test.txt",
+            0,
+            "John\nJane\nBob\n",
+        );
+        // grep.perl.test.ts:738 should combine Unicode and case insensitivity
+        check(
+            &[("/test.txt", "Caf\u{e9}\ncaf\u{e9}\nCAF\u{c9}\n")],
+            "grep -oP '(?i:caf)\\x{e9}' /test.txt",
+            0,
+            "Caf\u{e9}\ncaf\u{e9}\n",
+        );
+        // grep.perl.test.ts:747 should handle real-world URL extraction pattern
+        check(
+            &[(
+                "/test.txt",
+                "Link: <a href=\"https://example.com/path?q=1\">click</a>\n",
+            )],
+            "grep -oP 'href=\"\\Khttps?://[^\"]+' /test.txt",
+            0,
+            "https://example.com/path?q=1\n",
+        );
+        // grep.perl.test.ts:776 should handle real-world JSON value extraction
+        check(
+            &[(
+                "/test.txt",
+                "{\"name\": \"John\", \"age\": 30, \"city\": \"NYC\"}\n",
+            )],
+            "grep -oP '\"name\":\\s*\"\\K[^\"]+' /test.txt",
+            0,
+            "John\n",
+        );
+
+        // ---- engine-limitation exceptions (upstream it.skip) ----
+        // RE2 (the bounded engine backing -P) rejects lookahead/lookbehind and
+        // possessive quantifiers, matching the upstream it.skip rationale. These
+        // patterns must NOT silently succeed as portable behavior; the Rust -P
+        // engine reports an invalid-pattern error (non-zero exit, no match
+        // output) so the documented exception stays honest.
+        for pattern in [
+            "foo(?=\\d)",      // 664 positive lookahead
+            "foo(?!\\d)",      // 674 negative lookahead
+            "(?<=\\$)\\d+",    // 684 positive lookbehind
+            "(?<!\\$)\\b\\d+", // 694 negative lookbehind
+        ] {
+            let result = home_bash(&[("/test.txt", "foo1\nfoo\nfoo2\n")])
+                .exec(&format!("grep -oP '{pattern}' /test.txt"));
+            assert_ne!(
+                result.exit_code, 0,
+                "lookaround pattern must be rejected, not silently matched: {pattern}"
+            );
+            assert_eq!(
+                result.stdout, "",
+                "lookaround pattern must emit no match output: {pattern}"
+            );
+        }
+    }
+
+    #[test]
     fn text_search_jbc_grep_exclude_files_without_match_and_bracket_rows() {
         // grep --exclude: skip files whose basename matches the glob.
         let exclude = Bash::with_options(BashOptions {
