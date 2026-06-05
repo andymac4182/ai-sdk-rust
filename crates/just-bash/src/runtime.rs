@@ -1971,6 +1971,91 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn cat_upstream_command_preserves_binary_and_utf8_byte_clean() {
+        // maps packages/just-bash/src/commands/cat/cat.binary.test.ts:5,17,29,42,54,62,70
+        // and packages/just-bash/src/commands/cat/cat.utf8-stdin.test.ts:5
+
+        // "should output binary content unchanged" -> bytes [0x48,0x65,0x6c,0x6c,0x6f] = "Hello"
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/binary.bin".to_string(), "Hello".to_string())]),
+            cwd: Some("/".to_string()),
+            ..BashOptions::default()
+        });
+        let result = env.exec("cat /binary.bin");
+        assert_eq!(result.stdout, "Hello");
+        assert_eq!(result.exit_code, 0);
+
+        // "should handle null bytes in content" -> [0x41,0x00,0x42,0x00,0x43] = "A\0B\0C"
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/binary.bin".to_string(), "A\u{0}B\u{0}C".to_string())]),
+            cwd: Some("/".to_string()),
+            ..BashOptions::default()
+        });
+        let result = env.exec("cat /binary.bin");
+        assert_eq!(result.stdout, "A\u{0}B\u{0}C");
+        assert_eq!(result.exit_code, 0);
+
+        // "should concatenate multiple binary files" -> "AB" + "CD" = "ABCD"
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/a.bin".to_string(), "AB".to_string()),
+                ("/b.bin".to_string(), "CD".to_string()),
+            ]),
+            cwd: Some("/".to_string()),
+            ..BashOptions::default()
+        });
+        let result = env.exec("cat /a.bin /b.bin");
+        assert_eq!(result.stdout, "ABCD");
+        assert_eq!(result.exit_code, 0);
+
+        // "should number lines in binary file with -n" -> [0x41,0x0a,0x42,0x0a] = "A\nB\n"
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/binary.bin".to_string(), "A\nB\n".to_string())]),
+            cwd: Some("/".to_string()),
+            ..BashOptions::default()
+        });
+        let result = env.exec("cat -n /binary.bin");
+        assert_eq!(result.stdout, "     1\tA\n     2\tB\n");
+        assert_eq!(result.exit_code, 0);
+
+        // "should preserve UTF-8 multibyte characters"
+        let env = Bash::new();
+        env.exec("printf \"\u{4e2d}\u{6587}\u{6d4b}\u{8bd5}\\n\" > /tmp/utf8.txt");
+        let result = env.exec("cat /tmp/utf8.txt");
+        assert_eq!(result.stdout, "\u{4e2d}\u{6587}\u{6d4b}\u{8bd5}\n");
+        assert_eq!(result.exit_code, 0);
+
+        // "should preserve Korean text"
+        let env = Bash::new();
+        env.exec("printf \"\u{c124}\u{c815}\\n\" > /tmp/korean.txt");
+        let result = env.exec("cat /tmp/korean.txt");
+        assert_eq!(result.stdout, "\u{c124}\u{c815}\n");
+        assert_eq!(result.exit_code, 0);
+
+        // "should preserve emoji"
+        let env = Bash::new();
+        env.exec("printf \"hello \u{1f30d}\\n\" > /tmp/emoji.txt");
+        let result = env.exec("cat /tmp/emoji.txt");
+        assert_eq!(result.stdout, "hello \u{1f30d}\n");
+        assert_eq!(result.exit_code, 0);
+
+        // cat.utf8-stdin.test.ts:5 "byte-clean passthrough preserves multibyte input"
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/in.txt".to_string(),
+                "\u{d55c}\u{ae00} / caf\u{e9} / \u{6f22}\u{5b57}\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        let result = env.exec("cat /in.txt | cat");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.stdout,
+            "\u{d55c}\u{ae00} / caf\u{e9} / \u{6f22}\u{5b57}\n"
+        );
+    }
+
+    #[test]
     fn ls_upstream_command_covers_hidden_multi_path_recursive_and_classify_cases() {
         // maps selected portable packages/just-bash/src/commands/ls/ls.test.ts rows
         let env = Bash::with_options(BashOptions {
