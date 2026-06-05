@@ -5141,6 +5141,33 @@ const jbc38CaseGroups = [
       'JBC-38 verifies portable file text, extension, directory, brief/MIME, multiple-file, missing-file, usage, and help rows; binary magic-byte rows remain pending.',
   },
   {
+    file: 'packages/just-bash/src/commands/gzip/gzip.binary.test.ts',
+    lines: [6, 25, 40, 62, 76, 89, 105, 120, 134, 148],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::gzip-binary',
+    rustTest: 'jbc_gzip_binary_rows_match_upstream',
+    notes:
+      'JBC verifies the byte-clean virtual gzip codec: high bytes, null bytes, every byte value, and UTF-8 multibyte payloads round-trip verbatim through gzip/gunzip/zcat over virtual files and ASCII-safe gzip containers piped through stdin. Each assertion fails if a byte is corrupted.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/gzip/gzip.security.test.ts',
+    lines: [5, 18, 37],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::gzip-binary',
+    rustTest: 'jbc_gzip_security_rows_match_upstream',
+    notes:
+      'JBC verifies large gunzip -c output streams without truncation within the limit, and that payloads above an explicit decompressed-output limit fail closed with the upstream error for both file extraction (source left intact) and stdin input.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/gzip/gzip.utf8-stdin.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::gzip-binary',
+    rustTest: 'jbc_gzip_utf8_stdin_row_matches_upstream',
+    notes:
+      'JBC verifies multibyte text round-trips byte-clean through a gzip / gunzip pipeline reading from stdin.',
+  },
+  {
     files: [
       'packages/just-bash/src/commands/base64/base64.utf8-stdin.test.ts',
       'packages/just-bash/src/commands/gzip/gzip.test.ts',
