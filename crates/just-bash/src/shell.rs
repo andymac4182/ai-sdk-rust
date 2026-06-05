@@ -287,10 +287,53 @@ pub struct ParameterExpansion {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParameterOperation {
-    DefaultValue { word: Word, check_empty: bool },
-    AssignDefault { word: Word, check_empty: bool },
-    UseAlternative { word: Word, check_empty: bool },
+    DefaultValue {
+        word: Word,
+        check_empty: bool,
+    },
+    AssignDefault {
+        word: Word,
+        check_empty: bool,
+    },
+    UseAlternative {
+        word: Word,
+        check_empty: bool,
+    },
     Length,
+    /// `${var:offset}` / `${var:offset:length}` substring slicing. The raw
+    /// `offset[:length]` text is evaluated as arithmetic at expansion time.
+    Substring {
+        spec: String,
+    },
+    /// `${var^}` / `${var^^}` / `${var,}` / `${var,,}` case modification. The
+    /// optional pattern restricts which characters are converted.
+    CaseModify {
+        to_upper: bool,
+        all: bool,
+        pattern: String,
+    },
+    /// `${var/pat/repl}` (first), `${var//pat/repl}` (all), `${var/#pat/repl}`
+    /// (prefix anchored) and `${var/%pat/repl}` (suffix anchored) substitution.
+    PatternSubstitute {
+        pattern: String,
+        replacement: String,
+        global: bool,
+        anchor: PatternAnchor,
+    },
+    /// `${!var}` indirect expansion: the value of `var` names the parameter to
+    /// expand.
+    Indirect,
+    /// `${var@Q}` quote-for-reuse and `${var@A}` assignment-form transforms.
+    Transform {
+        op: char,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatternAnchor {
+    None,
+    Prefix,
+    Suffix,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1448,6 +1491,31 @@ fn parse_parameter_expansion(content: &str) -> ParameterExpansion {
         };
     }
 
+    // `${!var}` indirect expansion. (`${!prefix*}`/`${!prefix@}` name listing
+    // and `${!arr[@]}` key listing are not modelled here.)
+    if let Some(parameter) = content.strip_prefix('!') {
+        if is_valid_name(parameter) {
+            return ParameterExpansion {
+                parameter: parameter.to_string(),
+                operation: Some(ParameterOperation::Indirect),
+            };
+        }
+    }
+
+    // Operators introduced by a name followed by `@`, `^`, `,`, `:` (substring),
+    // or `/` (pattern substitution). These must be checked before the `:-`/`=`
+    // default-value operators, but the default operators also start with `:`,
+    // so we disambiguate the leading `:` case carefully below.
+    if let Some(name_end) = parameter_name_end(content) {
+        let (name, rest) = content.split_at(name_end);
+        if let Some(op) = parse_parameter_operator(rest) {
+            return ParameterExpansion {
+                parameter: name.to_string(),
+                operation: Some(op),
+            };
+        }
+    }
+
     for (operator, check_empty, kind) in [
         (":-", true, 0u8),
         ("-", false, 0),
@@ -1474,6 +1542,91 @@ fn parse_parameter_expansion(content: &str) -> ParameterExpansion {
     ParameterExpansion {
         parameter: content.to_string(),
         operation: None,
+    }
+}
+
+/// Returns the byte index just past the parameter name in `${name<op>...}`
+/// content. The name is either a plain identifier or an array reference
+/// `name[index]`. Returns `None` if `content` does not begin with a valid name.
+fn parameter_name_end(content: &str) -> Option<usize> {
+    let bytes = content.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let first = bytes[0];
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return None;
+    }
+    let mut index = 1;
+    while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_') {
+        index += 1;
+    }
+    // Optional `[index]` array subscript, captured as part of the name so the
+    // expansion machinery resolves the element value.
+    if index < bytes.len() && bytes[index] == b'[' {
+        if let Some(close) = content[index..].find(']') {
+            index += close + 1;
+        }
+    }
+    (index < bytes.len()).then_some(index)
+}
+
+/// Parses the operator suffix (everything after the parameter name) for the
+/// case-modify, substring, pattern-substitution, and transform expansions.
+/// Returns `None` for the `:-`/`:=`/`:+` default-value family so the caller's
+/// existing handling takes over.
+fn parse_parameter_operator(rest: &str) -> Option<ParameterOperation> {
+    let mut chars = rest.chars();
+    let first = chars.next()?;
+    let remainder = chars.as_str();
+    match first {
+        '@' => {
+            let op = remainder.chars().next()?;
+            (remainder.chars().count() == 1).then_some(ParameterOperation::Transform { op })
+        }
+        '^' | ',' => {
+            let to_upper = first == '^';
+            let (all, pattern) = if remainder.starts_with(first) {
+                (true, &remainder[first.len_utf8()..])
+            } else {
+                (false, remainder)
+            };
+            Some(ParameterOperation::CaseModify {
+                to_upper,
+                all,
+                pattern: pattern.to_string(),
+            })
+        }
+        ':' => {
+            // Distinguish substring `${var:offset}` from the default-value
+            // operators `${var:-x}`, `${var:=x}`, `${var:+x}`, `${var:?x}`.
+            match remainder.chars().next() {
+                Some('-') | Some('=') | Some('+') | Some('?') => None,
+                _ => Some(ParameterOperation::Substring {
+                    spec: remainder.to_string(),
+                }),
+            }
+        }
+        '/' => {
+            let (anchor, body) = match remainder.chars().next() {
+                Some('/') => (PatternAnchor::None, &remainder[1..]), // `//` global
+                Some('#') => (PatternAnchor::Prefix, &remainder[1..]),
+                Some('%') => (PatternAnchor::Suffix, &remainder[1..]),
+                _ => (PatternAnchor::None, remainder),
+            };
+            let global = remainder.starts_with('/');
+            let (pattern, replacement) = match body.find('/') {
+                Some(slash) => (body[..slash].to_string(), body[slash + 1..].to_string()),
+                None => (body.to_string(), String::new()),
+            };
+            Some(ParameterOperation::PatternSubstitute {
+                pattern,
+                replacement,
+                global,
+                anchor,
+            })
+        }
+        _ => None,
     }
 }
 
@@ -1520,6 +1673,182 @@ fn split_top_level(content: &str, separator: char) -> Vec<String> {
     }
     items.push(current);
     items
+}
+
+/// Splits `content` at the first top-level (brace-depth 0) occurrence of
+/// `separator`, returning the head and tail. Used for `${var:offset:length}`.
+fn split_top_level_once(content: &str, separator: char) -> Option<(&str, &str)> {
+    let mut depth = 0usize;
+    for (index, character) in content.char_indices() {
+        match character {
+            '{' | '(' => depth += 1,
+            '}' | ')' => depth = depth.saturating_sub(1),
+            other if other == separator && depth == 0 => {
+                return Some((&content[..index], &content[index + other.len_utf8()..]));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Applies `${var^}`/`${var^^}`/`${var,}`/`${var,,}` case modification. An
+/// empty `pattern` matches every character; otherwise only characters matching
+/// the (single-character) glob pattern are converted. With `all` every matching
+/// character is converted; otherwise only the first character of the value.
+fn apply_case_modify(value: &str, to_upper: bool, all: bool, pattern: &str) -> String {
+    let convert = |c: char| -> char {
+        if pattern_char_matches(pattern, c) {
+            if to_upper {
+                c.to_ascii_uppercase()
+            } else {
+                c.to_ascii_lowercase()
+            }
+        } else {
+            c
+        }
+    };
+    if all {
+        value.chars().map(convert).collect()
+    } else {
+        let mut chars = value.chars();
+        match chars.next() {
+            Some(first) => {
+                let mut out = String::new();
+                out.push(convert(first));
+                out.push_str(chars.as_str());
+                out
+            }
+            None => String::new(),
+        }
+    }
+}
+
+/// True if the single-character case-modify pattern matches `c`. An empty
+/// pattern matches everything (bash default); a non-empty pattern is matched as
+/// a glob against the single character.
+fn pattern_char_matches(pattern: &str, c: char) -> bool {
+    if pattern.is_empty() {
+        return true;
+    }
+    pattern_matches(pattern, &c.to_string())
+}
+
+/// Applies `${var/pat/repl}` family substitution. The pattern is matched as a
+/// bash glob; `global` replaces all non-overlapping matches, while the
+/// `anchor` restricts matching to the prefix or suffix of the value.
+fn apply_pattern_substitute(
+    value: &str,
+    pattern: &str,
+    replacement: &str,
+    global: bool,
+    anchor: PatternAnchor,
+) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    match anchor {
+        PatternAnchor::Prefix => {
+            for end in (0..=chars.len()).rev() {
+                let candidate: String = chars[..end].iter().collect();
+                if pattern_matches(pattern, &candidate) {
+                    let rest: String = chars[end..].iter().collect();
+                    return format!("{replacement}{rest}");
+                }
+            }
+            value.to_string()
+        }
+        PatternAnchor::Suffix => {
+            for start in 0..=chars.len() {
+                let candidate: String = chars[start..].iter().collect();
+                if pattern_matches(pattern, &candidate) {
+                    let head: String = chars[..start].iter().collect();
+                    return format!("{head}{replacement}");
+                }
+            }
+            value.to_string()
+        }
+        PatternAnchor::None => {
+            let mut result = String::new();
+            let mut index = 0usize;
+            let mut replaced = false;
+            while index < chars.len() {
+                if replaced && !global {
+                    result.extend(&chars[index..]);
+                    break;
+                }
+                // Greedily find the longest match starting at `index`.
+                let mut matched_len = None;
+                for end in (index + 1..=chars.len()).rev() {
+                    let candidate: String = chars[index..end].iter().collect();
+                    if pattern_matches(pattern, &candidate) {
+                        matched_len = Some(end - index);
+                        break;
+                    }
+                }
+                match matched_len {
+                    Some(len) => {
+                        result.push_str(replacement);
+                        index += len;
+                        replaced = true;
+                    }
+                    None => {
+                        result.push(chars[index]);
+                        index += 1;
+                    }
+                }
+            }
+            // An empty value with an empty/anchored-at-end pattern leaves nothing.
+            result
+        }
+    }
+}
+
+/// Applies `${var@Q}` (single-quote for safe reuse) and `${var@A}`
+/// (assignment-statement form). Other transforms are returned unchanged.
+fn apply_transform(op: char, name: &str, value: &str) -> String {
+    match op {
+        'Q' => quote_for_reuse(value),
+        'A' => format!("{name}={}", single_quote(value)),
+        _ => value.to_string(),
+    }
+}
+
+/// Unconditionally single-quotes `value` (escaping embedded single quotes),
+/// matching the assignment form bash emits for `${var@A}`.
+fn single_quote(value: &str) -> String {
+    let mut out = String::from("'");
+    for c in value.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Quotes `value` so it round-trips through the shell, matching bash's `${x@Q}`
+/// behaviour: values needing no quoting are returned bare, otherwise the value
+/// is single-quoted (with embedded single quotes escaped as `'\''`).
+fn quote_for_reuse(value: &str) -> String {
+    if !value.is_empty()
+        && value.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '.' | '/' | '-' | '+' | ',' | '%' | '@' | ':' | '=')
+        })
+    {
+        return value.to_string();
+    }
+    let mut out = String::from("'");
+    for c in value.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 fn serialize_statements(statements: &[Statement]) -> String {
@@ -1940,6 +2269,47 @@ fn serialize_parameter(parameter: &ParameterExpansion) -> String {
             if *check_empty { ":+" } else { "+" },
             serialize_word(word)
         ),
+        Some(ParameterOperation::Substring { spec }) => {
+            format!("${{{}:{}}}", parameter.parameter, spec)
+        }
+        Some(ParameterOperation::CaseModify {
+            to_upper,
+            all,
+            pattern,
+        }) => {
+            let symbol = if *to_upper { '^' } else { ',' };
+            let count = if *all { 2 } else { 1 };
+            format!(
+                "${{{}{}{}}}",
+                parameter.parameter,
+                symbol.to_string().repeat(count),
+                pattern
+            )
+        }
+        Some(ParameterOperation::PatternSubstitute {
+            pattern,
+            replacement,
+            global,
+            anchor,
+        }) => {
+            let lead = if *global {
+                "/".to_string()
+            } else {
+                match anchor {
+                    PatternAnchor::Prefix => "#".to_string(),
+                    PatternAnchor::Suffix => "%".to_string(),
+                    PatternAnchor::None => String::new(),
+                }
+            };
+            format!(
+                "${{{}/{}{}/{}}}",
+                parameter.parameter, lead, pattern, replacement
+            )
+        }
+        Some(ParameterOperation::Indirect) => format!("${{!{}}}", parameter.parameter),
+        Some(ParameterOperation::Transform { op }) => {
+            format!("${{{}@{}}}", parameter.parameter, op)
+        }
         None if is_valid_name(&parameter.parameter)
             || is_unbraced_special_parameter_name(&parameter.parameter) =>
         {
@@ -2067,7 +2437,13 @@ fn collect_word_part(part: &WordPart, names: &mut std::collections::BTreeSet<Str
             Some(ParameterOperation::DefaultValue { word, .. })
             | Some(ParameterOperation::AssignDefault { word, .. })
             | Some(ParameterOperation::UseAlternative { word, .. }) => collect_word(word, names),
-            Some(ParameterOperation::Length) | None => {}
+            Some(ParameterOperation::Length)
+            | Some(ParameterOperation::Substring { .. })
+            | Some(ParameterOperation::CaseModify { .. })
+            | Some(ParameterOperation::PatternSubstitute { .. })
+            | Some(ParameterOperation::Indirect)
+            | Some(ParameterOperation::Transform { .. })
+            | None => {}
         },
         WordPart::Brace(brace) => {
             for item in &brace.items {
@@ -3523,6 +3899,21 @@ impl<D: CommandDispatcher> Interpreter<D> {
             };
         }
 
+        // `set -- [arg ...]` replaces the positional parameters with the
+        // following arguments (and `set --` alone clears them). Bash treats
+        // everything after the first bare `--` as positional parameters.
+        if let Some(separator) = args.iter().position(|arg| arg == "--") {
+            // Any options before `--` are still applied; recurse on that slice.
+            if separator > 0 {
+                let result = self.apply_set_options(&args[..separator]);
+                if result.exit_code != 0 {
+                    return result;
+                }
+            }
+            self.state.positionals = args[separator + 1..].to_vec();
+            return ExecOutput::default();
+        }
+
         if args == ["-o", "pipefail"] {
             self.state.pipefail = true;
             return ExecOutput::default();
@@ -4412,6 +4803,9 @@ impl<D: CommandDispatcher> Interpreter<D> {
         let status = match token_refs.as_slice() {
             ["-n", value] => i32::from(value.is_empty()),
             ["-z", value] => i32::from(!value.is_empty()),
+            // `-v name` succeeds when the named variable (or array element) is
+            // set. The operand is a variable name, not an expansion.
+            ["-v", name] => i32::from(!self.parameter_is_set(name)),
             [left, operator, right] => {
                 let left = self.expand_inline_text(left);
                 let right = self.expand_inline_text(right);
@@ -4749,6 +5143,49 @@ impl<D: CommandDispatcher> Interpreter<D> {
                     vec![String::new()]
                 }
             }
+            Some(ParameterOperation::Substring { spec }) => {
+                vec![self.apply_substring(&value, spec)]
+            }
+            Some(ParameterOperation::CaseModify {
+                to_upper,
+                all,
+                pattern,
+            }) => vec![apply_case_modify(&value, *to_upper, *all, pattern)],
+            Some(ParameterOperation::PatternSubstitute {
+                pattern,
+                replacement,
+                global,
+                anchor,
+            }) => {
+                let expanded_pattern = self.expand_inline_text(pattern);
+                let expanded_replacement = self.expand_inline_text(replacement);
+                vec![apply_pattern_substitute(
+                    &value,
+                    &expanded_pattern,
+                    &expanded_replacement,
+                    *global,
+                    *anchor,
+                )]
+            }
+            Some(ParameterOperation::Indirect) => {
+                // `${!var}`: when `var` names an `arr[@]`-style reference, expand
+                // the underlying array; otherwise treat the value as a plain
+                // parameter name.
+                let target = value;
+                if let Some((array, ArrayIndex::All)) = parse_array_reference(&target) {
+                    if let Some(values) = self.state.arrays.get(array) {
+                        if !quoted {
+                            return values.clone();
+                        }
+                        return vec![values.join(" ")];
+                    }
+                    return vec![String::new()];
+                }
+                vec![self.lookup_parameter(&target)]
+            }
+            Some(ParameterOperation::Transform { op }) => {
+                vec![apply_transform(*op, &parameter.parameter, &value)]
+            }
             Some(ParameterOperation::Length) => unreachable!("handled above"),
             None => {
                 if matches!(parameter.parameter.as_str(), "@" | "*") && !quoted {
@@ -4758,6 +5195,40 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 }
             }
         }
+    }
+
+    /// Applies `${var:offset}` / `${var:offset:length}` slicing. `offset` and
+    /// `length` are evaluated as arithmetic. A negative offset counts from the
+    /// end; a negative length counts back from the end of the string. Indexing
+    /// is by Unicode scalar value to mirror upstream JavaScript string slicing.
+    fn apply_substring(&mut self, value: &str, spec: &str) -> String {
+        let chars: Vec<char> = value.chars().collect();
+        let total = chars.len() as i64;
+        let (offset_spec, length_spec) = match split_top_level_once(spec, ':') {
+            Some((offset, length)) => (offset.to_string(), Some(length.to_string())),
+            None => (spec.to_string(), None),
+        };
+        let offset_raw = self.eval_arithmetic(offset_spec.trim());
+        let start = if offset_raw < 0 {
+            (total + offset_raw).max(0)
+        } else {
+            offset_raw.min(total)
+        };
+        let end = match length_spec {
+            None => total,
+            Some(length_spec) => {
+                let length_raw = self.eval_arithmetic(length_spec.trim());
+                if length_raw < 0 {
+                    (total + length_raw).max(start)
+                } else {
+                    (start + length_raw).min(total)
+                }
+            }
+        };
+        if start >= end {
+            return String::new();
+        }
+        chars[start as usize..end as usize].iter().collect()
     }
 
     fn lookup_parameter(&self, parameter: &str) -> String {
@@ -11515,6 +11986,113 @@ greet World",
             let result = sh.exec(source);
             assert_eq!(result.exit_code, 0, "{line} exit {source:?}");
         }
+    }
+
+    /// R15JB closes the remaining portable rows in
+    /// `packages/just-bash/src/interpreter/prototype-pollution.test.ts` that the
+    /// in-process interpreter can now handle after extending parameter
+    /// expansion, the `[[ ]]` conditional, and the `set --` builtin. Each row
+    /// exercises a prototype keyword (`constructor`, `__proto__`, ...) used as a
+    /// variable name through a previously-unimplemented bash feature:
+    /// case-modify `${var^^}`, substring `${var:offset}`, pattern substitution
+    /// `${var/pat/repl}`, indirect `${!var}` (scalar and `arr[@]`), the `@Q`/`@A`
+    /// transforms, the `[[ -v name ]]` set test, and positional-parameter
+    /// replacement via `set --`. Every assertion fails if the corresponding
+    /// expansion/builtin regresses, so these are genuine behavior checks.
+    #[test]
+    fn r15jb_interpreter_prototype_pollution_expansion_rows_match_upstream() {
+        for (line, source, expected_stdout) in [
+            // L169 `${constructor^^}` upper-cases a keyword-named variable.
+            (
+                "L169",
+                "constructor=hello; echo ${constructor^^}",
+                "HELLO\n",
+            ),
+            // L237 `[[ -v constructor ]]` reports the keyword-named var is set.
+            (
+                "L237",
+                "constructor=x; if [[ -v constructor ]]; then echo set; else echo unset; fi",
+                "set\n",
+            ),
+            // L523 `set -- ...` installs keyword tokens as positional params.
+            (
+                "L523",
+                "set -- __proto__ constructor prototype; echo $1 $2 $3",
+                "__proto__ constructor prototype\n",
+            ),
+            // L532 `shift` drops the first positional after `set --`.
+            (
+                "L532",
+                "set -- __proto__ constructor\nshift\necho $1",
+                "constructor\n",
+            ),
+            // L812 `${!__proto__}` indirectly expands through a keyword-named var.
+            (
+                "L812",
+                "__proto__=indirect_target\nindirect_target=final_value\necho ${!__proto__}",
+                "final_value\n",
+            ),
+            // L823 `${!ref}` indirect array reference resolves `__proto__[@]`.
+            (
+                "L823",
+                "__proto__=(a b c)\nref=\"__proto__[@]\"\necho ${!ref}",
+                "a b c\n",
+            ),
+            // L836 `${__proto__@Q}` single-quotes a value needing quoting.
+            (
+                "L836",
+                "__proto__=\"quoted value\"\necho ${__proto__@Q}",
+                "'quoted value'\n",
+            ),
+            // L846 `${__proto__@A}` emits the assignment form.
+            (
+                "L846",
+                "__proto__=value\necho ${__proto__@A}",
+                "__proto__='value'\n",
+            ),
+            // L858 `${constructor:6}` slices a substring from a keyword-named var.
+            (
+                "L858",
+                "constructor=hello_world\necho ${constructor:6}",
+                "world\n",
+            ),
+            // L880 `${__proto__/world/universe}` substitutes within the value.
+            (
+                "L880",
+                "__proto__=\"hello world\"\necho ${__proto__/world/universe}",
+                "hello universe\n",
+            ),
+        ] {
+            let mut sh = shell();
+            let result = sh.exec(source);
+            assert_eq!(result.stdout, expected_stdout, "{line} stdout {source:?}");
+            assert_eq!(result.exit_code, 0, "{line} exit {source:?}");
+        }
+
+        // Guard the new expansion machinery against ordinary-variable regressions
+        // and the default-value / length operators it must not shadow.
+        let mut sh = shell();
+        assert_eq!(sh.exec("echo ${missing:-fallback}").stdout, "fallback\n");
+        assert_eq!(sh.exec("x=hi; echo ${x:-fb}").stdout, "hi\n");
+        assert_eq!(sh.exec("x=hello; echo ${#x}").stdout, "5\n");
+        assert_eq!(sh.exec("x=AbC; echo ${x,,}").stdout, "abc\n");
+        assert_eq!(sh.exec("x=abc; echo ${x^}").stdout, "Abc\n");
+        assert_eq!(
+            sh.exec("x=banana; echo ${x//a/o}").stdout,
+            "bonono\n",
+            "global pattern substitution"
+        );
+        assert_eq!(
+            sh.exec("x=hello_world; echo ${x:0:5}").stdout,
+            "hello\n",
+            "substring with length"
+        );
+        assert!(
+            sh.exec("if [[ -v never_set_var ]]; then echo y; else echo n; fi")
+                .stdout
+                == "n\n",
+            "-v on an unset variable is false"
+        );
     }
 
     /// JBC-50 closes the upstream `local` builtin rows

@@ -2003,6 +2003,16 @@ const r10jbInterpreterCoreCaseGroups = [
     notes:
       'R15JB verifies prototype keywords (__proto__, constructor, ...) used as declare -r/-i targets, eval-set/eval-defined/unset -f function and variable names (including eval array assignment and indirect eval naming), mapfile into a keyword-named array, read in a pipeline subshell, and return from a keyword-named function. The stdout rows assert exact output; the two exit-code-only upstream rows (L268 pipeline read, L766 mapfile) assert only exit 0.',
   },
+  {
+    file: 'packages/just-bash/src/interpreter/prototype-pollution.test.ts',
+    lines: [169, 237, 523, 532, 812, 823, 836, 846, 858, 880],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::prototype-pollution',
+    rustTest:
+      'r15jb_interpreter_prototype_pollution_expansion_rows_match_upstream',
+    notes:
+      'R15JB extends parameter expansion (${var^^} case-modify, ${var:offset} substring, ${var/pat/repl} substitution, ${!var} indirect scalar and arr[@], ${var@Q}/${var@A} transforms), the [[ -v name ]] conditional, and the set -- positional-parameter builtin so prototype keywords (constructor, __proto__, ...) used as variable names through those features round-trip. Each row asserts exact stdout/exit; the test also guards default-value/length/global-substitution regressions.',
+  },
 ];
 
 const jbc16CaseGroups = [
