@@ -6663,8 +6663,75 @@ const r18jbSleepDurationCaseGroups = [
   },
 ];
 
+const r16jbParserInterpreterCaseGroups = [
+  {
+    file: 'packages/just-bash/src/interpreter/redirections.binary.test.ts',
+    lines: [24, 132, 145, 178, 188, 198, 208],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r16jb_interpreter_redirections_binary_rows_match_upstream',
+    notes:
+      'R16JB verifies the portable redirections.binary rows whose payloads are representable through the String-backed VFS: UTF-8 round-trips of Latin-1/French/German text via read_file_buffer (the exact upstream byte sequences), the null-byte `> file` round-trip, and the gzip/gunzip `-c` text round-trips through `>` and a pipe. The remaining high-byte binary-input rows stay pending until a binary-input VFS facade lands.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/composition.test.ts',
+    lines: [100],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r16jb_interpreter_parser_runtime_rows_match_upstream',
+    notes:
+      'R16JB verifies the portable here-doc-piped-through-`sort | uniq` row through the registry-backed Bash runtime.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/set-errexit.test.ts',
+    lines: [306],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r16jb_interpreter_parser_runtime_rows_match_upstream',
+    notes:
+      'R16JB verifies that an explicit `exit 42` under `set -e` preserves the non-zero exit code.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/loops.test.ts',
+    lines: [60],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r16jb_interpreter_parser_runtime_rows_match_upstream',
+    notes:
+      'R16JB verifies that a `for` loop variable does not persist into a subsequent `exec` call.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/parse-errors.test.ts',
+    lines: [147, 179],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r16jb_interpreter_parser_runtime_rows_match_upstream',
+    notes:
+      'R16JB verifies redirect auto-creation of parent directories (exit 0 with the written content) and the file-not-found row (`cat` of a missing file exits 1 with a "No such file" stderr).',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/pipeline-execution.test.ts',
+    lines: [62],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r16jb_interpreter_parser_runtime_rows_match_upstream',
+    notes:
+      'R16JB verifies that a `ls existing missing | tee file` pipeline preserves stdout for the existing file and stderr for the missing one.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/subshell-args.test.ts',
+    lines: [6, 13, 25, 35, 41, 49, 55, 63, 69],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r16jb_syntax_subshell_positional_argument_rows_match_upstream',
+    notes:
+      'R16JB verifies the portable positional-argument rows: `bash -c`/`sh -c` forwarding `$1 $2`, `$#`, and `$@`; a `bash script.sh` passing `$1 $2 $3`; and the xargs append, `-I {}`, `-n 2`, and `-0` modes. The `$0`-to-script-name row stays pending.',
+  },
+];
+
 function caseOverrideFor(testCase) {
   const group = [
+    ...r16jbParserInterpreterCaseGroups,
     ...r18jbSleepDurationCaseGroups,
     ...r15jbStringsBinaryCaseGroups,
     ...r13jbSortCommandCaseGroups,

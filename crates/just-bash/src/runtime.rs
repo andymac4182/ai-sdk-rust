@@ -20224,6 +20224,198 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         );
     }
 
+    /// Maps the portable `redirections.binary.test.ts` rows whose binary/UTF-8
+    /// payload is representable through the String-backed virtual filesystem to
+    /// the registry-backed `Bash` runtime: UTF-8 round-trips of Latin-1/French
+    /// accents and German umlauts via `read_file_buffer` (the exact byte
+    /// sequences upstream asserts), the null-byte redirection that survives a
+    /// `> file` round-trip, and the gzip/gunzip `-c` text round-trips through
+    /// `>` and a pipe. Each row fails if redirection, gzip, or UTF-8 byte
+    /// preservation regresses.
+    #[test]
+    fn r16jb_interpreter_redirections_binary_rows_match_upstream() {
+        // L178 echo "Ü Ö Ä" > file preserves UTF-8 bytes via readFileBuffer.
+        let u178 = Bash::new();
+        u178.exec("echo \"Ü Ö Ä\" > /test.txt");
+        assert_eq!(
+            u178.read_file_buffer("/test.txt").unwrap(),
+            vec![0xc3, 0x9c, 0x20, 0xc3, 0x96, 0x20, 0xc3, 0x84, 0x0a]
+        );
+        // L188 French accented characters round-trip "café résumé\n".
+        let u188 = Bash::new();
+        u188.exec("echo \"café résumé\" > /test.txt");
+        assert_eq!(
+            String::from_utf8(u188.read_file_buffer("/test.txt").unwrap()).unwrap(),
+            "café résumé\n"
+        );
+        // L198 echo "Ü" > file yields exactly [0xC3, 0x9C, 0x0A].
+        let u198 = Bash::new();
+        u198.exec("echo \"Ü\" > /test.txt");
+        assert_eq!(
+            u198.read_file_buffer("/test.txt").unwrap(),
+            vec![0xc3, 0x9c, 0x0a]
+        );
+        // L208 multi-umlaut text survives a cat round-trip.
+        let u208 = Bash::new();
+        assert_eq!(
+            u208.exec("echo \"Ü Ö Ä ü ö ä ß\" > /test.txt\ncat /test.txt")
+                .stdout,
+            "Ü Ö Ä ü ö ä ß\n"
+        );
+        // L24 null bytes survive `cat nulls > output` (A\0B\0C).
+        let b24 = Bash::new();
+        b24.exec("printf 'A\\x00B\\x00C' > /nulls.bin");
+        b24.exec("cat /nulls.bin > /output.bin");
+        assert_eq!(
+            b24.exec("cat /output.bin").stdout.into_bytes(),
+            vec![0x41, 0x00, 0x42, 0x00, 0x43]
+        );
+        // L132 gzip -c through `>` then gunzip -c round-trips text.
+        let g132 = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "test data for compression".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        g132.exec("gzip -c /data.txt > /compressed.gz");
+        assert_eq!(
+            g132.exec("gunzip -c /compressed.gz").stdout,
+            "test data for compression"
+        );
+        // L145 gzip -c through a pipe then `>` then gunzip -c round-trips text.
+        let g145 = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/data.txt".to_string(),
+                "piped compression test".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        g145.exec("cat /data.txt | gzip -c > /compressed.gz");
+        assert_eq!(
+            g145.exec("gunzip -c /compressed.gz").stdout,
+            "piped compression test"
+        );
+    }
+
+    /// Maps portable parser/interpreter rows that exercise the registry-backed
+    /// `Bash` runtime without full control-flow blocks. `composition.test.ts`
+    /// L100 pipes a here-document through `sort | uniq`; `set-errexit.test.ts`
+    /// L306 preserves an explicit `exit 42`; `loops.test.ts` L60 proves a `for`
+    /// loop variable does not leak into a later `exec`; `parse-errors.test.ts`
+    /// L147 auto-creates redirect parent directories and L179 reports a
+    /// file-not-found with exit 1; and `pipeline-execution.test.ts` L62 keeps
+    /// stdout/stderr through a `ls | tee` pipeline. Each row fails if the
+    /// asserted stdout/stderr/exit-code/filesystem effect regresses.
+    #[test]
+    fn r16jb_interpreter_parser_runtime_rows_match_upstream() {
+        // composition.test.ts L100 here-doc piped through sort | uniq.
+        assert_eq!(
+            Bash::new()
+                .exec("cat <<EOF | sort | uniq\nbanana\napple\nbanana\ncherry\napple\nEOF")
+                .stdout,
+            "apple\nbanana\ncherry\n"
+        );
+        // set-errexit.test.ts L306 preserves a non-zero `exit` code.
+        let se306 = Bash::new().exec("\nset -e\nexit 42\n");
+        assert_eq!(se306.exit_code, 42);
+        // loops.test.ts L60 a `for` loop variable does not persist to a new exec.
+        let l60 = Bash::new();
+        l60.exec("for x in a b; do echo $x; done");
+        assert_eq!(l60.exec("echo \"[$x]\"").stdout, "[]\n");
+        // parse-errors.test.ts L147 redirect auto-creates parent directories.
+        let pe147 = Bash::new();
+        let r147 = pe147.exec("echo test > /newdir/file.txt");
+        assert_eq!(r147.exit_code, 0);
+        assert_eq!(pe147.read_file("/newdir/file.txt").unwrap(), "test\n");
+        // parse-errors.test.ts L179 missing file errors with exit 1.
+        let pe179 = Bash::new().exec("cat /nonexistent.txt");
+        assert_eq!(pe179.exit_code, 1);
+        assert!(
+            pe179.stderr.contains("No such file"),
+            "stderr={:?}",
+            pe179.stderr
+        );
+        // pipeline-execution.test.ts L62 `ls a b | tee` keeps stdout for the
+        // existing file and stderr for the missing one.
+        let pl62 = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data/file.txt".to_string(), "hello\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let r62 =
+            pl62.exec("ls /data/file.txt /no_such_xyz | tee /tmp/out.txt; (exit ${PIPESTATUS[0]})");
+        assert!(
+            r62.stdout.contains("/data/file.txt"),
+            "stdout={:?}",
+            r62.stdout
+        );
+        assert!(
+            r62.stderr.contains("No such file"),
+            "stderr={:?}",
+            r62.stderr
+        );
+    }
+
+    /// Maps the portable `subshell-args.test.ts` positional-argument rows to the
+    /// registry-backed `Bash` runtime: `bash -c`/`sh -c` forward `$1 $2`, `$#`,
+    /// and `$@` from the trailing operands, a `bash script.sh` invocation passes
+    /// `$1 $2 $3` to the script body, and the `xargs` rows append args, perform
+    /// `-I {}` replacement, batch with `-n 2`, and split null-separated input
+    /// with `-0`. Each row fails if positional-argument wiring or the matching
+    /// `xargs` mode regresses. (The `$0`-to-script-name row stays pending.)
+    #[test]
+    fn r16jb_syntax_subshell_positional_argument_rows_match_upstream() {
+        let env = Bash::new();
+        // L6 bash -c forwards $1 $2 from trailing operands (script arg1 arg2).
+        assert_eq!(
+            env.exec("bash -c 'echo $1 $2' script arg1 arg2").stdout,
+            "arg1 arg2\n"
+        );
+        // L13 sh -c behaves the same as bash -c for positional args.
+        assert_eq!(
+            env.exec("sh -c 'echo $1 $2' script arg1 arg2").stdout,
+            "arg1 arg2\n"
+        );
+        // L35 $# is the trailing argument count.
+        assert_eq!(env.exec("bash -c 'echo $#' script a b c").stdout, "3\n");
+        // L41 $@ expands to all trailing arguments.
+        assert_eq!(env.exec("bash -c 'echo $@' script a b c").stdout, "a b c\n");
+        // L25 a script file receives $1 $2 $3.
+        let script_env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/script.sh".to_string(),
+                "echo \"Args: $1 $2 $3\"".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            script_env.exec("bash /script.sh one two three").stdout,
+            "Args: one two three\n"
+        );
+        // L49 xargs appends piped words to the command.
+        assert_eq!(
+            env.exec("echo \"a b c\" | xargs echo prefix").stdout,
+            "prefix a b c\n"
+        );
+        // L55 xargs -I {} replaces the placeholder per input line.
+        assert_eq!(
+            env.exec("printf \"one\\ntwo\" | xargs -I {} echo item: {}")
+                .stdout,
+            "item: one\nitem: two\n"
+        );
+        // L63 xargs -n 2 batches arguments two at a time.
+        assert_eq!(
+            env.exec("echo \"a b c d\" | xargs -n 2 echo").stdout,
+            "a b\nc d\n"
+        );
+        // L69 xargs -0 splits null-separated input.
+        assert_eq!(
+            env.exec("printf \"file1\\x00file2\\x00file3\" | xargs -0 echo")
+                .stdout,
+            "file1 file2 file3\n"
+        );
+    }
+
     const RG_SHERLOCK: &str = "For the Doctor Watsons of this world, as opposed to the Sherlock\nHolmeses, success in the province of detective work must always\nbe, to a very large extent, the result of luck. Sherlock Holmes\ncan extract a clew from a wisp of straw or a flake of cigar ash;\nbut Doctor Watson has to have it taken out for him and dusted,\nand exhibited clearly, with a label attached.\n";
 
     fn rg_json_messages(stdout: &str) -> Vec<serde_json::Value> {
