@@ -3653,6 +3653,17 @@ pub struct ShellState {
     /// (an `if`/`while`/`until` condition or the left side of `&&`/`||`) where
     /// errexit must not fire.
     errexit_suppressed: u32,
+    /// `set -u` / `set -o nounset`: expanding an unset variable or positional
+    /// parameter (without a `${var:-...}`/`${var:+...}`/`${var:=...}` default
+    /// modifier) is a fatal error. The expansion records the diagnostic in
+    /// [`Self::nounset_error`]; the enclosing simple command drains it, reports
+    /// `bash: NAME: unbound variable` on stderr, and aborts the script with
+    /// exit code 1.
+    nounset: bool,
+    /// Pending `nounset` ("unbound variable") error raised while expanding the
+    /// current command's words. Carries the full stderr line. Drained by the
+    /// enclosing simple command, where it becomes a fatal exit-1 abort.
+    nounset_error: Option<String>,
     xtrace: bool,
     exited: Option<i32>,
     /// Pending execution-limit abort (recursion depth, command count, or loop
@@ -3841,6 +3852,8 @@ impl<D: CommandDispatcher> Interpreter<D> {
         self.state.subshell_depth = 0;
         self.state.errexit = false;
         self.state.errexit_suppressed = 0;
+        self.state.nounset = false;
+        self.state.nounset_error = None;
         self.state.command_count = 0;
         self.state.execution_limit = None;
         let mut output = match parse(source) {
@@ -4112,6 +4125,9 @@ impl<D: CommandDispatcher> Interpreter<D> {
         if let Some(output) = self.take_arith_error() {
             return output;
         }
+        if let Some(output) = self.take_nounset_error() {
+            return output;
+        }
         let redirections = command
             .redirections
             .iter()
@@ -4287,9 +4303,9 @@ impl<D: CommandDispatcher> Interpreter<D> {
                     "errexit" => self.state.errexit = enable,
                     "pipefail" => self.state.pipefail = enable,
                     "xtrace" => self.state.xtrace = enable,
+                    "nounset" => self.state.nounset = enable,
                     // Accepted long option names that are no-ops here.
-                    "nounset"
-                    | "verbose"
+                    "verbose"
                     | "noclobber"
                     | "noglob"
                     | "allexport"
@@ -4334,9 +4350,10 @@ impl<D: CommandDispatcher> Interpreter<D> {
                     match flag {
                         'e' => self.state.errexit = enable,
                         'x' => self.state.xtrace = enable,
+                        'u' => self.state.nounset = enable,
                         // Accepted short flags that are no-ops here.
-                        'u' | 'v' | 'f' | 'C' | 'a' | 'n' | 'h' | 'b' | 'm' | 'B' | 'H' | 'P'
-                        | 'T' | 'E' | 'p' => {}
+                        'v' | 'f' | 'C' | 'a' | 'n' | 'h' | 'b' | 'm' | 'B' | 'H' | 'P' | 'T'
+                        | 'E' | 'p' => {}
                         other => {
                             return ExecOutput {
                                 stdout: String::new(),
@@ -4364,7 +4381,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
         // (name, current value). Order is alphabetised below to match bash.
         let implemented: [(&str, bool); 5] = [
             ("errexit", self.state.errexit),
-            ("nounset", false),
+            ("nounset", self.state.nounset),
             ("pipefail", self.state.pipefail),
             ("verbose", false),
             ("xtrace", self.state.xtrace),
@@ -5650,6 +5667,21 @@ impl<D: CommandDispatcher> Interpreter<D> {
             }
             Some(ParameterOperation::Length) => unreachable!("handled above"),
             None => {
+                // `set -u` (nounset): a plain expansion of an unset variable or
+                // positional parameter is a fatal error. Special parameters
+                // (`$?`, `$#`, `$@`, `$*`, `$$`, `$!`, `$0`) are always defined
+                // and never trigger it; `${var:-...}` and friends are handled by
+                // the other operation arms above, so reaching here with `None`
+                // means there was no default-value modifier to suppress the
+                // error.
+                if self.state.nounset
+                    && !is_set
+                    && self.state.nounset_error.is_none()
+                    && !is_special_always_set_parameter(&parameter.parameter)
+                {
+                    self.state.nounset_error =
+                        Some(format!("bash: {}: unbound variable\n", parameter.parameter));
+                }
                 if matches!(parameter.parameter.as_str(), "@" | "*") && !quoted {
                     self.state.positionals.clone()
                 } else {
@@ -6023,8 +6055,16 @@ impl<D: CommandDispatcher> Interpreter<D> {
     }
 
     fn parameter_is_set(&self, parameter: &str) -> bool {
-        if matches!(parameter, "?" | "#" | "@" | "*" | "$") {
+        if matches!(parameter, "?" | "#" | "@" | "*" | "$" | "!" | "0") {
             return true;
+        }
+        // A positional parameter (`$1`, `$2`, ...) is "set" when it lies within
+        // the current positional list. `$0` is always set (handled above).
+        if !parameter.is_empty() && parameter.chars().all(|c| c.is_ascii_digit()) {
+            return parameter
+                .parse::<usize>()
+                .ok()
+                .is_some_and(|index| index >= 1 && index <= self.state.positionals.len());
         }
         if parse_subscript_reference(parameter).is_some() {
             return !self.lookup_parameter(parameter).is_empty();
@@ -6066,6 +6106,23 @@ impl<D: CommandDispatcher> Interpreter<D> {
             stdout: String::new(),
             stderr,
             exit_code: 1,
+        })
+    }
+
+    /// Drain any pending `set -u` (nounset) "unbound variable" error raised
+    /// while expanding the current command's words. In a non-interactive shell
+    /// this is fatal: bash prints the diagnostic on stderr, the offending
+    /// command does not run, and the whole script aborts with exit status 1
+    /// (subsequent statements are skipped). Setting `exited` mirrors the way
+    /// `exit 1`/the execution-limit abort short-circuit further execution.
+    fn take_nounset_error(&mut self) -> Option<ExecOutput> {
+        self.state.nounset_error.take().map(|stderr| {
+            self.state.exited = Some(1);
+            ExecOutput {
+                stdout: String::new(),
+                stderr,
+                exit_code: 1,
+            }
         })
     }
 }
@@ -6430,6 +6487,13 @@ fn split_array_literal(body: &str) -> Vec<String> {
 
 /// Strip a single matching pair of surrounding single or double quotes from an
 /// associative-array subscript so `'foo'`/`"foo"` both key on `foo`.
+/// Special parameters that bash always considers defined, so a plain expansion
+/// of them never triggers a `set -u` (nounset) "unbound variable" error:
+/// `$?`, `$#`, `$@`, `$*`, `$$`, `$!`, and `$0`.
+fn is_special_always_set_parameter(parameter: &str) -> bool {
+    matches!(parameter, "?" | "#" | "@" | "*" | "$" | "!" | "0")
+}
+
 fn dequote_subscript(subscript: &str) -> String {
     let trimmed = subscript.trim();
     if trimmed.len() >= 2 {
@@ -8906,6 +8970,91 @@ mod tests {
             ("set -u\necho \":${UNSET:+alt}:\"", "::\n"),
             // L203 `set -eu` with a set variable runs without error.
             ("set -eu\nVAR=hello\necho $VAR", "hello\n"),
+        ] {
+            let mut sh = shell();
+            let result = sh.exec(source);
+            assert_eq!(result.stderr, "", "stderr {source:?}");
+            assert_eq!(result.stdout, expected_stdout, "stdout {source:?}");
+            assert_eq!(result.exit_code, 0, "exit {source:?}");
+        }
+    }
+
+    /// Covers the portable `set -u`/`set -o nounset` ERROR rows of
+    /// `packages/just-bash/src/interpreter/builtins/set.test.ts` through the
+    /// Rust shell interpreter. Each tuple mirrors an upstream `it(...)`
+    /// assertion: expanding an unset variable or positional parameter under
+    /// nounset is fatal — bash prints `NAME: unbound variable` on stderr, the
+    /// offending command does not run, and the script aborts with exit 1.
+    ///
+    /// - L34 `set -u; echo $UNDEFINED_VAR` errors with `UNDEFINED_VAR: unbound
+    ///   variable` and exit 1.
+    /// - L77 `set -o nounset` form errors identically (`UNDEFINED`).
+    /// - L142 an unset positional `$1` inside a function under `set -u` errors
+    ///   with `1: unbound variable`.
+    /// - L214 `set -eu` then `echo $UNDEFINED` aborts before the following
+    ///   `echo "never"` runs.
+    ///
+    /// Positive control rows confirm the error does NOT fire for set variables
+    /// and set positionals, so the assertion fails if nounset over-triggers.
+    #[test]
+    fn jbpi_interpreter_set_nounset_error_rows_match_upstream() {
+        // (source, stderr-substring, expected exit code, must-not-appear stdout)
+        let error_rows = [
+            // L34 unset scalar under `set -u`.
+            (
+                "set -u\necho $UNDEFINED_VAR",
+                "UNDEFINED_VAR: unbound variable",
+                1,
+                "",
+            ),
+            // L77 unset scalar under `set -o nounset`.
+            (
+                "set -o nounset\necho $UNDEFINED",
+                "UNDEFINED: unbound variable",
+                1,
+                "",
+            ),
+            // L142 unset positional `$1` inside a function under `set -u`.
+            (
+                "myfunc() {\n  set -u\n  echo $1\n}\nmyfunc",
+                "1: unbound variable",
+                1,
+                "",
+            ),
+            // L214 `set -eu` aborts before `echo "never"`.
+            (
+                "set -eu\necho $UNDEFINED\necho \"never\"",
+                "UNDEFINED: unbound variable",
+                1,
+                "never",
+            ),
+        ];
+        for (source, stderr_needle, expected_code, forbidden_stdout) in error_rows {
+            let mut sh = shell();
+            let result = sh.exec(source);
+            assert!(
+                result.stderr.contains(stderr_needle),
+                "stderr {source:?}: {:?} missing {stderr_needle:?}",
+                result.stderr
+            );
+            assert_eq!(result.exit_code, expected_code, "exit {source:?}");
+            assert_eq!(result.stdout, "", "stdout {source:?}");
+            if !forbidden_stdout.is_empty() {
+                assert!(
+                    !result.stdout.contains(forbidden_stdout),
+                    "stdout {source:?} should not contain {forbidden_stdout:?}"
+                );
+            }
+        }
+
+        // Positive controls: nounset must NOT fire for set values/positionals.
+        for (source, expected_stdout) in [
+            ("set -u\nMYVAR=hello\necho $MYVAR", "hello\n"),
+            ("set -eu\nVAR=hello\necho $VAR", "hello\n"),
+            (
+                "myfunc() {\n  set -u\n  echo $1\n}\nmyfunc hello",
+                "hello\n",
+            ),
         ] {
             let mut sh = shell();
             let result = sh.exec(source);
