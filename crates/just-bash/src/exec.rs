@@ -35302,6 +35302,134 @@ mod tests {
     }
 
     #[test]
+    fn diff_binary_rows_detect_identical_and_differing_byte_content() {
+        // Mirrors packages/just-bash/src/commands/diff/diff.binary.test.ts:
+        //   line 6  - identical high-byte binary files -> exit 0, empty stdout
+        //   line 20 - identical null-byte files -> exit 0
+        //   line 33 - differing null-byte files -> exit 1
+        //   line 46 - high-byte text files differing in one byte -> exit 1
+        //   line 62 - binary stdin piped via `cat - | diff - file` differs -> exit 1
+        // High bytes 0x80-0xff map to the corresponding \u{0080}-\u{00ff} chars in
+        // the virtual filesystem's String content; the diff outcome depends on byte
+        // equality, which is preserved verbatim by this representation. Each
+        // assertion fails if diff mis-reports identical vs differing content.
+
+        // line 6: identical binary files [0x80,0x90,0xa0,0xb0,0xff]
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/a.bin", "\u{80}\u{90}\u{a0}\u{b0}\u{ff}")
+                .with_file("/b.bin", "\u{80}\u{90}\u{a0}\u{b0}\u{ff}")
+                .with_cwd("/"),
+        );
+        let result = bash.exec("diff /a.bin /b.bin", JustBashExecOptions::new());
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "");
+
+        // line 20: files with null bytes - identical [0x41,0x00,0x42]
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/a.bin", "\u{41}\u{0}\u{42}")
+                .with_file("/b.bin", "\u{41}\u{0}\u{42}")
+                .with_cwd("/"),
+        );
+        let result = bash.exec("diff /a.bin /b.bin", JustBashExecOptions::new());
+        assert_eq!(result.exit_code, 0);
+
+        // line 33: difference in files with null bytes [0x41,0x00,0x42] vs [0x41,0x00,0x43]
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/a.bin", "\u{41}\u{0}\u{42}")
+                .with_file("/b.bin", "\u{41}\u{0}\u{43}")
+                .with_cwd("/"),
+        );
+        let result = bash.exec("diff /a.bin /b.bin", JustBashExecOptions::new());
+        assert_eq!(result.exit_code, 1);
+
+        // line 46: text files with high bytes "hello\x80world\n" vs "hello\x81world\n"
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/a.txt", "hello\u{80}world\n")
+                .with_file("/b.txt", "hello\u{81}world\n")
+                .with_cwd("/"),
+        );
+        let result = bash.exec("diff /a.txt /b.txt", JustBashExecOptions::new());
+        assert_eq!(result.exit_code, 1);
+
+        // line 62: binary stdin diff `cat /a.bin | diff - /b.bin`
+        // [0x80,0x91,0xa0] vs [0x80,0x90,0xa0]
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/a.bin", "\u{80}\u{91}\u{a0}")
+                .with_file("/b.bin", "\u{80}\u{90}\u{a0}")
+                .with_cwd("/"),
+        );
+        let result = bash.exec("cat /a.bin | diff - /b.bin", JustBashExecOptions::new());
+        assert_eq!(result.exit_code, 1);
+    }
+
+    #[test]
+    fn binary_and_utf8_stream_command_rows_are_byte_clean() {
+        // Closes the remaining portable-pending byte-fidelity rows across small
+        // stream commands, each mapped 1:1 to an upstream case:
+        //   printf.binary.test.ts:80 - binary survives the printf->cat->base64->-d pipe
+        //   tee.binary.test.ts:5      - tee writes binary content to a file and stdout
+        //   base64.binary.test.ts:65  - binary round-trips through stdin base64/-d
+        //   bash.utf8-stdin.test.ts:5 - bash runs a piped multibyte script
+
+        // printf.binary:80 - printf '\x80\xff\x90\xab' -> base64 -> base64 -d round-trip
+        let bash = JustBashSession::new();
+        bash.exec(
+            "printf '\\x80\\xff\\x90\\xab' > /binary.bin",
+            JustBashExecOptions::new(),
+        );
+        bash.exec(
+            "base64 /binary.bin > /encoded.txt",
+            JustBashExecOptions::new(),
+        );
+        let decoded = bash.exec("base64 -d /encoded.txt", JustBashExecOptions::new());
+        assert_eq!(decoded.stdout, "\u{80}\u{ff}\u{90}\u{ab}");
+
+        // tee.binary:5 - cat /input.bin | tee /output.bin writes "Hi\n" to both
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/input.bin", "Hi\n"),
+        );
+        let tee = bash.exec(
+            "cat /input.bin | tee /output.bin",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(tee.stdout, "Hi\n");
+        assert_eq!(
+            bash.exec("cat /output.bin", JustBashExecOptions::new())
+                .stdout,
+            "Hi\n"
+        );
+
+        // base64.binary:65 - round-trip binary through stdin base64/-d
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/binary.bin", "\u{80}\u{ff}\u{90}\u{ab}\u{cd}"),
+        );
+        bash.exec(
+            "cat /binary.bin | base64 > /encoded.txt",
+            JustBashExecOptions::new(),
+        );
+        let rt = bash.exec("base64 -d /encoded.txt", JustBashExecOptions::new());
+        assert_eq!(rt.stdout, "\u{80}\u{ff}\u{90}\u{ab}\u{cd}");
+
+        // bash.utf8-stdin:5 - bash runs a piped multibyte script
+        let bash = JustBashSession::with_options(JustBashSessionOptions::new().with_file(
+            "/script.sh",
+            "echo \"\u{d55c}\u{ae00} / caf\u{e9} / \u{6f22}\u{5b57}\"\n",
+        ));
+        let piped = bash.exec("cat /script.sh | bash", JustBashExecOptions::new());
+        assert_eq!(piped.exit_code, 0);
+        assert_eq!(
+            piped.stdout,
+            "\u{d55c}\u{ae00} / caf\u{e9} / \u{6f22}\u{5b57}\n"
+        );
+    }
+
+    #[test]
     fn jbc_gzip_binary_rows_match_upstream() {
         // Mirrors packages/just-bash/src/commands/gzip/gzip.binary.test.ts. The
         // virtual gzip codec is byte-clean: high bytes, null bytes, every byte
