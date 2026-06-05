@@ -1060,6 +1060,9 @@ impl JustBashSession {
             command_count: 0,
             max_command_count: self.inner.max_command_count,
             errexit: false,
+            call_depth: 0,
+            source_depth: 0,
+            last_exit: 0,
         };
         let mut script = script.as_ref().to_string();
 
@@ -1219,6 +1222,14 @@ struct ExecState<'a> {
     command_count: usize,
     max_command_count: usize,
     errexit: bool,
+    /// Active shell-function call frames. `return` is only valid when this or
+    /// [`ExecState::source_depth`] is non-zero (mirrors upstream `callDepth`).
+    call_depth: u32,
+    /// Active `source`/`.` nesting frames (mirrors upstream `sourceDepth`).
+    source_depth: u32,
+    /// Status of the most recently completed command, used as the default
+    /// exit code for a bare `return`.
+    last_exit: i32,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1227,6 +1238,12 @@ struct CommandResult {
     stderr: String,
     exit_code: i32,
     exit_requested: bool,
+    /// `return` signal raised by a sourced script or a shell function. Mirrors
+    /// upstream `ReturnError`: it unwinds the current `executeScript` body (the
+    /// function or sourced file) but is consumed at that boundary so the
+    /// enclosing script keeps running. Unlike `exit_requested`, it never tears
+    /// down the whole exec.
+    return_requested: bool,
     /// Byte-clean stdout for commands that emit binary (mirrors upstream's
     /// `stdoutEncoding: "binary"`). When set, redirections write these raw
     /// bytes verbatim instead of UTF-8-encoding `stdout`. `stdout` itself
@@ -1253,8 +1270,16 @@ fn execute_control_script(state: &mut ExecState<'_>, script: &str) -> CommandRes
         combined.stderr.push_str(&result.stderr);
         combined.exit_code = result.exit_code;
         last_exit = result.exit_code;
+        state.last_exit = result.exit_code;
         if result.exit_requested {
             combined.exit_requested = true;
+            break;
+        }
+        // A `return` unwinds the rest of this body (function or sourced script)
+        // exactly like `exit` unwinds the whole exec; the function/source
+        // boundary clears the flag so the caller resumes.
+        if result.return_requested {
+            combined.return_requested = true;
             break;
         }
         let next_op = controls.get(index + 1).map(|(op, _)| *op);
@@ -1276,7 +1301,7 @@ fn execute_pipeline(state: &mut ExecState<'_>, command: &str) -> CommandResult {
         stderr.push_str(&result.stderr);
         stdin = result.stdout.clone();
         final_result = result;
-        if final_result.exit_requested {
+        if final_result.exit_requested || final_result.return_requested {
             break;
         }
     }
@@ -1471,7 +1496,16 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
     let command = command_basename(&tokens[0]);
     if let Some(body) = state.functions.get(command).cloned() {
         let old_stdin = std::mem::replace(&mut state.stdin, stdin);
-        let result = execute_control_script(state, &body);
+        // Positional parameters ($1..$n, $#, $@, $*) are the function's
+        // arguments for the duration of the call, then restored.
+        let old_positionals = set_positional_args(state, tokens[1..].to_vec());
+        state.call_depth += 1;
+        let mut result = execute_control_script(state, &body);
+        state.call_depth -= 1;
+        restore_positional_args(state, old_positionals);
+        // `return` raised inside the function stops at this frame: consume the
+        // signal so the caller keeps running, but keep the returned exit code.
+        result.return_requested = false;
         state.stdin = old_stdin;
         return result;
     }
@@ -1489,6 +1523,12 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
     }
     if command == "set" {
         return command_set(state, &tokens[1..]);
+    }
+    if command == "return" {
+        return command_return(state, &tokens[1..]);
+    }
+    if command == "source" || command == "." {
+        return command_source(state, &tokens[1..]);
     }
     if !state.session.inner.commands.contains(command) {
         return stderr_result(127, format!("bash: {}: command not found\n", tokens[0]));
@@ -5238,6 +5278,7 @@ fn command_find(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
         stderr,
         exit_code,
         exit_requested: false,
+        return_requested: false,
         stdout_bytes: None,
     }
 }
@@ -6693,6 +6734,7 @@ fn curl_error(options: &CurlOptions, exit_code: i32, message: impl Into<String>)
         stderr,
         exit_code,
         exit_requested: false,
+        return_requested: false,
         stdout_bytes: None,
     }
 }
@@ -25046,6 +25088,7 @@ fn sqlite3_minimal(state: &ExecState<'_>, args: &[String], stdin: &str) -> Comma
                         stderr: format!("Error: {error}\n"),
                         exit_code: 1,
                         exit_requested: false,
+                        return_requested: false,
                         stdout_bytes: None,
                     };
                 }
@@ -31691,6 +31734,7 @@ fn execute_custom_command(
         stderr: result.stderr,
         exit_code: result.exit_code,
         exit_requested: false,
+        return_requested: false,
         stdout_bytes: None,
     })
 }
@@ -31708,6 +31752,7 @@ fn execute_language_runtime(
         stderr: result.stderr,
         exit_code: result.exit_code,
         exit_requested: false,
+        return_requested: false,
         stdout_bytes: None,
     })
 }
@@ -32422,8 +32467,129 @@ fn execute_assignment_substitution(
         stderr: result.stderr,
         exit_code: result.exit_code,
         exit_requested: result.exit_requested,
+        return_requested: result.return_requested,
         stdout_bytes: None,
     })
+}
+
+/// `return [n]` builtin. Valid only inside a shell function or a sourced
+/// script; elsewhere it is a status-1 error. With no argument it resolves to the
+/// most recent command's status, otherwise it parses `n` and wraps it modulo 256
+/// (a non-numeric argument is a status-2 "numeric argument required" error that
+/// does NOT raise the return signal). Mirrors `interpreter/builtins/return.ts`.
+fn command_return(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
+    if state.call_depth == 0 && state.source_depth == 0 {
+        return stderr_result(
+            1,
+            "bash: return: can only `return' from a function or sourced script\n".to_string(),
+        );
+    }
+    let exit_code = match args.first() {
+        None => state.last_exit,
+        Some(arg) => match arg.parse::<i64>() {
+            Ok(value) => value.rem_euclid(256) as i32,
+            Err(_) => {
+                return stderr_result(
+                    2,
+                    format!("bash: return: {arg}: numeric argument required\n"),
+                );
+            }
+        },
+    };
+    CommandResult {
+        stdout: String::new(),
+        stderr: String::new(),
+        exit_code,
+        return_requested: true,
+        ..CommandResult::default()
+    }
+}
+
+/// `source` / `.` builtin. Reads a script from the virtual filesystem and runs
+/// its commands in the current environment (variables, functions, and `cd`
+/// persist into the caller). Mirrors `interpreter/builtins/source.ts`:
+///   * a leading `--` ends option parsing,
+///   * no filename argument is a status-2 "filename argument required" error,
+///   * a filename containing `/` resolves directly; otherwise PATH directories
+///     are searched (skipping directories) before the current directory,
+///   * a missing file is a status-1 "No such file or directory" error,
+///   * extra arguments become `$1..$n`/`$#`/`$@`/`$*` for the sourced script and
+///     are restored afterwards,
+///   * a `return` inside the sourced script unwinds only the script (its exit
+///     code becomes the source result) and never tears down the caller.
+fn command_source(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
+    let mut source_args: &[String] = args;
+    if source_args.first().is_some_and(|first| first == "--") {
+        source_args = &source_args[1..];
+    }
+    let Some(filename) = source_args.first().cloned() else {
+        return stderr_result(2, "bash: source: filename argument required\n".to_string());
+    };
+
+    let content = {
+        let fs = match state.session.inner.fs.lock() {
+            Ok(fs) => fs,
+            Err(_) => {
+                return stderr_result(1, "bash: source: filesystem lock poisoned\n".to_string());
+            }
+        };
+        if filename.contains('/') {
+            let path = resolve_path(&state.cwd, &filename);
+            fs.read_file(&path).ok()
+        } else {
+            let mut found = None;
+            let path_env = state.env.get("PATH").cloned().unwrap_or_default();
+            for dir in path_env.split(':').filter(|dir| !dir.is_empty()) {
+                let candidate = resolve_path(&state.cwd, &format!("{dir}/{filename}"));
+                match fs.stat(&candidate) {
+                    Ok(stat) if stat.is_directory => continue,
+                    Ok(_) => {
+                        if let Ok(text) = fs.read_file(&candidate) {
+                            found = Some(text);
+                            break;
+                        }
+                    }
+                    Err(_) => continue,
+                }
+            }
+            if found.is_none() {
+                let path = resolve_path(&state.cwd, &filename);
+                found = fs.read_file(&path).ok();
+            }
+            found
+        }
+    };
+
+    let Some(content) = content else {
+        return stderr_result(1, format!("bash: {filename}: No such file or directory\n"));
+    };
+
+    // Only swap in fresh positional parameters when extra arguments are passed,
+    // matching upstream (a bare `source file` keeps the caller's `$@`).
+    let extra_args = &source_args[1..];
+    let saved_positionals = if extra_args.is_empty() {
+        None
+    } else {
+        Some(set_positional_args(state, extra_args.to_vec()))
+    };
+
+    // Mirror the top-level `exec` preprocessing so a sourced file can define
+    // functions and use here-documents that persist into the caller's session.
+    let mut content = content;
+    extract_function_definitions(&mut content, &mut state.functions);
+    let content = rewrite_here_documents(&content);
+
+    state.source_depth += 1;
+    let mut result = execute_control_script(state, &content);
+    state.source_depth -= 1;
+    // A `return` raised inside the sourced script stops at the source boundary;
+    // its exit code is already on `result`. `exit` keeps propagating upward.
+    result.return_requested = false;
+
+    if let Some(saved) = saved_positionals {
+        restore_positional_args(state, saved);
+    }
+    result
 }
 
 fn set_positional_args(
@@ -37688,5 +37854,175 @@ mod tests {
         let trimmed = r.stdout.trim();
         assert!(trimmed.contains("File has"), "stdout: {trimmed:?}");
         assert!(trimmed.contains('3'), "stdout: {trimmed:?}");
+    }
+
+    // ----------------------------------------------------------------------
+    // source / `.` builtin (interpreter/builtins/source.test.ts and
+    // syntax/source.test.ts). Each test runs the upstream setup exec and the
+    // assertion exec against one persistent session, mirroring the upstream
+    // `new Bash()` + two `await env.exec(...)` shape.
+    // ----------------------------------------------------------------------
+
+    // builtins/source.test.ts:6 and syntax/source.test.ts:6 — sourced commands
+    // run in the current environment, so a variable set in the file is visible
+    // to the caller.
+    #[test]
+    fn source_builtin_executes_commands_in_current_environment() {
+        let session = jb_session();
+        session.exec("echo \"x=123\" > /tmp/test.sh", JustBashExecOptions::new());
+        let r = session.exec(
+            "source /tmp/test.sh\necho \"x is: $x\"",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "x is: 123\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    // builtins/source.test.ts:17 and syntax/source.test.ts:17 — a function
+    // defined in a sourced file is callable in the caller's environment.
+    #[test]
+    fn source_builtin_supports_functions_from_sourced_file() {
+        let session = jb_session();
+        session.exec(
+            "echo \"greet() { echo Hello \\$1; }\" > /tmp/funcs.sh",
+            JustBashExecOptions::new(),
+        );
+        let r = session.exec(
+            "source /tmp/funcs.sh\ngreet World",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "Hello World\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    // builtins/source.test.ts:28 — a sourced assignment overwrites the caller's
+    // existing variable (no subshell isolation).
+    #[test]
+    fn source_builtin_modifies_variables_in_caller_environment() {
+        let session = jb_session();
+        session.exec(
+            "echo \"VAR=modified\" > /tmp/modify.sh",
+            JustBashExecOptions::new(),
+        );
+        let r = session.exec(
+            "VAR=original\nsource /tmp/modify.sh\necho $VAR",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "modified\n");
+    }
+
+    // builtins/source.test.ts:57 and syntax/source.test.ts:44 — `.` is an alias
+    // for `source` and runs the file in the current environment.
+    #[test]
+    fn source_dot_builtin_works_same_as_source() {
+        let session = jb_session();
+        session.exec("echo \"y=456\" > /tmp/test2.sh", JustBashExecOptions::new());
+        let r = session.exec(
+            ". /tmp/test2.sh\necho \"y is: $y\"",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "y is: 456\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    // builtins/source.test.ts:80 and syntax/source.test.ts:57 — extra arguments
+    // after the filename become $1.. and $# for the sourced script.
+    #[test]
+    fn source_builtin_passes_arguments_to_sourced_script() {
+        let session = jb_session();
+        session.exec(
+            "echo \"echo args: \\$1 \\$2 \\$#\" > /tmp/args.sh",
+            JustBashExecOptions::new(),
+        );
+        let r = session.exec("source /tmp/args.sh foo bar", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "args: foo bar 2\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    // builtins/source.test.ts:88 — positional parameters are restored to the
+    // caller's after the sourced script returns (here, inside a function).
+    #[test]
+    fn source_builtin_restores_arguments_after_sourcing() {
+        let session = jb_session();
+        session.exec(
+            "echo \"echo sourced: \\$1\" > /tmp/sourced.sh",
+            JustBashExecOptions::new(),
+        );
+        let r = session.exec(
+            "myfunc() {\n  echo \"func: $1\"\n  source /tmp/sourced.sh arg\n  echo \"after: $1\"\n}\nmyfunc original",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "func: original\nsourced: arg\nafter: original\n");
+    }
+
+    // builtins/source.test.ts:106 and syntax/source.test.ts:28 — sourcing a
+    // missing file is a status-1 "No such file or directory" error.
+    #[test]
+    fn source_builtin_errors_on_missing_file() {
+        let session = jb_session();
+        let r = session.exec("source /nonexistent/file.sh", JustBashExecOptions::new());
+        assert!(
+            r.stderr.contains("No such file or directory"),
+            "stderr: {:?}",
+            r.stderr
+        );
+        assert_eq!(r.exit_code, 1);
+    }
+
+    // builtins/source.test.ts:113 and syntax/source.test.ts:35 — `source` with
+    // no argument is a status-2 "filename argument required" error.
+    #[test]
+    fn source_builtin_errors_with_no_arguments() {
+        let session = jb_session();
+        let r = session.exec("source", JustBashExecOptions::new());
+        assert!(
+            r.stderr.contains("filename argument required"),
+            "stderr: {:?}",
+            r.stderr
+        );
+        assert_eq!(r.exit_code, 2);
+    }
+
+    // builtins/source.test.ts:120 — `.` with no argument is also a status-2
+    // "filename argument required" error.
+    #[test]
+    fn source_dot_builtin_errors_with_no_arguments() {
+        let session = jb_session();
+        let r = session.exec(".", JustBashExecOptions::new());
+        assert!(
+            r.stderr.contains("filename argument required"),
+            "stderr: {:?}",
+            r.stderr
+        );
+        assert_eq!(r.exit_code, 2);
+    }
+
+    // builtins/source.test.ts:129 — sourcing a real host path like /etc/passwd
+    // stays inside the sandbox: the virtual file does not exist, so it is a
+    // status-1 "No such file or directory" error.
+    #[test]
+    fn source_builtin_does_not_access_real_etc_passwd() {
+        let session = jb_session();
+        let r = session.exec("source /etc/passwd", JustBashExecOptions::new());
+        assert!(
+            r.stderr.contains("No such file or directory"),
+            "stderr: {:?}",
+            r.stderr
+        );
+        assert_eq!(r.exit_code, 1);
+    }
+
+    // builtins/source.test.ts:136 — sourcing /etc/hosts likewise cannot escape
+    // the virtual filesystem.
+    #[test]
+    fn source_builtin_does_not_access_real_files_outside_vfs() {
+        let session = jb_session();
+        let r = session.exec("source /etc/hosts", JustBashExecOptions::new());
+        assert!(
+            r.stderr.contains("No such file or directory"),
+            "stderr: {:?}",
+            r.stderr
+        );
+        assert_eq!(r.exit_code, 1);
     }
 }
