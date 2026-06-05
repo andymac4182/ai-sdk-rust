@@ -15031,6 +15031,186 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn structured_data_yq_navigation_parent_parents_root_rows() {
+        // packages/just-bash/src/commands/yq/yq.navigation.test.ts:8,19,32,47,
+        //   60,74,87,101,115,127,141,154,165
+        // Verifies the portable yq navigation operators parent/parent(n)/parents/
+        // root, which require tracking the path used to reach the piped value.
+        // Each assertion mirrors the upstream vitest expectation byte-for-byte;
+        // they fail if path tracking regresses.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/nested.yaml".to_string(),
+                    "a:\n  b:\n    c: value\n".to_string(),
+                ),
+                ("/leaf.yaml".to_string(), "a:\n  b: test\n".to_string()),
+                ("/scalar.yaml".to_string(), "value: test\n".to_string()),
+                (
+                    "/items.yaml".to_string(),
+                    "items:\n  - name: foo\n    val: 1\n  - name: bar\n    val: 2\n".to_string(),
+                ),
+                ("/shallow.yaml".to_string(), "a: test\n".to_string()),
+                ("/pair.yaml".to_string(), "a: 1\nb: 2\n".to_string()),
+                (
+                    "/deep.yaml".to_string(),
+                    "a:\n  b:\n    c:\n      d: value\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // :8 parent returns immediate parent
+        let r = env.exec("yq -o json '.a.b.c | parent' /nested.yaml");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "{\n  \"c\": \"value\"\n}\n");
+
+        // :19 parent(2) returns grandparent
+        let r = env.exec("yq -o json '.a.b.c | parent(2)' /nested.yaml");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "{\n  \"b\": {\n    \"c\": \"value\"\n  }\n}\n");
+
+        // :32 parent(-1) returns root
+        let r = env.exec("yq -o json '.a.b.c | parent(-1)' /nested.yaml");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(
+            r.stdout,
+            "{\n  \"a\": {\n    \"b\": {\n      \"c\": \"value\"\n    }\n  }\n}\n"
+        );
+
+        // :47 root returns document root
+        let r = env.exec("yq -o json '.a.b.c | root' /nested.yaml");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(
+            r.stdout,
+            "{\n  \"a\": {\n    \"b\": {\n      \"c\": \"value\"\n    }\n  }\n}\n"
+        );
+
+        // :60 parents returns array of all ancestors (immediate, grand, root)
+        let r = env.exec("yq -o json '.a.b.c | parents | length' /nested.yaml");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "3\n");
+
+        // :74 parent(0) returns current value
+        let r = env.exec("yq -o json '.a.b | parent(0)' /leaf.yaml");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "\"test\"\n");
+
+        // :87 parent(-2) returns one level below root
+        let r = env.exec("yq -o json '.a.b.c | parent(-2)' /nested.yaml");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "{\n  \"b\": {\n    \"c\": \"value\"\n  }\n}\n");
+
+        // :101 parent beyond root returns empty
+        let r = env.exec("yq -o json '.a.b | parent(10)' /leaf.yaml");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "");
+
+        // :115 parent at root returns empty
+        let r = env.exec("yq -o json '. | parent' /scalar.yaml");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "");
+
+        // :127 parent with array index path
+        let r = env.exec("yq -o json '.items[0].name | parent' /items.yaml");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "{\n  \"name\": \"foo\",\n  \"val\": 1\n}\n");
+
+        // :141 parents on shallow path (just root)
+        let r = env.exec("yq -o json '.a | parents | length' /shallow.yaml");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "1\n");
+
+        // :154 root without prior navigation
+        let r = env.exec("yq -o json 'root' /pair.yaml");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "{\n  \"a\": 1,\n  \"b\": 2\n}\n");
+
+        // :165 chained parent calls
+        let r = env.exec("yq -o json '.a.b.c.d | parent | parent' /deep.yaml");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "{\n  \"c\": {\n    \"d\": \"value\"\n  }\n}\n");
+    }
+
+    #[test]
+    fn structured_data_yq_fixtures_toml_ini_csv_unicode_rows() {
+        // packages/just-bash/src/commands/yq/yq.fixtures.test.ts:516,600,650,659,
+        //   671,682,691,700,709,718
+        // Verifies portable yq TOML->YAML conversion, JSON unicode raw output, and
+        // the INI/CSV input parsers (global keys before sections, boolean vs
+        // string coercion, special-character paths, RFC-4180 quoted/escaped CSV
+        // fields, semicolon/tab delimiter auto-detection, and UTF-8 fields). Each
+        // assertion mirrors the upstream vitest expectation exactly and fails if
+        // the parser/converter regresses.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/fixtures/yaml/simple.yaml".to_string(), "title: Simple Document\ncount: 42\nenabled: true\ntags:\n  - important\n  - featured\n  - new\n".to_string()),
+                ("/fixtures/toml/config.toml".to_string(), "[server]\nhost = \"localhost\"\nport = 8080\ndebug = false\n\n[database]\nurl = \"postgres://localhost:5432/mydb\"\nmax_connections = 100\ntimeout = 30\n\n[database.pool]\nmin_size = 10\nmax_size = 50\n\n[logging]\nlevel = \"info\"\nformat = \"json\"\noutput = \"stdout\"\n\n[features]\ndark_mode = true\nnotifications = true\nanalytics = false\n".to_string()),
+                ("/fixtures/json/users.json".to_string(), "{\n  \"users\": [\n    {\n      \"name\": \"alice\",\n      \"age\": 30,\n      \"email\": \"alice@example.com\",\n      \"active\": true\n    },\n    { \"name\": \"bob\", \"age\": 25, \"email\": \"bob@example.com\", \"active\": false },\n    {\n      \"name\": \"charlie\",\n      \"age\": 35,\n      \"email\": \"charlie@example.com\",\n      \"active\": true\n    }\n  ],\n  \"metadata\": {\n    \"version\": 1.0,\n    \"generated\": \"2024-01-01\"\n  }\n}\n".to_string()),
+                ("/fixtures/json/special.json".to_string(), "{\n  \"empty_string\": \"\",\n  \"null_value\": null,\n  \"unicode\": \"Hello \\u4e16\\u754c\",\n  \"escaped\": \"quotes: \\\"nested\\\" and backslash: \\\\path\",\n  \"numbers\": {\n    \"integer\": 42,\n    \"float\": 3.14159,\n    \"negative\": -17,\n    \"scientific\": 1.5e10,\n    \"zero\": 0,\n    \"max_safe\": 9007199254740991\n  },\n  \"booleans\": {\n    \"true_val\": true,\n    \"false_val\": false\n  },\n  \"arrays\": {\n    \"empty\": [],\n    \"mixed\": [1, \"two\", true, null, { \"nested\": \"object\" }],\n    \"nested\": [[1, 2], [3, 4], [5, 6]]\n  },\n  \"objects\": {\n    \"empty\": {},\n    \"with-dash\": \"value\",\n    \"with.dot\": \"value\",\n    \"with space\": \"value\",\n    \"123numeric\": \"starts with number\"\n  },\n  \"deeply\": {\n    \"nested\": {\n      \"structure\": {\n        \"value\": \"found it\"\n      }\n    }\n  }\n}\n".to_string()),
+                ("/fixtures/ini/special.ini".to_string(), "; INI special cases with comments\n# Another comment style\n\n; Top-level values (before any section)\nglobal_key=global_value\napp_name=Test App\n\n[empty_section]\n; This section has no values\n\n[strings]\nsimple=hello\nwith_spaces=hello world\nquoted=\"quoted value\"\nsingle_quoted='single quoted'\nequals_in_value=key=value\nsemicolon=value;not a comment\n\n[numbers]\ninteger=42\nfloat=3.14\nnegative=-17\nzero=0\n\n[booleans]\ntrue_val=true\nfalse_val=false\nyes_val=yes\nno_val=no\non_val=on\noff_val=off\none=1\nzero=0\n\n[special_keys]\nkey-with-dash=value\nkey.with.dots=value\nkey_with_underscores=value\nUPPERCASE=value\n\n[paths]\nunix_path=/var/log/app.log\nwindows_path=C:\\\\Users\\\\test\nurl=https://example.com/path?query=value\n".to_string()),
+                ("/fixtures/csv/special.csv".to_string(), "name,description,value,enabled\n\"Simple\",\"A simple value\",100,true\n\"With, comma\",\"Value with comma in name\",200,false\n\"With \"\"quotes\"\"\",\"Escaped quotes inside\",300,true\n\"With\nnewline\",\"Multiline value\",400,true\n\"Empty\",\"\",0,false\n\"Unicode\",\"Hello 世界\",500,true\n\"Special chars\",\"Tab:\tBackslash:\\\",600,false\n".to_string()),
+                ("/fixtures/csv/semicolon.csv".to_string(), "name;price;quantity\nWidget;19.99;100\nGadget;29.99;50\n\"Item;with;semicolons\";9.99;25\n".to_string()),
+                ("/fixtures/csv/tabs.tsv".to_string(), "id\tname\tcategory\tprice\n1\tApple\tfruit\t1.50\n2\tBanana\tfruit\t0.75\n3\tCarrot\tvegetable\t0.50\n4\tBread\tbakery\t2.99\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // :516 should convert TOML to YAML
+        let r = env.exec("yq '.' /fixtures/toml/config.toml");
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.contains("server:"));
+        assert!(r.stdout.contains("host: localhost"));
+
+        // :600 should handle unicode (JSON input, raw output)
+        let r = env.exec("yq -p json '.unicode' /fixtures/json/special.json -r");
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.contains("Hello"));
+
+        // :650 should handle global keys before sections
+        let r = env.exec("yq -p ini '.global_key' /fixtures/ini/special.ini");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout.trim(), "global_value");
+
+        // :659 should handle various boolean formats (true->bool, yes->string)
+        let r = env.exec("yq -p ini '.booleans' /fixtures/ini/special.ini -o json");
+        assert_eq!(r.exit_code, 0);
+        let bools: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+        assert_eq!(bools["true_val"], serde_json::json!(true));
+        assert_eq!(bools["yes_val"], serde_json::json!("yes"));
+
+        // :671 should handle paths with special characters
+        let r = env.exec("yq -p ini '.paths.url' /fixtures/ini/special.ini");
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.contains("https://example.com"));
+
+        // :682 should handle quoted values with commas
+        let r = env.exec("yq -p csv '.[1].name' /fixtures/csv/special.csv");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout.trim(), "With, comma");
+
+        // :691 should handle escaped quotes
+        let r = env.exec("yq -p csv '.[2].name' /fixtures/csv/special.csv");
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.contains("quotes"));
+
+        // :700 should auto-detect semicolon delimiter
+        let r = env.exec("yq -p csv '.[0].name' /fixtures/csv/semicolon.csv");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout.trim(), "Widget");
+
+        // :709 should auto-detect tab delimiter
+        let r = env.exec("yq -p csv '.[0].name' /fixtures/csv/tabs.tsv");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout.trim(), "Apple");
+
+        // :718 should handle unicode in CSV
+        let r = env.exec("yq -p csv '.[5].description' /fixtures/csv/special.csv");
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.contains("Hello"));
+    }
+
+    #[test]
     fn structured_data_yq_fixtures_yaml_json_ini_csv_rows() {
         // packages/just-bash/src/commands/yq/yq.fixtures.test.ts
         //   YAML: :103   JSON: :139,:149,:158,:167

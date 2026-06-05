@@ -16267,16 +16267,198 @@ fn eval_structured_filter(
             continue;
         }
         let mut current = vec![value.clone()];
+        // jq-style navigation operators (`parent`, `parents`, `root`) need the
+        // path used to reach the current value. We track that path through the
+        // pipe while it stays single-valued and statically addressable (mirrors
+        // the upstream query engine's `currentPath`); any non-static stage
+        // (iteration, filters, etc.) drops tracking by resetting it to `None`.
+        let mut current_path: Option<Vec<JsonValue>> = Some(Vec::new());
         for segment in split_top_level(branch, '|') {
+            let segment = segment.trim();
+            // Navigation operators consume the tracked path instead of the value.
+            if let Some(path) = current_path.as_ref() {
+                if let Some(nav) = eval_navigation_op(root, path, segment) {
+                    let (values, new_path) = nav?;
+                    // `parent`/`root` keep an addressable path so they can be
+                    // chained (`parent | parent`); `parents` does not.
+                    current_path = new_path;
+                    current = values;
+                    continue;
+                }
+            }
             let mut next = Vec::new();
             for value in &current {
-                next.extend(eval_structured_expr(value, root, segment.trim(), env)?);
+                next.extend(eval_structured_expr(value, root, segment, env)?);
             }
+            // Extend the tracked path when this stage is a single static path
+            // selector applied to a single input value.
+            current_path = match (current_path.take(), current.len(), next.len()) {
+                (Some(mut path), 1, _) => match extract_static_path(segment) {
+                    Some(extra) => {
+                        path.extend(extra);
+                        Some(path)
+                    }
+                    None => None,
+                },
+                _ => None,
+            };
             current = next;
         }
         output.extend(current);
     }
     Ok(output)
+}
+
+/// Parse a static path selector (e.g. `.a.b.c`, `.items[0].name`,
+/// `.["x"].y`) into its component path of object keys (`String`) and array
+/// indices (`Number`). Returns `None` when the selector is not a plain static
+/// path — i.e. it iterates (`[]`), slices (`a:b`), is the identity `.`, or
+/// contains any construct that cannot be reduced to a fixed key/index chain.
+/// This mirrors the upstream `extractPathFromAst` helper used to advance the
+/// query engine's `currentPath` through a pipe.
+fn extract_static_path(selector: &str) -> Option<Vec<JsonValue>> {
+    let selector = selector.trim();
+    if selector == "." {
+        return Some(Vec::new());
+    }
+    let mut rest = selector.strip_prefix('.')?;
+    let mut path = Vec::new();
+    while !rest.is_empty() {
+        if rest.starts_with('[') {
+            let (inside, tail) = rest.strip_prefix('[')?.split_once(']')?;
+            let inside = inside.trim();
+            // Iteration and slices are not static single paths.
+            if inside.is_empty() || inside.contains(':') {
+                return None;
+            }
+            if let Some(stripped) = inside.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+                path.push(JsonValue::String(stripped.to_string()));
+            } else if let Ok(index) = inside.parse::<i64>() {
+                path.push(JsonValue::Number(index.into()));
+            } else {
+                return None;
+            }
+            // A `.` after a bracket index (`[0].name`) is a separator, not a
+            // new empty field.
+            rest = tail.strip_prefix('.').unwrap_or(tail);
+            continue;
+        }
+        // A field segment runs up to the next `.` or `[`.
+        let split = rest.find(['.', '[']).unwrap_or(rest.len());
+        let field = &rest[..split];
+        // Reject postfix iterators (`field[]`) and optional markers — they make
+        // the segment non-static.
+        if field.is_empty() || field.ends_with('?') || field.ends_with("[]") {
+            return None;
+        }
+        path.push(JsonValue::String(field.to_string()));
+        rest = &rest[split..];
+        rest = rest.strip_prefix('.').unwrap_or(rest);
+    }
+    Some(path)
+}
+
+/// Resolve a value at a path of object keys / array indices against `root`,
+/// returning `Null` for any missing or out-of-range step. Negative array
+/// indices count from the end, matching jq's `getpath` semantics.
+fn json_value_at_path(root: &JsonValue, path: &[JsonValue]) -> JsonValue {
+    let mut current = root;
+    for component in path {
+        match (current, component) {
+            (JsonValue::Object(map), JsonValue::String(key)) => {
+                current = map.get(key).unwrap_or(&JsonValue::Null);
+            }
+            (JsonValue::Array(items), JsonValue::Number(index)) => {
+                let Some(raw) = index.as_i64() else {
+                    return JsonValue::Null;
+                };
+                let resolved = if raw < 0 {
+                    items.len() as i64 + raw
+                } else {
+                    raw
+                };
+                if resolved < 0 {
+                    return JsonValue::Null;
+                }
+                current = items.get(resolved as usize).unwrap_or(&JsonValue::Null);
+            }
+            _ => return JsonValue::Null,
+        }
+    }
+    current.clone()
+}
+
+/// Evaluate a jq navigation operator (`parent`, `parent(n)`, `parents`,
+/// `root`) against the document `root` and the tracked `current_path`. Returns
+/// `None` when `segment` is not a navigation operator so the caller can fall
+/// through to ordinary expression evaluation. Semantics mirror the upstream
+/// query engine's navigation builtins exactly.
+#[allow(clippy::type_complexity)]
+fn eval_navigation_op(
+    root: &JsonValue,
+    current_path: &[JsonValue],
+    segment: &str,
+) -> Option<Result<(Vec<JsonValue>, Option<Vec<JsonValue>>), String>> {
+    let segment = segment.trim();
+    if segment == "root" {
+        // The new tracked path is the document root.
+        return Some(Ok((vec![root.clone()], Some(Vec::new()))));
+    }
+    if segment == "parents" {
+        // Immediate parent down to the document root (excludes the current
+        // value); empty when already at the root. The result is an array, so
+        // there is no single addressable path to keep tracking.
+        let mut parents = Vec::new();
+        let mut len = current_path.len();
+        while len > 0 {
+            len -= 1;
+            parents.push(json_value_at_path(root, &current_path[..len]));
+        }
+        return Some(Ok((vec![JsonValue::Array(parents)], None)));
+    }
+    // `parent` / `parent(n)`.
+    let levels = if segment == "parent" {
+        Some(1_i64)
+    } else if let Some(arg) = segment
+        .strip_prefix("parent(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        match arg.trim().parse::<i64>() {
+            Ok(value) => Some(value),
+            Err(_) => return Some(Err(format!("yq: invalid parent argument '{arg}'"))),
+        }
+    } else {
+        None
+    };
+    let levels = levels?;
+    let path_len = current_path.len() as i64;
+    if levels >= 0 {
+        // Positive: ascend `levels` steps; beyond the root yields nothing.
+        if path_len == 0 || levels > path_len {
+            return Some(Ok((Vec::new(), None)));
+        }
+        let target = (path_len - levels) as usize;
+        let new_path = current_path[..target].to_vec();
+        Some(Ok((
+            vec![json_value_at_path(root, &new_path)],
+            Some(new_path),
+        )))
+    } else {
+        // Negative: index from the root (`-1` = root, `-2` = one below root).
+        let target_len = -levels - 1;
+        if target_len >= path_len {
+            // Beyond the current value: yield the current value itself.
+            return Some(Ok((
+                vec![json_value_at_path(root, current_path)],
+                Some(current_path.to_vec()),
+            )));
+        }
+        let new_path = current_path[..target_len as usize].to_vec();
+        Some(Ok((
+            vec![json_value_at_path(root, &new_path)],
+            Some(new_path),
+        )))
+    }
 }
 
 /// Handle a jq `EXPR as PATTERN | BODY` variable binding. Returns `Ok(None)`
