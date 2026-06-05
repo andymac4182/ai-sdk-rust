@@ -1430,7 +1430,7 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
         },
         "pwd" => stdout_result(format!("{}\n", state.cwd)),
         "echo" => command_echo(&tokens[1..]),
-        "printf" => command_printf(&tokens[1..]),
+        "printf" => command_printf_dispatch(state, &tokens[1..]),
         "export" => {
             for arg in &tokens[1..] {
                 if let Some((key, value)) = arg.split_once('=') {
@@ -1594,6 +1594,120 @@ fn command_echo(args: &[String]) -> CommandResult {
         output.push('\n');
     }
     stdout_result(output)
+}
+
+/// Dispatches `printf`, peeling off the `-v VAR` option (which captures the
+/// formatted output into a shell variable instead of writing it to stdout)
+/// before delegating to [`command_printf`] for the actual formatting. Mirrors
+/// upstream `packages/just-bash/src/commands/printf/printf.ts` `-v` handling:
+/// validate the identifier (rejecting unsafe subscripts), and for an
+/// `name[key]` target store under the flattened `name_key` env key so a later
+/// `${name[key]}` expansion can read it back.
+fn command_printf_dispatch(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
+    let mut target_var: Option<String> = None;
+    let mut rest = args;
+    if rest.first().map(String::as_str) == Some("-v") {
+        let Some(name) = rest.get(1) else {
+            return stderr_result(1, "printf: -v: option requires an argument\n");
+        };
+        if !is_valid_printf_assign_target(name) {
+            return stderr_result(2, format!("printf: `{name}': not a valid identifier\n"));
+        }
+        target_var = Some(name.clone());
+        rest = &rest[2..];
+    }
+    let result = command_printf(rest);
+    let Some(target) = target_var else {
+        return result;
+    };
+    // Capture into the variable: stdout is suppressed, but any formatting
+    // diagnostics (stderr / non-zero exit) are preserved like upstream.
+    if let Some((array, key)) = parse_printf_array_subscript(&target) {
+        // Expand `$var` references inside the subscript against the current env.
+        let key = expand_printf_subscript_key(&key, &state.env);
+        state.env.insert(format!("{array}_{key}"), result.stdout);
+    } else {
+        state.env.insert(target, result.stdout);
+    }
+    CommandResult {
+        stdout: String::new(),
+        stderr: result.stderr,
+        exit_code: result.exit_code,
+        ..CommandResult::default()
+    }
+}
+
+/// Validates a `printf -v` target. Accepts a plain identifier optionally
+/// followed by a `[subscript]` whose contents are restricted to identifier
+/// characters plus the array sigils `@ * " ' $`, matching the upstream regex
+/// `^[a-zA-Z_][a-zA-Z0-9_]*(\[[a-zA-Z0-9_@*"'$]+\])?$`. This rejects unsafe
+/// subscripts like `x[;rm -rf /]` and `x[../../etc]`.
+fn is_valid_printf_assign_target(name: &str) -> bool {
+    let (head, subscript) = match name.split_once('[') {
+        Some((head, after)) => match after.strip_suffix(']') {
+            Some(inner) => (head, Some(inner)),
+            None => return false,
+        },
+        None => (name, None),
+    };
+    if !is_valid_var_name(head) {
+        return false;
+    }
+    match subscript {
+        None => true,
+        Some(inner) => {
+            !inner.is_empty()
+                && inner.chars().all(|ch| {
+                    ch == '_'
+                        || ch.is_ascii_alphanumeric()
+                        || matches!(ch, '@' | '*' | '"' | '\'' | '$')
+                })
+        }
+    }
+}
+
+/// Splits a validated `name[key]` target into its array name and raw key,
+/// stripping a single layer of matching quotes from the key. Returns `None`
+/// for a plain (non-subscripted) identifier.
+fn parse_printf_array_subscript(target: &str) -> Option<(String, String)> {
+    let (head, after) = target.split_once('[')?;
+    let inner = after.strip_suffix(']')?;
+    let key = if (inner.starts_with('"') && inner.ends_with('"') && inner.len() >= 2)
+        || (inner.starts_with('\'') && inner.ends_with('\'') && inner.len() >= 2)
+    {
+        inner[1..inner.len() - 1].to_string()
+    } else {
+        inner.to_string()
+    };
+    Some((head.to_string(), key))
+}
+
+/// Expands `$var` references inside a `printf -v name[$var]` subscript against
+/// the supplied environment, matching the upstream subscript expansion.
+fn expand_printf_subscript_key(key: &str, env: &BTreeMap<String, String>) -> String {
+    let mut output = String::new();
+    let mut chars = key.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '$' {
+            output.push(ch);
+            continue;
+        }
+        if !matches!(chars.peek(), Some(next) if next.is_ascii_alphabetic() || *next == '_') {
+            output.push('$');
+            continue;
+        }
+        let mut name = String::new();
+        while let Some(next) = chars.peek().copied() {
+            if next.is_ascii_alphanumeric() || next == '_' {
+                name.push(next);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        output.push_str(env.get(&name).map_or("", String::as_str));
+    }
+    output
 }
 
 fn command_printf(args: &[String]) -> CommandResult {
@@ -30025,6 +30139,25 @@ fn is_assignment(value: &str) -> bool {
         .is_some_and(|(name, _)| is_valid_var_name(name))
 }
 
+/// Translates a `name[key]` array reference into the flattened `name_key`
+/// environment lookup key used by `printf -v` array assignments. Returns
+/// `None` when the expression is not a well-formed array subscript.
+fn array_subscript_lookup_key(expression: &str) -> Option<String> {
+    let (head, after) = expression.split_once('[')?;
+    let inner = after.strip_suffix(']')?;
+    if !is_valid_var_name(head) || inner.is_empty() {
+        return None;
+    }
+    let key = if (inner.starts_with('"') && inner.ends_with('"') && inner.len() >= 2)
+        || (inner.starts_with('\'') && inner.ends_with('\'') && inner.len() >= 2)
+    {
+        &inner[1..inner.len() - 1]
+    } else {
+        inner
+    };
+    Some(format!("{head}_{key}"))
+}
+
 fn is_valid_var_name(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
@@ -30587,6 +30720,10 @@ fn read_variable(
                 .filter(|value| !value.is_empty())
                 .cloned()
                 .unwrap_or_else(|| default.to_string()))
+        } else if let Some(key) = array_subscript_lookup_key(&expression) {
+            // `${name[key]}` reads the flattened `name_key` entry written by
+            // `printf -v name[key]` (see `command_printf_dispatch`).
+            Ok(env.get(&key).cloned().unwrap_or_default())
         } else {
             Ok(env.get(&expression).cloned().unwrap_or_default())
         }
@@ -33233,6 +33370,59 @@ mod tests {
         let high_dat = bash.exec("base64 /high.dat", JustBashExecOptions::new());
         assert_eq!(high_dat.stdout, "//79/A==\n");
         assert_eq!(high_dat.exit_code, 0);
+    }
+
+    // Helper mirroring upstream `parseWidthPrecision`'s observable result
+    // ([width, precision, _consumed]) on top of the Rust `parse_printf_directive`.
+    // The Rust parser stores left-justify as a flag plus an unsigned width; here
+    // we reconstruct the signed width (negative => left-justify) and map the
+    // `Option<usize>` width/precision to upstream's `0`/`-1` sentinels so the
+    // numeric expectations line up 1:1.
+    fn parse_width_precision(spec: &str) -> (i64, i64) {
+        let mut chars = spec.chars().peekable();
+        let directive = parse_printf_directive(&mut chars);
+        let mut width = directive.width.unwrap_or(0) as i64;
+        if directive.left_justify && width > 0 {
+            width = -width;
+        }
+        let precision = directive.precision.map_or(-1, |value| value as i64);
+        (width, precision)
+    }
+
+    #[test]
+    fn printf_width_precision_parse_and_apply_match_upstream_escapes_helpers() {
+        // Mirrors packages/just-bash/src/commands/printf/escapes.test.ts:152
+        // (applyWidth) and :158/:165/:172/:179/:186 (parseWidthPrecision). Each
+        // assertion fails if the width/precision parsing or padding regresses.
+
+        // escapes.test.ts:152 applyWidth("hello", 3, -1) -> "hello"
+        // (no padding when the value is longer than the field width).
+        let directive = PrintfDirective {
+            left_justify: false,
+            zero_pad: false,
+            width: Some(3),
+            precision: None,
+            specifier: 's',
+        };
+        assert_eq!(
+            apply_printf_width("hello".to_string(), &directive, false),
+            "hello"
+        );
+
+        // escapes.test.ts:158 parseWidthPrecision("10f", 0) -> [10, -1, 2]
+        assert_eq!(parse_width_precision("10f"), (10, -1));
+
+        // escapes.test.ts:165 parseWidthPrecision("-20s", 0) -> [-20, -1, 3]
+        assert_eq!(parse_width_precision("-20s"), (-20, -1));
+
+        // escapes.test.ts:172 parseWidthPrecision(".5f", 0) -> [0, 5, 2]
+        assert_eq!(parse_width_precision(".5f"), (0, 5));
+
+        // escapes.test.ts:179 parseWidthPrecision("-10.5s", 0) -> [-10, 5, 5]
+        assert_eq!(parse_width_precision("-10.5s"), (-10, 5));
+
+        // escapes.test.ts:186 parseWidthPrecision("f", 0) -> [0, -1, 0]
+        assert_eq!(parse_width_precision("f"), (0, -1));
     }
 
     #[test]
