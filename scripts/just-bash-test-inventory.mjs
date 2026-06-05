@@ -4651,6 +4651,66 @@ const jbpiParserInterpreterCaseGroups = [
       'JB-PI verifies portable parse-error rows through the Rust parser/interpreter: unclosed/missing-keyword if/for/while/until syntax errors (exit 2 with "syntax error"), the elif-condition selection, else/fi without if, a digit-starting function name accepted, unclosed function body, graceful handling of unclosed quotes / missing redirect target / empty pipe and &&/|| operands, the unknown-command 127 row, and the local-outside-function exit-1 row. The runtime invalid-identifier row (L64) and filesystem-backed redirect/path/cat rows (L147, L172, L179) stay pending.',
   },
   {
+    file: 'packages/just-bash/src/syntax/composition.test.ts',
+    lines: [39, 232, 322, 393, 407, 463],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'jbpi_syntax_feature_composition_and_parse_error_rows_match_upstream',
+    notes:
+      'R16JB verifies portable syntax-composition rows that depend on `[[ ... ]]` operand expansion (now fixed so positional `$1`, quoted `"$VAR"`, and `$((...))` operands are expanded before the test): case-in-if, arithmetic in a while condition, a `[[ $1 -gt 0 ]]` test inside a function, nested for loops guarded by `[[ $((i*j)) -gt 2 ]]`, a function combining `local`/`for $@`/`case`/arithmetic, and a squared-value while loop. Each row fails if any composed control-flow primitive regresses.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/parse-errors.test.ts',
+    lines: [64],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'jbpi_syntax_feature_composition_and_parse_error_rows_match_upstream',
+    notes:
+      'R16JB verifies the runtime invalid-identifier row (`for 123 in ...`): the Rust shell validates the loop variable name at runtime and exits 1 with "not a valid identifier".',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/composition.test.ts',
+    lines: [425],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'jbpi_syntax_composition_pipeline_filter_rows_match_upstream',
+    notes:
+      'R16JB verifies the row piping a function `for`-loop through `sort -n | uniq | head -3` (1 2 3) through the Rust shell composed with faithful sort/uniq/head filters.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/eval.test.ts',
+    lines: [75],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'jbpi_syntax_composition_pipeline_filter_rows_match_upstream',
+    notes:
+      'R16JB verifies `eval` executing a piped command string (`echo hello | tr a-z A-Z` -> HELLO) through the Rust shell composed with a faithful tr.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/control-flow.test.ts',
+    lines: [192],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'jbpi_syntax_function_pipeline_and_set_u_rows_match_upstream',
+    notes:
+      'R16JB verifies a function whose body pipes its file argument through `cat | wc -l` (3 lines) through the Rust shell.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/set.test.ts',
+    lines: [110],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'jbpi_syntax_function_pipeline_and_set_u_rows_match_upstream',
+    notes:
+      'R16JB verifies `$$` is always considered set under `set -u` (nounset): the script exits 0 and prints a non-empty token instead of aborting.',
+  },
+  {
     file: 'packages/just-bash/src/syntax/set-errexit.test.ts',
     lines: [6, 18, 29, 43, 56, 73],
     status: 'portable-verified',
