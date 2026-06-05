@@ -7304,7 +7304,20 @@ fn parse_rg_short_flags(
             'b' => options.byte_offset = true,
             'L' => options.follow_symlinks = true,
             'U' => options.multiline = true,
-            'u' => unrestricted += 1,
+            // Each `u` steps unrestricted mode one level, mirroring the upstream
+            // rg-parser `handleUnrestricted`: -u disables ignore filtering, -uu
+            // additionally includes hidden files, and -uuu additionally searches
+            // binary (NUL-containing) files as if they were text.
+            'u' => {
+                if options.hidden {
+                    options.text = true;
+                } else if options.no_ignore {
+                    options.hidden = true;
+                } else {
+                    options.no_ignore = true;
+                }
+                unrestricted += 1;
+            }
             _ => {
                 return Err(stderr_result(
                     1,
@@ -7313,12 +7326,7 @@ fn parse_rg_short_flags(
             }
         }
     }
-    if unrestricted > 0 {
-        options.no_ignore = true;
-    }
-    if unrestricted > 1 {
-        options.hidden = true;
-    }
+    let _ = unrestricted;
     Ok(())
 }
 
