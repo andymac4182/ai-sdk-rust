@@ -1077,6 +1077,7 @@ impl JustBashSession {
         }
 
         extract_function_definitions(&mut script, &mut state.functions);
+        script = rewrite_here_documents(&script);
         let mut result = execute_control_script(&mut state, &script);
         let truncated = cap_output(&mut result, self.inner.max_output_length);
 
@@ -1302,17 +1303,34 @@ fn execute_simple_command(
 
     let (command, redirect) = split_stdout_redirection(command);
     let (command, stdin_redirect) = split_stdin_redirection(command);
-    let stdin = if let Some(path) = stdin_redirect {
-        let path = resolve_path(&state.cwd, &path);
-        match state.session.inner.fs.lock() {
-            Ok(fs) => match fs.read_file(&path) {
-                Ok(content) => content,
-                Err(_) => return stderr_result(1, format!("bash: {path}: No such file\n")),
-            },
-            Err(_) => return stderr_result(1, "bash: filesystem lock poisoned\n"),
+    let stdin = match stdin_redirect {
+        Some(StdinSource::File(path)) => {
+            let path = resolve_path(&state.cwd, &path);
+            match state.session.inner.fs.lock() {
+                Ok(fs) => match fs.read_file(&path) {
+                    Ok(content) => content,
+                    Err(_) => return stderr_result(1, format!("bash: {path}: No such file\n")),
+                },
+                Err(_) => return stderr_result(1, "bash: filesystem lock poisoned\n"),
+            }
         }
-    } else {
-        stdin
+        // Here-string: the word, with parameter/command expansion, plus a newline.
+        Some(StdinSource::HereString(word)) => match expand_here_string_word(state, &word) {
+            Ok(text) => text,
+            Err(error) => return stderr_result(1, format!("bash: {error}\n")),
+        },
+        // Here-document / encoded literal body.
+        Some(StdinSource::Literal { body, expand }) => {
+            if expand {
+                match expand_here_doc_body(state, &body) {
+                    Ok(text) => text,
+                    Err(error) => return stderr_result(1, format!("bash: {error}\n")),
+                }
+            } else {
+                body
+            }
+        }
+        None => stdin,
     };
     let mut tokens = match tokenize(command, &state.env) {
         Ok(tokens) => tokens,
@@ -1331,15 +1349,81 @@ fn execute_simple_command(
         }
         _ => true,
     });
+    // Peel leading `VAR=value` assignments. With no following command they set
+    // shell variables for the session; with a command they apply only for that
+    // command's environment (restored after it runs).
+    let assignment_count = tokens.iter().take_while(|t| is_assignment(t)).count();
+    let mut restore_env: Vec<(String, Option<String>)> = Vec::new();
+    if assignment_count > 0 {
+        let assignments: Vec<(String, String)> = tokens[..assignment_count]
+            .iter()
+            .filter_map(|t| {
+                t.split_once('=')
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+            })
+            .collect();
+        if assignment_count == tokens.len() {
+            // Pure assignment statement: persist into the session environment.
+            for (key, value) in assignments {
+                state.env.insert(key, value);
+            }
+            let mut result = CommandResult::default();
+            // `VAR=value > file` still truncates/creates the redirect target.
+            if let Some((path, append)) = redirect {
+                let write = state
+                    .session
+                    .inner
+                    .fs
+                    .lock()
+                    .map_err(|_| lock_poisoned_error())
+                    .and_then(|mut fs| {
+                        fs.write_redirection(
+                            &state.cwd,
+                            &path,
+                            OutputPayload::Text(String::new()),
+                            append,
+                        )
+                    });
+                if let Err(error) = write {
+                    result.stderr.push_str(&format!("bash: {error}\n"));
+                    result.exit_code = 1;
+                }
+            }
+            return result;
+        }
+        // Prefix assignments for a single command: apply temporarily and record
+        // the previous values so they can be restored once the command returns.
+        restore_env = assignments
+            .iter()
+            .map(|(k, _)| (k.clone(), state.env.get(k).cloned()))
+            .collect();
+        for (key, value) in assignments {
+            state.env.insert(key, value);
+        }
+        tokens.drain(..assignment_count);
+    }
+
     if !state.extra_args_consumed && !tokens.is_empty() {
         tokens.extend(state.extra_args.clone());
         state.extra_args_consumed = true;
     }
     if tokens.is_empty() {
+        for (key, prev) in restore_env {
+            match prev {
+                Some(value) => state.env.insert(key, value),
+                None => state.env.remove(&key),
+            };
+        }
         return CommandResult::default();
     }
 
     let mut result = execute_tokens(state, &tokens, stdin);
+    for (key, prev) in restore_env {
+        match prev {
+            Some(value) => state.env.insert(key, value),
+            None => state.env.remove(&key),
+        };
+    }
     if stdout_to_stderr {
         result.stderr.push_str(&result.stdout);
         result.stdout.clear();
@@ -9437,7 +9521,24 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
         Err(error) => return stderr_result(1, format!("sed: {error}\n")),
     };
     let lines = input.lines().map(ToString::to_string).collect::<Vec<_>>();
-    run_sed_program(&program, lines, quiet)
+    let mut writes: Vec<(String, String)> = Vec::new();
+    let result = run_sed_program_collecting(&program, lines, quiet, &mut writes);
+    if result.exit_code != 0 {
+        return result;
+    }
+    // Flush any `w file` outputs after the program runs. GNU sed truncates each
+    // `w` target once per invocation and writes the accumulated pattern spaces.
+    for (path, content) in writes {
+        let resolved = resolve_path(&state.cwd, &path);
+        let mut fs = match state.session.inner.fs.lock() {
+            Ok(fs) => fs,
+            Err(_) => return stderr_result(1, "sed: filesystem lock poisoned\n"),
+        };
+        if fs.write_file(&resolved, content).is_err() {
+            return stderr_result(1, format!("sed: couldn't write file {path}\n"));
+        }
+    }
+    result
 }
 
 /// A single parsed sed instruction: an optional address restriction plus the
@@ -9492,6 +9593,8 @@ enum SedOp {
     Append(String),
     Insert(String),
     Change(String),
+    /// `w file` — append the pattern space (plus a newline) to `file`.
+    WriteFile(String),
     /// `:label` defines a branch target (no runtime effect on its own).
     Label(String),
     /// `b`/`t`/`T` branch to a label (empty label == end of script).
@@ -9607,9 +9710,11 @@ fn sed_split_commands(script: &str) -> Result<Vec<String>, String> {
                 current.push_str(&consumed);
                 i = next;
             }
-            'a' | 'i' | 'c' if sed_token_is_command_start(&current) => {
+            'a' | 'i' | 'c' | 'w' if sed_token_is_command_start(&current) => {
                 // `a`/`i`/`c` take the rest of the line (until newline or `;`)
-                // as their text argument. Consume to end of token.
+                // as their text argument; `w` takes the rest of the line as a
+                // literal filename (which may contain `;`). Consume to end of
+                // token (the next unescaped newline).
                 current.push(ch);
                 i += 1;
                 // Consume the remaining text up to an unescaped newline.
@@ -9969,6 +10074,16 @@ fn parse_sed_op(rest: &str, address: Option<&SedAddress>, ere: bool) -> Result<S
         'g' => Ok(SedOp::GetCopy),
         'G' => Ok(SedOp::GetAppend),
         'x' => Ok(SedOp::Exchange),
+        // `w file` — append each matching pattern space to the named file. The
+        // filename runs to the end of the command (GNU sed treats everything
+        // after `w` and a single space as the literal path).
+        'w' => {
+            let path = chars.as_str().trim().to_string();
+            if path.is_empty() {
+                return Err("missing filename in r/R/w/W commands".to_string());
+            }
+            Ok(SedOp::WriteFile(path))
+        }
         'a' => Ok(SedOp::Append(sed_text_arg(chars.as_str()))),
         'i' => Ok(SedOp::Insert(sed_text_arg(chars.as_str()))),
         'c' => Ok(SedOp::Change(sed_text_arg(chars.as_str()))),
@@ -10030,6 +10145,19 @@ enum SedRangeEnd {
 
 /// Cycle-based execution of a parsed sed program over `lines`.
 fn run_sed_program(program: &[SedInstruction], lines: Vec<String>, quiet: bool) -> CommandResult {
+    let mut writes: Vec<(String, String)> = Vec::new();
+    run_sed_program_collecting(program, lines, quiet, &mut writes)
+}
+
+/// Like [`run_sed_program`] but also records `w file` writes into `writes` as
+/// `(path, accumulated-content)` pairs (one entry per distinct path, content in
+/// emit order). The caller flushes them to the filesystem.
+fn run_sed_program_collecting(
+    program: &[SedInstruction],
+    lines: Vec<String>,
+    quiet: bool,
+    writes: &mut Vec<(String, String)>,
+) -> CommandResult {
     let total = lines.len();
     let mut output = String::new();
     let mut hold = String::new();
@@ -10278,6 +10406,17 @@ fn run_sed_program(program: &[SedInstruction], lines: Vec<String>, quiet: bool) 
                         output.push('\n');
                     }
                     break 'prog;
+                }
+                SedOp::WriteFile(path) => {
+                    // Append the current pattern space (plus a newline) to the
+                    // accumulator for `path`. Multiple matches accumulate.
+                    if let Some(entry) = writes.iter_mut().find(|(p, _)| p == path) {
+                        entry.1.push_str(&pattern);
+                        entry.1.push('\n');
+                    } else {
+                        writes.push((path.clone(), format!("{pattern}\n")));
+                    }
+                    pc += 1;
                 }
                 SedOp::Label(_) => {
                     pc += 1;
@@ -31580,6 +31719,197 @@ enum ControlOp {
     Or,
 }
 
+/// Private-use marker prefix used to carry literal stdin (here-document and
+/// here-string bodies) inline through the line-based interpreter. The body has
+/// its newlines encoded as `\u{1}` so it survives `split_control`'s newline
+/// splitting; [`split_stdin_redirection`] decodes it back into real stdin text.
+const HEREDOC_MARKER: &str = "\u{E000}";
+const HEREDOC_NEWLINE: char = '\u{1}';
+
+/// Rewrite `command << DELIM` here-documents into an inline literal-stdin marker
+/// so the rest of the line-based interpreter can treat them like a here-string.
+///
+/// Supports `<<DELIM`, `<< DELIM`, `<<-DELIM` (leading-tab stripping) and quoted
+/// delimiters (`<<'EOF'`, `<<"EOF"`). Quoting the delimiter (or escaping any of
+/// its characters) disables parameter/command expansion of the body; the
+/// interpreter already leaves single-quoted-marker bodies unexpanded.
+fn rewrite_here_documents(script: &str) -> String {
+    if !script.contains("<<") {
+        return script.to_string();
+    }
+    let lines: Vec<&str> = script.split('\n').collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if let Some((delimiter, strip_tabs, expand)) = here_doc_operator(line) {
+            // Collect body lines until a line equal to the delimiter.
+            let mut body_lines: Vec<String> = Vec::new();
+            let mut j = i + 1;
+            let mut closed = false;
+            while j < lines.len() {
+                let raw = lines[j];
+                let candidate = if strip_tabs {
+                    raw.trim_start_matches('\t')
+                } else {
+                    raw
+                };
+                if candidate == delimiter {
+                    closed = true;
+                    break;
+                }
+                body_lines.push(if strip_tabs {
+                    raw.trim_start_matches('\t').to_string()
+                } else {
+                    raw.to_string()
+                });
+                j += 1;
+            }
+            // Body content: each line terminated by a newline (GNU heredoc).
+            let mut body = String::new();
+            for bl in &body_lines {
+                body.push_str(bl);
+                body.push('\n');
+            }
+            let encoded = encode_heredoc_body(&body, expand);
+            // Replace the `<< DELIM` operator with a here-string-style literal
+            // marker carrying the body; keep the rest of the command (e.g. a
+            // trailing `> file` redirect) intact.
+            let rewritten = replace_here_doc_operator(line, &encoded);
+            out.push(rewritten);
+            i = if closed { j + 1 } else { j };
+        } else {
+            out.push(line.to_string());
+            i += 1;
+        }
+    }
+    out.join("\n")
+}
+
+/// Encode a literal heredoc/here-string body as a single-line marker token.
+/// `expand` records whether the body should still undergo `$`/`` ` `` expansion.
+fn encode_heredoc_body(body: &str, expand: bool) -> String {
+    let flag = if expand { 'E' } else { 'L' };
+    let escaped: String = body
+        .chars()
+        .map(|c| if c == '\n' { HEREDOC_NEWLINE } else { c })
+        .collect();
+    format!("{HEREDOC_MARKER}{flag}{escaped}{HEREDOC_MARKER}")
+}
+
+/// If `line` contains a `<<`/`<<-` here-document operator (but not `<<<`), return
+/// `(delimiter, strip_leading_tabs, expand_body)`.
+fn here_doc_operator(line: &str) -> Option<(String, bool, bool)> {
+    let bytes: Vec<char> = line.chars().collect();
+    let mut quote = None::<char>;
+    let mut k = 0;
+    while k < bytes.len() {
+        let ch = bytes[k];
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => {}
+            None if ch == '\'' || ch == '"' => quote = Some(ch),
+            None if ch == '<' && bytes.get(k + 1) == Some(&'<') => {
+                // Exclude here-string `<<<`.
+                if bytes.get(k + 2) == Some(&'<') {
+                    return None;
+                }
+                let mut idx = k + 2;
+                let strip_tabs = bytes.get(idx) == Some(&'-');
+                if strip_tabs {
+                    idx += 1;
+                }
+                while bytes.get(idx) == Some(&' ') || bytes.get(idx) == Some(&'\t') {
+                    idx += 1;
+                }
+                // Read the delimiter word (optionally quoted). A quoted delimiter
+                // disables body expansion.
+                let mut expand = true;
+                let mut delimiter = String::new();
+                if let Some(&q @ ('\'' | '"')) = bytes.get(idx) {
+                    expand = false;
+                    idx += 1;
+                    while idx < bytes.len() && bytes[idx] != q {
+                        delimiter.push(bytes[idx]);
+                        idx += 1;
+                    }
+                } else {
+                    while idx < bytes.len()
+                        && !bytes[idx].is_whitespace()
+                        && !matches!(bytes[idx], '>' | '<' | '|' | ';' | '&')
+                    {
+                        if bytes[idx] == '\\' {
+                            expand = false;
+                            idx += 1;
+                            continue;
+                        }
+                        delimiter.push(bytes[idx]);
+                        idx += 1;
+                    }
+                }
+                if delimiter.is_empty() {
+                    return None;
+                }
+                return Some((delimiter, strip_tabs, expand));
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    None
+}
+
+/// Replace the `<<[-]DELIM` here-document operator in `line` with `replacement`
+/// (a `<<<`-style literal marker), preserving everything before and after it.
+fn replace_here_doc_operator(line: &str, replacement: &str) -> String {
+    let bytes: Vec<char> = line.chars().collect();
+    let mut quote = None::<char>;
+    let mut k = 0;
+    while k < bytes.len() {
+        let ch = bytes[k];
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => {}
+            None if ch == '\'' || ch == '"' => quote = Some(ch),
+            None if ch == '<'
+                && bytes.get(k + 1) == Some(&'<')
+                && bytes.get(k + 2) != Some(&'<') =>
+            {
+                let start = k;
+                let mut idx = k + 2;
+                if bytes.get(idx) == Some(&'-') {
+                    idx += 1;
+                }
+                while bytes.get(idx) == Some(&' ') || bytes.get(idx) == Some(&'\t') {
+                    idx += 1;
+                }
+                if let Some(&q @ ('\'' | '"')) = bytes.get(idx) {
+                    idx += 1;
+                    while idx < bytes.len() && bytes[idx] != q {
+                        idx += 1;
+                    }
+                    if idx < bytes.len() {
+                        idx += 1; // closing quote
+                    }
+                } else {
+                    while idx < bytes.len()
+                        && !bytes[idx].is_whitespace()
+                        && !matches!(bytes[idx], '>' | '<' | '|' | ';' | '&')
+                    {
+                        idx += 1;
+                    }
+                }
+                let prefix: String = bytes[..start].iter().collect();
+                let suffix: String = bytes[idx..].iter().collect();
+                return format!("{prefix}<<<{replacement}{suffix}");
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    line.to_string()
+}
+
 fn split_control(script: &str) -> Vec<(ControlOp, String)> {
     let mut parts = Vec::new();
     let mut current = String::new();
@@ -31668,10 +31998,23 @@ fn split_unquoted(input: &str, separator: char) -> Vec<String> {
 
 fn split_stdout_redirection(command: &str) -> (&str, Option<(String, bool)>) {
     let mut quote = None::<char>;
+    let mut in_marker = false;
+    let marker_char = HEREDOC_MARKER.chars().next().unwrap_or('\u{E000}');
     let chars = command.char_indices().collect::<Vec<_>>();
     let mut index = 0;
     while index < chars.len() {
         let (byte, ch) = chars[index];
+        // Skip over the encoded here-document literal so any `>` inside its body
+        // is not treated as an output redirection.
+        if ch == marker_char {
+            in_marker = !in_marker;
+            index += 1;
+            continue;
+        }
+        if in_marker {
+            index += 1;
+            continue;
+        }
         match quote {
             Some(q) if ch == q => quote = None,
             Some(_) => {}
@@ -31696,7 +32039,19 @@ fn split_stdout_redirection(command: &str) -> (&str, Option<(String, bool)>) {
     (command, None)
 }
 
-fn split_stdin_redirection(command: &str) -> (&str, Option<String>) {
+/// Source of stdin for a simple command, from a `<`, `<<<`, or `<<` redirect.
+enum StdinSource {
+    /// `< file` — read the named file.
+    File(String),
+    /// `<<< word` — the word (expanded) plus a trailing newline.
+    HereString(String),
+    /// `<< DELIM` here-document body (already extracted by
+    /// [`rewrite_here_documents`]). `expand` records whether `$`/`` ` ``
+    /// expansion still applies.
+    Literal { body: String, expand: bool },
+}
+
+fn split_stdin_redirection(command: &str) -> (&str, Option<StdinSource>) {
     let mut quote = None::<char>;
     let chars = command.char_indices().collect::<Vec<_>>();
     let mut index = 0;
@@ -31706,15 +32061,98 @@ fn split_stdin_redirection(command: &str) -> (&str, Option<String>) {
             Some(q) if ch == q => quote = None,
             Some(_) => {}
             None if ch == '\'' || ch == '"' => quote = Some(ch),
+            // `<<<` here-string (also carries the encoded here-document marker).
+            None if ch == '<'
+                && chars.get(index + 1).map(|(_, c)| *c) == Some('<')
+                && chars.get(index + 2).map(|(_, c)| *c) == Some('<') =>
+            {
+                let rest = command[byte + 3..].trim();
+                let prefix = command[..byte].trim();
+                if let Some(inner) = rest.strip_prefix(HEREDOC_MARKER) {
+                    if let Some(payload) = inner.strip_suffix(HEREDOC_MARKER) {
+                        let (flag, encoded) =
+                            payload.split_at(payload.chars().next().map_or(0, char::len_utf8));
+                        let body: String = encoded
+                            .chars()
+                            .map(|c| if c == HEREDOC_NEWLINE { '\n' } else { c })
+                            .collect();
+                        let expand = flag == "E";
+                        return (prefix, Some(StdinSource::Literal { body, expand }));
+                    }
+                }
+                return (prefix, Some(StdinSource::HereString(rest.to_string())));
+            }
             None if ch == '<' => {
                 let target = command[byte + 1..].trim().to_string();
-                return (command[..byte].trim(), Some(target));
+                return (command[..byte].trim(), Some(StdinSource::File(target)));
             }
             _ => {}
         }
         index += 1;
     }
     (command, None)
+}
+
+/// Expand a here-string word: parameter/quote-strip via [`tokenize`] (joining
+/// any resulting words with a single space) and append a trailing newline, the
+/// way bash feeds `<<< word` to a command's stdin.
+fn expand_here_string_word(state: &mut ExecState<'_>, word: &str) -> Result<String, String> {
+    let expanded = expand_here_doc_body(state, word)?;
+    let tokens = tokenize(&expanded, &state.env)?;
+    let mut text = tokens.join(" ");
+    text.push('\n');
+    Ok(text)
+}
+
+/// Expand `$(...)`/`` `...` `` command substitutions inside a here-document or
+/// here-string body, then `$VAR`/`${VAR}` parameters, leaving all other bytes
+/// (including UTF-8 text) intact. Quotes are preserved verbatim — heredoc bodies
+/// are not quote-stripped.
+fn expand_here_doc_body(state: &mut ExecState<'_>, body: &str) -> Result<String, String> {
+    // First resolve `$(...)` command substitutions.
+    let mut out = String::new();
+    let chars: Vec<char> = body.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '$' && chars.get(i + 1) == Some(&'(') {
+            // Find the matching close paren.
+            let mut depth = 1;
+            let mut j = i + 2;
+            while j < chars.len() && depth > 0 {
+                match chars[j] {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                if depth == 0 {
+                    break;
+                }
+                j += 1;
+            }
+            let inner: String = chars[i + 2..j].iter().collect();
+            let old_stdin = std::mem::take(&mut state.stdin);
+            let result = execute_control_script(state, &inner);
+            state.stdin = old_stdin;
+            out.push_str(result.stdout.trim_end_matches('\n'));
+            i = j + 1;
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    // Then resolve `$VAR`/`${VAR}` parameters.
+    let chars: Vec<char> = out.chars().collect();
+    let mut expanded = String::new();
+    let mut k = 0;
+    while k < chars.len() {
+        if chars[k] == '$' {
+            expanded.push_str(&read_variable(&chars, &mut k, &state.env)?);
+        } else {
+            expanded.push(chars[k]);
+        }
+        k += 1;
+    }
+    Ok(expanded)
 }
 
 fn tokenize(input: &str, env: &BTreeMap<String, String>) -> Result<Vec<String>, String> {

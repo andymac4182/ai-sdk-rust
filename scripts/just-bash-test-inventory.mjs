@@ -3408,6 +3408,18 @@ const jbc34CaseGroups = [
     notes:
       'JBC-34 verifies selected UTF-8 byte/codepoint rows for wc, cut, tr, uniq, and uniq-to-wc paths; rev, base64, split, tee, expand/unexpand, and sed newline-sensitive byte rows remain pending.',
   },
+  {
+    file: 'packages/just-bash/src/commands/utf8-across-commands.test.ts',
+    lines: [
+      21, 28, 38, 48, 60, 71, 77, 84, 95, 101, 110, 121, 128, 138, 147, 159, 168,
+      175, 185, 191, 232, 267,
+    ],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-pipeline',
+    rustTest: 'text_stream_jbc_utf8_across_commands_file_and_redirect_roundtrips',
+    notes:
+      'r15jb closes the cross-command UTF-8 file/redirect round-trips: tee (plain, -a append, readFileBuffer), sort -o output files, sed (substitution, output redirect, w command), awk (passthrough, output redirect, print > file), printf redirect/readFileBuffer, here-document and here-string redirects, variable assignment + echo redirect, command substitution to stdout and to file, cp content preservation, and split -l reassembly. Adds sed `w file`, here-document/`<<<` here-string stdin, and standalone/prefix `VAR=value` assignment support to the in-process interpreter.',
+  },
 ];
 
 const jbR11JbGrepGlobBinaryCaseGroups = [
