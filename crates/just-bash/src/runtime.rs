@@ -155,6 +155,105 @@ mod tests {
         })
     }
 
+    /// R15JB closes additional portable rows in
+    /// `packages/just-bash/src/interpreter/prototype-pollution.test.ts` that the
+    /// top-level [`Bash`] runtime already handles through the real `export`,
+    /// `printenv`, and `printf` builtins: JavaScript prototype keywords
+    /// (`__proto__`, `constructor`, `prototype`, ...) used as exported variable
+    /// names round-trip through `printenv`, and `printf`/`printf -v` emit and
+    /// store them as plain data. Each tuple mirrors one upstream `it(...)`
+    /// `Bash().exec(...)` stdout/exit-code assertion, so every row fails if the
+    /// builtin dispatch or environment storage regresses.
+    #[test]
+    fn r15jb_interpreter_prototype_pollution_runtime_builtin_rows_match_upstream() {
+        for (line, source, expected_stdout) in [
+            // L248 `export constructor=test; printenv constructor` round-trips.
+            (
+                "L248",
+                "export constructor=test; printenv constructor",
+                "test\n",
+            ),
+            // L257 `export __proto__=test; printenv __proto__` round-trips.
+            (
+                "L257",
+                "export __proto__=test; printenv __proto__",
+                "test\n",
+            ),
+            // L621 assign-then-`export`-then-`printenv` for a keyword name.
+            (
+                "L621",
+                "constructor=envval; export constructor; printenv constructor",
+                "envval\n",
+            ),
+            // L714 `printf '%s\n' ...` prints keyword arguments verbatim.
+            (
+                "L714",
+                "printf '%s\\n' __proto__ constructor",
+                "__proto__\nconstructor\n",
+            ),
+            // L721 `printf -v __proto__ ...` stores into a keyword-named variable.
+            (
+                "L721",
+                "printf -v __proto__ '%s' 'formatted'; echo $__proto__",
+                "formatted\n",
+            ),
+        ] {
+            let result = bash().exec(source);
+            assert_eq!(
+                result.stdout, expected_stdout,
+                "{line} stdout {source:?} stderr={:?}",
+                result.stderr
+            );
+            assert_eq!(
+                result.exit_code, 0,
+                "{line} exit {source:?} stderr={:?}",
+                result.stderr
+            );
+        }
+
+        // Guard against a keyword name leaking out of the environment map: an
+        // unrelated, never-set variable must still expand empty even after a
+        // prototype keyword was exported (no shared prototype lookup occurs).
+        let leak = bash().exec("export __proto__=polluted; echo \"[$never_set_var]\"");
+        assert_eq!(leak.stdout, "[]\n", "exported keyword must not leak");
+        assert_eq!(leak.exit_code, 0);
+    }
+
+    /// R15JB documents the two upstream host-isolation rows in
+    /// `packages/just-bash/src/interpreter/prototype-pollution.test.ts`
+    /// (L943 `should not pollute Object.prototype via env`, L953 `should not
+    /// pollute Object.prototype via constructor var`). Those assertions read the
+    /// JavaScript host `Object.prototype` after exporting a dangerous keyword to
+    /// prove the Node interpreter was not mutated. The Rust port stores the
+    /// environment in an ordinary [`BTreeMap`] with no shared global prototype,
+    /// so the host-pollution observation is not expressible; the portable
+    /// behavior (exporting `__proto__`/`constructor` keeps them as plain,
+    /// isolated map entries that do not affect unrelated lookups) is asserted
+    /// here as the closest faithful equivalent.
+    #[test]
+    fn r15jb_interpreter_prototype_pollution_host_isolation_rows_are_plain_data() {
+        // L943: exporting `__proto__` stores it as a plain key and does not
+        // create or shadow any other environment entry.
+        let env_row = bash()
+            .exec("export __proto__=polluted; printenv __proto__; echo \"[${polluted:-unset}]\"");
+        assert_eq!(env_row.exit_code, 0);
+        assert_eq!(
+            env_row.stdout, "polluted\n[unset]\n",
+            "exported __proto__ is an isolated key, not a prototype mutation"
+        );
+
+        // L953: exporting `constructor` likewise stays a plain data key and does
+        // not synthesize any inherited `constructor` value on other names.
+        let ctor_row = bash().exec(
+            "export constructor=polluted; printenv constructor; echo \"[${other_var:-unset}]\"",
+        );
+        assert_eq!(ctor_row.exit_code, 0);
+        assert_eq!(
+            ctor_row.stdout, "polluted\n[unset]\n",
+            "exported constructor is an isolated key, not a prototype mutation"
+        );
+    }
+
     #[test]
     fn sed_test_ts_zap_list_range_and_branch_rows() {
         // Cycle-engine rows from sed.test.ts that exercise the z (zap pattern
