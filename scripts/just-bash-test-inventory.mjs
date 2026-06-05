@@ -4864,6 +4864,64 @@ const jbcXanGroupbyTransformCaseGroups = [
   },
 ];
 
+const r14jbXanReshapeMoonbladeCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.reshape.test.ts',
+    lines: [105, 119, 134, 147, 160],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_reshape_rows',
+    notes:
+      'r14jb verifies portable xan pivot with count/sum/mean aggregation, auto-determined group columns, and the invalid-aggregation usage error over in-memory CSV.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.reshape.test.ts',
+    lines: [171, 184],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_flatmap_rows',
+    notes:
+      'r14jb verifies portable xan flatmap: a split(...)-style spec expands one input row into multiple output rows, while a scalar arithmetic spec maps one-to-one.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/moonblade-parser.test.ts',
+    lines: [17, 22, 30, 38, 46, 54],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_moonblade_parenthesized_rows',
+    notes:
+      'r14jb verifies the moonblade parenthesized-expression backtracking regression via `xan filter`: grouped identifier/comparison/tuple forms and single/multi-arg lambdas and a parenthesized method-call receiver all parse cleanly (exit 0) with no infinite recursion / stack overflow and are not mis-parsed as crashing lambdas.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.map.test.ts',
+    lines: [89],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest:
+      'js-only:xan-map-trim-requires-papaparse-output-quoting-of-leading-trailing-spaces',
+    notes:
+      'r14jb: `xan map trim(...)` computes the correct trimmed value, but this case additionally asserts that the unmodified source column is re-emitted with PapaParse-style CSV quoting of leading/trailing spaces (`"  hello  "`). The portable Rust CSV writer emits unquoted fields; reproducing the quote-on-whitespace behavior is a cross-cutting CSV-serializer concern (JS-runtime PapaParse formatting), documented here rather than mapped.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.prototype-pollution.test.ts',
+    lines: [88],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_dangerous_keyword_columns_rows',
+    notes:
+      'r14jb verifies xan explode of a column literally named `constructor`: the dangerous-keyword header is preserved and the delimited value is split into a header plus two data rows.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xan/xan.prototype-pollution.test.ts',
+    lines: [130, 154, 168],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_xan_dangerous_keyword_columns_rows',
+    notes:
+      'r14jb verifies the portable behavior behind the prototype-pollution-via-CSV cases: processing CSV whose headers/cells are JS-dangerous keywords (constructor/prototype/__proto__) through xan select/transpose/enum produces correct, uncorrupted output. The Rust port has no JS Object.prototype to pollute, so the security property holds by construction; the observable command output is asserted instead of the JS-only Object.hasOwn checks.',
+  },
+];
+
 const jbcYqFixturesCaseGroups = [
   {
     file: 'packages/just-bash/src/commands/yq/yq.fixtures.test.ts',
@@ -6071,6 +6129,7 @@ function caseOverrideFor(testCase) {
     ...jbc37CaseGroups,
     ...jbc44CaseGroups,
     ...jbcXanGroupbyTransformCaseGroups,
+    ...r14jbXanReshapeMoonbladeCaseGroups,
     ...jbcYqFixturesCaseGroups,
     ...justBashCoreSerializeCaseGroups,
     ...justBashTransformPluginsTeeCaseGroups,
