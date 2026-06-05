@@ -23,7 +23,9 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
 use crate::commands::CommandRegistry;
-use crate::encoding::{BufferEncoding, OutputPayload, bytes_to_string, content_to_bytes};
+use crate::encoding::{
+    BufferEncoding, ByteString, OutputPayload, bytes_to_string, content_to_bytes,
+};
 use crate::error::{JustBashError, JustBashErrorKind, JustBashResult};
 use crate::fs::{CpOptions, DirentEntry, FileStat, MkdirOptions, RmOptions, VirtualFileSystem};
 use crate::path::{join_path, normalize_path, resolve_path, resolve_symlink_target};
@@ -1200,6 +1202,12 @@ struct CommandResult {
     stderr: String,
     exit_code: i32,
     exit_requested: bool,
+    /// Byte-clean stdout for commands that emit binary (mirrors upstream's
+    /// `stdoutEncoding: "binary"`). When set, redirections write these raw
+    /// bytes verbatim instead of UTF-8-encoding `stdout`. `stdout` itself
+    /// holds the latin1 (char-per-byte) view so direct stdout inspection still
+    /// recovers each byte value.
+    stdout_bytes: Option<Vec<u8>>,
 }
 
 fn execute_control_script(state: &mut ExecState<'_>, script: &str) -> CommandResult {
@@ -1334,12 +1342,11 @@ fn execute_simple_command(
             .lock()
             .map_err(|_| lock_poisoned_error())
             .and_then(|mut fs| {
-                fs.write_redirection(
-                    &state.cwd,
-                    &path,
-                    OutputPayload::Text(result.stdout.clone()),
-                    append,
-                )
+                let payload = match &result.stdout_bytes {
+                    Some(bytes) => OutputPayload::Bytes(ByteString::from_bytes(bytes.clone())),
+                    None => OutputPayload::Text(result.stdout.clone()),
+                };
+                fs.write_redirection(&state.cwd, &path, payload, append)
             });
         match write {
             Ok(()) => result.stdout.clear(),
@@ -5006,6 +5013,7 @@ fn command_find(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
         stderr,
         exit_code,
         exit_requested: false,
+        stdout_bytes: None,
     }
 }
 
@@ -6460,6 +6468,7 @@ fn curl_error(options: &CurlOptions, exit_code: i32, message: impl Into<String>)
         stderr,
         exit_code,
         exit_requested: false,
+        stdout_bytes: None,
     }
 }
 
@@ -23617,6 +23626,7 @@ fn sqlite3_minimal(state: &ExecState<'_>, args: &[String], stdin: &str) -> Comma
                         stderr: format!("Error: {error}\n"),
                         exit_code: 1,
                         exit_requested: false,
+                        stdout_bytes: None,
                     };
                 }
                 stdout.push_str(&format!("Error: {error}\n"));
@@ -28393,7 +28403,15 @@ fn command_base64(state: &ExecState<'_>, args: &[String], stdin: &str) -> Comman
     if decode {
         let text = bytes_to_string(&input, BufferEncoding::Utf8);
         match content_to_bytes(text, BufferEncoding::Base64) {
-            Ok(bytes) => stdout_result(bytes_to_string(&bytes, BufferEncoding::Utf8)),
+            // base64 is byte-clean: the decoded payload may be arbitrary binary,
+            // so expose it as a latin1 (char-per-byte) string for direct stdout
+            // inspection and carry the raw bytes for byte-clean redirections,
+            // matching upstream's `stdoutEncoding: "binary"`.
+            Ok(bytes) => CommandResult {
+                stdout: bytes_to_string(&bytes, BufferEncoding::Latin1),
+                stdout_bytes: Some(bytes),
+                ..CommandResult::default()
+            },
             Err(_) => stderr_result(1, "base64: invalid input\n"),
         }
     } else {
@@ -29590,6 +29608,7 @@ fn execute_custom_command(
         stderr: result.stderr,
         exit_code: result.exit_code,
         exit_requested: false,
+        stdout_bytes: None,
     })
 }
 
@@ -29606,6 +29625,7 @@ fn execute_language_runtime(
         stderr: result.stderr,
         exit_code: result.exit_code,
         exit_requested: false,
+        stdout_bytes: None,
     })
 }
 
@@ -30016,6 +30036,7 @@ fn execute_assignment_substitution(
         stderr: result.stderr,
         exit_code: result.exit_code,
         exit_requested: result.exit_requested,
+        stdout_bytes: None,
     })
 }
 
@@ -32475,6 +32496,149 @@ mod tests {
         let tree = bash.exec("tree /", JustBashExecOptions::new());
         assert!(tree.stdout.contains("a.txt"));
         assert!(tree.stdout.contains("dir"));
+    }
+
+    #[test]
+    fn jbc_base64_binary_and_stdin_rows_match_upstream() {
+        // Mirrors packages/just-bash/src/commands/base64/base64.binary.test.ts and
+        // base64.test.ts:156. Each assertion fails if the byte-exact base64
+        // encode/decode round-trip through virtual files or ASCII/UTF-8 stdin
+        // regresses. Raw non-UTF-8 binary piped through stdin (binary.test.ts:65
+        // round-trip, :172 large pipe) stays portable-pending because the virtual
+        // pipeline carries stdin/stdout as UTF-8 byte-strings and cannot represent
+        // arbitrary non-UTF-8 bytes mid-pipe without a crate-wide Vec<u8> pipe.
+        let bash = JustBashSession::with_options(JustBashSessionOptions::new());
+        let write = |path: &str, bytes: Vec<u8>| {
+            bash.inner
+                .fs
+                .lock()
+                .unwrap()
+                .write_file(path, bytes)
+                .unwrap();
+        };
+
+        // base64.binary.test.ts:6 should encode binary file with high bytes.
+        write("/binary.bin", vec![0x80, 0x90, 0xa0, 0xb0, 0xff]);
+        let high = bash.exec("base64 /binary.bin", JustBashExecOptions::new());
+        assert_eq!(high.exit_code, 0);
+        assert_eq!(high.stdout.trim(), "gJCgsP8=");
+        assert!(
+            high.stdout
+                .trim()
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+        );
+
+        // base64.binary.test.ts:19 should encode and decode file with null bytes.
+        write("/nulls.bin", vec![0x41, 0x00, 0x42, 0x00, 0x43]);
+        bash.exec(
+            "base64 /nulls.bin > /encoded.txt",
+            JustBashExecOptions::new(),
+        );
+        let nulls = bash.exec("base64 -d /encoded.txt", JustBashExecOptions::new());
+        assert_eq!(nulls.stdout.as_bytes(), &[0x41, 0x00, 0x42, 0x00, 0x43]);
+
+        // base64.binary.test.ts:32 should encode and decode file with all byte values.
+        write("/allbytes.bin", (0u8..=255).collect::<Vec<_>>());
+        bash.exec(
+            "base64 /allbytes.bin > /allenc.txt",
+            JustBashExecOptions::new(),
+        );
+        bash.exec(
+            "base64 -d /allenc.txt > /allout.bin",
+            JustBashExecOptions::new(),
+        );
+        let allbytes = bash
+            .inner
+            .fs
+            .lock()
+            .unwrap()
+            .read_file_buffer("/allout.bin")
+            .unwrap();
+        assert_eq!(allbytes.len(), 256);
+        assert_eq!(allbytes, (0u8..=255).collect::<Vec<_>>());
+
+        // base64.binary.test.ts:52 should encode binary data from stdin
+        // (upstream asserts only exit 0 and non-empty output).
+        write("/stdinbin.bin", vec![0x80, 0xff, 0x90, 0xab]);
+        let stdin_enc = bash.exec("cat /stdinbin.bin | base64", JustBashExecOptions::new());
+        assert_eq!(stdin_enc.exit_code, 0);
+        assert!(!stdin_enc.stdout.trim().is_empty());
+
+        // base64.binary.test.ts:82 should decode base64 from stdin ("Hello").
+        write("/hello-b64.txt", b"SGVsbG8=\n".to_vec());
+        let dec_hello = bash.exec("cat /hello-b64.txt | base64 -d", JustBashExecOptions::new());
+        assert_eq!(dec_hello.stdout, "Hello");
+
+        // base64.binary.test.ts:94 should decode valid base64 from stdin ("ABC").
+        write("/abc-b64.txt", b"QUJD\n".to_vec());
+        let dec_abc = bash.exec("cat /abc-b64.txt | base64 -d", JustBashExecOptions::new());
+        assert_eq!(dec_abc.stdout, "ABC");
+
+        // base64.binary.test.ts:108 should round-trip text content via files.
+        write("/data.txt", b"Hello World 123".to_vec());
+        bash.exec(
+            "base64 /data.txt > /data-enc.txt",
+            JustBashExecOptions::new(),
+        );
+        let rt_text = bash.exec("base64 -d /data-enc.txt", JustBashExecOptions::new());
+        assert_eq!(rt_text.stdout, "Hello World 123");
+
+        // base64.binary.test.ts:121 should round-trip ASCII text via stdin.
+        write("/data2.txt", b"test content".to_vec());
+        bash.exec(
+            "cat /data2.txt | base64 > /data2-enc.txt",
+            JustBashExecOptions::new(),
+        );
+        let rt_stdin = bash.exec("base64 -d /data2-enc.txt", JustBashExecOptions::new());
+        assert_eq!(rt_stdin.stdout, "test content");
+
+        // base64.binary.test.ts:134 should handle large binary files (1MB+) via files.
+        let size = 1024 * 1024usize;
+        let large: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+        write("/large.bin", large.clone());
+        bash.exec(
+            "base64 /large.bin > /large-enc.txt",
+            JustBashExecOptions::new(),
+        );
+        bash.exec(
+            "base64 -d /large-enc.txt > /large-dec.bin",
+            JustBashExecOptions::new(),
+        );
+        let decoded = bash
+            .inner
+            .fs
+            .lock()
+            .unwrap()
+            .read_file_buffer("/large-dec.bin")
+            .unwrap();
+        assert_eq!(decoded.len(), size);
+        assert_eq!(decoded[0], 0);
+        assert_eq!(decoded[255], 255);
+        assert_eq!(decoded[size / 2], ((size / 2) % 256) as u8);
+        assert_eq!(decoded[size - 1], ((size - 1) % 256) as u8);
+        for i in (0..size).step_by(10000) {
+            assert_eq!(decoded[i], (i % 256) as u8);
+        }
+
+        // base64.test.ts:156 should encode binary data with invalid UTF-8 bytes
+        // (PNG magic bytes, 0x89 is invalid UTF-8).
+        write("/png.dat", vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+        let png = bash.exec("base64 /png.dat", JustBashExecOptions::new());
+        assert_eq!(png.stdout, "iVBORw0K\n");
+        assert_eq!(png.exit_code, 0);
+
+        // base64.test.ts:170 should encode binary file with null bytes.
+        write("/nulls.dat", vec![0x00, 0x00, 0x00, 0x00]);
+        let nulls_dat = bash.exec("base64 /nulls.dat", JustBashExecOptions::new());
+        assert_eq!(nulls_dat.stdout, "AAAAAA==\n");
+        assert_eq!(nulls_dat.exit_code, 0);
+
+        // base64.test.ts:182 should encode binary file with high bytes.
+        write("/high.dat", vec![0xff, 0xfe, 0xfd, 0xfc]);
+        let high_dat = bash.exec("base64 /high.dat", JustBashExecOptions::new());
+        assert_eq!(high_dat.stdout, "//79/A==\n");
+        assert_eq!(high_dat.exit_code, 0);
     }
 
     #[test]

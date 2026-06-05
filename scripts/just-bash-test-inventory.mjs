@@ -5027,6 +5027,24 @@ const jbc38CaseGroups = [
       'JBC-38 verifies portable base64 stdin/file encode/decode, wrapping, dash stdin, help, and option/error behavior; binary byte fixture rows remain pending.',
   },
   {
+    file: 'packages/just-bash/src/commands/base64/base64.binary.test.ts',
+    lines: [6, 19, 32, 52, 82, 94, 108, 121, 134],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::base64-binary',
+    rustTest: 'jbc_base64_binary_and_stdin_rows_match_upstream',
+    notes:
+      'JBC verifies byte-exact base64 encode/decode round-trips through virtual files and ASCII/UTF-8 stdin, plus invalid-UTF-8/null/high byte file encodes; decode is byte-clean via stdout_bytes redirection. Raw non-UTF-8 binary piped through stdin (lines 65, 172) stays pending because the virtual pipeline carries stdin/stdout as UTF-8 byte-strings.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/base64/base64.test.ts',
+    lines: [156, 170, 182],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::base64-binary',
+    rustTest: 'jbc_base64_binary_and_stdin_rows_match_upstream',
+    notes:
+      'JBC verifies byte-exact base64 encode of invalid-UTF-8 PNG magic bytes, null bytes, and high bytes from virtual binary files.',
+  },
+  {
     file: 'packages/just-bash/src/commands/file/file.test.ts',
     lines: [100, 108, 116, 128, 138, 152, 160, 168, 176, 186, 196, 204, 212, 222, 235, 244, 253],
     status: 'portable-verified',
