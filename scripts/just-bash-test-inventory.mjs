@@ -6846,8 +6846,39 @@ const r16jbParserInterpreterCaseGroups = [
   },
 ];
 
+const r13jbParserInterpreterCaseGroups = [
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/source.test.ts',
+    lines: [39, 68, 145, 161],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r13jb_source_builtin_rows_match_upstream',
+    notes:
+      'R13JB implements the portable `source`/`.` builtin in the Interpreter shell and verifies the multi-statement sourced file persisting assignments to the caller (L39), the `.` alias loading and running a sourced function definition (L68), a `return` ending the sourced script while the caller continues (L145), and the sourced `return N` propagating its exit code to `$?` (L161). The mapped test also exercises positional-argument forwarding/restoration and the no-argument and missing-file error rows.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/unset.test.ts',
+    lines: [154, 167],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r13jb_unset_assoc_array_element_rows_match_upstream',
+    notes:
+      'R13JB extends `unset` to remove a single associative-array element addressed by `name[subscript]` and verifies the single-quoted-key row (L154) and the plain-literal-key row (L167) each remove exactly the named element while leaving the array and its siblings intact. The variable-key and special-character-key rows (L126, L140) stay pending because assignment to a double-quoted assoc subscript is not yet parsed.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/parser-edge-cases.test.ts',
+    lines: [200],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r13jb_parser_edge_multiple_redirections_row_matches_upstream',
+    notes:
+      'R13JB verifies the "multiple redirections" row: `echo out; cat /missing 2>&1 > /tmp/out.txt` parses and executes without a parser error and still captures the leading `echo` output. Upstream leaves the exact stream split unasserted (shell-dependent), so the row fails only if the combined `2>&1 > file` redirection list fails to parse or execute.',
+  },
+];
+
 function caseOverrideFor(testCase) {
   const group = [
+    ...r13jbParserInterpreterCaseGroups,
     ...r16jbParserInterpreterCaseGroups,
     ...r18jbSleepDurationCaseGroups,
     ...r15jbStringsBinaryCaseGroups,

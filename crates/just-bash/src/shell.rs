@@ -3629,6 +3629,15 @@ impl AssocArray {
             .filter_map(|key| self.values.get(key).cloned())
             .collect()
     }
+
+    fn remove(&mut self, key: &str) -> bool {
+        if self.values.remove(key).is_some() {
+            self.order.retain(|existing| existing != key);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -4157,6 +4166,11 @@ impl<D: CommandDispatcher> Interpreter<D> {
             return prepend_trace(output, trace);
         }
 
+        if name == "source" || name == "." {
+            let output = self.execute_source(&args);
+            return prepend_trace(self.apply_redirections(output, &redirections), trace);
+        }
+
         if let Some(function) = self.state.functions.get(&name).cloned() {
             return prepend_trace(self.call_function(function, args), trace);
         }
@@ -4653,6 +4667,70 @@ impl<D: CommandDispatcher> Interpreter<D> {
         }
     }
 
+    /// `source FILE [args...]` / `. FILE [args...]` builtin. Reads the named
+    /// virtual file, parses it, and executes its statements in the *current*
+    /// shell scope so variable and function definitions persist (mirroring
+    /// `interpreter/builtins/source.ts`). When trailing arguments are supplied
+    /// they temporarily replace the positional parameters for the duration of
+    /// the sourced script and are restored afterward. A `return` inside the
+    /// sourced script stops at the source boundary and resolves the builtin's
+    /// status. Missing filename is a status-2 "filename argument required"
+    /// error; a missing file is a status-1 "No such file or directory" error.
+    fn execute_source(&mut self, args: &[String]) -> ExecOutput {
+        let Some(path) = args.first() else {
+            return ExecOutput {
+                stdout: String::new(),
+                stderr: "bash: source: filename argument required\n".to_string(),
+                exit_code: 2,
+            };
+        };
+        let Some(content) = self.files.read_to_string(path).map(str::to_string) else {
+            return ExecOutput {
+                stdout: String::new(),
+                stderr: format!("bash: source: {path}: No such file or directory\n"),
+                exit_code: 1,
+            };
+        };
+        let script = match parse(&content) {
+            Ok(script) => script,
+            Err(error) => {
+                return ExecOutput {
+                    stdout: String::new(),
+                    stderr: format!("{error}\n"),
+                    exit_code: 2,
+                };
+            }
+        };
+
+        // Trailing operands become the positional parameters for the sourced
+        // body; with none, the caller's parameters stay visible.
+        let extra = &args[1..];
+        let saved_positionals = if extra.is_empty() {
+            None
+        } else {
+            Some(std::mem::replace(
+                &mut self.state.positionals,
+                extra.to_vec(),
+            ))
+        };
+
+        // Allow `return` to terminate the sourced script without unwinding past
+        // it: bump the function depth so `return` is valid, then consume any
+        // pending return signal at this boundary. No local scope is pushed, so
+        // assignments persist to the caller (unlike a function call).
+        self.state.function_depth += 1;
+        let mut output = self.exec_script(&script);
+        self.state.function_depth -= 1;
+        if let Some(code) = self.state.returning.take() {
+            output.exit_code = code;
+        }
+
+        if let Some(saved) = saved_positionals {
+            self.state.positionals = saved;
+        }
+        output
+    }
+
     /// `shift [n]` builtin. Shifts the positional parameters left by `n`
     /// (default 1): `$(n+1)` becomes `$1`, and `$#` is decremented by `n`.
     /// A non-numeric or negative argument is a "numeric argument required"
@@ -4820,6 +4898,21 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 "-v" => unset_functions = false,
                 _ if unset_functions => {
                     self.state.functions.remove(arg);
+                }
+                _ if parse_subscript_reference(arg)
+                    .is_some_and(|(name, _)| self.state.assoc_arrays.contains_key(name)) =>
+                {
+                    // `unset name[key]` removes a single associative-array
+                    // element. The subscript may be single/double-quoted and may
+                    // reference a variable (`$key`), so expand parameters before
+                    // stripping the surrounding quote pair.
+                    if let Some((name, raw)) = parse_subscript_reference(arg) {
+                        let expanded = self.expand_subscript_text(raw);
+                        let key = dequote_subscript(&expanded);
+                        if let Some(assoc) = self.state.assoc_arrays.get_mut(name) {
+                            assoc.remove(&key);
+                        }
+                    }
                 }
                 _ => self.state.unset_var(arg),
             }
@@ -5536,6 +5629,41 @@ impl<D: CommandDispatcher> Interpreter<D> {
 
     fn expand_word_to_string(&mut self, word: &Word) -> String {
         self.expand_word(word, false).join(" ")
+    }
+
+    /// Expand `$name`/`${name}` parameter references inside an associative-array
+    /// subscript that arrives as raw command-argument text (e.g. the `"$key"`
+    /// subscript of `unset name["$key"]`). Quoting characters are preserved so
+    /// the caller can still strip a surrounding quote pair afterward; only bare
+    /// parameter references are substituted.
+    fn expand_subscript_text(&self, raw: &str) -> String {
+        let chars: Vec<char> = raw.chars().collect();
+        let mut out = String::new();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '$' && i + 1 < chars.len() {
+                if chars[i + 1] == '{' {
+                    if let Some(close) = chars[i + 2..].iter().position(|&c| c == '}') {
+                        let name: String = chars[i + 2..i + 2 + close].iter().collect();
+                        out.push_str(self.state.get_var(&name).unwrap_or(""));
+                        i += 2 + close + 1;
+                        continue;
+                    }
+                } else if chars[i + 1].is_alphabetic() || chars[i + 1] == '_' {
+                    let mut j = i + 1;
+                    while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '_') {
+                        j += 1;
+                    }
+                    let name: String = chars[i + 1..j].iter().collect();
+                    out.push_str(self.state.get_var(&name).unwrap_or(""));
+                    i = j;
+                    continue;
+                }
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out
     }
 
     fn expand_part(&mut self, part: &WordPart, quoted: bool) -> Vec<String> {
@@ -13238,6 +13366,125 @@ greet World",
         // should work in if condition
         let result = shell().exec("if ! false; then echo yes; fi");
         assert_eq!(result.stdout, "yes\n");
+    }
+
+    /// R13JB closes the portable `source`/`.` builtin rows from
+    /// `packages/just-bash/src/interpreter/builtins/source.test.ts` through the
+    /// `Interpreter` shell: a multi-statement sourced file persists every
+    /// assignment to the caller (L39), the `.` alias loads and runs a sourced
+    /// function definition (L68), a `return` inside a sourced script stops the
+    /// script but lets the caller continue (L145), the sourced `return N`
+    /// propagates its exit code to `$?` (L161), trailing operands become the
+    /// sourced script's positional parameters and are restored afterward, and
+    /// the no-argument / missing-file error rows report the upstream
+    /// diagnostics and exit codes. Each row fails if `source` scope, argument,
+    /// return, or error semantics regress.
+    #[test]
+    fn r13jb_source_builtin_rows_match_upstream() {
+        // L39 multiple commands in a sourced file persist A/B/C to the caller.
+        let result = shell().exec(
+            "cat > /tmp/multi.sh << 'EOF'\nA=1\nB=2\nC=$((A + B))\nEOF\nsource /tmp/multi.sh\necho $A $B $C",
+        );
+        assert_eq!(result.stdout, "1 2 3\n");
+        assert_eq!(result.exit_code, 0);
+
+        // L68 the `.` (dot) builtin loads a sourced function and calls it.
+        let result = shell().exec(
+            "echo \"add() { echo \\$((\\$1 + \\$2)); }\" > /tmp/add.sh\n. /tmp/add.sh\nadd 3 4",
+        );
+        assert_eq!(result.stdout, "7\n");
+
+        // L145 `return 0` ends the sourced script (skipping its remaining
+        // statements) but the caller keeps running.
+        let result = shell().exec(
+            "cat > /tmp/early.sh << 'EOF'\necho before\nreturn 0\necho after\nEOF\nsource /tmp/early.sh\necho done",
+        );
+        assert_eq!(result.stdout, "before\ndone\n");
+
+        // L161 `return 42` propagates its exit code to `$?` after sourcing.
+        let result = shell()
+            .exec("echo \"return 42\" > /tmp/exit.sh\nsource /tmp/exit.sh\necho \"exit: $?\"");
+        assert_eq!(result.stdout, "exit: 42\n");
+
+        // Trailing operands become the sourced script's positional parameters.
+        let result = shell()
+            .exec("echo \"echo args: \\$1 \\$2 \\$#\" > /tmp/args.sh\nsource /tmp/args.sh foo bar");
+        assert_eq!(result.stdout, "args: foo bar 2\n");
+        assert_eq!(result.exit_code, 0);
+
+        // The caller's positional parameters are restored after sourcing.
+        let result = shell().exec(
+            "echo \"echo sourced: \\$1\" > /tmp/sourced.sh\nmyfunc() {\necho \"func: $1\"\nsource /tmp/sourced.sh arg\necho \"after: $1\"\n}\nmyfunc original",
+        );
+        assert_eq!(
+            result.stdout,
+            "func: original\nsourced: arg\nafter: original\n"
+        );
+
+        // Missing filename is a status-2 "filename argument required" error for
+        // both `source` and `.`.
+        let result = shell().exec("source");
+        assert_eq!(result.exit_code, 2);
+        assert!(result.stderr.contains("filename argument required"));
+        let result = shell().exec(".");
+        assert_eq!(result.exit_code, 2);
+        assert!(result.stderr.contains("filename argument required"));
+
+        // A missing file is a status-1 "No such file or directory" error.
+        let result = shell().exec("source /nonexistent/file.sh");
+        assert_eq!(result.exit_code, 1);
+        assert!(result.stderr.contains("No such file or directory"));
+    }
+
+    /// R13JB closes the portable associative-array element `unset` rows from
+    /// `packages/just-bash/src/interpreter/builtins/unset.test.ts`: a
+    /// single-quoted subscript (`unset "dict['literal']"`, L154) and a plain
+    /// literal subscript (`unset 'dict[plainkey]'`, L167) each remove exactly
+    /// the named element from the associative array while leaving the array (and
+    /// other elements) intact. The test fails if the subscript is not parsed,
+    /// the quote pair is not stripped, or the wrong element is removed.
+    #[test]
+    fn r13jb_unset_assoc_array_element_rows_match_upstream() {
+        // L154 single-quoted subscript key.
+        let result = shell().exec(
+            "declare -A dict=()\ndict['literal']=bar\necho \"before: ${dict[literal]}\"\nunset \"dict['literal']\"\necho \"after: ${dict[literal]}\"",
+        );
+        assert_eq!(result.stdout, "before: bar\nafter: \n");
+        assert_eq!(result.exit_code, 0);
+
+        // L167 plain literal subscript key.
+        let result = shell().exec(
+            "declare -A dict=()\ndict[plainkey]=value\necho \"before: ${dict[plainkey]}\"\nunset 'dict[plainkey]'\necho \"after: ${dict[plainkey]}\"",
+        );
+        assert_eq!(result.stdout, "before: value\nafter: \n");
+        assert_eq!(result.exit_code, 0);
+
+        // Unsetting one element leaves sibling elements in place.
+        let result = shell().exec(
+            "declare -A dict=()\ndict[keep]=stay\ndict[drop]=gone\necho \"${dict[keep]}|${dict[drop]}\"\nunset 'dict[drop]'\necho \"${dict[keep]}|${dict[drop]}\"",
+        );
+        assert_eq!(result.stdout, "stay|gone\nstay|\n");
+    }
+
+    /// R13JB closes the portable `parser-edge-cases.test.ts:200` "multiple
+    /// redirections" row: `echo out; cat /missing 2>&1 > /tmp/out.txt` parses
+    /// and executes without raising a parser error. Upstream only asserts that
+    /// the script runs (the exact stream split is shell-dependent and left
+    /// unasserted), so this row fails only if the combined `2>&1 > file`
+    /// redirection list fails to parse or execute.
+    #[test]
+    fn r13jb_parser_edge_multiple_redirections_row_matches_upstream() {
+        let result = shell().exec("echo out; cat /missing 2>&1 > /tmp/out.txt");
+        // The leading `echo out` always succeeds; the script must not abort with
+        // a parser error (exit code 2 with an empty parse) on the redirection
+        // list. The `echo` output is captured regardless of the missing-file
+        // branch's stream routing.
+        assert!(
+            result.stdout.contains("out"),
+            "stdout={:?} stderr={:?}",
+            result.stdout,
+            result.stderr
+        );
     }
 
     /// Covers portable operator-precedence rows from
