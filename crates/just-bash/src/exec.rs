@@ -35071,4 +35071,199 @@ mod tests {
         assert_eq!(r.stdout, "fallback\nafter\n");
         assert_eq!(r.exit_code, 0);
     }
+
+    // Builds a session, writes the given raw bytes to `path` (bypassing the
+    // UTF-8 String layer so high bytes like 0x80/0xFF round-trip verbatim), and
+    // runs `cmd`. Mirrors upstream's `new Bash({ files: { path: Uint8Array } })`
+    // construction used by strings.binary.test.ts.
+    fn strings_run_binary(cmd: &str, path: &str, bytes: &[u8]) -> JustBashExecResult {
+        let bash = JustBashSession::new();
+        {
+            let mut fs = bash.inner.fs.lock().expect("fs lock");
+            fs.write_file(path, bytes.to_vec()).expect("write binary");
+        }
+        bash.exec(cmd, JustBashExecOptions::new())
+    }
+
+    // packages/just-bash/src/commands/strings/strings.binary.test.ts:5
+    // "extracts strings from binary data with null terminators"
+    #[test]
+    fn strings_binary_extracts_strings_with_null_terminators() {
+        let bytes = [
+            0x68, 0x65, 0x6c, 0x6c, 0x6f, // hello
+            0x00, // null terminator
+            0x01, 0x02, 0x03, // binary garbage
+            0x77, 0x6f, 0x72, 0x6c, 0x64, // world
+            0x00, // null terminator
+        ];
+        let r = strings_run_binary("strings /binary.bin", "/binary.bin", &bytes);
+        assert_eq!(r.stdout, "hello\nworld\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    // packages/just-bash/src/commands/strings/strings.binary.test.ts:33
+    // "handles mixed binary and text content"
+    #[test]
+    fn strings_binary_handles_mixed_binary_and_text_content() {
+        let bytes = [
+            0x7f, 0x45, 0x4c, 0x46, // ELF magic
+            0x02, 0x01, 0x01, 0x00, // binary header
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // padding
+            0x74, 0x65, 0x73, 0x74, 0x5f, 0x66, 0x75, 0x6e, 0x63, // test_func
+            0x00, 0x00, 0x00, // padding
+            0x6d, 0x61, 0x69, 0x6e, // main
+            0x00, // null
+        ];
+        let r = strings_run_binary("strings /binary.bin", "/binary.bin", &bytes);
+        assert!(r.stdout.contains("test_func"), "stdout: {:?}", r.stdout);
+        assert!(r.stdout.contains("main"), "stdout: {:?}", r.stdout);
+        assert_eq!(r.exit_code, 0);
+    }
+
+    // packages/just-bash/src/commands/strings/strings.binary.test.ts:80
+    // "filters strings shorter than minimum length with binary file"
+    #[test]
+    fn strings_binary_filters_shorter_than_minimum_length() {
+        let bytes = [
+            0x61, 0x62, // ab (2 chars)
+            0x00, 0x63, 0x64, 0x65, // cde (3 chars)
+            0x00, 0x66, 0x67, 0x68, 0x69, // fghi (4 chars)
+            0x00,
+        ];
+        let r = strings_run_binary("strings /binary.bin", "/binary.bin", &bytes);
+        assert_eq!(r.stdout, "fghi\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    // packages/just-bash/src/commands/strings/strings.binary.test.ts:105
+    // "handles -n option with binary file"
+    #[test]
+    fn strings_binary_handles_n_option() {
+        let bytes = [
+            0x61, 0x62, // ab
+            0x00, 0x63, 0x64, 0x65, // cde
+            0x00, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, // fghijk (6 chars)
+            0x00,
+        ];
+        let r = strings_run_binary("strings -n 6 /binary.bin", "/binary.bin", &bytes);
+        assert_eq!(r.stdout, "fghijk\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    // packages/just-bash/src/commands/strings/strings.binary.test.ts:132
+    // "handles -t d option with binary file"
+    #[test]
+    fn strings_binary_handles_t_d_option() {
+        let bytes = [
+            0x00, 0x00, 0x00, 0x00, // 4 null bytes (offset 0-3)
+            0x74, 0x65, 0x73, 0x74, // test (at offset 4)
+            0x00,
+        ];
+        let r = strings_run_binary("strings -t d /binary.bin", "/binary.bin", &bytes);
+        assert!(r.stdout.contains("4 test"), "stdout: {:?}", r.stdout);
+        assert_eq!(r.exit_code, 0);
+    }
+
+    // packages/just-bash/src/commands/strings/strings.binary.test.ts:154
+    // "handles -t x option with binary file"
+    #[test]
+    fn strings_binary_handles_t_x_option() {
+        let mut bytes = vec![0x00u8; 16]; // 16 null bytes to reach offset 0x10
+        bytes.extend_from_slice(&[0x68, 0x65, 0x78, 0x74, 0x00]); // hext + null
+        let r = strings_run_binary("strings -t x /binary.bin", "/binary.bin", &bytes);
+        assert!(r.stdout.contains("10 hext"), "stdout: {:?}", r.stdout);
+        assert_eq!(r.exit_code, 0);
+    }
+
+    // packages/just-bash/src/commands/strings/strings.binary.test.ts:174
+    // "extracts all printable ASCII characters"
+    #[test]
+    fn strings_binary_extracts_all_printable_ascii() {
+        let bytes = [
+            0x20, 0x41, 0x42, 0x43, // " ABC"
+            0x7e, // ~
+            0x00,
+        ];
+        let r = strings_run_binary("strings -n 1 /binary.bin", "/binary.bin", &bytes);
+        assert!(r.stdout.contains(" ABC~"), "stdout: {:?}", r.stdout);
+        assert_eq!(r.exit_code, 0);
+    }
+
+    // packages/just-bash/src/commands/strings/strings.binary.test.ts:194
+    // "ignores non-printable bytes"
+    #[test]
+    fn strings_binary_ignores_non_printable_bytes() {
+        let bytes = [
+            0x01, 0x02, 0x03, 0x04, // control chars
+            0x74, 0x65, 0x73, 0x74, // test
+            0x80, 0x81, 0x82, 0x83, // high bytes
+        ];
+        let r = strings_run_binary("strings /binary.bin", "/binary.bin", &bytes);
+        assert_eq!(r.stdout, "test\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    // packages/just-bash/src/commands/strings/strings.binary.test.ts:219
+    // "handles tabs as printable characters"
+    #[test]
+    fn strings_binary_handles_tabs_as_printable() {
+        let bytes = [
+            0x61, 0x09, 0x62, 0x09, 0x63, // a\tb\tc
+            0x00,
+        ];
+        let r = strings_run_binary("strings /binary.bin", "/binary.bin", &bytes);
+        assert_eq!(r.stdout, "a\tb\tc\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    // packages/just-bash/src/commands/strings/strings.binary.test.ts:238
+    // "handles long binary file with many strings"
+    #[test]
+    fn strings_binary_handles_long_file_with_many_strings() {
+        let strings = ["function1", "variable_x", "CONSTANT", "main", "printf"];
+        let mut bytes: Vec<u8> = Vec::new();
+        for s in strings {
+            // binary garbage before each string
+            bytes.extend_from_slice(&[0x00, 0x01, 0x02, 0xff, 0xfe, 0x80]);
+            bytes.extend_from_slice(s.as_bytes());
+            bytes.push(0x00); // null terminator
+        }
+        let r = strings_run_binary("strings /binary.bin", "/binary.bin", &bytes);
+        assert_eq!(r.exit_code, 0);
+        for s in strings {
+            assert!(r.stdout.contains(s), "missing {s:?} in {:?}", r.stdout);
+        }
+    }
+
+    // packages/just-bash/src/commands/strings/strings.binary.test.ts:267
+    // "handles empty binary file"
+    #[test]
+    fn strings_binary_handles_empty_file() {
+        let r = strings_run_binary("strings /empty.bin", "/empty.bin", &[]);
+        assert_eq!(r.stdout, "");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    // packages/just-bash/src/commands/strings/strings.binary.test.ts:279
+    // "handles binary file with only non-printable bytes"
+    #[test]
+    fn strings_binary_handles_only_non_printable_bytes() {
+        let bytes = [0x00, 0x01, 0x02, 0x03, 0xff, 0xfe];
+        let r = strings_run_binary("strings /binary.bin", "/binary.bin", &bytes);
+        assert_eq!(r.stdout, "");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    // packages/just-bash/src/commands/strings/strings.binary.test.ts:291
+    // "handles binary file with string at very end"
+    #[test]
+    fn strings_binary_handles_string_at_very_end() {
+        let bytes = [
+            0x00, 0x01, 0x02, 0x03, // binary
+            0x74, 0x65, 0x73, 0x74, // test (no null terminator at end)
+        ];
+        let r = strings_run_binary("strings /binary.bin", "/binary.bin", &bytes);
+        assert_eq!(r.stdout, "test\n");
+        assert_eq!(r.exit_code, 0);
+    }
 }
