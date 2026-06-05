@@ -3740,7 +3740,17 @@ const r15jbSqlite3FixturesCaseGroups = [
     owner: 'crates/just-bash::runtime::sqlite3',
     rustTest: 'structured_data_sqlite3_fixtures_queries_and_modes_rows',
     notes:
-      'R15-JB rebuilds the upstream users/products/datatypes fixtures with CREATE/INSERT (the Rust port has no binary .db loader) and asserts byte-identical output for SELECT *, projected WHERE + ORDER BY, COUNT aggregation, -json row serialization, -box rendering, -nullvalue NULL substitution, -readonly writeback suppression, sqlite_master table listing, and PRAGMA table_info. Lines 71/88/104/152/170/206 remain portable-pending because they require list-mode REAL float precision, table-alias JOINs, IN(list), OR/IS NULL predicates, or named-column INSERT that the minimal in-memory engine does not implement.',
+      'R15-JB rebuilds the upstream users/products/datatypes fixtures with CREATE/INSERT (the Rust port has no binary .db loader) and asserts byte-identical output for SELECT *, projected WHERE + ORDER BY, COUNT aggregation, -json row serialization, -box rendering, -nullvalue NULL substitution, -readonly writeback suppression, sqlite_master table listing, and PRAGMA table_info. The JOIN/aggregate/predicate fixture rows (71/88/104/152/170/206) are closed by structured_data_sqlite3_fixtures_join_aggregate_and_predicate_rows.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.fixtures.test.ts',
+    lines: [71, 88, 104, 152, 170, 206],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sqlite3',
+    rustTest:
+      'structured_data_sqlite3_fixtures_join_aggregate_and_predicate_rows',
+    notes:
+      'R10-JB closes the remaining fixture rows by extending the portable sqlite3 engine: list-mode REAL values now render with full IEEE-754 precision (:71), the SELECT path resolves table-alias equi-JOINs (:88) and JOIN + GROUP BY/SUM aggregation (:104), WHERE supports IN(list) membership (:152) and OR/IS NULL composition (:170), and named-column INSERT writes back to the session overlay (:206). Each rebuilt fixture query is asserted byte-for-byte against the upstream expectation.',
   },
 ];
 

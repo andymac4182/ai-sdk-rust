@@ -24841,13 +24841,55 @@ fn insert_into_table(db: &mut MiniSqlDb, rest: &str, replace: bool) -> Result<()
         return Ok(());
     }
 
-    let Some((table, values)) = rest.split_once("VALUES") else {
+    let Some((table_and_cols, values)) = rest.split_once("VALUES") else {
         return Err("invalid INSERT".to_string());
     };
-    let table = table.split_whitespace().next().unwrap_or(table).trim();
+    let table_and_cols = table_and_cols.trim();
+    // Optional explicit column list: `table (c1, c2, ...)`.
+    let (table, explicit_columns): (&str, Option<Vec<String>>) =
+        match table_and_cols.split_once('(') {
+            Some((name, cols)) => {
+                let cols = cols.trim_end().trim_end_matches(')');
+                let columns = split_top_level(cols, ',')
+                    .into_iter()
+                    .map(|column| column.trim().trim_matches('"').to_string())
+                    .collect::<Vec<_>>();
+                (name.trim(), Some(columns))
+            }
+            None => (
+                table_and_cols
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or(table_and_cols),
+                None,
+            ),
+        };
     let new_rows = parse_sql_value_groups(values);
     let Some(result_set) = db.tables.get_mut(table) else {
         return Err(format!("no such table: {table}"));
+    };
+    // When an explicit column list is given, remap each supplied value into the
+    // table's column order, leaving omitted columns NULL (matching sqlite3's
+    // INSERT INTO t (a, b) VALUES (...) form).
+    let new_rows: Vec<Vec<SqlValue>> = if let Some(explicit) = &explicit_columns {
+        new_rows
+            .into_iter()
+            .map(|supplied| {
+                let mut row = vec![SqlValue { raw: None }; result_set.columns.len()];
+                for (column, value) in explicit.iter().zip(supplied) {
+                    if let Some(index) = result_set
+                        .columns
+                        .iter()
+                        .position(|existing| existing == column)
+                    {
+                        row[index] = value;
+                    }
+                }
+                row
+            })
+            .collect()
+    } else {
+        new_rows
     };
     for row in new_rows {
         if replace && !result_set.columns.is_empty() {
@@ -25123,7 +25165,80 @@ fn row_matches_where(columns: &[String], row: &[SqlValue], where_clause: Option<
     let Some(clause) = where_clause else {
         return true;
     };
+    eval_where_predicate(columns, row, clause.trim())
+}
+
+/// Evaluate a boolean WHERE predicate against a single row. Supports top-level
+/// `OR`/`AND` short-circuit composition (OR has lower precedence than AND),
+/// then a single comparison / `IS [NOT] NULL` / `IN (...)` term. Predicates that
+/// reference an unknown column do not match.
+fn eval_where_predicate(columns: &[String], row: &[SqlValue], clause: &str) -> bool {
     let clause = clause.trim();
+    // OR binds loosest — split on the first top-level OR.
+    if let Some(pos) = find_keyword_at_top_level(clause, "OR") {
+        let left = &clause[..pos];
+        let right = &clause[pos + "OR".len()..];
+        return eval_where_predicate(columns, row, left)
+            || eval_where_predicate(columns, row, right);
+    }
+    if let Some(pos) = find_keyword_at_top_level(clause, "AND") {
+        let left = &clause[..pos];
+        let right = &clause[pos + "AND".len()..];
+        return eval_where_predicate(columns, row, left)
+            && eval_where_predicate(columns, row, right);
+    }
+    eval_where_term(columns, row, clause)
+}
+
+/// Evaluate a single (non-composite) WHERE term.
+fn eval_where_term(columns: &[String], row: &[SqlValue], term: &str) -> bool {
+    let term = term.trim();
+    let cell_for = |name: &str| -> Option<Option<String>> {
+        resolve_column_index(columns, name)
+            .map(|index| row.get(index).and_then(|value| value.raw.clone()))
+    };
+
+    // `<column> IS [NOT] NULL`
+    if let Some(pos) = find_keyword_at_top_level(term, "IS") {
+        let column = term[..pos].trim();
+        let rest = term[pos + "IS".len()..].trim();
+        let (negated, target) = match rest
+            .strip_prefix("NOT ")
+            .or_else(|| rest.strip_prefix("not "))
+        {
+            Some(after) => (true, after.trim()),
+            None => (false, rest),
+        };
+        if target.eq_ignore_ascii_case("NULL") {
+            let Some(cell) = cell_for(column) else {
+                return false;
+            };
+            let is_null = cell.is_none();
+            return if negated { !is_null } else { is_null };
+        }
+    }
+
+    // `<column> IN (v1, v2, ...)`
+    if let Some(pos) = find_keyword_at_top_level(term, "IN") {
+        let column = term[..pos].trim();
+        let after_in = term[pos + "IN".len()..].trim();
+        if after_in.starts_with('(') {
+            if let Ok(inner) = match_parenthesised_subquery(after_in) {
+                let Some(cell) = cell_for(column) else {
+                    return false;
+                };
+                let candidates = split_top_level(inner, ',')
+                    .into_iter()
+                    .map(|literal| parse_sql_value(literal.trim()).raw)
+                    .collect::<Vec<_>>();
+                return candidates.iter().any(|candidate| {
+                    compare_sql_values(cell.as_deref(), candidate.as_deref())
+                        == std::cmp::Ordering::Equal
+                });
+            }
+        }
+    }
+
     for (operator, kind) in [
         ("<=", WhereOp::Le),
         (">=", WhereOp::Ge),
@@ -25133,12 +25248,10 @@ fn row_matches_where(columns: &[String], row: &[SqlValue], where_clause: Option<
         ("<", WhereOp::Lt),
         (">", WhereOp::Gt),
     ] {
-        if let Some((left, right)) = clause.split_once(operator) {
-            let column = left.trim().trim_matches('"');
-            let Some(index) = columns.iter().position(|existing| existing == column) else {
+        if let Some((left, right)) = term.split_once(operator) {
+            let Some(cell) = cell_for(left.trim()) else {
                 return false;
             };
-            let cell = row.get(index).and_then(|value| value.raw.clone());
             let expected = parse_sql_value(right.trim());
             let order = compare_sql_values(cell.as_deref(), expected.raw.as_deref());
             return match kind {
@@ -25152,6 +25265,16 @@ fn row_matches_where(columns: &[String], row: &[SqlValue], where_clause: Option<
         }
     }
     false
+}
+
+/// Strip a table-qualifier (`alias.col`) and surrounding double quotes from a
+/// WHERE column reference, returning the bare column name.
+fn where_column_name(reference: &str) -> &str {
+    let trimmed = reference.trim().trim_matches('"');
+    match trimmed.rsplit_once('.') {
+        Some((_, col)) => col.trim_matches('"'),
+        None => trimmed,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -25253,14 +25376,19 @@ fn find_top_level_keyword(fragment: &str, keyword: &str) -> Option<usize> {
 fn select_sql_body(db: &MiniSqlDb, body: &str) -> Result<SqlResultSet, String> {
     let body = body.trim();
     // Peel a trailing top-level ORDER BY clause so it applies to the whole
-    // (possibly UNION-ed) result set.
+    // (possibly UNION-ed) result set. For a *single* SELECT term we leave the
+    // ORDER BY attached so `select_sql_core` can sort on the (unprojected)
+    // source columns — this lets `ORDER BY <col>` reference a column that the
+    // projection drops, matching sqlite3.
     if let Some(pos) = find_top_level_keyword(body, "ORDER BY") {
         let head = &body[..pos];
-        let order_clause = body[pos..].trim_start();
-        let order_clause = order_clause["ORDER BY".len()..].trim();
-        let mut result = select_sql_set_ops(db, head)?;
-        sort_sql_result(&mut result, order_clause)?;
-        return Ok(result);
+        if find_top_level_keyword(head, "UNION").is_some() {
+            let order_clause = body[pos..].trim_start();
+            let order_clause = order_clause["ORDER BY".len()..].trim();
+            let mut result = select_sql_set_ops(db, head)?;
+            sort_sql_result(&mut result, order_clause)?;
+            return Ok(result);
+        }
     }
     select_sql_set_ops(db, body)
 }
@@ -25322,10 +25450,7 @@ fn sort_sql_result(result: &mut SqlResultSet, order_clause: &str) -> Result<(), 
     {
         key = key[..key.len() - 4].trim();
     }
-    let column_index = result
-        .columns
-        .iter()
-        .position(|column| column == key)
+    let column_index = resolve_column_index(&result.columns, key)
         .or_else(|| key.parse::<usize>().ok().map(|number| number - 1))
         .unwrap_or(0);
     result.rows.sort_by(|left, right| {
@@ -25374,52 +25499,374 @@ fn sqlite_master_table(db: &MiniSqlDb) -> SqlResultSet {
     }
 }
 
+/// Clone a result set, exposing each column under both its bare name and (when a
+/// qualifier is present) its qualified name. Used to build joined/aliased
+/// sources where projection and WHERE may reference either form.
+fn qualify_source_columns(table: &SqlResultSet, alias: Option<&str>) -> SqlResultSet {
+    let columns = match alias {
+        Some(alias) => table
+            .columns
+            .iter()
+            .map(|column| format!("{alias}.{column}"))
+            .collect(),
+        None => table.columns.clone(),
+    };
+    SqlResultSet {
+        columns,
+        rows: table.rows.clone(),
+    }
+}
+
+/// Returns true when a bare (non-JOIN) FROM clause carries a table alias, e.g.
+/// `products p`. A lone table name has a single whitespace-free token.
+fn from_clause_has_alias(from_clause: &str) -> bool {
+    from_clause.split_whitespace().count() >= 2
+}
+
+/// Resolve a `table alias` FROM clause into a source whose columns are
+/// qualified by the alias. Unqualified references still resolve via the bare
+/// suffix match in `resolve_column_index`.
+fn resolve_aliased_source(db: &MiniSqlDb, from_clause: &str) -> Result<SqlResultSet, String> {
+    resolve_aliased_or_plain(db, from_clause)
+}
+
+/// Parse a `table [AS] alias` reference, returning the table name and optional
+/// alias.
+fn parse_table_ref(reference: &str) -> (&str, Option<String>) {
+    let tokens: Vec<&str> = reference.split_whitespace().collect();
+    match tokens.as_slice() {
+        [name] => (name, None),
+        [name, alias] => (name, Some(alias.to_string())),
+        [name, kw, alias] if kw.eq_ignore_ascii_case("AS") => (name, Some(alias.to_string())),
+        [name, ..] => (name, tokens.last().map(|alias| alias.to_string())),
+        [] => (reference, None),
+    }
+}
+
+/// Resolve a `tableA a JOIN tableB b ON a.x = b.y [JOIN ...]` FROM clause into a
+/// single cartesian-then-filtered source. Columns are qualified by each table's
+/// alias. Only equi-join `ON <left> = <right>` conditions are modeled, which is
+/// what the fixture queries exercise.
+fn resolve_joined_source(db: &MiniSqlDb, from_clause: &str) -> Result<SqlResultSet, String> {
+    // Split into the leading base table and successive `JOIN ... ON ...` parts.
+    // `find_top_level_keyword` returns the index of the space *before* the
+    // keyword, so the keyword body begins at `pos + 1 + keyword.len()`.
+    let first_join = find_top_level_keyword(from_clause, "JOIN").unwrap();
+    let base_ref = from_clause[..first_join].trim();
+    let mut acc = resolve_aliased_or_plain(db, base_ref)?;
+    let mut rest = from_clause[first_join + " JOIN".len()..].trim().to_string();
+
+    loop {
+        // The join target runs up to the next `ON`; the ON-condition runs up to
+        // the next top-level JOIN (or end of clause).
+        let Some(on_pos) = find_top_level_keyword(&rest, "ON") else {
+            return Err(format!("near \"{rest}\": syntax error"));
+        };
+        let target_ref = rest[..on_pos].trim().to_string();
+        let after_on = rest[on_pos + " ON".len()..].trim().to_string();
+        let (condition, next) = match find_top_level_keyword(&after_on, "JOIN") {
+            Some(pos) => (
+                after_on[..pos].trim().to_string(),
+                Some(after_on[pos + " JOIN".len()..].trim().to_string()),
+            ),
+            None => (after_on.clone(), None),
+        };
+        let right = resolve_aliased_or_plain(db, &target_ref)?;
+        acc = cartesian_join(&acc, &right, &condition)?;
+        match next {
+            Some(next) => rest = next,
+            None => break,
+        }
+    }
+    Ok(acc)
+}
+
+/// Resolve a single table reference (with or without an alias) into a qualified
+/// source.
+fn resolve_aliased_or_plain(db: &MiniSqlDb, reference: &str) -> Result<SqlResultSet, String> {
+    let (name, alias) = parse_table_ref(reference);
+    let Some(table) = db.tables.get(name) else {
+        return Err(format!("no such table: {name}"));
+    };
+    Ok(qualify_source_columns(table, alias.as_deref()))
+}
+
+/// Cartesian-product two sources and keep rows satisfying an `ON <l> = <r>`
+/// equi-join condition.
+fn cartesian_join(
+    left: &SqlResultSet,
+    right: &SqlResultSet,
+    condition: &str,
+) -> Result<SqlResultSet, String> {
+    let mut columns = left.columns.clone();
+    columns.extend(right.columns.iter().cloned());
+    let mut rows = Vec::new();
+    for left_row in &left.rows {
+        for right_row in &right.rows {
+            let mut combined = left_row.clone();
+            combined.extend(right_row.iter().cloned());
+            if join_condition_holds(&columns, &combined, condition) {
+                rows.push(combined);
+            }
+        }
+    }
+    Ok(SqlResultSet { columns, rows })
+}
+
+/// Evaluate a single `<left> = <right>` equi-join condition where both sides are
+/// column references resolved against the combined row.
+fn join_condition_holds(columns: &[String], row: &[SqlValue], condition: &str) -> bool {
+    let Some((left, right)) = condition.split_once('=') else {
+        return false;
+    };
+    let left = join_value(columns, row, left.trim());
+    let right = join_value(columns, row, right.trim());
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            compare_sql_values(left.as_deref(), right.as_deref()) == std::cmp::Ordering::Equal
+        }
+        _ => false,
+    }
+}
+
+/// Resolve a join-condition operand: either a column reference (qualified or
+/// bare) or a literal.
+fn join_value(columns: &[String], row: &[SqlValue], operand: &str) -> Option<Option<String>> {
+    let operand = operand.trim();
+    if let Some(index) = resolve_column_index(columns, operand) {
+        return Some(row.get(index).and_then(|value| value.raw.clone()));
+    }
+    Some(parse_sql_value(operand).raw)
+}
+
+/// Find a column by qualified name, bare name, or unique unqualified suffix.
+fn resolve_column_index(columns: &[String], reference: &str) -> Option<usize> {
+    let reference = reference.trim().trim_matches('"');
+    if let Some(index) = columns.iter().position(|column| column == reference) {
+        return Some(index);
+    }
+    let bare = where_column_name(reference);
+    columns
+        .iter()
+        .position(|column| where_column_name(column) == bare)
+}
+
+/// Project a `SELECT *` over a (possibly joined) source, stripping table
+/// qualifiers from output column names like real sqlite3.
+fn project_star(source: &SqlResultSet) -> SqlResultSet {
+    SqlResultSet {
+        columns: source
+            .columns
+            .iter()
+            .map(|column| where_column_name(column).to_string())
+            .collect(),
+        rows: source.rows.clone(),
+    }
+}
+
+/// Resolve a projection expression to a source column index (qualified or bare).
+fn resolve_projection_index(source: &SqlResultSet, column: &str) -> Option<usize> {
+    resolve_column_index(&source.columns, column)
+}
+
+/// Output column label for a projected expression: an explicit `AS alias`, else
+/// the bare column name (qualifier stripped).
+fn projection_output_name(column: &str) -> String {
+    let (expr, alias) = split_sql_alias(column);
+    if let Some(alias) = alias {
+        return alias;
+    }
+    where_column_name(expr).to_string()
+}
+
+/// Evaluate a `GROUP BY` aggregate SELECT. Supports projections combining the
+/// grouping column with a single aggregate (`SUM(<col>)` or `COUNT(*)`), which
+/// is what the fixture join+aggregate query exercises.
+fn aggregate_grouped_select(
+    source: &SqlResultSet,
+    projection: &str,
+    group_key: &str,
+) -> Result<SqlResultSet, String> {
+    let group_ref = group_key.trim().trim_matches('"');
+    let group_index = resolve_column_index(&source.columns, group_ref)
+        .ok_or_else(|| format!("no such column: {group_ref}"))?;
+
+    let projections = split_top_level(projection, ',')
+        .into_iter()
+        .map(|item| item.trim().to_string())
+        .collect::<Vec<_>>();
+
+    // Group rows by the grouping column value, preserving first-seen order.
+    let mut order: Vec<Option<String>> = Vec::new();
+    let mut groups: std::collections::HashMap<Option<String>, Vec<Vec<SqlValue>>> =
+        std::collections::HashMap::new();
+    for row in &source.rows {
+        let key = row.get(group_index).and_then(|value| value.raw.clone());
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+        }
+        groups.entry(key).or_default().push(row.clone());
+    }
+
+    let columns = projections
+        .iter()
+        .map(|expr| projection_output_name(expr))
+        .collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    for key in &order {
+        let group_rows = &groups[key];
+        let mut out_row = Vec::new();
+        for expr in &projections {
+            out_row.push(eval_group_projection(
+                source,
+                group_rows,
+                expr,
+                group_index,
+            )?);
+        }
+        rows.push(out_row);
+    }
+    Ok(SqlResultSet { columns, rows })
+}
+
+/// Evaluate one projection expression for a group of rows.
+fn eval_group_projection(
+    source: &SqlResultSet,
+    group_rows: &[Vec<SqlValue>],
+    expr: &str,
+    group_index: usize,
+) -> Result<SqlValue, String> {
+    let (raw_expr, _) = split_sql_alias(expr);
+    let raw_expr = raw_expr.trim();
+    let upper = raw_expr.to_ascii_uppercase();
+    if upper == "COUNT(*)" {
+        return Ok(SqlValue {
+            raw: Some(group_rows.len().to_string()),
+        });
+    }
+    if let Some(inner) = upper
+        .strip_prefix("SUM(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        // Recover the original-cased column reference inside SUM(...).
+        let arg = raw_expr["SUM(".len()..raw_expr.len() - 1].trim();
+        let _ = inner;
+        let index = resolve_column_index(&source.columns, arg)
+            .ok_or_else(|| format!("no such column: {arg}"))?;
+        let mut sum = 0.0_f64;
+        for row in group_rows {
+            if let Some(raw) = row.get(index).and_then(|value| value.raw.as_deref())
+                && let Ok(value) = raw.parse::<f64>()
+            {
+                sum += value;
+            }
+        }
+        return Ok(SqlValue {
+            raw: Some(format_sql_aggregate_number(sum)),
+        });
+    }
+    // Plain grouping column (or any non-aggregate reference): take the value from
+    // the first row of the group.
+    let index = resolve_column_index(&source.columns, raw_expr).unwrap_or(group_index);
+    Ok(group_rows
+        .first()
+        .and_then(|row| row.get(index).cloned())
+        .unwrap_or(SqlValue { raw: None }))
+}
+
+/// Format an aggregate numeric result: render as an integer when the value has
+/// no fractional part, otherwise with full REAL precision (matching sqlite3).
+fn format_sql_aggregate_number(value: f64) -> String {
+    if value.fract() == 0.0 && value.abs() < 1e15 {
+        return format!("{}", value as i64);
+    }
+    format_sqlite_real(value)
+}
+
 fn select_sql_core(db: &MiniSqlDb, body: &str) -> Result<SqlResultSet, String> {
     let body = body.trim();
     if let Some(from_pos) = find_top_level_keyword(body, "FROM") {
         let projection = &body[..from_pos];
-        let table_and_where = body[from_pos + " FROM ".len() - 1..].trim();
-        // Peel a trailing top-level WHERE clause.
-        let (table, where_clause) = match find_top_level_keyword(table_and_where, "WHERE") {
+        let from_and_rest = body[from_pos + " FROM ".len() - 1..].trim();
+        // Peel a trailing top-level ORDER BY clause (outermost; sits after GROUP
+        // BY). Sorting on the *source* — before projection — lets the ORDER BY
+        // reference a column that the projection drops.
+        let (before_order, order_by) = match find_top_level_keyword(from_and_rest, "ORDER BY") {
             Some(pos) => (
-                table_and_where[..pos].trim(),
-                Some(table_and_where[pos + " WHERE ".len() - 1..].trim()),
+                from_and_rest[..pos].trim(),
+                Some(from_and_rest[pos + " ORDER BY".len()..].trim()),
             ),
-            None => (table_and_where, None),
+            None => (from_and_rest, None),
         };
-        // A parenthesised sub-query stands in for a real table.
+        // Peel a trailing top-level GROUP BY clause (it sits after WHERE).
+        let (before_group, group_by) = match find_top_level_keyword(before_order, "GROUP BY") {
+            Some(pos) => (
+                before_order[..pos].trim(),
+                Some(before_order[pos + " GROUP BY".len()..].trim()),
+            ),
+            None => (before_order, None),
+        };
+        // Peel a trailing top-level WHERE clause.
+        let (from_clause, where_clause) = match find_top_level_keyword(before_group, "WHERE") {
+            Some(pos) => (
+                before_group[..pos].trim(),
+                Some(before_group[pos + " WHERE ".len() - 1..].trim()),
+            ),
+            None => (before_group, None),
+        };
+        // Resolve the FROM clause (which may join several tables) into a single
+        // source result set whose columns carry both qualified (`alias.col`) and
+        // bare (`col`) names so projection / WHERE can reference either form.
         let owned_source;
-        let source = if table.starts_with('(') {
-            let inner = match_parenthesised_subquery(table)?;
+        let source = if from_clause.starts_with('(') {
+            let inner = match_parenthesised_subquery(from_clause)?;
             owned_source = select_sql_body(db, inner)?;
             &owned_source
-        } else if table.eq_ignore_ascii_case("sqlite_master") {
+        } else if from_clause.eq_ignore_ascii_case("sqlite_master") {
             owned_source = sqlite_master_table(db);
             &owned_source
+        } else if find_top_level_keyword(from_clause, "JOIN").is_some() {
+            owned_source = resolve_joined_source(db, from_clause)?;
+            &owned_source
+        } else if from_clause_has_alias(from_clause) {
+            owned_source = resolve_aliased_source(db, from_clause)?;
+            &owned_source
         } else {
-            let Some(source) = db.tables.get(table) else {
-                return Err(format!("no such table: {table}"));
+            let Some(source) = db.tables.get(from_clause) else {
+                return Err(format!("no such table: {from_clause}"));
             };
             source
         };
         // Apply the WHERE filter, producing a filtered source.
-        let filtered;
-        let source = if where_clause.is_some() {
-            filtered = SqlResultSet {
-                columns: source.columns.clone(),
-                rows: source
-                    .rows
-                    .iter()
-                    .filter(|row| row_matches_where(&source.columns, row, where_clause))
-                    .cloned()
-                    .collect(),
-            };
-            &filtered
-        } else {
-            source
+        let mut filtered = SqlResultSet {
+            columns: source.columns.clone(),
+            rows: source
+                .rows
+                .iter()
+                .filter(|row| row_matches_where(&source.columns, row, where_clause))
+                .cloned()
+                .collect(),
         };
-        // Aggregate: COUNT(*).
+        // For a non-aggregate query, sort the source on the ORDER BY key now —
+        // while every source column is still available — then project.
+        if group_by.is_none()
+            && let Some(order_clause) = order_by
+        {
+            sort_sql_result(&mut filtered, order_clause)?;
+        }
+        let source = &filtered;
+
         let projection_trim = projection.trim();
+        // GROUP BY with aggregate projection (currently SUM/COUNT) is handled
+        // separately because it collapses many input rows into grouped output.
+        if let Some(group_key) = group_by {
+            let mut grouped = aggregate_grouped_select(source, projection_trim, group_key)?;
+            if let Some(order_clause) = order_by {
+                sort_sql_result(&mut grouped, order_clause)?;
+            }
+            return Ok(grouped);
+        }
+        // Aggregate: COUNT(*).
         let (count_expr, count_alias) = split_sql_alias(projection_trim);
         if count_expr.trim().eq_ignore_ascii_case("COUNT(*)") {
             let column = count_alias.unwrap_or_else(|| "COUNT(*)".to_string());
@@ -25431,21 +25878,21 @@ fn select_sql_core(db: &MiniSqlDb, body: &str) -> Result<SqlResultSet, String> {
             });
         }
         if projection_trim == "*" {
-            return Ok(source.clone());
+            return Ok(project_star(source));
         }
-        let columns = projection
-            .split(',')
+        let raw_columns = split_top_level(projection_trim, ',')
+            .into_iter()
             .map(|column| column.trim().to_string())
             .collect::<Vec<_>>();
-        let indexes = columns
+        let indexes = raw_columns
             .iter()
-            .map(|column| {
-                source
-                    .columns
-                    .iter()
-                    .position(|source| source == column)
-                    .unwrap_or(0)
-            })
+            .map(|column| resolve_projection_index(source, column))
+            .collect::<Vec<_>>();
+        // Output column names drop the table qualifier, matching real sqlite3
+        // (which labels a `p.name` projection simply `name`).
+        let columns = raw_columns
+            .iter()
+            .map(|column| projection_output_name(column))
             .collect::<Vec<_>>();
         return Ok(SqlResultSet {
             columns,
@@ -25455,7 +25902,11 @@ fn select_sql_core(db: &MiniSqlDb, body: &str) -> Result<SqlResultSet, String> {
                 .map(|row| {
                     indexes
                         .iter()
-                        .filter_map(|index| row.get(*index).cloned())
+                        .map(|index| {
+                            index
+                                .and_then(|index| row.get(index).cloned())
+                                .unwrap_or(SqlValue { raw: None })
+                        })
                         .collect()
                 })
                 .collect(),
@@ -25908,7 +26359,28 @@ fn format_sql_quote(result_set: &SqlResultSet) -> String {
 }
 
 fn sql_value_text(value: &SqlValue, null_value: &str) -> String {
-    value.raw.clone().unwrap_or_else(|| null_value.to_string())
+    match &value.raw {
+        None => null_value.to_string(),
+        Some(raw) => render_sql_text_value(raw),
+    }
+}
+
+/// Render a stored cell as text the way the upstream sqlite3 port's
+/// `valueToString` does: an integer prints verbatim, but a non-integer numeric
+/// (REAL) value is re-rendered with full IEEE-754 precision
+/// (`toPrecision(17).replace(/\.?0+$/, "")`), so a stored `999.99` prints as
+/// `999.99000000000001`. Non-numeric text passes through untouched.
+fn render_sql_text_value(raw: &str) -> String {
+    if raw.parse::<i64>().is_ok() {
+        return raw.to_string();
+    }
+    if (raw.contains('.') || raw.contains('e') || raw.contains('E'))
+        && let Ok(float) = raw.parse::<f64>()
+        && float.fract() != 0.0
+    {
+        return format_sqlite_real(float);
+    }
+    raw.to_string()
 }
 
 fn sql_value_delimited(value: &SqlValue, null_value: &str, separator: &str) -> String {
