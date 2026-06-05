@@ -2046,8 +2046,8 @@ const r10jbInterpreterCoreCaseGroups = [
   {
     file: 'packages/just-bash/src/interpreter/prototype-pollution.test.ts',
     lines: [
-      135, 228, 349, 362, 375, 388, 451, 459, 466, 655, 665, 678, 688, 868,
-      892, 903, 916,
+      135, 144, 228, 349, 362, 375, 388, 451, 459, 466, 478, 488, 655, 665,
+      678, 688, 868, 892, 903, 916,
     ],
     status: 'portable-verified',
     owner: 'crates/just-bash::shell::prototype-pollution',
@@ -2058,7 +2058,7 @@ const r10jbInterpreterCoreCaseGroups = [
   },
   {
     file: 'packages/just-bash/src/interpreter/prototype-pollution.test.ts',
-    lines: [268, 404, 413, 587, 594, 603, 632, 643, 766, 787, 928],
+    lines: [268, 404, 413, 431, 440, 587, 594, 603, 632, 643, 766, 787, 928],
     status: 'portable-verified',
     owner: 'crates/just-bash::shell::prototype-pollution',
     rustTest:
@@ -4823,14 +4823,14 @@ const jbpiParserInterpreterCaseGroups = [
     lines: [
       35, 44, 52, 60, 72, 84, 94, 104, 118, 131, 139, 147, 157, 171, 180,
       188, 196, 209, 216, 228, 243, 252, 264, 287, 296, 308, 319, 327, 337,
-      349, 385, 396, 408, 418, 431, 441, 453, 465, 479, 488, 497, 505, 515,
-      529, 536, 548, 562, 577, 589, 598, 607, 616,
+      349, 359, 385, 396, 408, 418, 431, 441, 453, 465, 479, 488, 497, 505,
+      515, 529, 536, 548, 562, 577, 589, 598, 607, 616,
     ],
     status: 'portable-verified',
     owner: 'crates/just-bash::parser-interpreter',
     rustTest: 'jbpi_syntax_execution_protection_rows_match_upstream',
     notes:
-      'JB-PI verifies portable execution-protection rows through the Rust interpreter: recursion depth (maxCallDepth), command count (maxCommandCount), and loop iterations (maxLoopIterations) are bounded with the upstream ExecutionLimitError exit code (126) and a non-stack-overflow diagnostic whether the runaway is reached via plain/mutual recursion, eval-in-loop, function-with-loop, command substitution, arithmetic, subshells (incl. subshell-in-loop), pipelines, case, local, simulated-select, trap-guarded, empty-body or comment-only loops; bounded brace/range/char-range expansion, deep finite command substitution, many tokens/args, long finite pipelines, PROMPT_COMMAND assignment and self-referential variables exit 0 with the documented output; oversized input is rejected with a "too large" parser error. The recursive-eval (L275) and large-arithmetic-overflow (L359) rows stay pending pending an eval-recursion guard and double-precision arithmetic, and the upstream-skipped recursive-arith-in-param-expansion row (L373) stays pending.',
+      'JB-PI verifies portable execution-protection rows through the Rust interpreter: recursion depth (maxCallDepth), command count (maxCommandCount), and loop iterations (maxLoopIterations) are bounded with the upstream ExecutionLimitError exit code (126) and a non-stack-overflow diagnostic whether the runaway is reached via plain/mutual recursion, eval-in-loop, function-with-loop, command substitution, arithmetic, subshells (incl. subshell-in-loop), pipelines, case, local, simulated-select, trap-guarded, empty-body or comment-only loops; bounded brace/range/char-range expansion, deep finite command substitution, many tokens/args, long finite pipelines, PROMPT_COMMAND assignment and self-referential variables exit 0 with the documented output; oversized input is rejected with a "too large" parser error. The large-arithmetic-overflow row (L359) now exits 0 because eval_arith_binary uses 64-bit wrapping arithmetic (matching bash fixed-width and Just Bash double-precision: no trap). The recursive-eval row (L275) stays pending an eval-recursion guard, and the upstream-skipped recursive-arith-in-param-expansion row (L373) stays pending.',
   },
 ];
 
