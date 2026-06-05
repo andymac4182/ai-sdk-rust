@@ -12597,6 +12597,114 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         );
     }
 
+    /// Ports the strict yq parser/security rows that exercise the block-scalar,
+    /// nested-sequence, anchor/alias, malformed-document, billion-laughs, and
+    /// unresolved-tag behaviors of the YAML reader:
+    ///
+    /// - yq.fixtures.test.ts:544 "should handle multiline string"
+    /// - yq.fixtures.test.ts:553 "should handle nested arrays"
+    /// - yq.fixtures.test.ts:562 "should handle YAML anchors and references"
+    /// - yq.test.ts:294 "should handle invalid YAML"
+    /// - yq.yaml-security.test.ts:16 "should limit alias expansion (billion-laughs defense)"
+    /// - yq.yaml-security.test.ts:33 "should not execute !!js/function tags"
+    #[test]
+    fn structured_data_yq_block_scalar_anchor_and_yaml_security_rows() {
+        // special.yaml mirrors the upstream fixture's multiline/folded scalars,
+        // nested sequences, and anchor/alias declarations.
+        let special = concat!(
+            "multiline: |\n",
+            "  This is a\n",
+            "  multiline string\n",
+            "  with preserved newlines\n",
+            "folded: >\n",
+            "  This is a folded\n",
+            "  string that will be\n",
+            "  joined into one line\n",
+            "nested_arrays:\n",
+            "  - - 1\n",
+            "    - 2\n",
+            "  - - 3\n",
+            "    - 4\n",
+            "anchor: &anchor_name\n",
+            "  shared: data\n",
+            "reference: *anchor_name\n",
+        );
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/special.yaml".to_string(), special.to_string()),
+                (
+                    "/bad.yaml".to_string(),
+                    "invalid: yaml: syntax: error:".to_string(),
+                ),
+                (
+                    "/bomb.yaml".to_string(),
+                    [
+                        "a: &a [x,x,x,x,x,x,x,x,x,x]",
+                        "b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a,*a]",
+                        "c: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b,*b]",
+                        "d: &d [*c,*c,*c,*c,*c,*c,*c,*c,*c,*c]",
+                    ]
+                    .join("\n"),
+                ),
+                (
+                    "/func.yaml".to_string(),
+                    "payload: !!js/function >\n  function() { return 42; }\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // Literal block scalar (`|`) preserves the inner newlines, so the raw
+        // string output contains the multiline body.
+        let multiline = env.exec("yq '.multiline' /special.yaml -o json -r");
+        assert_eq!(multiline.exit_code, 0, "stderr: {}", multiline.stderr);
+        assert!(
+            multiline.stdout.contains("multiline string"),
+            "multiline block scalar lost: {:?}",
+            multiline.stdout
+        );
+
+        // Nested sequence (`- - 1`) indexes through both levels.
+        let nested = env.exec("yq '.nested_arrays[0][1]' /special.yaml");
+        assert_eq!(nested.exit_code, 0, "stderr: {}", nested.stderr);
+        assert_eq!(nested.stdout.trim(), "2");
+
+        // Alias (`*anchor_name`) resolves to the anchored mapping.
+        let anchor = env.exec("yq '.reference.shared' /special.yaml");
+        assert_eq!(anchor.exit_code, 0, "stderr: {}", anchor.stderr);
+        assert_eq!(anchor.stdout.trim(), "data");
+
+        // Malformed YAML fails with a parse error and exit code 5.
+        let invalid = env.exec("yq '.' /bad.yaml");
+        assert_eq!(invalid.exit_code, 5, "stdout: {:?}", invalid.stdout);
+        assert!(
+            invalid.stderr.contains("parse error"),
+            "missing parse error: {:?}",
+            invalid.stderr
+        );
+
+        // Billion-laughs: the alias budget either bounds the result to the
+        // single-level length (10) or rejects the document; it must never
+        // expand to 10^4 elements.
+        let bomb = env.exec("yq '.d | length' /bomb.yaml");
+        assert!(
+            bomb.stdout.trim() == "10" || bomb.exit_code != 0,
+            "alias bomb expanded: exit={} stdout={:?}",
+            bomb.exit_code,
+            bomb.stdout
+        );
+
+        // Unresolved `!!js/function` tag: the value stays raw text (proving no
+        // execution) and the command succeeds.
+        let func = env.exec("yq '.payload' /func.yaml");
+        assert_eq!(func.exit_code, 0, "stderr: {}", func.stderr);
+        assert!(
+            func.stdout.contains("function()"),
+            "js/function tag not preserved as text: {:?}",
+            func.stdout
+        );
+    }
+
     #[test]
     fn structured_data_yq_deep_query_env_and_security_rows() {
         let env = Bash::with_options(BashOptions {

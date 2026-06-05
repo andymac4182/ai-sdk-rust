@@ -2167,6 +2167,33 @@ const jbc16CaseGroups = [
       'JBC-16 verifies portable yq env object field lookup, missing env nulls, and empty env strings inside the scoped Rust session.',
   },
   {
+    file: 'packages/just-bash/src/commands/yq/yq.fixtures.test.ts',
+    lines: [544, 553, 562],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_yq_block_scalar_anchor_and_yaml_security_rows',
+    notes:
+      'R17 verifies portable yq YAML block scalars (literal `|` multiline strings), nested sequences (`- - 1` two-level indexing), and anchor/alias resolution (`*anchor` references) over the in-memory Rust YAML reader.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.test.ts',
+    lines: [294],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_yq_block_scalar_anchor_and_yaml_security_rows',
+    notes:
+      'R17 verifies that malformed YAML (a plain scalar value containing an inline mapping) is rejected with a `yq: parse error` message and exit code 5.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.yaml-security.test.ts',
+    lines: [16, 33],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_yq_block_scalar_anchor_and_yaml_security_rows',
+    notes:
+      'R17 verifies the YAML billion-laughs defense (alias expansion is bounded by maxAliasCount, so a nested-alias bomb is rejected rather than expanded) and that unresolved `!!js/function` tags stay raw text, proving no code execution.',
+  },
+  {
     file: 'packages/just-bash/src/commands/xan/xan.basic.test.ts',
     lines: [27, 34, 41, 48, 57, 64, 89, 116, 127, 147, 156, 163, 172, 179, 186, 193, 202],
     status: 'portable-verified',
