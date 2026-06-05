@@ -2031,6 +2031,25 @@ const r10jbInterpreterCoreCaseGroups = [
     notes:
       'R15JB extends parameter expansion (${var^^} case-modify, ${var:offset} substring, ${var/pat/repl} substitution, ${!var} indirect scalar and arr[@], ${var@Q}/${var@A} transforms), the [[ -v name ]] conditional, and the set -- positional-parameter builtin so prototype keywords (constructor, __proto__, ...) used as variable names through those features round-trip. Each row asserts exact stdout/exit; the test also guards default-value/length/global-substitution regressions.',
   },
+  {
+    file: 'packages/just-bash/src/interpreter/prototype-pollution.test.ts',
+    lines: [248, 257, 621, 714, 721],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::prototype-pollution',
+    rustTest:
+      'r15jb_interpreter_prototype_pollution_runtime_builtin_rows_match_upstream',
+    notes:
+      'R15JB closes the top-level Bash runtime rows that exercise the real export/printenv/printf builtins: prototype keywords (__proto__, constructor) used as exported variable names round-trip through printenv, and printf/printf -v emit and store them as plain data. Each row asserts exact stdout/exit and the test also guards against an exported keyword leaking out of the environment map.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/prototype-pollution.test.ts',
+    lines: [943, 953],
+    status: 'js-only-documented',
+    owner: 'docs/just-bash::interpreter-host-prototype-isolation',
+    rustTest: 'js-only-documented',
+    notes:
+      'These upstream rows read the JavaScript host Object.prototype after exporting a dangerous keyword to prove the Node interpreter was not mutated. The Rust port stores the environment in an ordinary BTreeMap with no shared global prototype, so the host-pollution observation is not expressible; the portable behavior (exported __proto__/constructor stay isolated plain map entries that do not affect unrelated lookups) is asserted by r15jb_interpreter_prototype_pollution_host_isolation_rows_are_plain_data.',
+  },
 ];
 
 const jbc16CaseGroups = [
