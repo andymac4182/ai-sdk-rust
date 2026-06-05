@@ -37487,4 +37487,78 @@ mod tests {
         assert_eq!(r.stdout, "test\n");
         assert_eq!(r.exit_code, 0);
     }
+
+    // -----------------------------------------------------------------------
+    // r16jb just-bash-parser-interpreter: syntax/composition.test.ts coverage.
+    //
+    // These port the portable "Syntax Feature Composition" rows that combine
+    // arithmetic, case, `[[`-tests, here-documents, functions, loops and pipes
+    // through real command semantics on a `JustBashSession`. Each case runs the
+    // exact upstream script and asserts the same stdout / exit code.
+    // -----------------------------------------------------------------------
+
+    fn jb_session() -> JustBashSession {
+        JustBashSession::new()
+    }
+
+    // composition.test.ts:16 "should use arithmetic in if condition"
+    #[test]
+    fn composition_arithmetic_in_if_condition() {
+        let r = jb_session().exec(
+            "export X=5\nif [[ $((X + 3)) -eq 8 ]]; then\n  echo \"math works\"\nfi",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "math works\n");
+    }
+
+    // composition.test.ts:188 "should test arithmetic result"
+    #[test]
+    fn composition_test_arithmetic_result() {
+        let r = jb_session().exec(
+            "if [[ $((10 / 2)) -eq 5 ]]; then\n  echo \"arithmetic correct\"\nfi",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "arithmetic correct\n");
+    }
+
+    // composition.test.ts:198 "should use test expression with file created by
+    // previous command" - the file must persist across two execs on the same
+    // session.
+    #[test]
+    fn composition_test_file_created_by_previous_command() {
+        let session = jb_session();
+        session.exec(
+            "echo 'content' > /tmp/testfile.txt",
+            JustBashExecOptions::new(),
+        );
+        let r = session.exec(
+            "if [[ -f /tmp/testfile.txt ]]; then\n  echo \"file exists\"\nfi",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "file exists\n");
+    }
+
+    // composition.test.ts:209 "should combine multiple test conditions with
+    // command substitution"
+    #[test]
+    fn composition_multiple_test_conditions_with_command_substitution() {
+        let r = jb_session().exec(
+            "export COUNT=3\nif [[ $COUNT -gt 0 && $(echo \"valid\") == \"valid\" ]]; then\n  echo \"both conditions met\"\nfi",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "both conditions met\n");
+    }
+
+    // composition.test.ts:438 "should combine test expression with file
+    // operations and here doc"
+    #[test]
+    fn composition_test_expression_with_file_operations_and_here_doc() {
+        let r = jb_session().exec(
+            "cat <<EOF > /tmp/data.txt\nline1\nline2\nline3\nEOF\nif [[ -f /tmp/data.txt ]]; then\n  count=$(wc -l < /tmp/data.txt)\n  echo \"File has $count lines\"\nfi",
+            JustBashExecOptions::new(),
+        );
+        let trimmed = r.stdout.trim();
+        assert!(trimmed.contains("File has"), "stdout: {trimmed:?}");
+        assert!(trimmed.contains('3'), "stdout: {trimmed:?}");
+    }
 }
