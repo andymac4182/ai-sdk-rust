@@ -16884,6 +16884,60 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         assert_eq!(from_missing.exit_code, 0);
     }
 
+    // JBC-awk: `"cmd" | getline [VAR]` runs the command INSIDE the Just Bash
+    // session (never the host shell) and reads its stdout one record per
+    // getline. Each assertion fails if the command output is not captured,
+    // fields are not re-split into `$0`, the variable form leaks into `$0`, or
+    // the success/EOF return value is wrong.
+    // Upstream: packages/just-bash/src/commands/awk/awk.getline.test.ts
+    //   :147 reads from command pipe into $0,
+    //   :156 reads from command pipe into variable,
+    //   :165 reads multiple lines from command pipe,
+    //   :176 updates fields after command pipe getline into $0,
+    //   :185 returns 1 on success, 0 on EOF.
+    #[test]
+    fn awk_jbc_command_awk_command_pipe_getline_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([(
+                "/test/data.txt".to_string(),
+                "line1\nline2\nline3".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+
+        // :147 reads from command pipe into $0 (plain getline replaces $0).
+        let into_line = env.exec(r#"awk 'BEGIN { "echo hello" | getline; print }'"#);
+        assert_eq!(into_line.exit_code, 0);
+        assert_eq!(into_line.stdout, "hello\n");
+
+        // :156 reads from command pipe into a variable (leaves $0 untouched).
+        let into_var = env.exec(r#"awk 'BEGIN { "echo world" | getline x; print "got:", x }'"#);
+        assert_eq!(into_var.exit_code, 0);
+        assert_eq!(into_var.stdout, "got: world\n");
+
+        // :165 reads multiple lines from a command pipe in a while loop (the
+        // redirect is truthy per successful read, then EOF ends the loop).
+        let multi = env.exec(
+            r#"awk 'BEGIN { while (("cat /test/data.txt") | getline line) print "read:", line }'"#,
+        );
+        assert_eq!(multi.exit_code, 0);
+        assert_eq!(multi.stdout, "read: line1\nread: line2\nread: line3\n");
+
+        // :176 updates fields after command pipe getline into $0 (FS re-splits).
+        let fields =
+            env.exec(r#"awk 'BEGIN { FS=":"; "echo a:bc:def" | getline; print NF, $1, $2 }'"#);
+        assert_eq!(fields.exit_code, 0);
+        assert_eq!(fields.stdout, "3 a bc\n");
+
+        // :185 returns 1 on the first read and 0 once the command's single line
+        // of output is exhausted (the command is run once and buffered).
+        let ret = env.exec(
+            "awk 'BEGIN {\n  ret1 = (\"echo single\" | getline)\n  ret2 = (\"echo single\" | getline)\n  print ret1, ret2\n}'",
+        );
+        assert_eq!(ret.exit_code, 0);
+        assert_eq!(ret.stdout, "1 0\n");
+    }
+
     // JBC-awk: `print`/`printf` redirected to a file with `>` (truncate) and
     // `>>` (append). Each assertion fails if the redirect buffer, append seed,
     // or printf formatting to file is wrong.
@@ -17792,6 +17846,45 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
                 .stdout,
             "truthy\n"
         );
+
+        // :179 a getline in the consequent branch is evaluated when the
+        // condition is true: `1 ? (getline line < FILE) : 0` reads the file.
+        let consequent = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "hello world\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let r = consequent.exec(
+            r#"echo "" | awk 'BEGIN { x = 1 ? (getline line < "/data.txt") : 0; print line }'"#,
+        );
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "hello world\n");
+
+        // :190 a getline in the alternate branch is evaluated when the condition
+        // is false: `0 ? 0 : (getline line < FILE)` reads the file.
+        let alternate = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/data.txt".to_string(), "test data\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let r = alternate.exec(
+            r#"echo "" | awk 'BEGIN { x = 0 ? 0 : (getline line < "/data.txt"); print line }'"#,
+        );
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "test data\n");
+
+        // :201 nested ternary picks the consequent getline (data1) and leaves
+        // the alternate getline (data2) unevaluated.
+        let nested = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/data1.txt".to_string(), "first\n".to_string()),
+                ("/data2.txt".to_string(), "second\n".to_string()),
+            ]),
+            ..BashOptions::default()
+        });
+        let r = nested.exec(
+            r#"echo "" | awk 'BEGIN { x = 1 ? (getline a < "/data1.txt") : (getline b < "/data2.txt"); print a }'"#,
+        );
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "first\n");
     }
 
     #[test]
