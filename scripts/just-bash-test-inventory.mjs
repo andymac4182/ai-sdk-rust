@@ -468,6 +468,24 @@ const jb06CaseGroups = [
       'JBC-06 verifies portable ls directory listing, hidden-file flags, multiple paths, recursion, single files, empty directories, classify directories, and reverse sorting.',
   },
   {
+    file: 'packages/just-bash/src/commands/ls/ls.test.ts',
+    lines: [18, 62, 73, 84, 225, 237, 249, 261, 277, 293, 305, 316],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::ls',
+    rustTest: 'ls_upstream_command_covers_long_format_human_size_and_exec_classify_cases',
+    notes:
+      'r14jb-r3 verifies the default root listing (seeded bin/dev/proc/usr), -l long format with total/mode/size columns, the directory indicator, combined -la, -F executable * / symlink @ classification, -lF long classify (including symlink-to-dir mode), -aF, single-file -F, and -dF.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/ls/ls.human.test.ts',
+    lines: [5, 17, 29, 41, 53, 64, 76],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::ls',
+    rustTest: 'ls_upstream_command_covers_long_format_human_size_and_exec_classify_cases',
+    notes:
+      'r14jb-r3 verifies ls -lh human-readable sizing: bytes for small files, 1.5K/15K rounding, 2.0M megabytes, --human-readable long form, exact bytes without -h, and -lah combined with hidden files.',
+  },
+  {
     file: 'packages/just-bash/src/commands/mkdir/mkdir.test.ts',
     lines: [24, 34, 41, 48, 58, 68, 77, 85, 95],
     status: 'portable-verified',
