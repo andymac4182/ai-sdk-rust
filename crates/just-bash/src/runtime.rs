@@ -11490,6 +11490,176 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         );
     }
 
+    /// Mirrors packages/just-bash/src/commands/wc/wc.binary.test.ts byte and
+    /// codepoint rows that the portable Rust runtime reproduces verbatim:
+    /// `wc -c` reports the raw byte length of a NUL-bearing binary file, `wc -l`
+    /// counts newline-terminated lines across embedded NUL bytes, and over a
+    /// UTF-8 file `-c` (bytes) and `-m` (codepoints) genuinely diverge (6 vs 2
+    /// for "한글"). The non-UTF-8 raw-byte file row (0xFF/0xFE) stays pending
+    /// because the public `Bash` facade seeds files as UTF-8 strings and cannot
+    /// carry invalid-UTF-8 bytes through `BashOptions::files`.
+    #[test]
+    fn jbc_wc_binary_byte_and_codepoint_counts_match_upstream_rows() {
+        // wc.binary.test.ts:5 — "should count bytes correctly".
+        // Uint8Array [0x41,0x00,0x42,0x00,0x43] is 5 bytes ("A\0B\0C").
+        let bytes = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/binary.bin".to_string(), "A\u{0}B\u{0}C".to_string())]),
+            ..BashOptions::default()
+        });
+        let r = bytes.exec("wc -c /binary.bin");
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.contains('5'), "stdout: {:?}", r.stdout);
+
+        // wc.binary.test.ts:17 — "should count lines with null bytes".
+        // [0x41,0x0a,0x00,0x0a,0x42,0x0a] is three newline-terminated lines.
+        let lines = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/binary.bin".to_string(), "A\n\u{0}\nB\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let r = lines.exec("wc -l /binary.bin");
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.contains('3'), "stdout: {:?}", r.stdout);
+
+        // wc.binary.test.ts:29 — "counts -m as codepoints over a UTF-8 file".
+        // "한글" is 6 UTF-8 bytes / 2 codepoints; -c=6 and -m=2 must diverge.
+        let utf8 = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/utf8.txt".to_string(), "한글".to_string())]),
+            ..BashOptions::default()
+        });
+        assert_eq!(
+            utf8.exec("wc -c /utf8.txt")
+                .stdout
+                .trim()
+                .split_whitespace()
+                .next(),
+            Some("6")
+        );
+        assert_eq!(
+            utf8.exec("wc -m /utf8.txt")
+                .stdout
+                .trim()
+                .split_whitespace()
+                .next(),
+            Some("2")
+        );
+    }
+
+    /// Mirrors packages/just-bash/src/commands/registry.test.ts. Upstream tests
+    /// JS-internal lazy module loading (`createLazyCommands`, `clearCommandCache`,
+    /// `getLoadedCommandCount`) — implementation details of the on-demand command
+    /// loader. The Rust port registers commands eagerly into the session, so the
+    /// observable contract those tests pin down is what we assert here:
+    /// the registry exposes more than 30 named commands including the canonical
+    /// set, and each one is genuinely executable (load-on-execution and
+    /// independent-command rows). The cache-reset internals are a JS-only loader
+    /// concern with no Rust analogue.
+    #[test]
+    fn command_registry_lazy_commands_names_and_execution_match_upstream_rows() {
+        // registry.test.ts:14 — ">30 commands containing the canonical names".
+        let env = Bash::new();
+        let names = env.registered_command_names();
+        assert!(
+            names.len() > 30,
+            "expected more than 30 registered commands, got {}",
+            names.len()
+        );
+        for expected in [
+            "echo", "cat", "grep", "sed", "awk", "find", "ls", "mkdir", "bash", "sh",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "registry missing command {expected:?}; have {names:?}"
+            );
+        }
+
+        // registry.test.ts:32 — "should load command on first execution".
+        // The Rust analogue is that a freshly-built session runs the command
+        // correctly with no separate priming step.
+        let echo_env = Bash::new();
+        let echo = echo_env.exec("echo hello world");
+        assert_eq!(echo.stdout, "hello world\n");
+        assert_eq!(echo.exit_code, 0);
+
+        // registry.test.ts:43 — "should cache commands after loading".
+        // Re-running the same command twice yields the same deterministic
+        // output (no per-run loader state leaks into behavior).
+        let cache_env = Bash::new();
+        assert_eq!(cache_env.exec("echo first").stdout, "first\n");
+        assert_eq!(cache_env.exec("echo second").stdout, "second\n");
+
+        // registry.test.ts:56 — "should load different commands independently".
+        let multi = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/test.txt".to_string(), "content".to_string())]),
+            ..BashOptions::default()
+        });
+        assert_eq!(multi.exec("echo test").stdout, "test\n");
+        assert_eq!(multi.exec("cat /test.txt").stdout, "content");
+
+        // registry.test.ts:68 — "should clear cache correctly".
+        // Two independent sessions resolve the registry from scratch and run
+        // the same command identically, the observable equivalent of a clean
+        // cache reset between runs.
+        let fresh_a = Bash::new();
+        let fresh_b = Bash::new();
+        assert_eq!(
+            fresh_a.exec("echo test").stdout,
+            fresh_b.exec("echo test").stdout
+        );
+        assert_eq!(fresh_b.exec("echo test").exit_code, 0);
+    }
+
+    /// Mirrors the "decoded-text -> byte-consumer pipe boundary" and
+    /// "split named-file UTF-8 chunking" / "sort -f -o" rows of
+    /// packages/just-bash/src/commands/utf8-bytestring.test.ts. When sed/grep/rev
+    /// decode UTF-8 stdin, emit Unicode text, and pipe into a byte consumer, the
+    /// pipe boundary must re-encode to UTF-8 bytes so `base64`/`md5sum`/`wc -c`
+    /// operate on bytes, and named-file `split`/`sort -f -o` writes preserve the
+    /// multibyte bytes. (printf-hex byte-string source rows stay pending — the
+    /// Rust facade seeds UTF-8 string files, not latin1-shaped byte buffers.)
+    #[test]
+    fn text_pipeline_utf8_bytestring_decoded_to_byte_consumer_rows() {
+        // utf8-bytestring.test.ts:143 — rev -> base64 round-trips UTF-8 bytes.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/in.txt".to_string(), "한".to_string())]),
+            ..BashOptions::default()
+        });
+        let r = env.exec("cat /in.txt | rev | base64");
+        assert_eq!(r.exit_code, 0);
+        // base64 of UTF-8 bytes 0xED 0x95 0x9C is "7ZWc".
+        assert_eq!(r.stdout.trim(), "7ZWc");
+
+        // utf8-bytestring.test.ts:154 — grep -o -> md5sum hashes original bytes.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/in.txt".to_string(), "한글\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let r = env.exec("cat /in.txt | grep -o '한글' | md5sum");
+        assert_eq!(r.exit_code, 0);
+        // md5 of the 7 UTF-8 bytes "한글\n"; GNU two-space "  -" format.
+        assert_eq!(r.stdout.trim(), "ebef630fbec2e89fbcd589797bb6441c  -");
+
+        // utf8-bytestring.test.ts:168 — split -l 1 keeps multibyte chars intact.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/in.txt".to_string(), "한\n글\n漢\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let r = env.exec("split -l 1 /in.txt /tmp/c_");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(env.read_file("/tmp/c_aa").unwrap(), "한\n");
+        assert_eq!(env.read_file("/tmp/c_ab").unwrap(), "글\n");
+        assert_eq!(env.read_file("/tmp/c_ac").unwrap(), "漢\n");
+
+        // utf8-bytestring.test.ts:182 — sort -f -o preserves UTF-8 bytes in file.
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/in.txt".to_string(), "Café\nApple\n".to_string())]),
+            ..BashOptions::default()
+        });
+        let r = env.exec("sort -f -o /out.txt /in.txt");
+        assert_eq!(r.exit_code, 0);
+        let written = env.read_file_buffer("/out.txt").unwrap();
+        assert_eq!(String::from_utf8(written).unwrap(), "Apple\nCafé\n");
+    }
+
     // Mirrors packages/just-bash/src/commands/utf8-across-commands.test.ts.
     // UTF-8 text spanning Latin-1 supplement, Latin Extended/Greek/Cyrillic,
     // CJK, and emoji code points must round-trip through tee, sort -o, sed
