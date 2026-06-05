@@ -11721,6 +11721,26 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
                 .next(),
             Some("2")
         );
+
+        // wc.binary.test.ts:50 — "counts -c as raw bytes for a file with
+        // non-UTF-8 bytes". [0x00,0x01,0x02,0xFF,0xFE] is 5 bytes; 0xFF/0xFE are
+        // invalid UTF-8 leaders that the read layer maps to U+FFFD, so the
+        // decoded text is wider than 5 bytes. `wc -c` must still report 5 (the
+        // raw file size). Seeded via `with_binary_file`, which carries the
+        // invalid-UTF-8 bytes verbatim where `BashOptions::files` (a UTF-8
+        // String map) cannot.
+        let raw = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_binary_file("/raw.bin", vec![0x00, 0x01, 0x02, 0xff, 0xfe]),
+        );
+        let raw_result = raw.exec("wc -c /raw.bin", JustBashExecOptions::new());
+        assert_eq!(raw_result.exit_code, 0);
+        assert_eq!(
+            raw_result.stdout.trim().split_whitespace().next(),
+            Some("5"),
+            "wc -c must report the raw 5-byte file size, got {:?}",
+            raw_result.stdout
+        );
     }
 
     /// Mirrors packages/just-bash/src/commands/registry.test.ts. Upstream tests

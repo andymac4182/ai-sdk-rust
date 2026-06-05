@@ -1530,6 +1530,17 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
     if command == "source" || command == "." {
         return command_source(state, &tokens[1..]);
     }
+    // A command name containing `/` is a path. If it does not resolve to a
+    // registered builtin (those are handled below), try to execute it as a user
+    // script: the file must exist, be a regular file, and have an execute bit
+    // set, mirroring upstream resolveCommand/executeUserScript. The quoted
+    // executable path (e.g. `'/bin/my cmd.sh'`) reaches here as a single token,
+    // so spaces in the path are preserved verbatim.
+    if tokens[0].contains('/') && !state.session.inner.commands.contains(command) {
+        if let Some(result) = execute_user_script(state, &tokens[0], &tokens[1..], &stdin) {
+            return result;
+        }
+    }
     if !state.session.inner.commands.contains(command) {
         return stderr_result(127, format!("bash: {}: command not found\n", tokens[0]));
     }
@@ -2794,11 +2805,39 @@ fn command_wc(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
         Ok(inputs) => inputs,
         Err(error) => return stderr_result(1, format!("wc: {error}\n")),
     };
+    // `wc -c` must report the raw on-disk byte count, not the byte length of the
+    // UTF-8-decoded text: a file holding invalid UTF-8 (e.g. 0xFF/0xFE) is
+    // decoded to U+FFFD replacement chars whose UTF-8 encoding is wider than the
+    // original bytes. Read each file's true byte length from the virtual
+    // filesystem and use it for the `-c` column. (mirrors upstream wc.binary).
+    let raw_byte_counts: Vec<Option<usize>> = if show_bytes {
+        paths
+            .iter()
+            .map(|path| {
+                let resolved = resolve_path(&state.cwd, path);
+                state
+                    .session
+                    .inner
+                    .fs
+                    .lock()
+                    .ok()
+                    .and_then(|fs| fs.read_file_buffer(&resolved).ok())
+                    .map(|bytes| bytes.len())
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut stdout = String::new();
     let multiple_files = paths.len() > 1;
     let mut total = TextCounts::default();
-    for input in &inputs {
-        let counts = TextCounts::from_text(&input.text);
+    for (index, input) in inputs.iter().enumerate() {
+        let mut counts = TextCounts::from_text(&input.text);
+        if show_bytes && !paths.is_empty() {
+            if let Some(Some(raw)) = raw_byte_counts.get(index) {
+                counts.bytes = *raw;
+            }
+        }
         total.add(counts);
         stdout.push_str(&format_wc_counts(
             counts,
@@ -31714,6 +31753,64 @@ fn command_bash(
     result
 }
 
+/// Execute an executable user script referenced by an explicit path command
+/// (a command name containing `/` that is not a registered builtin).
+///
+/// Returns `None` when the path does not exist (so the caller falls back to the
+/// usual `command not found` diagnostic) and `Some` once the path has been
+/// classified: a directory or non-executable file yields a `126 Permission
+/// denied` result, while an executable regular file is run as a bash script
+/// with the given positional arguments. Mirrors upstream resolveCommand +
+/// executeUserScript.
+fn execute_user_script(
+    state: &mut ExecState<'_>,
+    raw_command: &str,
+    args: &[String],
+    stdin: &str,
+) -> Option<CommandResult> {
+    let resolved = resolve_path(&state.cwd, raw_command);
+    let stat = {
+        let fs = state.session.inner.fs.lock().ok()?;
+        if !fs.exists(&resolved) {
+            // File does not exist: let the caller emit `command not found`.
+            return None;
+        }
+        fs.stat(&resolved).ok()?
+    };
+    if stat.is_directory {
+        return Some(stderr_result(
+            126,
+            format!("bash: {raw_command}: Permission denied\n"),
+        ));
+    }
+    if stat.mode & 0o111 == 0 {
+        // The file exists but no execute bit is set.
+        return Some(stderr_result(
+            126,
+            format!("bash: {raw_command}: Permission denied\n"),
+        ));
+    }
+    let script = match state.session.inner.fs.lock() {
+        Ok(fs) => match fs.read_file(&resolved) {
+            Ok(script) => script,
+            Err(_) => {
+                return Some(stderr_result(
+                    127,
+                    format!("bash: {raw_command}: No such file or directory\n"),
+                ));
+            }
+        },
+        Err(_) => return Some(stderr_result(1, "bash: filesystem lock poisoned\n")),
+    };
+    let script = strip_shebang(&script).to_string();
+    let old_stdin = std::mem::replace(&mut state.stdin, stdin.to_string());
+    let old_positionals = set_positional_args(state, args.to_vec());
+    let result = execute_control_script(state, &script);
+    restore_positional_args(state, old_positionals);
+    state.stdin = old_stdin;
+    Some(result)
+}
+
 fn execute_custom_command(
     state: &ExecState<'_>,
     command: &str,
@@ -35003,6 +35100,23 @@ mod tests {
         let passthrough = utf8.exec("cat /in.txt | timeout 5 cat", JustBashExecOptions::new());
         assert_eq!(passthrough.exit_code, 0);
         assert_eq!(passthrough.stdout, "한글 / café\n");
+
+        // timeout.command-name-quoting.test.ts:5 executes quoted command names
+        // containing spaces — `timeout 1 '/bin/my cmd.sh'` resolves and runs the
+        // quoted executable path verbatim (no word-splitting of the command name).
+        let quoted = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/bin/my cmd.sh", "echo TIMEOUT_OK\n"),
+        );
+        assert_eq!(
+            quoted
+                .exec("chmod +x '/bin/my cmd.sh'", JustBashExecOptions::new())
+                .exit_code,
+            0
+        );
+        let quoted_run = quoted.exec("timeout 1 '/bin/my cmd.sh'", JustBashExecOptions::new());
+        assert_eq!(quoted_run.stdout, "TIMEOUT_OK\n");
+        assert_eq!(quoted_run.stderr, "");
+        assert_eq!(quoted_run.exit_code, 0);
     }
 
     #[test]
@@ -37182,6 +37296,27 @@ mod tests {
             "stdout: {:?}",
             join_out.stdout
         );
+
+        // xargs.command-name-quoting.test.ts:5 executes quoted command names
+        // containing spaces — `xargs -I {} '/bin/my cmd.sh' {}` invokes the
+        // quoted user-script path verbatim per input item, passing the
+        // substituted argument as `$1` to the script body.
+        let quoting = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/bin/my cmd.sh", "echo XARGS:$1\n"),
+        );
+        assert_eq!(
+            quoting
+                .exec("chmod +x '/bin/my cmd.sh'", JustBashExecOptions::new())
+                .exit_code,
+            0
+        );
+        let quoting_run = quoting.exec(
+            "printf '/dir/f.txt\\n' | xargs -I {} '/bin/my cmd.sh' {}",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(quoting_run.stdout, "XARGS:/dir/f.txt\n");
+        assert_eq!(quoting_run.stderr, "");
+        assert_eq!(quoting_run.exit_code, 0);
     }
 
     // --- Upstream parity: interpreter/builtins cd/exit/export/unset ---
