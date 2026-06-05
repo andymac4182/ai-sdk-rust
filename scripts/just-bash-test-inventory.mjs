@@ -5728,6 +5728,24 @@ const jbInterpreterBuiltinsCaseGroups = [
     notes:
       'JB set builtin errexit (set -e / set -o errexit and their +e / +o disablement): a failing simple command aborts the script with exit code 1, a succeeding command does not, +e/+o re-disables errexit, and AND-OR list members that fail on the left of && or || do not trigger errexit.',
   },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/set.test.ts',
+    lines: [155, 325, 337, 348, 363, 378, 393, 444, 477],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::builtins::set',
+    rustTest: 'upstream_set_errexit_exception_pipefail_positional_rows',
+    notes:
+      'r14jb-r7 verifies the portable set errexit-exception, pipefail, and nounset-positional rows through the Rust shell: errexit aborts on the final failing member of an && list but not on a !-negated command, a failed if condition selects else without aborting while a failed if/while body does abort, a while condition becoming false terminates the loop normally, pipefail returns the rightmost failing exit code, errexit + pipefail aborts on a failing pipeline, and a set positional parameter under nounset reads without error.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/set.test.ts',
+    lines: [492, 500, 508, 516],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::builtins::set',
+    rustTest: 'upstream_set_error_handling_rows',
+    notes:
+      'r14jb-r7 verifies the portable set error-handling rows through the Rust shell: `set --help` succeeds and prints the usage text including `-e`, `set -z` is an invalid-option error (exit 1) naming `-z`, `set -o unknownoption` is an invalid-option-name error (exit 1) naming the option, and `set -o` with no argument lists the options including errexit.',
+  },
 ];
 
 const jbR5ParserInterpreterCaseGroups = [
