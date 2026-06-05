@@ -459,6 +459,24 @@ const jb06CaseGroups = [
       'JBC-06 verifies portable cat file reads, concatenation, -n numbering, stdin, dash placeholder, relative paths, and missing-file behavior in the virtual filesystem.',
   },
   {
+    file: 'packages/just-bash/src/commands/cat/cat.binary.test.ts',
+    lines: [5, 17, 29, 42, 54, 62, 70],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::cat',
+    rustTest: 'cat_upstream_command_preserves_binary_and_utf8_byte_clean',
+    notes:
+      'r15jb-r13 verifies cat is byte-clean: ASCII bytes ("Hello"), embedded null bytes (A\\0B\\0C), concatenation of multiple binary files, -n line numbering over binary content, and exact preservation of UTF-8 multibyte (中文测试), Korean (설정), and emoji (🌍) bytes in the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/cat/cat.utf8-stdin.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::cat',
+    rustTest: 'cat_upstream_command_preserves_binary_and_utf8_byte_clean',
+    notes:
+      'r15jb-r13 verifies cat performs byte-clean passthrough of multibyte UTF-8 input piped through stdin (한글 / café / 漢字).',
+  },
+  {
     file: 'packages/just-bash/src/commands/ls/ls.test.ts',
     lines: [5, 29, 41, 53, 102, 114, 129, 137, 146, 159, 172, 184, 196, 213, 329, 342, 355],
     status: 'portable-verified',
