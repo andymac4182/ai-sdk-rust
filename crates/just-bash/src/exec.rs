@@ -33939,6 +33939,92 @@ mod tests {
     }
 
     #[test]
+    fn just_bash_od_binary_and_utf8_stdin_dump_rows() {
+        // Mirrors od.binary.test.ts and od.utf8-stdin.test.ts: od dumps raw
+        // bytes (octal by default, characters under -c) for binary files and
+        // piped binary stdin, surviving null/high bytes byte-for-byte.
+
+        // od.binary.test.ts:6 should dump binary file with high bytes.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_binary_file("/binary.bin", vec![0x80, 0x90, 0xa0, 0xb0, 0xff]),
+        );
+        let r = bash.exec("od /binary.bin", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert!(!r.stdout.is_empty());
+        assert!(r.stdout.contains("0000000"));
+        // 0x80 0x90 0xa0 0xb0 0xff -> octal 200 220 240 260 377.
+        assert_eq!(r.stdout, "0000000  200 220 240 260 377\n0000005\n");
+
+        // od.binary.test.ts:21 should dump binary file with null bytes (-c).
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_binary_file("/nulls.bin", vec![0x00, 0x00, 0x41, 0x42]),
+        );
+        let r = bash.exec("od -c /nulls.bin", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.contains("\\0"));
+        assert!(r.stdout.contains('A'));
+        assert!(r.stdout.contains('B'));
+        assert_eq!(r.stdout, "0000000   \\0  \\0   A   B\n0000004\n");
+
+        // od.binary.test.ts:37 should dump all byte values with default format.
+        let all16: Vec<u8> = (0..16).map(|i| (i * 16) as u8).collect();
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_binary_file("/allbytes.bin", all16),
+        );
+        let r = bash.exec("od /allbytes.bin", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert!(!r.stdout.is_empty());
+        assert_eq!(
+            r.stdout,
+            "0000000  000 020 040 060 100 120 140 160 200 220 240 260 300 320 340 360\n0000020\n"
+        );
+
+        // od.binary.test.ts:54 should dump binary data from stdin.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_binary_file("/binary.bin", vec![0x80, 0xff, 0x90, 0xab]),
+        );
+        let r = bash.exec("cat /binary.bin | od", JustBashExecOptions::new());
+        // Upstream asserts only exit 0 and non-empty output for binary stdin.
+        assert_eq!(r.exit_code, 0);
+        assert!(!r.stdout.is_empty());
+        assert!(r.stdout.starts_with("0000000"));
+
+        // od.binary.test.ts:67 should dump piped binary with character format.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_binary_file("/binary.bin", vec![0x41, 0x42, 0x43, 0x44]),
+        );
+        let r = bash.exec("cat /binary.bin | od -c", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.contains('A'));
+        assert!(r.stdout.contains('B'));
+        assert!(r.stdout.contains('C'));
+        assert!(r.stdout.contains('D'));
+        assert_eq!(r.stdout, "0000000    A   B   C   D\n0000004\n");
+
+        // od.test.ts:21 should show escape sequences in character mode.
+        let bash = JustBashSession::new();
+        let r = bash.exec("echo \"hello\" | od -c", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "0000000    h   e   l   l   o  \\n\n0000006\n");
+
+        // od.utf8-stdin.test.ts:5 dumps raw UTF-8 bytes byte-by-byte (octal).
+        let bash =
+            JustBashSession::with_options(JustBashSessionOptions::new().with_file("/in.txt", "한"));
+        let r = bash.exec("cat /in.txt | od", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        // 한 = bytes 0xED 0x95 0x9C -> octal 355 225 234 (raw bytes survive the
+        // pipe instead of being decoded-then-re-encoded).
+        let tokens: Vec<&str> = r.stdout.split_whitespace().collect();
+        assert!(tokens.contains(&"355"));
+        assert!(tokens.contains(&"225"));
+        assert!(tokens.contains(&"234"));
+    }
+
+    #[test]
     fn just_bash_bash_general_export_does_not_persist_functions_reset_and_filesystem_persists() {
         let bash = JustBashSession::new();
 
