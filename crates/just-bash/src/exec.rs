@@ -18566,6 +18566,7 @@ struct YqOptions {
     csv_header: bool,
     csv_delimiter: Option<char>,
     xml_attribute_prefix: String,
+    slurp: bool,
 }
 
 impl Default for YqOptions {
@@ -18586,6 +18587,7 @@ impl Default for YqOptions {
             csv_header: true,
             csv_delimiter: None,
             xml_attribute_prefix: "+@".to_string(),
+            slurp: false,
         }
     }
 }
@@ -18822,7 +18824,8 @@ fn parse_yq_options(args: &[String]) -> Result<YqOptions, CommandResult> {
             "-n" => options.null_input = true,
             "-e" => options.exit_status = true,
             "-j" => options.join_output = true,
-            _ if arg.starts_with('-') && arg.len() > 2 => {
+            "-s" | "--slurp" => options.slurp = true,
+            _ if arg.starts_with('-') && arg.len() > 2 && !arg.starts_with("--") => {
                 for flag in arg[1..].chars() {
                     match flag {
                         'r' => options.raw_output = true,
@@ -18832,6 +18835,7 @@ fn parse_yq_options(args: &[String]) -> Result<YqOptions, CommandResult> {
                         'j' => options.join_output = true,
                         'i' => options.in_place = true,
                         'f' => options.front_matter = true,
+                        's' => options.slurp = true,
                         _ => {
                             return Err(stderr_result(1, format!("yq: unknown option: -{flag}\n")));
                         }
@@ -18939,8 +18943,7 @@ fn parse_yq_input(
     match format {
         "json" => parse_json_stream(input)
             .map_err(|error| stderr_result(1, format!("yq: parse error: {error}\n"))),
-        "yaml" | "yml" => parse_simple_yaml(input)
-            .map(|value| vec![value])
+        "yaml" | "yml" => parse_simple_yaml_documents(input)
             .map_err(|error| stderr_result(1, format!("yq: {error}\n"))),
         "ini" => Ok(vec![parse_ini_input(input)]),
         "csv" | "tsv" => {
@@ -18976,7 +18979,15 @@ fn collect_yq_inputs(
     }
     let (input, _) = read_yq_input(state, options, stdin)?;
     let format = detect_yq_input_format(options, &input);
-    parse_yq_input(&input, &format, options)
+    let mut documents = parse_yq_input(&input, &format, options)?;
+    if options.slurp {
+        // `-s`/`--slurp` reads every parsed document and wraps them into a single
+        // array so the filter runs once over the combined value, mirroring the
+        // upstream yq slurp mode (`yaml.parseAllDocuments`).
+        let array = JsonValue::Array(std::mem::take(&mut documents));
+        return Ok(vec![array]);
+    }
+    Ok(documents)
 }
 
 fn input_format_from_path(path: &str) -> Option<String> {
@@ -19021,6 +19032,11 @@ fn render_yq_output(value: &JsonValue, options: &YqOptions) -> String {
     }
     match value {
         JsonValue::Array(_) | JsonValue::Object(_) => render_yaml_value(value, 0, options.indent),
+        // A bare null scalar renders as the literal `null` in YAML output,
+        // matching the upstream `yaml.stringify(null)` behavior. The shared
+        // `json_scalar_string` helper renders null as an empty string for
+        // contexts like CSV cells, so only the YAML scalar path is adjusted.
+        JsonValue::Null => "null".to_string(),
         _ => json_scalar_string(value),
     }
 }
@@ -19986,6 +20002,50 @@ fn xml_unescape(value: &str) -> String {
         .replace("&amp;", "&")
 }
 
+/// Parse a YAML stream into one value per document. A line that is exactly
+/// `---` (optionally with trailing whitespace) starts a new document, mirroring
+/// `yaml.parseAllDocuments`. A leading `---` marker before the first document is
+/// ignored. Single-document inputs (the common case) yield exactly one value.
+fn parse_simple_yaml_documents(input: &str) -> Result<Vec<JsonValue>, String> {
+    let is_separator = |line: &str| {
+        let trimmed = line.trim_end();
+        trimmed == "---" || trimmed == "..."
+    };
+    if !input.lines().any(is_separator) {
+        return parse_simple_yaml(input).map(|value| vec![value]);
+    }
+    let mut documents = Vec::new();
+    let mut current = String::new();
+    let mut has_content = false;
+    let flush = |buffer: &mut String,
+                 has_content: &mut bool,
+                 documents: &mut Vec<JsonValue>|
+     -> Result<(), String> {
+        if *has_content {
+            documents.push(parse_simple_yaml(buffer)?);
+        }
+        buffer.clear();
+        *has_content = false;
+        Ok(())
+    };
+    for line in input.lines() {
+        if is_separator(line) {
+            flush(&mut current, &mut has_content, &mut documents)?;
+            continue;
+        }
+        if !line.trim().is_empty() {
+            has_content = true;
+        }
+        current.push_str(line);
+        current.push('\n');
+    }
+    flush(&mut current, &mut has_content, &mut documents)?;
+    if documents.is_empty() {
+        documents.push(JsonValue::Null);
+    }
+    Ok(documents)
+}
+
 fn parse_simple_yaml(input: &str) -> Result<JsonValue, String> {
     // YAML is a JSON superset: flow-style documents such as `{}` or `[1, 2]`
     // are valid YAML, so try JSON first before falling back to the block parser.
@@ -19997,7 +20057,14 @@ fn parse_simple_yaml(input: &str) -> Result<JsonValue, String> {
     }
     let lines = input
         .lines()
-        .filter(|line| !line.trim().is_empty())
+        // Skip blank lines and whole-line `#` comments. YAML comments occupy a
+        // full line (indentation followed by `#`); inline `# ...` after a value
+        // is left untouched here because the simple scalar parser does not split
+        // on it, matching how the upstream fixtures are authored.
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !trimmed.starts_with('#')
+        })
         .map(|line| {
             (
                 line.chars().take_while(|ch| *ch == ' ').count(),
@@ -20083,6 +20150,35 @@ fn parse_yaml_scalar(raw: &str) -> JsonValue {
     }
 }
 
+/// Render a scalar JSON value as it should appear in YAML output. String values
+/// that would otherwise be reparsed as a number, boolean, or null are quoted to
+/// preserve their string type, matching `yaml.stringify` (e.g. the string
+/// `"2.0"` renders as `"2.0"`, not the bare number `2.0`). All other scalars use
+/// the shared plain rendering.
+fn yaml_scalar_render(value: &JsonValue) -> String {
+    if let JsonValue::String(text) = value
+        && yaml_string_needs_quoting(text)
+    {
+        return format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""));
+    }
+    json_scalar_string(value)
+}
+
+fn yaml_string_needs_quoting(text: &str) -> bool {
+    if text.is_empty() {
+        return true;
+    }
+    if matches!(
+        text,
+        "true" | "false" | "null" | "~" | "yes" | "no" | "on" | "off"
+    ) {
+        return true;
+    }
+    // A string that parses cleanly as a YAML number would be reread as a number,
+    // so it must be quoted to stay a string.
+    text.parse::<i64>().is_ok() || text.parse::<f64>().is_ok()
+}
+
 fn render_yaml_value(value: &JsonValue, indent: usize, step: usize) -> String {
     let spaces = " ".repeat(indent);
     match value {
@@ -20095,7 +20191,7 @@ fn render_yaml_value(value: &JsonValue, indent: usize, step: usize) -> String {
                         output.push_str(&render_yaml_value(value, indent + step, step));
                     }
                     _ => {
-                        output.push_str(&format!("{spaces}{key}: {}\n", json_scalar_string(value)))
+                        output.push_str(&format!("{spaces}{key}: {}\n", yaml_scalar_render(value)))
                     }
                 }
             }
@@ -20110,7 +20206,7 @@ fn render_yaml_value(value: &JsonValue, indent: usize, step: usize) -> String {
                         output.push_str(&render_yaml_value(value, indent + step, step));
                         output.push('\n');
                     }
-                    _ => output.push_str(&format!("{spaces}- {}\n", json_scalar_string(value))),
+                    _ => output.push_str(&format!("{spaces}- {}\n", yaml_scalar_render(value))),
                 }
             }
             output.trim_end_matches('\n').to_string()

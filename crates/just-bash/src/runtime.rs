@@ -16389,6 +16389,110 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn structured_data_yq_special_fixtures_slurp_and_inplace_rows() {
+        // packages/just-bash/src/commands/yq/yq.fixtures.test.ts
+        //   :526 (empty string), :535 (null value),
+        //   :611 (self-closing tag), :620 (multiple attributes),
+        //   :630 (deeply nested XML), :639 (repeated elements as array).
+        // packages/just-bash/src/commands/yq/yq.test.ts
+        //   :219 (slurp multiple YAML documents), :794 (in-place -i, TSV suite).
+        // Inputs mirror the upstream special.yaml / special.xml fixtures and the
+        // inline documents from the slurp and inplace describe blocks exactly.
+        let special_yaml = concat!(
+            "# YAML special cases\n",
+            "empty_string: \"\"\n",
+            "null_value: null\n",
+            "multiline: |\n",
+            "  This is a\n  multiline string\n  with preserved newlines\n",
+            "folded: >\n",
+            "  This is a folded\n  string that will be\n  joined into one line\n",
+            "unicode: \"Hello \\u4e16\\u754c\"\n",
+            "nested_arrays:\n  - - 1\n    - 2\n  - - 3\n    - 4\n",
+            "anchor: &anchor_name\n  shared: data\n",
+            "reference: *anchor_name\n",
+        );
+        let special_xml = concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+            "<root xmlns:custom=\"http://example.com/custom\">\n",
+            "  <!-- XML special cases -->\n",
+            "  <empty></empty>\n",
+            "  <self-closing/>\n",
+            "  <multiple-attrs id=\"1\" class=\"item\" data-value=\"test\" enabled=\"true\"/>\n",
+            "  <nested>\n    <level1>\n      <level2>\n        <level3>deep value</level3>\n      </level2>\n    </level1>\n  </nested>\n",
+            "  <repeated>\n    <item>first</item>\n    <item>second</item>\n    <item>third</item>\n  </repeated>\n",
+            "</root>\n",
+        );
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                (
+                    "/fixtures/yaml/special.yaml".to_string(),
+                    special_yaml.to_string(),
+                ),
+                (
+                    "/fixtures/xml/special.xml".to_string(),
+                    special_xml.to_string(),
+                ),
+                (
+                    "/data.yaml".to_string(),
+                    "---\nname: first\n---\nname: second\n".to_string(),
+                ),
+                (
+                    "/inplace.yaml".to_string(),
+                    "version: 1.0\nname: test\n".to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // fixtures.test.ts :526 should handle empty string -> '""'
+        let empty = env.exec("yq '.empty_string' /fixtures/yaml/special.yaml -o json");
+        assert_eq!(empty.exit_code, 0);
+        assert_eq!(empty.stdout.trim(), "\"\"");
+
+        // fixtures.test.ts :535 should handle null value -> 'null'
+        let null_value = env.exec("yq '.null_value' /fixtures/yaml/special.yaml");
+        assert_eq!(null_value.exit_code, 0);
+        assert_eq!(null_value.stdout.trim(), "null");
+
+        // fixtures.test.ts :611 self-closing tag is present
+        let self_closing =
+            env.exec("yq -p xml '.root | has(\"self-closing\")' /fixtures/xml/special.xml");
+        assert_eq!(self_closing.exit_code, 0);
+        assert_eq!(self_closing.stdout.trim(), "true");
+
+        // fixtures.test.ts :620 multiple attributes -> '"1"'
+        let multi_attr = env.exec(
+            "yq -p xml '.root[\"multiple-attrs\"][\"+@id\"]' /fixtures/xml/special.xml -o json",
+        );
+        assert_eq!(multi_attr.exit_code, 0);
+        assert_eq!(multi_attr.stdout.trim(), "\"1\"");
+
+        // fixtures.test.ts :630 deeply nested XML
+        let deep =
+            env.exec("yq -p xml '.root.nested.level1.level2.level3' /fixtures/xml/special.xml");
+        assert_eq!(deep.exit_code, 0);
+        assert_eq!(deep.stdout.trim(), "deep value");
+
+        // fixtures.test.ts :639 repeated elements parsed as array of length 3
+        let repeated =
+            env.exec("yq -p xml '.root.repeated.item | length' /fixtures/xml/special.xml");
+        assert_eq!(repeated.exit_code, 0);
+        assert_eq!(repeated.stdout.trim(), "3");
+
+        // yq.test.ts :219 slurp multiple YAML documents with -s
+        let slurp = env.exec("yq -s '.[0].name' /data.yaml");
+        assert_eq!(slurp.exit_code, 0);
+        assert_eq!(slurp.stdout, "first\n");
+
+        // yq.test.ts :794 modify file in-place with -i (TSV describe block)
+        let inplace = env.exec("yq -i '.version = \"2.0\"' /inplace.yaml");
+        assert_eq!(inplace.exit_code, 0);
+        assert_eq!(inplace.stdout, "");
+        let read_back = env.exec("cat /inplace.yaml");
+        assert!(read_back.stdout.contains("version: \"2.0\""));
+    }
+
+    #[test]
     fn awk_jbc_command_awk_expression_edge_and_error_rows() {
         // Maps the portable pending rows of awk.expressions.test.ts,
         // awk.edge-cases.test.ts, and awk.errors.test.ts that the Rust awk
