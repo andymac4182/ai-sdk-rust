@@ -20156,6 +20156,7 @@ fn command_xan(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
         "partition" => xan_partition(state, &args[1..], stdin),
         "transform" => xan_transform(state, &args[1..], stdin),
         "map" => xan_map(state, &args[1..], stdin),
+        "flatmap" => xan_flatmap(state, &args[1..], stdin),
         "explode" => xan_explode(state, &args[1..], stdin),
         "implode" => xan_implode(state, &args[1..], stdin),
         "pivot" => xan_pivot(state, &args[1..], stdin),
@@ -21985,6 +21986,76 @@ fn xan_map(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult
             })
             .collect();
         new_rows.push(new_row);
+    }
+    stdout_result(render_csv(&CsvData {
+        headers: new_headers,
+        rows: new_rows,
+    }))
+}
+
+/// Port of upstream `cmdFlatmap` (xan-simple.ts): like `xan map`, but a spec
+/// whose expression returns an array expands into multiple rows. Each computed
+/// column contributes `maxLen` values (missing positions become empty cells),
+/// and the original row columns are repeated across the expanded rows.
+fn xan_flatmap(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    let mut map_expr: Option<String> = None;
+    let mut files: Vec<String> = Vec::new();
+    for arg in args {
+        if !arg.starts_with('-') {
+            if map_expr.is_none() {
+                map_expr = Some(arg.clone());
+            } else {
+                files.push(arg.clone());
+            }
+        }
+    }
+    let Some(map_expr) = map_expr else {
+        return stderr_result(1, "xan flatmap: no expression specified\n");
+    };
+    let csv = match read_csv_arg(
+        state,
+        files.first().map(String::as_str),
+        stdin,
+        "xan flatmap",
+    ) {
+        Ok(csv) => csv,
+        Err(result) => return result,
+    };
+    let specs = parse_xan_map_specs(&map_expr);
+
+    let mut new_headers = csv.headers.clone();
+    for spec in &specs {
+        new_headers.push(spec.alias.clone());
+    }
+
+    let mut new_rows: Vec<Vec<String>> = Vec::new();
+    for (row_index, row) in csv.rows.iter().enumerate() {
+        // Evaluate each spec into a list of cell values. A `split(...)`-style
+        // expression yields the parsed list; any other expression yields a
+        // single-element list, mirroring upstream's array/scalar handling.
+        let mut results: Vec<Vec<String>> = Vec::new();
+        let mut max_len = 1usize;
+        for spec in &specs {
+            let expanded = match xan_eval_map_list(&csv.headers, row, row_index, &spec.expr) {
+                Some(list) => list,
+                None => {
+                    vec![xan_eval_map_expr(&csv.headers, row, row_index, &spec.expr).render()]
+                }
+            };
+            max_len = max_len.max(expanded.len());
+            results.push(expanded);
+        }
+        for i in 0..max_len {
+            let mut new_row: Vec<String> = row.clone();
+            if new_row.len() < csv.headers.len() {
+                new_row.resize(csv.headers.len(), String::new());
+            }
+            for cells in &results {
+                // Upstream: `results[j][i] ?? null`, rendered as empty string.
+                new_row.push(cells.get(i).cloned().unwrap_or_default());
+            }
+            new_rows.push(new_row);
+        }
     }
     stdout_result(render_csv(&CsvData {
         headers: new_headers,
