@@ -27428,13 +27428,21 @@ fn command_gzip(
         }
         index += 1;
     }
+    let max_decompressed = state.session.inner.max_output_length;
     if paths.is_empty() || paths.iter().any(|path| path == "-") {
         if options.decompress {
-            return match virtual_gzip_unpack(stdin) {
-                Ok(text) => stdout_result(text),
+            return match virtual_gzip_unpack_bytes(stdin) {
+                Ok(bytes) => {
+                    if bytes.len() > max_decompressed {
+                        return gzip_limit_error(command, &options, "stdin", max_decompressed);
+                    }
+                    gzip_bytes_stdout(bytes)
+                }
                 Err(message) => gzip_error(command, &options, message),
             };
         }
+        // The compressed container is ASCII (gzip magic + base64), so it survives
+        // later pipe boundaries verbatim without byte-clean carrying.
         return stdout_result(virtual_gzip_pack(stdin));
     }
     if options.list {
@@ -27448,10 +27456,37 @@ fn command_gzip(
         Err(result) => return result,
     };
     if options.decompress {
-        command_gzip_decompress_files(command, state, &targets, &options)
+        command_gzip_decompress_files(command, state, &targets, &options, max_decompressed)
     } else {
         command_gzip_compress_files(command, state, &targets, &options)
     }
+}
+
+/// Builds a byte-clean stdout result mirroring upstream's `stdoutEncoding:
+/// "binary"`. `stdout` carries the latin1 (char-per-byte) view so direct
+/// inspection recovers every byte, while `stdout_bytes` carries the raw bytes
+/// for byte-clean redirections.
+fn gzip_bytes_stdout(bytes: Vec<u8>) -> CommandResult {
+    CommandResult {
+        stdout: ByteString::from_bytes(bytes.clone()).decode_utf8_or_latin1(),
+        stdout_bytes: Some(bytes),
+        ..CommandResult::default()
+    }
+}
+
+fn gzip_limit_error(
+    command: &str,
+    options: &GzipOptions,
+    label: &str,
+    max: usize,
+) -> CommandResult {
+    if options.quiet {
+        return stderr_result(1, "");
+    }
+    stderr_result(
+        1,
+        format!("{command}: {label}: decompressed data exceeds limit ({max} bytes)\n"),
+    )
 }
 
 struct GzipOptions {
@@ -27532,7 +27567,7 @@ fn command_gzip_compress_files(
             ));
             continue;
         }
-        let content = match fs.read_file(path) {
+        let content = match fs.read_file_buffer(path) {
             Ok(content) => content,
             Err(_) => {
                 exit_code = 1;
@@ -27540,7 +27575,7 @@ fn command_gzip_compress_files(
                 continue;
             }
         };
-        let packed = virtual_gzip_pack(&content);
+        let packed = virtual_gzip_pack_bytes(&content);
         if options.stdout {
             stdout.push_str(&packed);
         } else {
@@ -27578,12 +27613,13 @@ fn command_gzip_decompress_files(
     state: &ExecState<'_>,
     paths: &[String],
     options: &GzipOptions,
+    max_decompressed: usize,
 ) -> CommandResult {
     let mut fs = match state.session.inner.fs.lock() {
         Ok(fs) => fs,
         Err(_) => return stderr_result(1, format!("{command}: filesystem lock poisoned\n")),
     };
-    let mut stdout = String::new();
+    let mut stdout_bytes: Vec<u8> = Vec::new();
     let mut stderr = String::new();
     let mut exit_code = 0;
     for path in paths {
@@ -27604,7 +27640,7 @@ fn command_gzip_decompress_files(
                 continue;
             }
         };
-        let unpacked = match virtual_gzip_unpack(&packed) {
+        let unpacked = match virtual_gzip_unpack_bytes(&packed) {
             Ok(content) => content,
             Err(message) => {
                 exit_code = 1;
@@ -27614,8 +27650,19 @@ fn command_gzip_decompress_files(
                 continue;
             }
         };
+        // Mirror upstream's pre-inflate ISIZE guard: refuse to extract a payload
+        // that exceeds the decompressed-output limit, leaving the source intact.
+        if unpacked.len() > max_decompressed {
+            exit_code = 1;
+            if !options.quiet {
+                stderr.push_str(&format!(
+                    "{command}: {path}: decompressed data exceeds limit ({max_decompressed} bytes)\n"
+                ));
+            }
+            continue;
+        }
         if options.stdout {
-            stdout.push_str(&unpacked);
+            stdout_bytes.extend_from_slice(&unpacked);
         } else {
             let output_path = path.trim_end_matches(&options.suffix);
             if let Err(error) = fs.write_file(output_path, unpacked) {
@@ -27635,8 +27682,15 @@ fn command_gzip_decompress_files(
             stderr.push_str(&format!("{path}: OK\n"));
         }
     }
+    let (stdout, stdout_bytes) = if options.stdout {
+        let text = ByteString::from_bytes(stdout_bytes.clone()).decode_utf8_or_latin1();
+        (text, Some(stdout_bytes))
+    } else {
+        (String::new(), None)
+    };
     CommandResult {
         stdout,
+        stdout_bytes,
         stderr,
         exit_code,
         ..CommandResult::default()
@@ -27716,20 +27770,29 @@ fn gzip_error(command: &str, options: &GzipOptions, message: impl AsRef<str>) ->
     }
 }
 
-fn virtual_gzip_pack(content: &str) -> String {
+fn virtual_gzip_pack_bytes(content: &[u8]) -> String {
     format!(
         "{VIRTUAL_GZIP_PREFIX}{}",
-        bytes_to_string(content.as_bytes(), BufferEncoding::Base64)
+        bytes_to_string(content, BufferEncoding::Base64)
     )
 }
 
-fn virtual_gzip_unpack(content: &str) -> Result<String, &'static str> {
+fn virtual_gzip_pack(content: &str) -> String {
+    virtual_gzip_pack_bytes(content.as_bytes())
+}
+
+/// Decompresses the virtual container to its exact original bytes. The codec is
+/// byte-clean: arbitrary non-UTF-8 payloads (high bytes, null bytes, every byte
+/// value) round-trip verbatim, mirroring upstream's binary-safe gzip/gunzip.
+fn virtual_gzip_unpack_bytes(content: &str) -> Result<Vec<u8>, &'static str> {
     let Some(encoded) = content.strip_prefix(VIRTUAL_GZIP_PREFIX) else {
         return Err("not in gzip format");
     };
-    content_to_bytes(encoded, BufferEncoding::Base64)
-        .map(|bytes| bytes_to_string(&bytes, BufferEncoding::Utf8))
-        .map_err(|_| "not in gzip format")
+    content_to_bytes(encoded, BufferEncoding::Base64).map_err(|_| "not in gzip format")
+}
+
+fn virtual_gzip_unpack(content: &str) -> Result<String, &'static str> {
+    virtual_gzip_unpack_bytes(content).map(|bytes| bytes_to_string(&bytes, BufferEncoding::Utf8))
 }
 
 #[derive(Clone, Copy)]
@@ -33227,6 +33290,207 @@ mod tests {
         let tree = bash.exec("tree /", JustBashExecOptions::new());
         assert!(tree.stdout.contains("a.txt"));
         assert!(tree.stdout.contains("dir"));
+    }
+
+    #[test]
+    fn jbc_gzip_binary_rows_match_upstream() {
+        // Mirrors packages/just-bash/src/commands/gzip/gzip.binary.test.ts. The
+        // virtual gzip codec is byte-clean: high bytes, null bytes, every byte
+        // value, and UTF-8 multibyte payloads round-trip verbatim through gzip /
+        // gunzip / zcat over virtual files and ASCII-safe gzip containers piped
+        // through stdin. Each assertion fails if a byte is corrupted.
+        let read_buffer = |bash: &JustBashSession, path: &str| -> Vec<u8> {
+            bash.inner
+                .fs
+                .lock()
+                .unwrap()
+                .read_file_buffer(path)
+                .unwrap()
+        };
+
+        // binary.test.ts:6 should compress and decompress binary file with high bytes.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_binary_file("/binary.bin", vec![0x80, 0x90, 0xa0, 0xb0, 0xff]),
+        );
+        bash.exec("gzip -k /binary.bin", JustBashExecOptions::new());
+        bash.exec("rm /binary.bin", JustBashExecOptions::new());
+        bash.exec("gunzip /binary.bin.gz", JustBashExecOptions::new());
+        assert_eq!(
+            read_buffer(&bash, "/binary.bin"),
+            vec![0x80, 0x90, 0xa0, 0xb0, 0xff]
+        );
+
+        // binary.test.ts:25 should compress and decompress file with null bytes.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_binary_file("/nulls.bin", vec![0x41, 0x00, 0x42, 0x00, 0x43]),
+        );
+        bash.exec("gzip -k /nulls.bin", JustBashExecOptions::new());
+        bash.exec("rm /nulls.bin", JustBashExecOptions::new());
+        bash.exec("gunzip /nulls.bin.gz", JustBashExecOptions::new());
+        assert_eq!(
+            read_buffer(&bash, "/nulls.bin"),
+            vec![0x41, 0x00, 0x42, 0x00, 0x43]
+        );
+
+        // binary.test.ts:40 should compress and decompress file with all byte values.
+        let all: Vec<u8> = (0u8..=255).collect();
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_binary_file("/allbytes.bin", all.clone()),
+        );
+        bash.exec("gzip -k /allbytes.bin", JustBashExecOptions::new());
+        bash.exec("rm /allbytes.bin", JustBashExecOptions::new());
+        bash.exec("gunzip /allbytes.bin.gz", JustBashExecOptions::new());
+        assert_eq!(read_buffer(&bash, "/allbytes.bin"), all);
+
+        // binary.test.ts:62 should compress from stdin and output to stdout.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/data.txt", "test data for compression"),
+        );
+        bash.exec(
+            "cat /data.txt | gzip -c > /compressed.gz",
+            JustBashExecOptions::new(),
+        );
+        let r = bash.exec("gunzip -c /compressed.gz", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "test data for compression");
+
+        // binary.test.ts:76 should decompress from stdin.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/data.txt", "original content"),
+        );
+        bash.exec("gzip -k /data.txt", JustBashExecOptions::new());
+        let r = bash.exec("cat /data.txt.gz | gunzip", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "original content");
+
+        // binary.test.ts:89 should handle piped binary data with high bytes.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_binary_file("/binary.bin", vec![0x80, 0xff, 0x90, 0xab]),
+        );
+        bash.exec(
+            "gzip -c /binary.bin > /binary.bin.gz",
+            JustBashExecOptions::new(),
+        );
+        let r = bash.exec("cat /binary.bin.gz | gunzip -c", JustBashExecOptions::new());
+        assert_eq!(
+            r.stdout.chars().map(|c| c as u32).collect::<Vec<_>>(),
+            vec![0x80, 0xff, 0x90, 0xab]
+        );
+
+        // binary.test.ts:105 should handle zcat with piped input.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/data.txt", "zcat test content"),
+        );
+        bash.exec("gzip -k /data.txt", JustBashExecOptions::new());
+        let r = bash.exec("cat /data.txt.gz | zcat", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "zcat test content");
+
+        // binary.test.ts:120 should compress and decompress UTF-8 text.
+        let original = "Hello 中文 日本語 한국어 🎉";
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/unicode.txt", original),
+        );
+        bash.exec(
+            "gzip -c /unicode.txt > /unicode.txt.gz",
+            JustBashExecOptions::new(),
+        );
+        let r = bash.exec("gunzip -c /unicode.txt.gz", JustBashExecOptions::new());
+        assert_eq!(r.stdout, original);
+
+        // binary.test.ts:134 should handle UTF-8 via stdin pipe.
+        let original = "Привет мир 你好世界";
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/unicode.txt", original),
+        );
+        bash.exec(
+            "cat /unicode.txt | gzip -c > /compressed.gz",
+            JustBashExecOptions::new(),
+        );
+        let r = bash.exec("gunzip -c /compressed.gz", JustBashExecOptions::new());
+        assert_eq!(r.stdout, original);
+
+        // binary.test.ts:148 should preserve UTF-8 multi-byte sequences.
+        let original = "🚀🎉🔥💯";
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/emoji.txt", original),
+        );
+        bash.exec(
+            "gzip -c /emoji.txt > /emoji.txt.gz",
+            JustBashExecOptions::new(),
+        );
+        let r = bash.exec("gunzip -c /emoji.txt.gz", JustBashExecOptions::new());
+        assert_eq!(r.stdout, original);
+    }
+
+    #[test]
+    fn jbc_gzip_security_rows_match_upstream() {
+        // Mirrors packages/just-bash/src/commands/gzip/gzip.security.test.ts.
+        // Large decompressed output streams without truncation when within the
+        // limit; payloads above an explicit decompressed-output limit fail closed
+        // with the upstream error for both file extraction and stdin input, and
+        // file extraction leaves the source untouched.
+
+        // security.test.ts:5 handles large gunzip -c output without stack overflow.
+        // Upstream's default maxOutputSize is 10MB, so 200000 bytes streams fully.
+        let big = "A".repeat(200_000);
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_max_output_length(10 * 1024 * 1024)
+                .with_file("/big.txt", big.clone()),
+        );
+        bash.exec("gzip /big.txt", JustBashExecOptions::new());
+        let r = bash.exec("gunzip -c /big.txt.gz", JustBashExecOptions::new());
+        assert_eq!(r.stdout, big);
+        assert_eq!(r.stderr, "");
+        assert_eq!(r.exit_code, 0);
+
+        // security.test.ts:18 enforces decompressed output limit for file extraction.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_max_output_length(128)
+                .with_file("/payload.txt", "X".repeat(200)),
+        );
+        bash.exec("gzip /payload.txt", JustBashExecOptions::new());
+        let r = bash.exec("gunzip /payload.txt.gz", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "");
+        assert_eq!(
+            r.stderr,
+            "gunzip: /payload.txt.gz: decompressed data exceeds limit (128 bytes)\n"
+        );
+        assert_eq!(r.exit_code, 1);
+        assert!(!bash.inner.fs.lock().unwrap().exists("/payload.txt"));
+
+        // security.test.ts:37 enforces decompressed output limit for stdin input.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_max_output_length(128)
+                .with_file("/payload.txt", "Y".repeat(200)),
+        );
+        bash.exec("gzip /payload.txt", JustBashExecOptions::new());
+        let r = bash.exec(
+            "cat /payload.txt.gz | gunzip -c",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "");
+        assert_eq!(
+            r.stderr,
+            "gunzip: stdin: decompressed data exceeds limit (128 bytes)\n"
+        );
+        assert_eq!(r.exit_code, 1);
+    }
+
+    #[test]
+    fn jbc_gzip_utf8_stdin_row_matches_upstream() {
+        // Mirrors packages/just-bash/src/commands/gzip/gzip.utf8-stdin.test.ts:5:
+        // multibyte text round-trips byte-clean through a gzip / gunzip pipeline
+        // reading from stdin.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/in.txt", "한글 / café / 漢字\n"),
+        );
+        let r = bash.exec("cat /in.txt | gzip | gunzip", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "한글 / café / 漢字\n");
     }
 
     #[test]
