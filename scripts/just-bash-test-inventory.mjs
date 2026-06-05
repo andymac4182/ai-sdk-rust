@@ -5289,6 +5289,27 @@ const jbc48CaseGroups = [
   },
 ];
 
+const jbc51CaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/grep/grep.perl.test.ts',
+    lines: [644, 703, 718, 729, 738, 747, 776],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::grep',
+    rustTest: 'text_search_jbc51_grep_perl_other_features_and_combinations_rows',
+    notes:
+      'JBC-51 verifies portable grep Perl mode (-P) other features and complex feature combinations over the virtual filesystem without host grep: non-greedy quantifiers (<.*?>), greedy a+b atomic-style matching, and the real-world combined patterns mixing \\K, \\Q...\\E, \\x{NNNN}, (?i:...) and character classes (€-price extraction, case-insensitive named-field \\K, Unicode+case-insensitivity, href URL extraction, JSON value extraction).',
+  },
+  {
+    file: 'packages/just-bash/src/commands/grep/grep.perl.test.ts',
+    lines: [654, 664, 674, 684, 694, 762],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::grep (RE2 lookaround/possessive unsupported)',
+    rustTest: 'text_search_jbc51_grep_perl_other_features_and_combinations_rows',
+    notes:
+      'Upstream marks these it.skip: the RE2 bounded engine backing -P rejects lookahead/lookbehind (ReDoS protection) and JavaScript has no possessive quantifiers (a++). The JBC-51 Rust test asserts the four lookaround patterns are rejected (non-zero exit, no match output) rather than silently matched, so this documented engine-limitation exception fails if lookaround is ever quietly accepted.',
+  },
+];
+
 const jbc45CaseGroups = [
   {
     file: 'packages/just-bash/src/Bash.general.test.ts',
@@ -6406,6 +6427,7 @@ function caseOverrideFor(testCase) {
     ...jbc43CaseGroups,
     ...jbc45CaseGroups,
     ...jbc48CaseGroups,
+    ...jbc51CaseGroups,
     ...jbc46CaseGroups,
     ...r10jbTarCaseGroups,
     ...r11jbTarCaseGroups,
