@@ -19,11 +19,11 @@ Rows are intentionally fail-closed: no row is verified until a sibling implement
 | Non-test TS/TSX source files | 423 |
 | Test files | 485 |
 | Test cases | 9936 |
-| Portable pending cases | 426 |
-| Portable verified cases | 8333 |
+| Portable pending cases | 418 |
+| Portable verified cases | 8341 |
 | JS-only documented cases | 1177 |
 | Type-system impossible cases | 0 |
-| Strict gate gaps | 426 |
+| Strict gate gaps | 418 |
 | Inventory check command | node scripts/just-bash-test-inventory.mjs --check |
 | Strict gate command | node scripts/just-bash-test-inventory.mjs --strict |
 | Conformance plan | docs/open-agents/just-bash-conformance.md |
@@ -270,7 +270,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | command:seq | 23 | 0 | 23 | 0 | 0 |
 | packages/just-bash | command:shared | 50 | 38 | 12 | 0 | 0 |
 | packages/just-bash | command:sleep | 14 | 8 | 6 | 0 | 0 |
-| packages/just-bash | command:sort | 57 | 8 | 49 | 0 | 0 |
+| packages/just-bash | command:sort | 57 | 0 | 57 | 0 | 0 |
 | packages/just-bash | command:split | 33 | 1 | 32 | 0 | 0 |
 | packages/just-bash | command:sqlite3 | 151 | 0 | 140 | 11 | 0 |
 | packages/just-bash | command:stat | 11 | 0 | 11 | 0 | 0 |
@@ -357,7 +357,6 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | pending:just-bash-command-sed | portable-pending | 7 |
 | pending:just-bash-command-shared | portable-pending | 38 |
 | pending:just-bash-command-sleep | portable-pending | 8 |
-| pending:just-bash-command-sort | portable-pending | 8 |
 | pending:just-bash-command-split | portable-pending | 1 |
 | pending:just-bash-command-tac | portable-pending | 2 |
 | pending:just-bash-command-tail | portable-pending | 2 |
@@ -607,7 +606,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | command:sleep | packages/just-bash/src/commands/sleep/sleep.test.ts | 14 | 8 | 6 | 0 | 0 | crates/just-bash::runtime::small-command-leftovers; pending:just-bash-command-sleep |
 | packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.advanced.test.ts | 24 | 0 | 24 | 0 | 0 | crates/just-bash::runtime::sort |
 | packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.binary.test.ts | 4 | 0 | 4 | 0 | 0 | crates/just-bash::runtime::sort |
-| packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 27 | 8 | 19 | 0 | 0 | crates/just-bash::runtime::sort; crates/just-bash::runtime::text-pipeline; pending:just-bash-command-sort |
+| packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 27 | 0 | 27 | 0 | 0 | crates/just-bash::runtime::sort; crates/just-bash::runtime::text-pipeline |
 | packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.utf8-stdin.test.ts | 2 | 0 | 2 | 0 | 0 | crates/just-bash::runtime::text-pipeline |
 | packages/just-bash | command:split | packages/just-bash/src/commands/split/split.test.ts | 32 | 0 | 32 | 0 | 0 | crates/just-bash::runtime::small-posix-table |
 | packages/just-bash | command:split | packages/just-bash/src/commands/split/split.utf8-stdin.test.ts | 1 | 1 | 0 | 0 | 0 | pending:just-bash-command-split |
@@ -5651,14 +5650,14 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 158 | (top-level) | should show help with --help | it | portable-verified | crates/just-bash::runtime::text-pipeline | text_pipeline_head_tail_wc_sort_uniq_cut_tr_close_upstream_rows | JBC-23 verifies portable sort combined numeric/reverse flags, ignore-case variants, case-folded unique count, field sort, and help output. |
 | packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 167 | -f flag (case-insensitive) | should sort by field range -k1,2 | it | portable-verified | crates/just-bash::runtime::sort | sort_upstream_complex_key_syntax_ranges_perkey_modifiers_delimiter_and_long_key | just-bash-command-sort verifies complex -k key syntax: field ranges -k1,2 and single-field -k2,2 against deterministic virtual-filesystem expectations. Remaining complex-key rows stay pending for a later round. |
 | packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 176 | -f flag (case-insensitive) | should sort by single field only with -k2,2 | it | portable-verified | crates/just-bash::runtime::sort | sort_upstream_complex_key_syntax_ranges_perkey_modifiers_delimiter_and_long_key | just-bash-command-sort verifies complex -k key syntax: field ranges -k1,2 and single-field -k2,2 against deterministic virtual-filesystem expectations. Remaining complex-key rows stay pending for a later round. |
-| packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 185 | -f flag (case-insensitive) | should support per-key numeric modifier -k2n | it | portable-pending | pending:just-bash-command-sort | pending:just-bash-command-sort | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
-| packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 194 | -f flag (case-insensitive) | should support per-key reverse modifier -k1r | it | portable-pending | pending:just-bash-command-sort | pending:just-bash-command-sort | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
-| packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 203 | -f flag (case-insensitive) | should support combined modifiers -k2,2nr | it | portable-pending | pending:just-bash-command-sort | pending:just-bash-command-sort | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
-| packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 212 | -f flag (case-insensitive) | should support multiple keys for secondary sort | it | portable-pending | pending:just-bash-command-sort | pending:just-bash-command-sort | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
-| packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 222 | -f flag (case-insensitive) | should support character position -k1.2 | it | portable-pending | pending:just-bash-command-sort | pending:just-bash-command-sort | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
-| packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 232 | -f flag (case-insensitive) | should support per-key ignore-case -k1f | it | portable-pending | pending:just-bash-command-sort | pending:just-bash-command-sort | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
-| packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 241 | -f flag (case-insensitive) | should support custom delimiter with -t | it | portable-pending | pending:just-bash-command-sort | pending:just-bash-command-sort | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
-| packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 250 | -f flag (case-insensitive) | should handle --key= syntax | it | portable-pending | pending:just-bash-command-sort | pending:just-bash-command-sort | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
+| packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 185 | -f flag (case-insensitive) | should support per-key numeric modifier -k2n | it | portable-verified | crates/just-bash::runtime::sort | sort_upstream_complex_key_syntax_ranges_perkey_modifiers_delimiter_and_long_key | just-bash-command-sort-keys verifies per-key numeric modifier -k2n against deterministic virtual-filesystem expectations. |
+| packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 194 | -f flag (case-insensitive) | should support per-key reverse modifier -k1r | it | portable-verified | crates/just-bash::runtime::sort | sort_upstream_complex_key_syntax_ranges_perkey_modifiers_delimiter_and_long_key | just-bash-command-sort-keys verifies per-key reverse modifier -k1r against deterministic virtual-filesystem expectations. |
+| packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 203 | -f flag (case-insensitive) | should support combined modifiers -k2,2nr | it | portable-verified | crates/just-bash::runtime::sort | sort_upstream_complex_key_syntax_ranges_perkey_modifiers_delimiter_and_long_key | just-bash-command-sort-keys verifies combined per-key modifiers -k2,2nr (numeric+reverse) against deterministic virtual-filesystem expectations. |
+| packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 212 | -f flag (case-insensitive) | should support multiple keys for secondary sort | it | portable-verified | crates/just-bash::runtime::sort | sort_upstream_complex_key_syntax_ranges_perkey_modifiers_delimiter_and_long_key | just-bash-command-sort-keys verifies multiple keys (-k1,1 -k2,2n) for secondary sort against deterministic virtual-filesystem expectations. |
+| packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 222 | -f flag (case-insensitive) | should support character position -k1.2 | it | portable-verified | crates/just-bash::runtime::sort | sort_upstream_complex_key_syntax_ranges_perkey_modifiers_delimiter_and_long_key | just-bash-command-sort-keys verifies character-position key start -k1.2 against deterministic virtual-filesystem expectations. |
+| packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 232 | -f flag (case-insensitive) | should support per-key ignore-case -k1f | it | portable-verified | crates/just-bash::runtime::sort | sort_upstream_complex_key_syntax_ranges_perkey_modifiers_delimiter_and_long_key | just-bash-command-sort-keys verifies per-key ignore-case modifier -k1f against deterministic virtual-filesystem expectations. |
+| packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 241 | -f flag (case-insensitive) | should support custom delimiter with -t | it | portable-verified | crates/just-bash::runtime::sort | sort_upstream_complex_key_syntax_ranges_perkey_modifiers_delimiter_and_long_key | just-bash-command-sort-keys verifies custom field delimiter -t: with -k2n against deterministic virtual-filesystem expectations. |
+| packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.test.ts | 250 | -f flag (case-insensitive) | should handle --key= syntax | it | portable-verified | crates/just-bash::runtime::sort | sort_upstream_complex_key_syntax_ranges_perkey_modifiers_delimiter_and_long_key | just-bash-command-sort-keys verifies --key=1n long-option syntax against deterministic virtual-filesystem expectations. |
 | packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.utf8-stdin.test.ts | 5 | (top-level) | default sort preserves bytes (no case-fold corruption) | it | portable-verified | crates/just-bash::runtime::text-pipeline | text_stream_jbc34_utf8_pipeline_rows_use_implemented_commands | JBC-34 verifies sort and sort -f preserve UTF-8 text through stdin without byte corruption. |
 | packages/just-bash | command:sort | packages/just-bash/src/commands/sort/sort.utf8-stdin.test.ts | 12 | (top-level) | sort -f case-folds without mutating UTF-8 leading bytes | it | portable-verified | crates/just-bash::runtime::text-pipeline | text_stream_jbc34_utf8_pipeline_rows_use_implemented_commands | JBC-34 verifies sort and sort -f preserve UTF-8 text through stdin without byte corruption. |
 | packages/just-bash | command:split | packages/just-bash/src/commands/split/split.test.ts | 6 | (top-level) | splits file into 1000-line chunks by default | it | portable-verified | crates/just-bash::runtime::small-posix-table | jbc38_small_posix_table_and_xargs_commands_match_upstream_rows | JBC-38 verifies portable comm, column, join, paste, expand/unexpand, fold, nl, split, and xargs rows over virtual files/stdin; quoted host-script command-name rows remain pending. |
