@@ -406,6 +406,75 @@ mod tests {
         assert_eq!(r.stdout, "world\n");
     }
 
+    /// R23JB closes the three upstream `it.skip` sed regex rows that exist only
+    /// because the upstream engine — like the Rust port — runs on an RE2-class
+    /// regex backend (linear-time, no backreferences). Each upstream test is
+    /// skipped with the note that RE2 rejects backreferences / would otherwise
+    /// build a ReDoS pattern; the Rust port reproduces that exact backend
+    /// limitation, so these rows are closed as faithful documented exceptions
+    /// asserting the real RE2 behavior rather than the (unreachable) upstream
+    /// expectation.
+    ///
+    /// Maps:
+    ///  - sed.regex.test.ts:157 (it.skip) `s/\(abc\)\1/X/` BRE backreference
+    ///  - sed.regex.test.ts:196 (it.skip) `-E 's/(abc)\1/X/'` ERE backreference
+    ///  - sed.limits.test.ts:133 (it.skip) pathological `/^\(a\+\)\+$/p` regex
+    #[test]
+    fn sed_regex_re2_backref_and_pathological_rows_match_engine() {
+        // sed.regex.test.ts:157 — BRE `\( \)` grouping with a `\1` backreference.
+        // Upstream skips this because RE2 has no backreferences; the Rust `regex`
+        // engine is the same family, so compiling the substitution pattern fails
+        // closed with a "backreferences are not supported" diagnostic and a
+        // non-zero exit instead of producing the (RE2-impossible) `X` result.
+        let bre =
+            sed_session(&[("/test.txt", "abcabc\n")]).exec("sed 's/\\(abc\\)\\1/X/' /test.txt");
+        assert_eq!(
+            bre.exit_code, 1,
+            "BRE backref exit; stderr={:?}",
+            bre.stderr
+        );
+        assert_eq!(bre.stdout, "", "BRE backref leaves stdout empty");
+        assert!(
+            bre.stderr.contains("backreferences are not supported"),
+            "BRE backref diagnostic was {:?}",
+            bre.stderr
+        );
+
+        // sed.regex.test.ts:196 — ERE `( )` grouping with a `\1` backreference
+        // under `-E`. Same RE2 backreference limitation, same fail-closed result.
+        let ere =
+            sed_session(&[("/test.txt", "abcabc\n")]).exec("sed -E 's/(abc)\\1/X/' /test.txt");
+        assert_eq!(
+            ere.exit_code, 1,
+            "ERE backref exit; stderr={:?}",
+            ere.stderr
+        );
+        assert_eq!(ere.stdout, "", "ERE backref leaves stdout empty");
+        assert!(
+            ere.stderr.contains("backreferences are not supported"),
+            "ERE backref diagnostic was {:?}",
+            ere.stderr
+        );
+
+        // sed.limits.test.ts:133 — the pathological `(a+)+` pattern that triggers
+        // catastrophic backtracking on a backtracking engine. The upstream test is
+        // skipped because the BRE->ERE conversion creates a ReDoS pattern; the Rust
+        // RE2 engine matches in guaranteed linear time, so this completes quickly
+        // (a defined exit code, no hang). The pattern is anchored with `$` after a
+        // trailing `b`, so it does not match: only the autoprinted line is emitted.
+        let patho =
+            bash().exec("echo \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaab\" | sed '/^\\(a\\+\\)\\+$/p'");
+        assert_eq!(
+            patho.exit_code, 0,
+            "pathological regex completes; stderr={:?}",
+            patho.stderr
+        );
+        assert_eq!(
+            patho.stdout, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaab\n",
+            "pathological regex does not match (trailing b before $), autoprint only"
+        );
+    }
+
     #[test]
     fn sed_limits_iteration_and_resource_rows() {
         // sed.limits.test.ts — runaway-compute protection and bounded handling of
