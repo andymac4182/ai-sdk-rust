@@ -3063,6 +3063,26 @@ const jbc23CaseGroups = [
       'JBC-23 verifies portable printf binary hex/octal escapes, null bytes, virtual-file redirects, and cat round trips; base64 remains pending.',
   },
   {
+    file: 'packages/just-bash/src/commands/printf/printf.test.ts',
+    lines: [183, 190, 199, 207, 214],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::text-stream',
+    rustTest:
+      'printf_dash_v_assigns_output_to_variables_and_validates_identifiers',
+    notes:
+      'r15jb-r4 verifies printf -v variable-name validation and capture: a plain identifier and an array subscript (name[0]) store the formatted output into a shell variable readable via $var/${name[0]}, name[@] is accepted, and unsafe subscripts (x[;rm -rf /], x[../../etc]) are rejected with exit 2 and a `not a valid identifier` diagnostic.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/printf/escapes.test.ts',
+    lines: [152, 158, 165, 172, 179, 186],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::printf',
+    rustTest:
+      'printf_width_precision_parse_and_apply_match_upstream_escapes_helpers',
+    notes:
+      'r15jb-r4 verifies the printf width/precision helpers backing escapes.ts: applyWidth leaves a value untouched when it is longer than the field width, and parseWidthPrecision parses "10f"/"-20s"/".5f"/"-10.5s"/"f" into the equivalent (signed width, precision) the Rust parse_printf_directive produces.',
+  },
+  {
     file: 'packages/just-bash/src/commands/grep/grep.advanced.test.ts',
     lines: [
       7, 27, 37, 50, 59, 68, 80, 89, 111, 118, 125, 132, 139, 146, 158,

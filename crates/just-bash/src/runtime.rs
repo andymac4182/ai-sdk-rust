@@ -1099,6 +1099,40 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn printf_dash_v_assigns_output_to_variables_and_validates_identifiers() {
+        // maps packages/just-bash/src/commands/printf/printf.test.ts:183 through :219
+        // (the "-v variable name validation" describe block).
+        let env = bash();
+
+        // :183 should accept valid variable names — output is captured into the
+        // variable rather than written to stdout.
+        let valid = env.exec(r#"printf -v myvar "%s" hello; echo $myvar"#);
+        assert_eq!(valid.stdout, "hello\n");
+        assert_eq!(valid.exit_code, 0);
+
+        // :190 should accept array subscript with index — stored under the
+        // flattened `arr_0` key and read back via `${arr[0]}`.
+        let indexed = env.exec(r#"printf -v 'arr[0]' '%s' hello; echo ${arr[0]}"#);
+        assert_eq!(indexed.stdout, "hello\n");
+        assert_eq!(indexed.exit_code, 0);
+
+        // :199 should accept array subscript with @ — exit status only.
+        let at_subscript = env.exec(r#"printf -v 'arr[@]' '%s' hello; echo ${arr[@]}"#);
+        assert_eq!(at_subscript.exit_code, 0);
+
+        // :207 should reject invalid variable names with special chars.
+        let injection = env.exec(r#"printf -v 'x[;rm -rf /]' '%s' hello"#);
+        assert_eq!(injection.exit_code, 2);
+        assert!(injection.stderr.contains("not a valid identifier"));
+        assert!(injection.stdout.is_empty());
+
+        // :214 should reject variable names with path traversal.
+        let traversal = env.exec(r#"printf -v 'x[../../etc]' '%s' hello"#);
+        assert_eq!(traversal.exit_code, 2);
+        assert!(traversal.stderr.contains("not a valid identifier"));
+    }
+
+    #[test]
     fn pwd_cd_export_env_and_printenv_are_virtual_and_isolated() {
         // maps packages/just-bash/src/commands/pwd/pwd.test.ts and env/env.test.ts
         let env = Bash::with_options(BashOptions {
