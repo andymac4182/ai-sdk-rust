@@ -6454,8 +6454,21 @@ const r15jbStringsBinaryCaseGroups = [
   },
 ];
 
+const r18jbSleepDurationCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/sleep/sleep.test.ts',
+    lines: [6, 19, 34, 47, 60, 73, 87, 102],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::sleep',
+    rustTest: 'r18jb_sleep_command_duration_capture_rows_parse_sum_and_cap',
+    notes:
+      'just-bash-command-sleep verifies the upstream duration-capture rows (whole/decimal seconds, s/m/h/d suffixes, the 1d cap to MAX_SLEEP_MS, decimal-with-suffix, and summed multi-arg durations) by checking the exact parsed/summed/capped millisecond total via sleep_total_ms, the same helper command_sleep uses. No host shell fallback or JavaScript mock-clock injection.',
+  },
+];
+
 function caseOverrideFor(testCase) {
   const group = [
+    ...r18jbSleepDurationCaseGroups,
     ...r15jbStringsBinaryCaseGroups,
     ...r13jbSortCommandCaseGroups,
     ...r13jbCommandAwkCaseGroups,
