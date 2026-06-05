@@ -3665,6 +3665,18 @@ const r13jbSqlite3WriteOpsCaseGroups = [
   },
 ];
 
+const r15jbSqlite3FixturesCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/sqlite3/sqlite3.fixtures.test.ts',
+    lines: [10, 27, 41, 55, 119, 138, 186, 228, 242],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sqlite3',
+    rustTest: 'structured_data_sqlite3_fixtures_queries_and_modes_rows',
+    notes:
+      'R15-JB rebuilds the upstream users/products/datatypes fixtures with CREATE/INSERT (the Rust port has no binary .db loader) and asserts byte-identical output for SELECT *, projected WHERE + ORDER BY, COUNT aggregation, -json row serialization, -box rendering, -nullvalue NULL substitution, -readonly writeback suppression, sqlite_master table listing, and PRAGMA table_info. Lines 71/88/104/152/170/206 remain portable-pending because they require list-mode REAL float precision, table-alias JOINs, IN(list), OR/IS NULL predicates, or named-column INSERT that the minimal in-memory engine does not implement.',
+  },
+];
+
 const jbc25CaseGroups = [
   {
     file: 'packages/just-bash/src/commands/awk/awk.test.ts',
@@ -6159,6 +6171,7 @@ function caseOverrideFor(testCase) {
     ...jbc24CaseGroups,
     ...r11jbSqlite3CaseGroups,
     ...r13jbSqlite3WriteOpsCaseGroups,
+    ...r15jbSqlite3FixturesCaseGroups,
     ...jbc25CaseGroups,
     ...jbc35CaseGroups,
     ...jbc42CaseGroups,
