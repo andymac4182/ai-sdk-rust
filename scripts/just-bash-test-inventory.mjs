@@ -5873,6 +5873,47 @@ const r12jbSedCaseGroups = [
   },
 ];
 
+const r23jbSedRegexAndLexerCaseGroups = [
+  {
+    // sed.test.ts:7 (lexer tokenize `+N` as RELATIVE_OFFSET) and :16 (parser
+    // parses `/^2/,+2d` into one command). The Rust port has no separate lexer
+    // token enum to assert; the end-to-end behavior that both upstream unit
+    // tests guard — the `+N` relative-offset address being tokenized AND parsed
+    // — is proven by executing `/^2/,+2d` and friends, which deletes the matched
+    // line plus the next N lines. The mapped test asserts that exact deletion, so
+    // it fails if `+N` is mis-tokenized or mis-parsed.
+    file: 'packages/just-bash/src/commands/sed/sed.test.ts',
+    lines: [7, 16],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sed',
+    rustTest: 'sed_test_ts_inplace_holdspace_text_and_cycle_rows',
+    notes:
+      'R23JB closes the sed lexer/parser relative-offset rows: :7 (tokenize `+N` as RELATIVE_OFFSET) and :16 (parse `/^2/,+2d` into one command). The Rust port proves both by executing `/^2/,+2d`, `-n /a/,+1p`, and `/^2/,+2{d}` over a virtual session and asserting the exact deleted/printed lines, which only hold if the `+N` relative-offset endpoint is tokenized and parsed correctly.',
+  },
+  {
+    // sed.regex.test.ts:157 / :196 (both it.skip) and sed.limits.test.ts:133
+    // (it.skip). All three are skipped upstream purely because the regex backend
+    // is RE2-class (no backreferences, linear time). The Rust port runs on the
+    // same family of engine and reproduces that limitation faithfully.
+    file: 'packages/just-bash/src/commands/sed/sed.regex.test.ts',
+    lines: [157, 196],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sed',
+    rustTest: 'sed_regex_re2_backref_and_pathological_rows_match_engine',
+    notes:
+      'R23JB closes the two upstream `it.skip` backreference-grouping rows as faithful RE2-limitation exceptions: BRE `s/\\(abc\\)\\1/X/` (:157) and ERE `-E s/(abc)\\1/X/` (:196). Both are skipped upstream because RE2 has no backreferences; the Rust `regex` engine is the same family, so each fails closed with exit 1 and a "backreferences are not supported" diagnostic instead of the RE2-impossible `X` result. The test asserts that exact behavior.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/sed/sed.limits.test.ts',
+    lines: [133],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::sed',
+    rustTest: 'sed_regex_re2_backref_and_pathological_rows_match_engine',
+    notes:
+      'R23JB closes the upstream `it.skip` pathological-regex row (:133): the `(a+)+` ReDoS pattern that the upstream skips because BRE->ERE conversion would build a catastrophic-backtracking pattern. The Rust RE2 engine matches in guaranteed linear time, so `sed /^\\(a\\+\\)\\+$/p` completes with a defined exit code (0) and autoprints the non-matching line exactly once. The test asserts that completion and output.',
+  },
+];
+
 function groupMatchesFile(group, file) {
   if (group.file && group.file !== file) {
     return false;
@@ -6551,6 +6592,7 @@ function caseOverrideFor(testCase) {
     ...r10jbCommandAwkCaseGroups,
     ...jbSedTestTsCaseGroups,
     ...r12jbSedCaseGroups,
+    ...r23jbSedRegexAndLexerCaseGroups,
     ...jbAliasCaseGroups,
     ...jbInterpreterBuiltinsCaseGroups,
     ...jbR5ParserInterpreterCaseGroups,
