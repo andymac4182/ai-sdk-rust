@@ -10392,7 +10392,9 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
         main_cursor: 0,
         session: state.session,
         cwd: state.cwd.clone(),
+        env: state.env.clone(),
         getline_files: BTreeMap::new(),
+        command_pipes: BTreeMap::new(),
         output_files: BTreeMap::new(),
         // Default awk seed (POSIX leaves it implementation-defined; using a
         // fixed non-zero constant keeps `rand()` deterministic until `srand` is
@@ -11135,6 +11137,16 @@ struct AwkGetlineFile {
     cursor: usize,
 }
 
+/// Cursor state for a command opened by `"cmd" | getline [VAR]`. The command is
+/// run once inside the Just Bash session on first read and its stdout buffered
+/// as newline-delimited records; the cursor advances one line per getline.
+#[derive(Clone, Debug)]
+struct AwkCommandPipe {
+    /// `None` when the command could not be run (getline then returns -1).
+    lines: Option<Vec<String>>,
+    cursor: usize,
+}
+
 struct AwkRuntime<'a> {
     separator: AwkSeparator,
     ofs: String,
@@ -11154,8 +11166,13 @@ struct AwkRuntime<'a> {
     session: &'a JustBashSession,
     /// Command working directory used to resolve relative redirect paths.
     cwd: String,
+    /// Effective shell environment, used to run `"cmd" | getline` subcommands
+    /// inside the Just Bash session (never the host shell).
+    env: BTreeMap<String, String>,
     /// Open `getline < FILE` streams keyed by resolved path.
     getline_files: BTreeMap<String, AwkGetlineFile>,
+    /// Open `"cmd" | getline` streams keyed by the command string.
+    command_pipes: BTreeMap<String, AwkCommandPipe>,
     /// Buffered output for `print > FILE` / `print >> FILE`, keyed by resolved
     /// path and flushed to the session filesystem when the program finishes.
     output_files: BTreeMap<String, String>,
@@ -11255,6 +11272,46 @@ impl AwkRuntime<'_> {
                 Ok(Some(line))
             }
             None => Ok(None),
+        }
+    }
+
+    /// Reads the next line from a command opened by `"cmd" | getline [VAR]`.
+    /// Returns `Ok(Some(line))` on a successful read, `Ok(None)` at EOF, and
+    /// `Err(())` when the command could not be run. The command runs once on
+    /// first access inside the Just Bash session (its own `ExecState`, never the
+    /// host shell) and its stdout is split into newline-delimited records.
+    fn command_pipe_next(&mut self, command: &str) -> Result<Option<String>, ()> {
+        if !self.command_pipes.contains_key(command) {
+            let pipe = self.run_command_pipe(command);
+            self.command_pipes.insert(command.to_string(), pipe);
+        }
+        let entry = self.command_pipes.get_mut(command).ok_or(())?;
+        let Some(lines) = entry.lines.as_ref() else {
+            return Err(());
+        };
+        match lines.get(entry.cursor).cloned() {
+            Some(line) => {
+                entry.cursor += 1;
+                Ok(Some(line))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Runs `command` inside the Just Bash session and buffers its stdout as the
+    /// records `"cmd" | getline` will yield. A trailing newline is dropped so a
+    /// single-line command (e.g. `echo hello`) yields exactly one record.
+    fn run_command_pipe(&self, command: &str) -> AwkCommandPipe {
+        let options = JustBashExecOptions {
+            cwd: Some(self.cwd.clone()),
+            env: self.env.clone(),
+            replace_env: true,
+            ..JustBashExecOptions::default()
+        };
+        let result = self.session.exec(command, options);
+        AwkCommandPipe {
+            lines: Some(awk_split_input_lines(&result.stdout)),
+            cursor: 0,
         }
     }
 
@@ -11534,6 +11591,18 @@ enum AwkExpr {
     GetlineFile {
         target: Option<String>,
         path: Box<AwkExpr>,
+    },
+    /// `"cmd" | getline [VAR]` reading the next line from the output of a
+    /// command run inside the Just Bash session (never the host shell). The
+    /// command is executed once on first read and its stdout buffered into
+    /// newline-delimited records; each `getline` advances a per-command cursor.
+    /// `target` is `None` for `cmd | getline` (updates `$0`, re-splits fields)
+    /// and `Some(var)` for `cmd | getline VAR` (updates only the variable).
+    /// Evaluates to "1" on a successful read, "0" at EOF, and "-1" when the
+    /// command could not be run, matching POSIX awk's getline return.
+    GetlineCommand {
+        target: Option<String>,
+        command: Box<AwkExpr>,
     },
 }
 
@@ -12466,7 +12535,7 @@ impl<'a> AwkExprParser<'a> {
     }
 
     fn parse_ternary(&mut self) -> Result<AwkExpr, String> {
-        let condition = self.parse_or()?;
+        let condition = self.parse_pipe_getline()?;
         self.skip_whitespace();
         if !self.consume_char('?') {
             return Ok(condition);
@@ -12482,6 +12551,45 @@ impl<'a> AwkExprParser<'a> {
             consequent: Box::new(consequent),
             alternate: Box::new(alternate),
         })
+    }
+
+    /// Handles the command-pipe getline operator `EXPR | getline [VAR]`. The
+    /// left operand (the command string) is parsed at `parse_or` precedence, so
+    /// `||` is already consumed and a remaining single `|` is the getline pipe.
+    /// Without a following `getline` keyword the bare `|` is left unconsumed and
+    /// reported as unsupported by the surrounding parser, matching the existing
+    /// behavior for `print | "cmd"` (still unsupported).
+    fn parse_pipe_getline(&mut self) -> Result<AwkExpr, String> {
+        let mut expression = self.parse_or()?;
+        loop {
+            self.skip_whitespace();
+            let rest = &self.source[self.cursor..];
+            // A single `|` not part of `||` introduces command-pipe getline.
+            if !rest.starts_with('|') || rest.starts_with("||") {
+                break;
+            }
+            // Only consume the `|` when it is actually followed by `getline`;
+            // otherwise leave it for the caller to reject as unsupported.
+            let save = self.cursor;
+            self.cursor += 1;
+            self.skip_whitespace();
+            if !self.consume_keyword("getline") {
+                self.cursor = save;
+                break;
+            }
+            self.skip_whitespace();
+            // An empty identifier means the bare `cmd | getline` form (target
+            // `$0`); only a real variable name produces `cmd | getline VAR`.
+            let target = self
+                .take_identifier()
+                .filter(|name| !name.is_empty())
+                .map(str::to_string);
+            expression = AwkExpr::GetlineCommand {
+                target,
+                command: Box::new(expression),
+            };
+        }
+        Ok(expression)
     }
 
     fn parse_or(&mut self) -> Result<AwkExpr, String> {
@@ -13282,6 +13390,28 @@ fn eval_awk_expr(
                         // the current FS (so `print $2` after the read works).
                         None => context.replace_line(line, &runtime.separator),
                         // `getline VAR < FILE`: assign the whole line to VAR and
+                        // leave `$0`/NF intact.
+                        Some(name) => {
+                            runtime.variables.insert(name.clone(), line);
+                        }
+                    }
+                    Ok("1".to_string())
+                }
+            }
+        }
+        AwkExpr::GetlineCommand { target, command } => {
+            let command = eval_awk_expr(command, context, runtime)?;
+            match runtime.command_pipe_next(&command) {
+                // -1: the command could not be run.
+                Err(()) => Ok("-1".to_string()),
+                // 0: end of output, leaving `$0`/the target variable untouched.
+                Ok(None) => Ok("0".to_string()),
+                Ok(Some(line)) => {
+                    match target {
+                        // `cmd | getline`: replace `$0` and re-split fields with
+                        // the current FS (so `print $2` after the read works).
+                        None => context.replace_line(line, &runtime.separator),
+                        // `cmd | getline VAR`: assign the whole line to VAR and
                         // leave `$0`/NF intact.
                         Some(name) => {
                             runtime.variables.insert(name.clone(), line);
