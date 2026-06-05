@@ -5579,6 +5579,33 @@ const jbc46CaseGroups = [
       'JBC-46 verifies portable od stdin/file octal output, -c character mode, -An address suppression, and missing-file diagnostics. Additional binary dump rows remain pending.',
   },
   {
+    file: 'packages/just-bash/src/commands/od/od.binary.test.ts',
+    lines: [6, 21, 37, 54, 67],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'just_bash_od_binary_and_utf8_stdin_dump_rows',
+    notes:
+      'R24 verifies od dumps binary virtual files in default octal (high bytes, all-byte ramp) and -c character mode (null bytes render as \\0), and dumps binary piped stdin (high-byte and ABCD character format) on the in-process Rust session.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/od/od.test.ts',
+    lines: [21],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'just_bash_od_binary_and_utf8_stdin_dump_rows',
+    notes:
+      'R24 verifies od -c renders the trailing newline of `echo "hello"` as the \\n named escape sequence with exact field widths.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/od/od.utf8-stdin.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'just_bash_od_binary_and_utf8_stdin_dump_rows',
+    notes:
+      'R24 verifies od dumps the raw UTF-8 bytes of a piped multibyte file byte-by-byte (octal 355 225 234 for 한), proving bytes survive the pipe instead of being decoded-then-re-encoded.',
+  },
+  {
     file: 'packages/just-bash/src/commands/tac/tac.test.ts',
     lines: [5, 12, 19, 26, 34],
     status: 'portable-verified',
