@@ -862,6 +862,42 @@ and exhibited clearly, with a label attached.\n";
         assert_eq!(env.exec("echo test | grep test").exit_code, 0);
     }
 
+    /// Covers the portable rows of
+    /// `packages/just-bash/src/commands/clear/clear.test.ts`: the `clear`
+    /// command emits the ANSI "erase display + cursor home" escape sequence
+    /// (L5) and prints help mentioning the command and the terminal it clears
+    /// under `--help` (L12). Mirrors upstream
+    /// `packages/just-bash/src/commands/clear/clear.ts`.
+    #[test]
+    fn clear_command_emits_ansi_sequence_and_help_rows_match_upstream() {
+        // L5 `clear` emits the exact ANSI erase-display + cursor-home sequence.
+        let result = bash().exec("clear");
+        assert_eq!(result.stdout, "\u{1b}[2J\u{1b}[H", "L5 stdout");
+        assert_eq!(result.stderr, "", "L5 stderr");
+        assert_eq!(result.exit_code, 0, "L5 exit");
+
+        // L12 `clear --help` prints help text mentioning "clear" and "terminal".
+        let help = bash().exec("clear --help");
+        assert!(help.stdout.contains("clear"), "L12 mentions clear");
+        assert!(help.stdout.contains("terminal"), "L12 mentions terminal");
+        assert_eq!(help.exit_code, 0, "L12 exit");
+    }
+
+    /// Covers the L5 row of
+    /// `packages/just-bash/src/commands/hostname/hostname.test.ts`: in the
+    /// sandboxed environment `hostname` always returns `localhost\n` with a
+    /// zero exit code. Mirrors upstream
+    /// `packages/just-bash/src/commands/hostname/hostname.ts`. The L12
+    /// command-substitution row stays pending until the runtime `$(...)`
+    /// substitution path lands.
+    #[test]
+    fn hostname_command_returns_localhost_row_matches_upstream() {
+        let result = bash().exec("hostname");
+        assert_eq!(result.stdout, "localhost\n", "L5 stdout");
+        assert_eq!(result.stderr, "", "L5 stderr");
+        assert_eq!(result.exit_code, 0, "L5 exit");
+    }
+
     #[test]
     fn registry_upstream_bash_commands_only_registers_specified_commands() {
         // maps packages/just-bash/src/Bash.commands.test.ts:20
