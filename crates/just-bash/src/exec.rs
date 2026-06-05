@@ -31232,6 +31232,23 @@ fn is_valid_var_name(name: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
+/// Maximum sleep duration: 1 hour (mirrors upstream MAX_SLEEP_MS; prevents DoS via indefinite blocking).
+const MAX_SLEEP_MS: u64 = 3_600_000;
+
+/// Parse, sum, and cap a `sleep` argument list the same way GNU sleep / upstream `sleepCommand`
+/// does: every argument is parsed independently, the durations are summed, and the total is
+/// capped to [`MAX_SLEEP_MS`]. Returns the offending argument on the first parse failure.
+fn sleep_total_ms(args: &[String]) -> Result<u64, &str> {
+    let mut ms = 0u64;
+    for arg in args {
+        match parse_duration_ms(arg) {
+            Ok(value) => ms = ms.saturating_add(value),
+            Err(()) => return Err(arg),
+        }
+    }
+    Ok(ms.min(MAX_SLEEP_MS))
+}
+
 fn command_sleep(state: &ExecState<'_>, args: &[String]) -> CommandResult {
     if args.iter().any(|arg| arg == "--help") {
         return stdout_result(
@@ -31241,15 +31258,12 @@ fn command_sleep(state: &ExecState<'_>, args: &[String]) -> CommandResult {
     if args.is_empty() {
         return stderr_result(1, "sleep: missing operand\n");
     }
-    let mut ms = 0u64;
-    for arg in args {
-        match parse_duration_ms(arg) {
-            Ok(value) => ms = ms.saturating_add(value),
-            Err(()) => {
-                return stderr_result(1, format!("sleep: invalid time interval '{}'\n", arg));
-            }
+    let ms = match sleep_total_ms(args) {
+        Ok(ms) => ms,
+        Err(arg) => {
+            return stderr_result(1, format!("sleep: invalid time interval '{}'\n", arg));
         }
-    }
+    };
     let deadline = Instant::now() + Duration::from_millis(ms.min(50));
     while Instant::now() < deadline {
         if let Some(cancelled) = cancelled_result(state) {
@@ -35572,6 +35586,38 @@ mod tests {
             bash.exec("sleep --help", JustBashExecOptions::new())
                 .stdout
                 .contains("sleep")
+        );
+    }
+
+    // Upstream parity: packages/just-bash/src/commands/sleep/sleep.test.ts duration-capture rows.
+    // Upstream injects a `sleep: async (ms) => { sleptMs = ms }` mock and asserts the captured
+    // millisecond total. The Rust runtime caps the real wait to a tiny deadline, so the exact
+    // parsed/summed/capped duration is verified directly through `sleep_total_ms`, which is the
+    // same function `command_sleep` uses to compute the duration it would pass to the sleeper.
+    #[test]
+    fn r18jb_sleep_command_duration_capture_rows_parse_sum_and_cap() {
+        let ms = |arg: &str| sleep_total_ms(&[arg.to_string()]).expect("duration should parse");
+
+        // "should sleep for specified seconds" — sleep 2 -> 2000ms
+        assert_eq!(ms("2"), 2000);
+        // "should handle decimal seconds" — sleep 0.5 -> 500ms
+        assert_eq!(ms("0.5"), 500);
+        // "should handle seconds suffix" — sleep 3s -> 3000ms
+        assert_eq!(ms("3s"), 3000);
+        // "should handle minutes suffix" — sleep 2m -> 120000ms
+        assert_eq!(ms("2m"), 120_000);
+        // "should handle hours suffix" — sleep 1h -> 3600000ms
+        assert_eq!(ms("1h"), 3_600_000);
+        // "should handle days suffix" — sleep 1d -> capped to MAX_SLEEP_MS (1 hour)
+        assert_eq!(ms("1d"), 3_600_000);
+        // "should handle decimal values with suffix" — sleep 0.5m -> 30000ms
+        assert_eq!(ms("0.5m"), 30_000);
+
+        // "should sum multiple durations" — sleep 1 2 3 -> 6000ms (1+2+3 = 6 seconds)
+        assert_eq!(
+            sleep_total_ms(&["1".to_string(), "2".to_string(), "3".to_string()])
+                .expect("durations should parse"),
+            6000
         );
     }
 
