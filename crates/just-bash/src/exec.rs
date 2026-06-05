@@ -25,6 +25,7 @@ use sha2::{Digest, Sha256};
 use crate::commands::CommandRegistry;
 use crate::encoding::{
     BufferEncoding, ByteString, OutputPayload, bytes_to_string, content_to_bytes,
+    decode_binary_to_utf8,
 };
 use crate::error::{JustBashError, JustBashErrorKind, JustBashResult};
 use crate::fs::{CpOptions, DirentEntry, FileStat, MkdirOptions, RmOptions, VirtualFileSystem};
@@ -1107,9 +1108,16 @@ impl JustBashSession {
             }
         }
 
+        // Decode binary (latin1, one char = one byte) strings back to UTF-8 at
+        // the output boundary, mirroring upstream `decodeBinaryToUtf8`. The
+        // internal pipeline carries data as latin1-shaped byte buffers for byte
+        // transparency; here valid UTF-8 byte sequences become proper Unicode
+        // (CJK, emoji, accents) while non-UTF-8 (e.g. compressed) bytes stay
+        // latin1. Logging above sees the raw latin1 view, matching upstream's
+        // `logResult` order.
         JustBashExecResult {
-            stdout: result.stdout,
-            stderr: result.stderr,
+            stdout: decode_binary_to_utf8(&result.stdout),
+            stderr: decode_binary_to_utf8(&result.stderr),
             exit_code: result.exit_code,
             env: state.env,
             metadata: JustBashExecMetadata {
@@ -9498,11 +9506,12 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
                     }
                 }
             };
+            let input_ends_with_newline = contents.ends_with('\n');
             let lines = contents
                 .lines()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>();
-            let result = run_sed_program(&program, lines, quiet);
+            let result = run_sed_program(&program, lines, quiet, input_ends_with_newline);
             if result.exit_code != 0 {
                 return result;
             }
@@ -9520,9 +9529,11 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
         Ok(input) => input,
         Err(error) => return stderr_result(1, format!("sed: {error}\n")),
     };
+    let input_ends_with_newline = input.ends_with('\n');
     let lines = input.lines().map(ToString::to_string).collect::<Vec<_>>();
     let mut writes: Vec<(String, String)> = Vec::new();
-    let result = run_sed_program_collecting(&program, lines, quiet, &mut writes);
+    let result =
+        run_sed_program_collecting(&program, lines, quiet, input_ends_with_newline, &mut writes);
     if result.exit_code != 0 {
         return result;
     }
@@ -10144,9 +10155,14 @@ enum SedRangeEnd {
 }
 
 /// Cycle-based execution of a parsed sed program over `lines`.
-fn run_sed_program(program: &[SedInstruction], lines: Vec<String>, quiet: bool) -> CommandResult {
+fn run_sed_program(
+    program: &[SedInstruction],
+    lines: Vec<String>,
+    quiet: bool,
+    input_ends_with_newline: bool,
+) -> CommandResult {
     let mut writes: Vec<(String, String)> = Vec::new();
-    run_sed_program_collecting(program, lines, quiet, &mut writes)
+    run_sed_program_collecting(program, lines, quiet, input_ends_with_newline, &mut writes)
 }
 
 /// Like [`run_sed_program`] but also records `w file` writes into `writes` as
@@ -10156,11 +10172,16 @@ fn run_sed_program_collecting(
     program: &[SedInstruction],
     lines: Vec<String>,
     quiet: bool,
+    input_ends_with_newline: bool,
     writes: &mut Vec<(String, String)>,
 ) -> CommandResult {
     let total = lines.len();
     let mut output = String::new();
     let mut hold = String::new();
+    // Tracks whether the most recently emitted output for a cycle came from an
+    // (auto-)printed pattern space with no trailing `a`-append, used to decide
+    // whether the final missing trailing newline is preserved.
+    let mut last_output_was_auto_print = false;
     // Range-activation state keyed by instruction index (for PatternRange and
     // numeric/regex two-address ranges).
     let mut range_state: Vec<RangeStatus> = vec![RangeStatus::Inactive; program.len()];
@@ -10475,16 +10496,29 @@ fn run_sed_program_collecting(
             }
         }
 
+        let mut had_pattern_output = false;
         if !deleted && auto_print {
             output.push_str(&pattern);
             output.push('\n');
+            had_pattern_output = true;
         }
+        let had_appends = !appended_after.is_empty();
         for text in appended_after.drain(..) {
             output.push_str(&text);
             output.push('\n');
         }
+        // Mirror upstream sed `lastOutputWasAutoPrint`: a line produced pattern
+        // output (auto-print or explicit print) and no `a`-appends this cycle.
+        // Appends always carry their own newline and must not be stripped.
+        last_output_was_auto_print = had_pattern_output && !had_appends;
     }
     let _ = line_no;
+    // If the input did not end with a newline, GNU sed preserves that for the
+    // final auto-printed line: strip the single trailing newline only when the
+    // last output came from an (auto-)printed pattern space, not an append.
+    if !input_ends_with_newline && last_output_was_auto_print && output.ends_with('\n') {
+        output.pop();
+    }
     stdout_result(output)
 }
 
@@ -16328,6 +16362,12 @@ fn command_tr(args: &[String], stdin: &str) -> CommandResult {
     if args.is_empty() {
         return stderr_result(1, "tr: missing operand\n");
     }
+    // Translation operates on codepoints — SET1/SET2 are real Unicode strings,
+    // so decode the latin1-shaped stdin byte buffer to UTF-8 first, otherwise
+    // multibyte chars do not match the SET they were spelled with. (mirrors
+    // upstream tr.ts decodeBytesToUtf8 on ctx.stdin)
+    let decoded_stdin = decode_binary_to_utf8(stdin);
+    let stdin = decoded_stdin.as_str();
     let mut delete = false;
     let mut squeeze = false;
     let mut complement = false;
@@ -27963,7 +28003,12 @@ fn command_expand(
         }
         index += 1;
     }
-    let input = match collect_text_inputs_dash(state, &paths, stdin, name) {
+    // expand/unexpand count column positions by codepoint, so decode the
+    // latin1-shaped stdin byte buffer to UTF-8 first — a multibyte char must
+    // occupy one column, not one column per UTF-8 byte. File contents are
+    // already UTF-8 text. (mirrors upstream expand.ts decodeBytesToUtf8)
+    let decoded_stdin = decode_binary_to_utf8(stdin);
+    let input = match collect_text_inputs_dash(state, &paths, &decoded_stdin, name) {
         Ok(input) => input,
         Err(result) => return result,
     };
@@ -30853,7 +30898,12 @@ fn command_rev(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
             _ => paths.push(arg.clone()),
         }
     }
-    let input = match collect_text_inputs(state, &paths, stdin) {
+    // rev reverses by codepoint, so decode the latin1-shaped stdin byte buffer
+    // to UTF-8 first — reversing the latin1 bytes of a multibyte sequence would
+    // shred valid UTF-8 into garbage. File contents are already UTF-8 text.
+    // (mirrors upstream rev.ts decodeBytesToUtf8 on ctx.stdin)
+    let decoded_stdin = decode_binary_to_utf8(stdin);
+    let input = match collect_text_inputs(state, &paths, &decoded_stdin) {
         Ok(input) => input,
         Err(error) => return stderr_result(1, format!("rev: {error}\n")),
     };
@@ -31492,13 +31542,27 @@ fn command_bash(
     args: &[String],
     stdin: String,
 ) -> CommandResult {
-    if args.is_empty() {
-        return CommandResult::default();
-    }
     if args.first().is_some_and(|arg| arg == "--help") {
         return stdout_result(format!(
             "Usage: {shell_name} [-c command] [script] [args...]\n"
         ));
+    }
+    if args.is_empty() {
+        // No arguments: read the script from stdin. Decode the latin1-shaped
+        // stdin byte buffer to UTF-8 first so a script's non-ASCII string
+        // literals reach the parser as text. (mirrors upstream bash.ts/sh.ts
+        // decodeBytesToUtf8 on ctx.stdin) With no stdin we succeed silently
+        // since interactive mode is unsupported.
+        let script = decode_binary_to_utf8(&stdin);
+        if script.trim().is_empty() {
+            return CommandResult::default();
+        }
+        // The stdin buffer was consumed as the script itself, so the script's
+        // own commands see empty stdin.
+        let old_stdin = std::mem::take(&mut state.stdin);
+        let result = execute_control_script(state, &script);
+        state.stdin = old_stdin;
+        return result;
     }
     if args.first().is_some_and(|arg| arg == "-c") {
         if let Some(script) = args.get(1) {
