@@ -4973,6 +4973,24 @@ const jbcYqFixturesCaseGroups = [
     notes:
       'JBC-yq verifies portable yq TOML->YAML conversion, JSON unicode raw output, and the INI/CSV input parsers: INI global keys before sections, true/false boolean coercion versus yes-as-string, special-character paths, RFC-4180 quoted/escaped CSV fields, semicolon and tab delimiter auto-detection, and UTF-8 CSV fields.',
   },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.fixtures.test.ts',
+    lines: [526, 535, 611, 620, 630, 639],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_yq_special_fixtures_slurp_and_inplace_rows',
+    notes:
+      'r14jb verifies portable yq special-fixture rows: empty-string ("") and null-value (null) YAML scalars from special.yaml, and the special.xml self-closing-tag has() probe, multiple-attribute +@id lookup, deeply-nested element navigation, and repeated-element array length. Adds YAML comment-line skipping, bare-null YAML rendering, and string-vs-number scalar quoting to the Rust yq engine.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.test.ts',
+    lines: [219, 794],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_yq_special_fixtures_slurp_and_inplace_rows',
+    notes:
+      'r14jb verifies portable yq slurp mode (-s/--slurp wraps every `---`-separated YAML document into a single array before filtering) and in-place editing (-i) where the rewritten file quotes the string value `"2.0"` so it round-trips as a string. Implements yq slurp and multi-document YAML splitting in the Rust engine.',
+  },
 ];
 
 const jbc44CaseGroups = [
