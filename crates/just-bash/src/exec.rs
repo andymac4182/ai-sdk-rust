@@ -19554,9 +19554,9 @@ fn parse_yq_input(
 ) -> Result<Vec<JsonValue>, CommandResult> {
     match format {
         "json" => parse_json_stream(input)
-            .map_err(|error| stderr_result(1, format!("yq: parse error: {error}\n"))),
+            .map_err(|error| stderr_result(5, format!("yq: parse error: {error}\n"))),
         "yaml" | "yml" => parse_simple_yaml_documents(input)
-            .map_err(|error| stderr_result(1, format!("yq: {error}\n"))),
+            .map_err(|error| stderr_result(5, format!("yq: {error}\n"))),
         "ini" => Ok(vec![parse_ini_input(input)]),
         "csv" | "tsv" => {
             let delimiter = options.csv_delimiter.unwrap_or(if format == "tsv" {
@@ -20658,6 +20658,29 @@ fn parse_simple_yaml_documents(input: &str) -> Result<Vec<JsonValue>, String> {
     Ok(documents)
 }
 
+/// Maximum number of alias (`*anchor`) expansions permitted while parsing a
+/// single YAML document. Mirrors the upstream `yaml` library's
+/// `maxAliasCount: 100` billion-laughs defense: a document whose aliases would
+/// expand beyond this budget is rejected as a parse error instead of being
+/// materialised into an exponentially large value.
+const YAML_MAX_ALIAS_COUNT: usize = 100;
+
+/// A single significant YAML line retained with its indentation and raw
+/// (unstripped) text. Block scalars need the raw text so embedded `#` and
+/// nested indentation survive, so the parser keeps both the trimmed content and
+/// the original line.
+#[derive(Clone)]
+struct YamlLine {
+    indent: usize,
+    content: String,
+    raw: String,
+}
+
+struct YamlParser {
+    anchors: std::collections::HashMap<String, JsonValue>,
+    alias_count: usize,
+}
+
 fn parse_simple_yaml(input: &str) -> Result<JsonValue, String> {
     // YAML is a JSON superset: flow-style documents such as `{}` or `[1, 2]`
     // are valid YAML, so try JSON first before falling back to the block parser.
@@ -20667,88 +20690,538 @@ fn parse_simple_yaml(input: &str) -> Result<JsonValue, String> {
             return Ok(value);
         }
     }
-    let lines = input
+    let lines: Vec<YamlLine> = input
         .lines()
         // Skip blank lines and whole-line `#` comments. YAML comments occupy a
-        // full line (indentation followed by `#`); inline `# ...` after a value
-        // is left untouched here because the simple scalar parser does not split
-        // on it, matching how the upstream fixtures are authored.
+        // full line (indentation followed by `#`). Inline `# ...` after a value
+        // is handled by the scalar parser, which strips unquoted trailing
+        // comments.
         .filter(|line| {
             let trimmed = line.trim();
             !trimmed.is_empty() && !trimmed.starts_with('#')
         })
-        .map(|line| {
-            (
-                line.chars().take_while(|ch| *ch == ' ').count(),
-                line.trim().to_string(),
-            )
+        .map(|line| YamlLine {
+            indent: line.chars().take_while(|ch| *ch == ' ').count(),
+            content: line.trim().to_string(),
+            raw: line.to_string(),
         })
-        .collect::<Vec<_>>();
-    let mut index = 0;
+        .collect();
     if lines.is_empty() {
         return Ok(JsonValue::Null);
     }
-    parse_yaml_block(&lines, &mut index, lines[0].0)
+    let mut parser = YamlParser {
+        anchors: std::collections::HashMap::new(),
+        alias_count: 0,
+    };
+    let mut index = 0;
+    let value = parser.parse_block(&lines, &mut index, lines[0].indent)?;
+    if index != lines.len() {
+        return Err(format!(
+            "parse error: unexpected content at YAML line: {}",
+            lines[index].content
+        ));
+    }
+    Ok(value)
 }
 
-fn parse_yaml_block(
-    lines: &[(usize, String)],
-    index: &mut usize,
-    indent: usize,
-) -> Result<JsonValue, String> {
-    if lines
-        .get(*index)
-        .is_some_and(|(line_indent, line)| *line_indent == indent && line.starts_with("- "))
-    {
+impl YamlParser {
+    fn parse_block(
+        &mut self,
+        lines: &[YamlLine],
+        index: &mut usize,
+        indent: usize,
+    ) -> Result<JsonValue, String> {
+        if lines
+            .get(*index)
+            .is_some_and(|line| line.indent == indent && is_yaml_seq_entry(&line.content))
+        {
+            return self.parse_sequence(lines, index, indent);
+        }
+        self.parse_mapping(lines, index, indent)
+    }
+
+    fn parse_sequence(
+        &mut self,
+        lines: &[YamlLine],
+        index: &mut usize,
+        indent: usize,
+    ) -> Result<JsonValue, String> {
         let mut values = Vec::new();
-        while let Some((line_indent, line)) = lines.get(*index) {
-            if *line_indent != indent || !line.starts_with("- ") {
+        while let Some(line) = lines.get(*index) {
+            if line.indent != indent || !is_yaml_seq_entry(&line.content) {
                 break;
             }
-            let item = line[2..].trim();
+            // Content after the leading `- ` (or after a bare `-`).
+            let item = line.content[1..].trim_start().to_string();
+            // Column where the item content begins, so a nested `- ` or
+            // `key:` block under this entry inherits the correct indent.
+            let item_indent = indent + (line.content.len() - line.content[1..].trim_start().len());
             *index += 1;
-            let mut value = if item.is_empty() {
-                parse_yaml_block(lines, index, indent + 2)?
-            } else if let Some((key, raw_value)) = item.split_once(':') {
+            let value = if item.is_empty() {
+                // `-` on its own line: the value is the more-indented block
+                // that follows.
+                if lines.get(*index).is_some_and(|next| next.indent > indent) {
+                    let next_indent = lines[*index].indent;
+                    self.parse_block(lines, index, next_indent)?
+                } else {
+                    JsonValue::Null
+                }
+            } else if is_yaml_seq_entry(&item) {
+                // Nested sequence on the same line: `- - 1`. Re-parse this entry
+                // as the first element of an inner sequence by rewinding to a
+                // synthetic line set.
+                self.parse_inline_nested_sequence(lines, index, item_indent, &item)?
+            } else if let Some((key, raw_value)) = split_yaml_key(&item) {
+                // Inline mapping entry: `- key: value` (possibly followed by
+                // more keys at the item indent).
                 let mut object = JsonMap::new();
-                object.insert(key.trim().to_string(), parse_yaml_scalar(raw_value.trim()));
+                let (anchor, parsed) =
+                    self.parse_inline_value(lines, index, item_indent, raw_value.trim())?;
+                if let Some(name) = anchor {
+                    self.anchors.insert(name, parsed.clone());
+                }
+                object.insert(key.trim().to_string(), parsed);
+                self.collect_mapping_into(lines, index, item_indent, &mut object)?;
                 JsonValue::Object(object)
             } else {
-                parse_yaml_scalar(item)
+                // Plain scalar item.
+                self.resolve_scalar(&item)?
             };
-            if lines
-                .get(*index)
-                .is_some_and(|(line_indent, line)| *line_indent > indent && !line.starts_with("- "))
-                && let JsonValue::Object(object) = &mut value
-                && let JsonValue::Object(extra) = parse_yaml_block(lines, index, indent + 2)?
-            {
-                object.extend(extra);
-            }
             values.push(value);
         }
-        return Ok(JsonValue::Array(values));
+        Ok(JsonValue::Array(values))
     }
-    let mut object = JsonMap::new();
-    while let Some((line_indent, line)) = lines.get(*index) {
-        if *line_indent != indent || line.starts_with("- ") {
+
+    /// Handle `- - x` by treating the inner `- x` as a one-or-more element
+    /// sequence whose continuation lines sit at `item_indent`.
+    fn parse_inline_nested_sequence(
+        &mut self,
+        lines: &[YamlLine],
+        index: &mut usize,
+        item_indent: usize,
+        first_item: &str,
+    ) -> Result<JsonValue, String> {
+        let mut values = Vec::new();
+        // First element comes from the inline `- x`.
+        let inner = first_item[1..].trim_start().to_string();
+        values.push(self.resolve_scalar(&inner)?);
+        // Subsequent elements are `- y` lines indented at item_indent.
+        while let Some(line) = lines.get(*index) {
+            if line.indent != item_indent || !is_yaml_seq_entry(&line.content) {
+                break;
+            }
+            let element = line.content[1..].trim_start().to_string();
+            *index += 1;
+            values.push(self.resolve_scalar(&element)?);
+        }
+        Ok(JsonValue::Array(values))
+    }
+
+    fn parse_mapping(
+        &mut self,
+        lines: &[YamlLine],
+        index: &mut usize,
+        indent: usize,
+    ) -> Result<JsonValue, String> {
+        let mut object = JsonMap::new();
+        self.collect_mapping_into(lines, index, indent, &mut object)?;
+        Ok(JsonValue::Object(object))
+    }
+
+    fn collect_mapping_into(
+        &mut self,
+        lines: &[YamlLine],
+        index: &mut usize,
+        indent: usize,
+        object: &mut JsonMap<String, JsonValue>,
+    ) -> Result<(), String> {
+        while let Some(line) = lines.get(*index) {
+            if line.indent != indent || is_yaml_seq_entry(&line.content) {
+                break;
+            }
+            let Some((key, raw_value)) = split_yaml_key(&line.content) else {
+                return Err(format!("parse error: invalid YAML line: {}", line.content));
+            };
+            let key = key.trim().to_string();
+            let raw_value = raw_value.trim().to_string();
+            *index += 1;
+            let (anchor, value) = self.parse_inline_value(lines, index, indent, &raw_value)?;
+            if let Some(name) = anchor {
+                self.anchors.insert(name, value.clone());
+            }
+            object.insert(key, value);
+        }
+        Ok(())
+    }
+
+    /// Parse the value portion of a `key:` or `- ` entry. The value may be an
+    /// inline scalar, an anchor declaration, a block scalar (`|`/`>`), or empty
+    /// (meaning the value is the indented block that follows). Returns an
+    /// optional anchor name to register alongside the parsed value.
+    fn parse_inline_value(
+        &mut self,
+        lines: &[YamlLine],
+        index: &mut usize,
+        indent: usize,
+        raw_value: &str,
+    ) -> Result<(Option<String>, JsonValue), String> {
+        // Pull a leading anchor declaration (`&name`) off the value.
+        let (anchor, rest) = strip_yaml_anchor(raw_value);
+        let rest = rest.trim();
+        // A leading tag (`!!str`, `!!js/function`, ...) is unresolved in the
+        // `core` schema and stripped; what follows may still be a block scalar
+        // indicator (e.g. `!!js/function >`). Block scalar content is always
+        // collected as raw text, which proves the tag is never executed.
+        let untagged = if rest.starts_with('!') {
+            strip_yaml_tag(rest).trim()
+        } else {
+            rest
+        };
+        // Block scalar indicators.
+        if let Some(style) = block_scalar_style(untagged) {
+            let text = collect_block_scalar(lines, index, indent, style);
+            return Ok((anchor, JsonValue::String(text)));
+        }
+        if rest.is_empty() {
+            // Value continues as an indented block on following lines.
+            if lines.get(*index).is_some_and(|next| next.indent > indent) {
+                let next_indent = lines[*index].indent;
+                let value = self.parse_block(lines, index, next_indent)?;
+                return Ok((anchor, value));
+            }
+            return Ok((anchor, JsonValue::Null));
+        }
+        // A bare (unquoted) scalar value that itself contains a `key: value`
+        // mapping indicator is malformed — YAML forbids a block-mapping value to
+        // appear inline as a plain scalar (e.g. `invalid: yaml: syntax: error:`).
+        if !rest.starts_with(['"', '\'', '[', '{', '*', '!']) && split_yaml_key(rest).is_some() {
+            return Err(format!(
+                "parse error: nested mapping not allowed inline: {rest}"
+            ));
+        }
+        let value = self.resolve_scalar(rest)?;
+        Ok((anchor, value))
+    }
+
+    /// Resolve a scalar token, handling aliases (`*name`), flow collections
+    /// (`[...]`/`{...}`), tags (`!!tag`), and the billion-laughs alias budget.
+    fn resolve_scalar(&mut self, raw: &str) -> Result<JsonValue, String> {
+        let (anchor, rest) = strip_yaml_anchor(raw);
+        let trimmed = rest.trim();
+        if let Some(name) = trimmed.strip_prefix('*') {
+            let name = name.trim();
+            return self.resolve_alias(name);
+        }
+        if trimmed.starts_with('[') || trimmed.starts_with('{') {
+            let value = self.parse_flow(trimmed)?;
+            if let Some(name) = anchor {
+                self.anchors.insert(name, value.clone());
+            }
+            return Ok(value);
+        }
+        let value = parse_yaml_scalar(trimmed);
+        if let Some(name) = anchor {
+            self.anchors.insert(name, value.clone());
+        }
+        Ok(value)
+    }
+
+    /// Resolve a `*name` alias, charging the billion-laughs budget and
+    /// recursively re-counting nested aliases inside the referenced value so a
+    /// chain of aliased sequences (`&b [*a,*a,...]`) cannot expand without
+    /// bound.
+    fn resolve_alias(&mut self, name: &str) -> Result<JsonValue, String> {
+        let value = match self.anchors.get(name) {
+            Some(value) => value.clone(),
+            None => return Err(format!("parse error: unknown anchor: {name}")),
+        };
+        // Each materialised node of the referenced value counts against the
+        // budget, matching the upstream `maxAliasCount` accounting which limits
+        // total expanded nodes rather than literal alias tokens.
+        self.alias_count = self.alias_count.saturating_add(count_yaml_nodes(&value));
+        if self.alias_count > YAML_MAX_ALIAS_COUNT {
+            return Err("parse error: maximum alias count exceeded".to_string());
+        }
+        Ok(value)
+    }
+
+    /// Parse a YAML flow collection (`[a, b]` or `{a: 1}`) with alias support.
+    fn parse_flow(&mut self, text: &str) -> Result<JsonValue, String> {
+        let mut chars = text.char_indices().peekable();
+        let value = self.parse_flow_node(text, &mut chars)?;
+        Ok(value)
+    }
+
+    fn parse_flow_node(
+        &mut self,
+        text: &str,
+        chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    ) -> Result<JsonValue, String> {
+        skip_flow_ws(chars);
+        match chars.peek().map(|(_, c)| *c) {
+            Some('[') => self.parse_flow_seq(text, chars),
+            Some('{') => self.parse_flow_map(text, chars),
+            _ => {
+                let token = read_flow_scalar(chars);
+                self.resolve_scalar(token.trim())
+            }
+        }
+    }
+
+    fn parse_flow_seq(
+        &mut self,
+        text: &str,
+        chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    ) -> Result<JsonValue, String> {
+        chars.next(); // consume '['
+        let mut values = Vec::new();
+        loop {
+            skip_flow_ws(chars);
+            match chars.peek().map(|(_, c)| *c) {
+                Some(']') => {
+                    chars.next();
+                    break;
+                }
+                None => return Err("parse error: unterminated flow sequence".to_string()),
+                _ => {
+                    values.push(self.parse_flow_node(text, chars)?);
+                    skip_flow_ws(chars);
+                    if let Some((_, ',')) = chars.peek() {
+                        chars.next();
+                    }
+                }
+            }
+        }
+        Ok(JsonValue::Array(values))
+    }
+
+    fn parse_flow_map(
+        &mut self,
+        text: &str,
+        chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    ) -> Result<JsonValue, String> {
+        chars.next(); // consume '{'
+        let mut object = JsonMap::new();
+        loop {
+            skip_flow_ws(chars);
+            match chars.peek().map(|(_, c)| *c) {
+                Some('}') => {
+                    chars.next();
+                    break;
+                }
+                None => return Err("parse error: unterminated flow mapping".to_string()),
+                _ => {
+                    let key = read_flow_key(chars);
+                    skip_flow_ws(chars);
+                    if let Some((_, ':')) = chars.peek() {
+                        chars.next();
+                    }
+                    let value = self.parse_flow_node(text, chars)?;
+                    object.insert(key.trim().to_string(), value);
+                    skip_flow_ws(chars);
+                    if let Some((_, ',')) = chars.peek() {
+                        chars.next();
+                    }
+                }
+            }
+        }
+        Ok(JsonValue::Object(object))
+    }
+}
+
+/// Count the materialised nodes (scalars + collection elements) of a value, used
+/// for the YAML alias-expansion budget.
+fn count_yaml_nodes(value: &JsonValue) -> usize {
+    match value {
+        JsonValue::Array(items) => 1 + items.iter().map(count_yaml_nodes).sum::<usize>(),
+        JsonValue::Object(map) => 1 + map.values().map(count_yaml_nodes).sum::<usize>(),
+        _ => 1,
+    }
+}
+
+fn skip_flow_ws(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>) {
+    while let Some((_, c)) = chars.peek() {
+        if c.is_whitespace() {
+            chars.next();
+        } else {
             break;
         }
-        let Some((key, raw_value)) = line.split_once(':') else {
-            return Err(format!("invalid YAML line: {line}"));
-        };
-        *index += 1;
-        let value = if raw_value.trim().is_empty() {
-            parse_yaml_block(lines, index, indent + 2)?
-        } else {
-            parse_yaml_scalar(raw_value.trim())
-        };
-        object.insert(key.trim().to_string(), value);
     }
-    Ok(JsonValue::Object(object))
+}
+
+/// Read a flow scalar token up to the next `,`, `]`, `}`, or `:` delimiter,
+/// honouring quotes.
+fn read_flow_scalar(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>) -> String {
+    let mut out = String::new();
+    let mut quote: Option<char> = None;
+    while let Some((_, c)) = chars.peek().copied() {
+        match quote {
+            Some(q) => {
+                out.push(c);
+                chars.next();
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => {
+                if c == '"' || c == '\'' {
+                    quote = Some(c);
+                    out.push(c);
+                    chars.next();
+                } else if c == ',' || c == ']' || c == '}' {
+                    break;
+                } else {
+                    out.push(c);
+                    chars.next();
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Read a flow mapping key up to the next `:` (or terminator), honouring quotes.
+fn read_flow_key(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>) -> String {
+    let mut out = String::new();
+    let mut quote: Option<char> = None;
+    while let Some((_, c)) = chars.peek().copied() {
+        match quote {
+            Some(q) => {
+                out.push(c);
+                chars.next();
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => {
+                if c == '"' || c == '\'' {
+                    quote = Some(c);
+                    out.push(c);
+                    chars.next();
+                } else if c == ':' || c == ',' || c == '}' {
+                    break;
+                } else {
+                    out.push(c);
+                    chars.next();
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Whether a trimmed line is a sequence entry (`-` or `- value`).
+fn is_yaml_seq_entry(content: &str) -> bool {
+    content == "-" || content.starts_with("- ")
+}
+
+/// Split a mapping line into `(key, value)` on the first unquoted `:` that is
+/// followed by whitespace or end-of-line. Returns `None` when no such key
+/// separator exists (the line is then treated as an invalid mapping line).
+fn split_yaml_key(content: &str) -> Option<(&str, &str)> {
+    let bytes = content.as_bytes();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let ch = bytes[i] as char;
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            ':' if !in_single && !in_double => {
+                let after = &content[i + 1..];
+                if after.is_empty() || after.starts_with(' ') {
+                    return Some((&content[..i], after));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Strip a leading `&anchor` declaration off a value, returning the anchor name
+/// and the remaining value text.
+fn strip_yaml_anchor(value: &str) -> (Option<String>, &str) {
+    let trimmed = value.trim_start();
+    if let Some(rest) = trimmed.strip_prefix('&') {
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let name = rest[..end].to_string();
+        return (Some(name), rest[end..].trim_start());
+    }
+    (None, value)
+}
+
+/// Block scalar styles: literal (`|`) preserves newlines, folded (`>`) joins
+/// lines with spaces.
+#[derive(Clone, Copy)]
+enum BlockScalarStyle {
+    Literal,
+    Folded,
+}
+
+/// Detect a block scalar indicator (`|`, `>`, optionally with a chomping
+/// indicator such as `|-` or `>+`). Returns `None` for any other value.
+fn block_scalar_style(rest: &str) -> Option<BlockScalarStyle> {
+    let core = rest.trim_end_matches(['-', '+']);
+    match core {
+        "|" => Some(BlockScalarStyle::Literal),
+        ">" => Some(BlockScalarStyle::Folded),
+        _ => None,
+    }
+}
+
+/// Collect the body of a block scalar: every following line more indented than
+/// `parent_indent`. Literal style preserves newlines; folded style joins lines
+/// with single spaces. The result is clip-chomped (a single trailing newline).
+fn collect_block_scalar(
+    lines: &[YamlLine],
+    index: &mut usize,
+    parent_indent: usize,
+    style: BlockScalarStyle,
+) -> String {
+    let mut body_lines: Vec<String> = Vec::new();
+    let mut block_indent: Option<usize> = None;
+    while let Some(line) = lines.get(*index) {
+        // Block scalar content must be more indented than the key line. The
+        // first content line fixes the block indentation; subsequent lines have
+        // their leading block indentation stripped.
+        let raw_indent = line.raw.chars().take_while(|ch| *ch == ' ').count();
+        if raw_indent <= parent_indent {
+            break;
+        }
+        let indent = *block_indent.get_or_insert(raw_indent);
+        let stripped: String = line.raw.chars().skip(indent).collect();
+        body_lines.push(stripped);
+        *index += 1;
+    }
+    match style {
+        BlockScalarStyle::Literal => {
+            let mut text = body_lines.join("\n");
+            text.push('\n');
+            text
+        }
+        BlockScalarStyle::Folded => {
+            let mut text = body_lines.join(" ");
+            text.push('\n');
+            text
+        }
+    }
 }
 
 fn parse_yaml_scalar(raw: &str) -> JsonValue {
-    let raw = raw.trim().trim_matches('"').trim_matches('\'');
+    let raw = strip_yaml_inline_comment(raw.trim());
+    // Drop an explicit type tag (`!!str`, `!tag`, ...). Unknown tags are not
+    // resolved, mirroring the `core` schema: the value stays a plain string.
+    let raw = strip_yaml_tag(raw);
+    let raw = raw.trim();
+    if let Some(inner) = raw.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+        return JsonValue::String(unescape_yaml_double_quoted(inner));
+    }
+    if let Some(inner) = raw.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')) {
+        return JsonValue::String(inner.replace("''", "'"));
+    }
     match raw {
         "" => JsonValue::String(String::new()),
         "true" => JsonValue::Bool(true),
@@ -20760,6 +21233,63 @@ fn parse_yaml_scalar(raw: &str) -> JsonValue {
             .or_else(|_| raw.parse::<f64>().map(json_number))
             .unwrap_or_else(|_| JsonValue::String(raw.to_string())),
     }
+}
+
+/// Strip a trailing unquoted ` # comment` from a plain scalar.
+fn strip_yaml_inline_comment(raw: &str) -> &str {
+    if raw.starts_with('"') || raw.starts_with('\'') {
+        return raw;
+    }
+    if let Some(pos) = raw.find(" #") {
+        return raw[..pos].trim_end();
+    }
+    raw
+}
+
+/// Strip a leading YAML tag (`!!type` or `!local`) from a scalar value.
+fn strip_yaml_tag(raw: &str) -> &str {
+    if let Some(rest) = raw.strip_prefix('!') {
+        let rest = rest.trim_start_matches('!');
+        // Skip the tag token up to the next whitespace.
+        let after = rest.find(char::is_whitespace).map(|i| &rest[i..]);
+        return after.map(str::trim_start).unwrap_or("");
+    }
+    raw
+}
+
+/// Decode the common escape sequences inside a YAML double-quoted scalar,
+/// including `\uXXXX` unicode escapes used by the fixtures.
+fn unescape_yaml_double_quoted(input: &str) -> String {
+    let mut out = String::new();
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('/') => out.push('/'),
+            Some('u') => {
+                let hex: String = (0..4).filter_map(|_| chars.next()).collect();
+                if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                    if let Some(decoded) = char::from_u32(code) {
+                        out.push(decoded);
+                    }
+                }
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// Render a scalar JSON value as it should appear in YAML output. String values
