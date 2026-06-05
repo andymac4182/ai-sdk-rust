@@ -2081,6 +2081,33 @@ const jbc16CaseGroups = [
       'JBC-16 verifies that limit(n; range(...)) caps output and that moderate ranges complete deterministically.',
   },
   {
+    file: 'packages/just-bash/src/commands/jq/jq.limits.test.ts',
+    lines: [16, 25, 35, 44, 54, 65, 78],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_loop_iteration_limits_rows',
+    notes:
+      'R15JB verifies jq until/while/repeat loop protection: infinite loops surface as an ExecutionLimitError (exit 126, "too many iterations") while terminating loops complete, and recurse(.a?) under limit() stops cleanly.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.limits.test.ts',
+    lines: [98, 108, 116],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_range_output_cap_rows',
+    notes:
+      'R15JB verifies that jq range() output is capped at 1,000,000 elements for the range(n), range(start;end), and range(start;end;step) forms to prevent memory exhaustion.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/jq/jq.prototype-pollution.test.ts',
+    lines: [294, 309, 364],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_jq_fromstream_reduce_iterator_dangerous_key_rows',
+    notes:
+      'R15JB verifies that jq fromstream reconstruction, .[] |= iterator updates, and reduce key accumulation all drop dangerous object keys (__proto__/constructor) while preserving safe keys.',
+  },
+  {
     file: 'packages/just-bash/src/commands/yq/yq.test.ts',
     lines: [
       6, 17, 33, 50, 66, 100, 111, 124, 135, 287, 305, 314, 324, 331,
