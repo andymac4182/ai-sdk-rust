@@ -3885,11 +3885,22 @@ impl<D: CommandDispatcher> Interpreter<D> {
             // `set -e`: abort on the first failing statement outside of a
             // tested context. A statement ending in `&&`/`||` is itself a
             // tested compound, so errexit only inspects its final status.
+            //
+            // A pipeline beginning with the `!` reserved word is exempt from
+            // errexit regardless of its outcome (POSIX: "The -e setting shall
+            // be ignored when executing ... a pipeline beginning with the !
+            // reserved word"), so `! true` (which yields status 1) must not
+            // abort the script.
+            let final_pipeline_negated = statement
+                .pipelines
+                .last()
+                .is_some_and(|pipeline| pipeline.negated);
             if self.state.errexit
                 && self.state.errexit_suppressed == 0
                 && self.state.exited.is_none()
                 && self.state.loop_control.is_none()
                 && self.state.returning.is_none()
+                && !final_pipeline_negated
                 && status != 0
             {
                 self.state.exited = Some(status);
@@ -9623,6 +9634,91 @@ mod tests {
             "L516 errexit {:?}",
             list.stdout
         );
+    }
+
+    /// Covers the remaining portable
+    /// `packages/just-bash/src/syntax/set-errexit.test.ts` rows not already
+    /// exercised by `jbpi_syntax_set_errexit_match_upstream`:
+    ///   - L147 `! true` (negated success) does not trigger errexit.
+    ///   - L270 `set -ee` (repeated `-e`) enables errexit.
+    ///   - L282 `set -ze` reports an "invalid option" mentioning `-z` (exit 1)
+    ///     before errexit can engage.
+    ///   - L291 `set -ez` enables errexit first, then fails on `z`, so the
+    ///     script aborts with no further output (exit 1).
+    ///   - L317 `set --help` prints usage including `-e` and `errexit`.
+    ///   - L326 `set -z` is an "invalid option" error mentioning `-z`.
+    ///   - L334 `set -o unknownoption` is an "invalid option name" error.
+    ///   - L342 `set -o` lists options including `errexit`.
+    ///   - L351 `set +o` prints `set`-prefixed option-restore commands.
+    #[test]
+    fn jbpi_syntax_set_errexit_options_and_combined_flags_rows_match_upstream() {
+        // L147 negated successful command is exempt from errexit.
+        let r = shell().exec("set -e\n! true\necho after");
+        assert_eq!(r.stdout, "after\n", "L147 stdout");
+        assert_eq!(r.exit_code, 0, "L147 exit");
+
+        // L270 `set -ee` (multiple `e`) still enables errexit.
+        let r = shell().exec("set -ee\necho before\nfalse\necho after");
+        assert_eq!(r.stdout, "before\n", "L270 stdout");
+        assert_eq!(r.exit_code, 1, "L270 exit");
+
+        // L282 invalid flag in a combined option set: `-z` errors before `-e`
+        // would take effect.
+        let r = shell().exec("set -ze");
+        assert_eq!(r.exit_code, 1, "L282 exit");
+        assert!(r.stderr.contains("-z"), "L282 -z {:?}", r.stderr);
+        assert!(
+            r.stderr.contains("invalid option"),
+            "L282 invalid option {:?}",
+            r.stderr
+        );
+
+        // L291 `set -ez` enables errexit, then fails on `z`; the failing `set`
+        // command aborts the script under errexit so nothing else runs.
+        let r = shell().exec("set -ez\necho \"should not reach\"");
+        assert_eq!(r.exit_code, 1, "L291 exit");
+        assert_eq!(r.stdout, "", "L291 stdout");
+
+        // L317 `set --help`.
+        let r = shell().exec("set --help");
+        assert_eq!(r.exit_code, 0, "L317 exit");
+        assert!(r.stdout.contains("usage:"), "L317 usage {:?}", r.stdout);
+        assert!(r.stdout.contains("-e"), "L317 -e {:?}", r.stdout);
+        assert!(r.stdout.contains("errexit"), "L317 errexit {:?}", r.stdout);
+
+        // L326 `set -z` invalid short option.
+        let r = shell().exec("set -z");
+        assert_eq!(r.exit_code, 1, "L326 exit");
+        assert!(r.stderr.contains("-z"), "L326 -z {:?}", r.stderr);
+        assert!(
+            r.stderr.contains("invalid option"),
+            "L326 invalid option {:?}",
+            r.stderr
+        );
+
+        // L334 `set -o unknownoption` invalid long option name.
+        let r = shell().exec("set -o unknownoption");
+        assert_eq!(r.exit_code, 1, "L334 exit");
+        assert!(
+            r.stderr.contains("unknownoption"),
+            "L334 name {:?}",
+            r.stderr
+        );
+        assert!(
+            r.stderr.contains("invalid option name"),
+            "L334 invalid option name {:?}",
+            r.stderr
+        );
+
+        // L342 `set -o` lists options including `errexit`.
+        let r = shell().exec("set -o");
+        assert_eq!(r.exit_code, 0, "L342 exit");
+        assert!(r.stdout.contains("errexit"), "L342 errexit {:?}", r.stdout);
+
+        // L351 `set +o` prints `set`-prefixed commands to recreate settings.
+        let r = shell().exec("set +o");
+        assert_eq!(r.exit_code, 0, "L351 exit");
+        assert!(r.stdout.contains("set"), "L351 set {:?}", r.stdout);
     }
 
     #[test]
