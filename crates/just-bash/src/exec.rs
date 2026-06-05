@@ -35283,6 +35283,136 @@ mod tests {
     }
 
     #[test]
+    fn jbc46_checksum_binary_and_utf8_stdin_rows_hash_raw_bytes() {
+        let bash = JustBashSession::with_options(JustBashSessionOptions::new());
+        // checksum.binary.test.ts:33 / :76 / :118 - stdin with binary data:
+        // Uint8Array([0x80, 0xff, 0x90, 0xab]) piped via `cat /binary.bin | <cmd>`.
+        // Upstream only asserts exit 0 and a digest-shaped first field, which is
+        // what each branch below checks (matching /^[a-f0-9]{N}\s+/).
+        bash.inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file("/binary.bin", vec![0x80, 0xff, 0x90, 0xab])
+            .unwrap();
+
+        let md5 = bash.exec("cat /binary.bin | md5sum", JustBashExecOptions::new());
+        assert_eq!(md5.exit_code, 0); // checksum.binary.test.ts:41
+        let md5_hash = md5.stdout.split_whitespace().next().unwrap();
+        assert_eq!(md5_hash.len(), 32); // checksum.binary.test.ts:42
+        assert!(md5_hash.bytes().all(|b| b.is_ascii_hexdigit()));
+
+        let sha256 = bash.exec("cat /binary.bin | sha256sum", JustBashExecOptions::new());
+        assert_eq!(sha256.exit_code, 0); // checksum.binary.test.ts:84
+        let sha256_hash = sha256.stdout.split_whitespace().next().unwrap();
+        assert_eq!(sha256_hash.len(), 64); // checksum.binary.test.ts:85
+        assert!(sha256_hash.bytes().all(|b| b.is_ascii_hexdigit()));
+
+        let sha1 = bash.exec("cat /binary.bin | sha1sum", JustBashExecOptions::new());
+        assert_eq!(sha1.exit_code, 0); // checksum.binary.test.ts:126
+        let sha1_hash = sha1.stdout.split_whitespace().next().unwrap();
+        assert_eq!(sha1_hash.len(), 40); // checksum.binary.test.ts:127
+        assert!(sha1_hash.bytes().all(|b| b.is_ascii_hexdigit()));
+
+        // checksum.binary.test.ts:45 - identical binary content hashes identically.
+        bash.inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file("/a.bin", vec![0x80, 0x90, 0xa0])
+            .unwrap();
+        bash.inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file("/b.bin", vec![0x80, 0x90, 0xa0])
+            .unwrap();
+        let hash_a = bash
+            .exec("md5sum /a.bin", JustBashExecOptions::new())
+            .stdout;
+        let hash_b = bash
+            .exec("md5sum /b.bin", JustBashExecOptions::new())
+            .stdout;
+        let first =
+            |s: &str| -> String { s.split_whitespace().next().unwrap_or_default().to_string() };
+        assert_eq!(first(&hash_a), first(&hash_b)); // checksum.binary.test.ts:58
+        // The digest of [0x80,0x90,0xa0] is well-known; pin it so a regression
+        // in binary file reads is caught, not just self-consistency.
+        assert_eq!(first(&hash_a), "4a3924f9668b45471825f086276745ed");
+
+        // checksum.binary.test.ts:145 - sha256sum of UTF-8 stdin (🚀🎉🔥).
+        bash.inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file("/emoji.txt", "🚀🎉🔥")
+            .unwrap();
+        let sha_utf8 = bash.exec("cat /emoji.txt | sha256sum", JustBashExecOptions::new());
+        assert_eq!(sha_utf8.exit_code, 0); // checksum.binary.test.ts:153
+        assert_eq!(first(&sha_utf8.stdout).len(), 64); // checksum.binary.test.ts:154
+        // Hashing the raw UTF-8 bytes (12 bytes) yields this exact digest.
+        assert_eq!(
+            first(&sha_utf8.stdout),
+            "8289878d97a2366b4cef36cd8264f330dc3cb978e29636c9aba665e8a1c9fb51"
+        );
+
+        // checksum.binary.test.ts:157 - identical UTF-8 content hashes identically.
+        bash.inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file("/a.txt", "Привет мир")
+            .unwrap();
+        bash.inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file("/b.txt", "Привет мир")
+            .unwrap();
+        let utf_a = bash
+            .exec("md5sum /a.txt", JustBashExecOptions::new())
+            .stdout;
+        let utf_b = bash
+            .exec("md5sum /b.txt", JustBashExecOptions::new())
+            .stdout;
+        assert_eq!(first(&utf_a), first(&utf_b)); // checksum.binary.test.ts:170
+
+        // checksum.binary.test.ts:189 - modified binary file fails check mode.
+        bash.inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file("/mod.bin", vec![0x80, 0x90, 0xa0])
+            .unwrap();
+        bash.exec(
+            "md5sum /mod.bin > /checksums.txt",
+            JustBashExecOptions::new(),
+        );
+        // Mutate the file to different bytes.
+        bash.inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file("/mod.bin", vec![0x81, 0x90, 0xa0])
+            .unwrap();
+        let modified = bash.exec("md5sum -c /checksums.txt", JustBashExecOptions::new());
+        assert_eq!(modified.exit_code, 1); // checksum.binary.test.ts:201
+        assert!(modified.stdout.contains("FAILED")); // checksum.binary.test.ts:202
+
+        // md5sum.utf8-stdin.test.ts:5 - md5sum hashes the raw UTF-8 bytes of
+        // "한글" (ed 95 9c ea b8 80), not a double-encoded form.
+        bash.inner
+            .fs
+            .lock()
+            .unwrap()
+            .write_file("/in.txt", "한글")
+            .unwrap();
+        let utf8_stdin = bash.exec("cat /in.txt | md5sum", JustBashExecOptions::new());
+        assert_eq!(utf8_stdin.exit_code, 0);
+        assert_eq!(utf8_stdin.stdout, "52b8c54ab4ea672ee6cdfdfef0a31db4  -\n");
+    }
+
+    #[test]
     fn jbc46_virtual_tar_archive_round_trips_list_extract_and_codecs() {
         let bash = JustBashSession::with_options(
             JustBashSessionOptions::new()

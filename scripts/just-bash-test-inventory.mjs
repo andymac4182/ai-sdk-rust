@@ -5495,6 +5495,24 @@ const jbc46CaseGroups = [
       'JBC-46 verifies file-backed binary checksum rows for md5sum, sha1sum, and sha256sum plus Unicode and binary check mode. Binary stdin and mutation/same-content rows remain pending.',
   },
   {
+    file: 'packages/just-bash/src/commands/md5sum/checksum.binary.test.ts',
+    lines: [33, 45, 76, 118, 145, 157, 189],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::checksums',
+    rustTest: 'jbc46_checksum_binary_and_utf8_stdin_rows_hash_raw_bytes',
+    notes:
+      'JBC-46 verifies md5/sha1/sha256 over binary and UTF-8 stdin (digest-shaped output, matching upstream), identical-binary and identical-UTF-8 content stability with pinned digests, and check-mode detection of a mutated binary file (exit 1 + FAILED).',
+  },
+  {
+    file: 'packages/just-bash/src/commands/md5sum/md5sum.utf8-stdin.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::checksums',
+    rustTest: 'jbc46_checksum_binary_and_utf8_stdin_rows_hash_raw_bytes',
+    notes:
+      'JBC-46 verifies md5sum hashes the raw UTF-8 bytes of "한글" from stdin (52b8c54ab4ea672ee6cdfdfef0a31db4), not a double-encoded form.',
+  },
+  {
     file: 'packages/just-bash/src/commands/tar/tar.test.ts',
     lines: [
       6, 16, 25, 32, 39, 91, 143, 161, 173, 186, 224, 240, 269, 307, 322,
