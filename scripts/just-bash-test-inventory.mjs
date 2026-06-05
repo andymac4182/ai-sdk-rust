@@ -3061,6 +3061,15 @@ const jbc20CaseGroups = [
       'JBC-20 verifies portable timeout command duration parsing, ignored foreground/kill/signal options, operand diagnostics, cooperative 124 cancellation, no post-timeout output or file side effects, and help output.',
   },
   {
+    file: 'packages/just-bash/src/commands/timeout/timeout.command-name-quoting.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::timeout',
+    rustTest: 'jbc20_timeout_command_rows_use_cooperative_in_process_cancellation',
+    notes:
+      'R15JB verifies a quoted executable path containing spaces (`timeout 1 \'/bin/my cmd.sh\'`) resolves to the user script verbatim and runs it: the path-with-space command name reaches command resolution as a single token, the executable bit is honored, and the script body (echo TIMEOUT_OK) executes with exit 0. Backed by execute_user_script path-based script execution.',
+  },
+  {
     file: 'packages/just-bash/src/interpreter/pipeline-execution.test.ts',
     lines: [5, 11, 16, 22, 27, 35, 57],
     status: 'portable-verified',
@@ -3483,12 +3492,12 @@ const jbc34CaseGroups = [
   },
   {
     file: 'packages/just-bash/src/commands/wc/wc.binary.test.ts',
-    lines: [5, 17, 29],
+    lines: [5, 17, 29, 50],
     status: 'portable-verified',
     owner: 'crates/just-bash::runtime::text-pipeline',
     rustTest: 'jbc_wc_binary_byte_and_codepoint_counts_match_upstream_rows',
     notes:
-      'r22jb closes the wc binary byte/codepoint rows: wc -c reports the raw byte length of a NUL-bearing file (5), wc -l counts newline-terminated lines across embedded NUL bytes (3), and over a UTF-8 file wc -c (6 bytes) and wc -m (2 codepoints) genuinely diverge. The non-UTF-8 raw-byte file row (line 50, 0xFF/0xFE) stays pending because BashOptions::files seeds UTF-8 strings and cannot carry invalid-UTF-8 bytes.',
+      'r22jb/r15jb close the wc binary byte/codepoint rows: wc -c reports the raw byte length of a NUL-bearing file (5), wc -l counts newline-terminated lines across embedded NUL bytes (3), over a UTF-8 file wc -c (6 bytes) and wc -m (2 codepoints) genuinely diverge, and (line 50) wc -c reports the raw 5-byte size of a file holding invalid-UTF-8 0xFF/0xFE leaders even though the decoded text widens them to U+FFFD. The 0xFF/0xFE row is seeded with JustBashSessionOptions::with_binary_file, which carries invalid-UTF-8 bytes verbatim, and command_wc now reads the raw on-disk byte length for the -c column.',
   },
   {
     file: 'packages/just-bash/src/commands/registry.test.ts',
@@ -5475,6 +5484,15 @@ const jbc38CaseGroups = [
     rustTest: 'jbc38_small_posix_table_and_xargs_commands_match_upstream_rows',
     notes:
       'JBC-38 verifies portable comm, column, join, paste, expand/unexpand, fold, nl, split, and xargs rows over virtual files/stdin; quoted host-script command-name rows remain pending.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/xargs/xargs.command-name-quoting.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::small-posix-table',
+    rustTest: 'jbc38_small_posix_table_and_xargs_commands_match_upstream_rows',
+    notes:
+      "R15JB closes the xargs quoted-command-name row: `xargs -I {} '/bin/my cmd.sh' {}` invokes the quoted user-script path (with a space) verbatim per input item and passes the substituted argument as $1, exercising path-based execute_user_script resolution (executable bit honored, no host shell fallback).",
   },
 ];
 
