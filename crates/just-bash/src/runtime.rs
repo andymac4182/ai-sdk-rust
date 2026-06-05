@@ -516,10 +516,13 @@ mod tests {
         assert_eq!(r.exit_code, 0);
 
         // :90 exchange with large buffers `h; x; x` round-trips unchanged.
+        // The input file has no trailing newline, so GNU sed preserves that on
+        // the final auto-printed line (verified against host `printf 'xxx' |
+        // sed 'h; x; x'`, which emits `xxx` with no trailing newline).
         let bigx = "x".repeat(10_000);
         let r = sed_session(&[("/input.txt", bigx.as_str())]).exec("sed 'h; x; x' /input.txt");
         assert_eq!(r.exit_code, 0);
-        assert_eq!(r.stdout, format!("{bigx}\n"));
+        assert_eq!(r.stdout, bigx);
 
         // :163 step address on large (10k line) input completes.
         let tenk = std::iter::repeat("line")

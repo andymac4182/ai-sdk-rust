@@ -107,6 +107,48 @@ fn bytes_to_latin1(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| char::from(*byte)).collect()
 }
 
+/// Decodes a binary (latin1, one char = one byte) string back to UTF-8 at the
+/// output boundary, mirroring upstream `decodeBinaryToUtf8` in `Bash.ts`.
+///
+/// The internal pipeline carries data as latin1-shaped byte buffers so bytes
+/// pass through transparently (e.g. compressed data through `cat`). At the
+/// output boundary, valid UTF-8 byte sequences are decoded back to Unicode so
+/// multibyte text (CJK, Cyrillic, emoji) renders correctly.
+///
+/// Scanning rules (identical to upstream):
+/// - all chars <= 0x7F: pure ASCII, returned unchanged;
+/// - any char > 0xFF: already proper Unicode (e.g. from `printf`/`grep`), not a
+///   binary string, returned as-is;
+/// - chars only in 0x80..=0xFF: a latin1 byte buffer that may hold UTF-8; the
+///   bytes are decoded strictly and returned, falling back to the original
+///   string when the bytes are not valid UTF-8.
+pub fn decode_binary_to_utf8(value: &str) -> String {
+    if value.is_empty() {
+        return value.to_string();
+    }
+
+    let mut has_high_byte = false;
+    for character in value.chars() {
+        let code = character as u32;
+        if code > 0xff {
+            // Already a proper Unicode string, not a binary string.
+            return value.to_string();
+        }
+        if code > 0x7f {
+            has_high_byte = true;
+        }
+    }
+    if !has_high_byte {
+        return value.to_string();
+    }
+
+    let bytes: Vec<u8> = value.chars().map(|character| character as u8).collect();
+    match String::from_utf8(bytes) {
+        Ok(decoded) => decoded,
+        Err(_) => value.to_string(),
+    }
+}
+
 fn decode_hex(text: &str) -> JustBashResult<Vec<u8>> {
     if text.len() % 2 != 0 {
         return Err(JustBashError::new(

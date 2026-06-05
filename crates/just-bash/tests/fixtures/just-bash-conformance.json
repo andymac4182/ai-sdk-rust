@@ -27375,6 +27375,309 @@
         "found": true
       },
       "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_tar_1eefde366bd2d5f4"
+    },
+    {
+      "id": "comparison:utf8-bytestring:38",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "utf8-bytestring",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/utf8-bytestring.test.ts",
+        "line": 38,
+        "suite": "UTF-8 byte preservation across the pipeline boundary > bash / sh from stdin",
+        "testName": "parses a script containing non-ASCII string literals",
+        "declaration": "it"
+      },
+      "command": "printf 'echo \"caf\\xc3\\xa9\"\\n' | bash",
+      "script": "printf 'echo \"caf\\xc3\\xa9\"\\n' | bash",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "café\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/utf8-bytestring.test.ts:38:it:parses a script containing non-ASCII string literals",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::utf8_bytestring_38_bash_parses_non_ascii_literals",
+        "notes": "R16-JB closes the UTF-8 ByteString pipeline-boundary gap: the Rust corpus runner executes the printf-bytes (or seeded UTF-8 file) pipeline through the real just-bash engine and asserts byte-exact stdout/stderr/exit code, proving codepoint-vs-byte handling for bash-from-stdin, rev, expand, tr, sed→wc -c, cat, and tee plus the latin1→UTF-8 output-boundary decode.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::utf8_bytestring_38_bash_parses_non_ascii_literals",
+      "runnerProof": {
+        "source": "R16-JB",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:utf8-bytestring:47",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "utf8-bytestring",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/utf8-bytestring.test.ts",
+        "line": 47,
+        "suite": "UTF-8 byte preservation across the pipeline boundary > rev",
+        "testName": "reverses by codepoint, not by latin1 byte",
+        "declaration": "it"
+      },
+      "command": "printf '\\xed\\x95\\x9c\\xea\\xb8\\x80\\n' | rev",
+      "script": "printf '\\xed\\x95\\x9c\\xea\\xb8\\x80\\n' | rev",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "글한\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/utf8-bytestring.test.ts:47:it:reverses by codepoint, not by latin1 byte",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::utf8_bytestring_47_rev_reverses_by_codepoint",
+        "notes": "R16-JB closes the UTF-8 ByteString pipeline-boundary gap: the Rust corpus runner executes the printf-bytes (or seeded UTF-8 file) pipeline through the real just-bash engine and asserts byte-exact stdout/stderr/exit code, proving codepoint-vs-byte handling for bash-from-stdin, rev, expand, tr, sed→wc -c, cat, and tee plus the latin1→UTF-8 output-boundary decode.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::utf8_bytestring_47_rev_reverses_by_codepoint",
+      "runnerProof": {
+        "source": "R16-JB",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:utf8-bytestring:81",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "utf8-bytestring",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/utf8-bytestring.test.ts",
+        "line": 81,
+        "suite": "UTF-8 byte preservation across the pipeline boundary > expand / unexpand",
+        "testName": "counts column positions by codepoint, not by byte",
+        "declaration": "it"
+      },
+      "command": "printf 'caf\\xc3\\xa9\\tafter\\n' | expand",
+      "script": "printf 'caf\\xc3\\xa9\\tafter\\n' | expand",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "café    after\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/utf8-bytestring.test.ts:81:it:counts column positions by codepoint, not by byte",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::utf8_bytestring_81_expand_counts_columns_by_codepoint",
+        "notes": "R16-JB closes the UTF-8 ByteString pipeline-boundary gap: the Rust corpus runner executes the printf-bytes (or seeded UTF-8 file) pipeline through the real just-bash engine and asserts byte-exact stdout/stderr/exit code, proving codepoint-vs-byte handling for bash-from-stdin, rev, expand, tr, sed→wc -c, cat, and tee plus the latin1→UTF-8 output-boundary decode.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::utf8_bytestring_81_expand_counts_columns_by_codepoint",
+      "runnerProof": {
+        "source": "R16-JB",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:utf8-bytestring:95",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "utf8-bytestring",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/utf8-bytestring.test.ts",
+        "line": 95,
+        "suite": "UTF-8 byte preservation across the pipeline boundary > tr",
+        "testName": "translates by codepoint",
+        "declaration": "it"
+      },
+      "command": "printf 'caf\\xc3\\xa9\\n' | tr 'é' 'X'",
+      "script": "printf 'caf\\xc3\\xa9\\n' | tr 'é' 'X'",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "cafX\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/utf8-bytestring.test.ts:95:it:translates by codepoint",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::utf8_bytestring_95_tr_translates_by_codepoint",
+        "notes": "R16-JB closes the UTF-8 ByteString pipeline-boundary gap: the Rust corpus runner executes the printf-bytes (or seeded UTF-8 file) pipeline through the real just-bash engine and asserts byte-exact stdout/stderr/exit code, proving codepoint-vs-byte handling for bash-from-stdin, rev, expand, tr, sed→wc -c, cat, and tee plus the latin1→UTF-8 output-boundary decode.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::utf8_bytestring_95_tr_translates_by_codepoint",
+      "runnerProof": {
+        "source": "R16-JB",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:utf8-bytestring:134",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "utf8-bytestring",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/utf8-bytestring.test.ts",
+        "line": 134,
+        "suite": "UTF-8 byte preservation across the pipeline boundary > decoded-text → byte-consumer pipe boundary",
+        "testName": "text-emitting cmd → wc -c reports byte count, not code units",
+        "declaration": "it"
+      },
+      "command": "cat /in.txt | sed 's/$//' | wc -c",
+      "script": "cat /in.txt | sed 's/$//' | wc -c",
+      "initialFiles": {
+        "/in.txt": "한글"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "6\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/utf8-bytestring.test.ts:134:it:text-emitting cmd → wc -c reports byte count, not code units",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::utf8_bytestring_134_sed_to_wc_c_reports_byte_count",
+        "notes": "R16-JB closes the UTF-8 ByteString pipeline-boundary gap: the Rust corpus runner executes the printf-bytes (or seeded UTF-8 file) pipeline through the real just-bash engine and asserts byte-exact stdout/stderr/exit code, proving codepoint-vs-byte handling for bash-from-stdin, rev, expand, tr, sed→wc -c, cat, and tee plus the latin1→UTF-8 output-boundary decode.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::utf8_bytestring_134_sed_to_wc_c_reports_byte_count",
+      "runnerProof": {
+        "source": "R16-JB",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:utf8-bytestring:201",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "utf8-bytestring",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/utf8-bytestring.test.ts",
+        "line": 201,
+        "suite": "UTF-8 byte preservation across the pipeline boundary > cat / head / tail / tee — passthrough must stay byte-clean",
+        "testName": "cat round-trips multibyte bytes through stdin and stdout",
+        "declaration": "it"
+      },
+      "command": "printf '\\xed\\x95\\x9c\\xea\\xb8\\x80\\n' | cat",
+      "script": "printf '\\xed\\x95\\x9c\\xea\\xb8\\x80\\n' | cat",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "한글\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/utf8-bytestring.test.ts:201:it:cat round-trips multibyte bytes through stdin and stdout",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::utf8_bytestring_201_cat_round_trips_multibyte_bytes",
+        "notes": "R16-JB closes the UTF-8 ByteString pipeline-boundary gap: the Rust corpus runner executes the printf-bytes (or seeded UTF-8 file) pipeline through the real just-bash engine and asserts byte-exact stdout/stderr/exit code, proving codepoint-vs-byte handling for bash-from-stdin, rev, expand, tr, sed→wc -c, cat, and tee plus the latin1→UTF-8 output-boundary decode.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::utf8_bytestring_201_cat_round_trips_multibyte_bytes",
+      "runnerProof": {
+        "source": "R16-JB",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:utf8-bytestring:208",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "utf8-bytestring",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/commands/utf8-bytestring.test.ts",
+        "line": 208,
+        "suite": "UTF-8 byte preservation across the pipeline boundary > cat / head / tail / tee — passthrough must stay byte-clean",
+        "testName": "tee passes UTF-8 stdin through to its stdout unchanged",
+        "declaration": "it"
+      },
+      "command": "printf '\\xe6\\xbc\\xa2\\xe5\\xad\\x97\\n' | tee /tmp/out.txt",
+      "script": "printf '\\xe6\\xbc\\xa2\\xe5\\xad\\x97\\n' | tee /tmp/out.txt",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "漢字\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/commands/utf8-bytestring.test.ts:208:it:tee passes UTF-8 stdin through to its stdout unchanged",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::utf8_bytestring_208_tee_passes_utf8_stdin_unchanged",
+        "notes": "R16-JB closes the UTF-8 ByteString pipeline-boundary gap: the Rust corpus runner executes the printf-bytes (or seeded UTF-8 file) pipeline through the real just-bash engine and asserts byte-exact stdout/stderr/exit code, proving codepoint-vs-byte handling for bash-from-stdin, rev, expand, tr, sed→wc -c, cat, and tee plus the latin1→UTF-8 output-boundary decode.",
+        "found": true
+      },
+      "assertions": [],
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::utf8_bytestring_208_tee_passes_utf8_stdin_unchanged",
+      "runnerProof": {
+        "source": "R16-JB",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
     }
   ]
 }
