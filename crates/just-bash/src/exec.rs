@@ -34061,6 +34061,44 @@ mod tests {
                 .trim(),
             "7"
         );
+
+        // L49: `cat /utf8 | sed s/x/y/ | wc -c` keeps the byte count — the
+        // no-op substitution passes "한글" (6 UTF-8 bytes) through untouched.
+        let sed_count = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/in.txt", "한글"),
+        );
+        assert_eq!(
+            sed_count
+                .exec(
+                    "cat /in.txt | sed 's/x/y/' | wc -c",
+                    JustBashExecOptions::new()
+                )
+                .stdout
+                .trim(),
+            "6"
+        );
+
+        // L119: a heredoc with non-ASCII text pipes as UTF-8 bytes — "한\n" is
+        // 3 UTF-8 bytes + newline = 4 bytes to `wc -c`.
+        let heredoc = JustBashSession::new();
+        assert_eq!(
+            heredoc
+                .exec("wc -c <<EOF\n한\nEOF", JustBashExecOptions::new())
+                .stdout
+                .trim(),
+            "4"
+        );
+
+        // L128: a here-string with non-ASCII text likewise pipes as UTF-8
+        // bytes — `<<< "한"` feeds "한\n" (4 bytes) to `wc -c`.
+        let herestring = JustBashSession::new();
+        assert_eq!(
+            herestring
+                .exec("wc -c <<< \"한\"", JustBashExecOptions::new())
+                .stdout
+                .trim(),
+            "4"
+        );
     }
 
     #[test]
@@ -34789,6 +34827,16 @@ mod tests {
         assert_eq!(help.exit_code, 0);
         assert!(help.stdout.contains("timeout"));
         assert!(help.stdout.contains("DURATION"));
+
+        // timeout.utf8-stdin.test.ts:5 byte-clean passthrough to the wrapped
+        // command — `cat /in.txt | timeout 5 cat` forwards the UTF-8 stdin
+        // verbatim to the wrapped `cat`, preserving the multibyte bytes.
+        let utf8 = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/in.txt", "한글 / café\n"),
+        );
+        let passthrough = utf8.exec("cat /in.txt | timeout 5 cat", JustBashExecOptions::new());
+        assert_eq!(passthrough.exit_code, 0);
+        assert_eq!(passthrough.stdout, "한글 / café\n");
     }
 
     #[test]
@@ -36789,6 +36837,56 @@ mod tests {
             )
             .stdout,
             "file-x\nfile-y\n"
+        );
+
+        // split.utf8-stdin.test.ts:5 preserves multibyte content across split
+        // chunks — `cat /in.txt | split -l 1 - /tmp/chunk_` reads UTF-8 from
+        // stdin and writes each line to its own byte-identical chunk file.
+        let split_utf8 = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/in.txt", "한글\ncafé\n漢字\n"),
+        );
+        assert_eq!(
+            split_utf8
+                .exec(
+                    "cat /in.txt | split -l 1 - /tmp/chunk_",
+                    JustBashExecOptions::new()
+                )
+                .exit_code,
+            0
+        );
+        assert_eq!(split_utf8.read_file("/tmp/chunk_aa").unwrap(), "한글\n");
+        assert_eq!(split_utf8.read_file("/tmp/chunk_ab").unwrap(), "café\n");
+        assert_eq!(split_utf8.read_file("/tmp/chunk_ac").unwrap(), "漢字\n");
+
+        // join.utf8-stdin.test.ts:5 joins on ASCII keys while preserving
+        // multibyte field values — `cat /a.txt | join - /b.txt` reads the left
+        // table from stdin and keeps the non-ASCII field bytes intact.
+        let join_utf8 = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/a.txt", "1 한글\n2 café\n")
+                .with_file("/b.txt", "1 韓国\n2 法国\n"),
+        );
+        let join_out = join_utf8.exec("cat /a.txt | join - /b.txt", JustBashExecOptions::new());
+        assert_eq!(join_out.exit_code, 0);
+        assert!(
+            join_out.stdout.contains("한글"),
+            "stdout: {:?}",
+            join_out.stdout
+        );
+        assert!(
+            join_out.stdout.contains("韓国"),
+            "stdout: {:?}",
+            join_out.stdout
+        );
+        assert!(
+            join_out.stdout.contains("café"),
+            "stdout: {:?}",
+            join_out.stdout
+        );
+        assert!(
+            join_out.stdout.contains("法国"),
+            "stdout: {:?}",
+            join_out.stdout
         );
     }
 

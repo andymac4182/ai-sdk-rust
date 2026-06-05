@@ -2908,6 +2908,20 @@ and exhibited clearly, with a label attached.\n";
         });
         relative_rm.exec("rm file.txt");
         assert_eq!(relative_rm.exec("cat /home/user/file.txt").exit_code, 1);
+
+        // rm.test.ts:17 should remove multiple files — after removing all three
+        // user files, only the always-present `/bin`, `/dev`, `/proc`, `/usr`
+        // entries remain at the root.
+        let multi = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/a.txt".to_string(), String::new()),
+                ("/b.txt".to_string(), String::new()),
+                ("/c.txt".to_string(), String::new()),
+            ]),
+            ..BashOptions::default()
+        });
+        multi.exec("rm /a.txt /b.txt /c.txt");
+        assert_eq!(multi.exec("ls /").stdout, "bin\ndev\nproc\nusr\n");
     }
 
     #[test]
