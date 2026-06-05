@@ -18944,10 +18944,10 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     /// `-nullvalue` substitution, `-readonly` write suppression, `sqlite_master`
     /// table listing, or `PRAGMA table_info` regresses.
     ///
-    /// Fixture cases requiring SQL features the minimal engine does not implement
-    /// (table-alias JOIN at :88/:104, `IN (list)` at :152, `OR`/`IS NULL` at
-    /// :170, named-column INSERT at :206, and float-storage-dependent list-mode
-    /// REAL precision at :71) are intentionally left unmapped for a later round.
+    /// The remaining fixture cases (table-alias JOIN at :88/:104, list-mode REAL
+    /// precision at :71, `IN (list)` at :152, `OR`/`IS NULL` at :170, and
+    /// named-column INSERT at :206) are closed by
+    /// `structured_data_sqlite3_fixtures_join_aggregate_and_predicate_rows`.
     #[test]
     fn structured_data_sqlite3_fixtures_queries_and_modes_rows() {
         let env = bash();
@@ -19037,6 +19037,99 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         assert!(pragma.contains("email"));
         assert!(pragma.contains("INTEGER"));
         assert!(pragma.contains("TEXT"));
+    }
+
+    /// Closes the remaining portable `sqlite3.fixtures.test.ts` rows that exercise
+    /// SQL features beyond plain SELECT/WHERE: list-mode REAL precision (:71),
+    /// table-alias equi-JOIN (:88), JOIN + `GROUP BY`/`SUM` aggregation (:104),
+    /// `IN (list)` filtering (:152), `OR`/`IS NULL` predicates (:170), and
+    /// named-column INSERT writeback within a session (:206). The upstream test
+    /// loads binary `.db` fixtures via OverlayFs; the Rust port has no binary
+    /// loader, so the equivalent users/products/datatypes tables are rebuilt with
+    /// CREATE/INSERT and the identical queries are asserted byte-for-byte. Each
+    /// assertion fails if the corresponding engine feature regresses.
+    #[test]
+    fn structured_data_sqlite3_fixtures_join_aggregate_and_predicate_rows() {
+        let env = bash();
+        env.exec(
+            "sqlite3 /products.db \"CREATE TABLE categories(id INTEGER PRIMARY KEY, name TEXT); INSERT INTO categories VALUES(1,'Electronics'),(2,'Books'),(3,'Clothing'); CREATE TABLE products(id INTEGER PRIMARY KEY, name TEXT, price REAL, category_id INTEGER); INSERT INTO products VALUES(1,'Laptop',999.99,1),(2,'Phone',699.5,1),(3,'Headphones',149.99,1),(4,'Python Book',49.99,2),(5,'T-Shirt',19.99,3)\"",
+        );
+
+        // sqlite3.fixtures.test.ts:71 — list mode renders REAL columns with full
+        // IEEE-754 precision (999.99 -> 999.99000000000001), integers stay exact,
+        // ordered by price descending.
+        assert_eq!(
+            env.exec(
+                "sqlite3 /products.db \"SELECT name, price FROM products ORDER BY price DESC\""
+            )
+            .stdout,
+            "Laptop|999.99000000000001\n\
+             Phone|699.5\n\
+             Headphones|149.99000000000001\n\
+             Python Book|49.990000000000002\n\
+             T-Shirt|19.989999999999998\n"
+        );
+
+        // :88 — table-alias equi-JOIN with a qualified WHERE filter and ORDER BY
+        // on a projected, qualified column.
+        assert_eq!(
+            env.exec(
+                "sqlite3 /products.db \"SELECT p.name, c.name FROM products p JOIN categories c ON p.category_id = c.id WHERE c.name = 'Electronics' ORDER BY p.name\""
+            )
+            .stdout,
+            "Headphones|Electronics\nLaptop|Electronics\nPhone|Electronics\n"
+        );
+
+        // :104 — JOIN feeding GROUP BY with a SUM aggregate, header on, ordered by
+        // the aggregate alias. Electronics totals 999.99 + 699.5 + 149.99.
+        let grouped = env
+            .exec(
+                "sqlite3 -header /products.db \"SELECT c.name, SUM(p.price) as total FROM products p JOIN categories c ON p.category_id = c.id GROUP BY c.name ORDER BY total DESC\"",
+            )
+            .stdout;
+        assert!(grouped.contains("name|total"), "header missing: {grouped}");
+        assert!(grouped.contains("Electronics"), "group missing: {grouped}");
+        assert!(grouped.contains("1849.48"), "sum missing: {grouped}");
+
+        env.exec(
+            "sqlite3 /datatypes.db \"CREATE TABLE mixed(id INTEGER PRIMARY KEY, int_val INTEGER, real_val REAL, text_val TEXT); INSERT INTO mixed VALUES(1,42,3.14,'hello'),(2,NULL,NULL,NULL),(3,-100,0.001,'world'),(4,0,-99.99,'')\"",
+        );
+
+        // :152 — `IN (list)` membership filter with ORDER BY on an unprojected
+        // column, serialized as `-json` with full REAL precision.
+        assert_eq!(
+            env.exec(
+                "sqlite3 -json /datatypes.db \"SELECT int_val, real_val FROM mixed WHERE id IN (1, 3, 4) ORDER BY id\""
+            )
+            .stdout,
+            "[{\"int_val\":42,\"real_val\":3.1400000000000001},\n\
+             {\"int_val\":-100,\"real_val\":0.001},\n\
+             {\"int_val\":0,\"real_val\":-99.989999999999995}]\n"
+        );
+
+        // :170 — `OR` composing an `IS NULL` test with an empty-string equality,
+        // with `-nullvalue` substitution distinguishing NULL from `''`.
+        assert_eq!(
+            env.exec(
+                "sqlite3 -nullvalue \"NULL\" /datatypes.db \"SELECT id, text_val FROM mixed WHERE text_val IS NULL OR text_val = '' ORDER BY id\""
+            )
+            .stdout,
+            "2|NULL\n4|\n"
+        );
+
+        // :206 — named-column INSERT (omitted columns default to NULL) is written
+        // back to the overlay so a follow-up SELECT in the same session sees it.
+        env.exec(
+            "sqlite3 /users.db \"CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT, email TEXT, age INTEGER, active INTEGER); INSERT INTO users VALUES(1,'Alice','alice@example.com',30,1)\"",
+        );
+        env.exec(
+            "sqlite3 /users.db \"INSERT INTO users (name, email, age) VALUES ('Test', 'test@test.com', 99)\"",
+        );
+        assert_eq!(
+            env.exec("sqlite3 /users.db \"SELECT name FROM users WHERE email = 'test@test.com'\"")
+                .stdout,
+            "Test\n"
+        );
     }
 
     /// Closes the portable `sqlite3.test.ts` unknown-option and REAL-precision
