@@ -2909,6 +2909,11 @@ pub struct AppliedRedirection {
 /// `ExecutionLimitError.EXIT_CODE`.
 pub const EXECUTION_LIMIT_EXIT_CODE: i32 = 126;
 
+/// Usage text emitted by the `set` builtin for `set --help` and appended to
+/// invalid-option errors. Mirrors upstream
+/// `packages/just-bash/src/interpreter/builtins/set.ts` `SET_USAGE`.
+const SET_USAGE: &str = "set: usage: set [-eux] [+eux] [-o option] [+o option]\nOptions:\n  -e            Exit immediately if a command exits with non-zero status\n  +e            Disable -e\n  -u            Treat unset variables as an error when substituting\n  +u            Disable -u\n  -x            Print commands and their arguments as they are executed\n  +x            Disable -x\n  -o errexit    Same as -e\n  +o errexit    Disable errexit\n  -o nounset    Same as -u\n  +o nounset    Disable nounset\n  -o pipefail   Return status of last failing command in pipeline\n  +o pipefail   Disable pipefail\n  -o xtrace     Same as -x\n  +o xtrace     Disable xtrace\n";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionLimits {
     pub max_loop_iterations: usize,
@@ -3507,34 +3512,192 @@ impl<D: CommandDispatcher> Interpreter<D> {
         expand_trace_prefix(raw, &self.state)
     }
 
-    fn apply_set_options(&mut self, args: &[String]) {
+    fn apply_set_options(&mut self, args: &[String]) -> ExecOutput {
+        // `set --help` prints the usage text and succeeds (mirrors upstream
+        // `handleSet`'s `success(SET_USAGE)`).
+        if args.iter().any(|arg| arg == "--help") {
+            return ExecOutput {
+                stdout: SET_USAGE.to_string(),
+                stderr: String::new(),
+                exit_code: 0,
+            };
+        }
+
         if args == ["-o", "pipefail"] {
             self.state.pipefail = true;
-            return;
+            return ExecOutput::default();
         }
         if args == ["+o", "pipefail"] {
             self.state.pipefail = false;
-            return;
+            return ExecOutput::default();
         }
         if args == ["-o", "errexit"] {
             self.state.errexit = true;
-            return;
+            return ExecOutput::default();
         }
         if args == ["+o", "errexit"] {
             self.state.errexit = false;
-            return;
+            return ExecOutput::default();
         }
 
-        for arg in args {
-            match arg.as_str() {
-                "-x" => self.state.xtrace = true,
-                "+x" => self.state.xtrace = false,
-                "-e" => self.state.errexit = true,
-                "+e" => self.state.errexit = false,
-                "-o" | "+o" | "pipefail" | "errexit" => {}
-                _ => {}
+        // `set -o` / `set +o` with no option name lists the current option
+        // settings (upstream prints implemented + no-op options, sorted).
+        if args == ["-o"] {
+            return ExecOutput {
+                stdout: self.format_set_o_listing(false),
+                stderr: String::new(),
+                exit_code: 0,
+            };
+        }
+        if args == ["+o"] {
+            return ExecOutput {
+                stdout: self.format_set_o_listing(true),
+                stderr: String::new(),
+                exit_code: 0,
+            };
+        }
+
+        let mut index = 0;
+        while index < args.len() {
+            let arg = args[index].as_str();
+
+            // `-o <name>` / `+o <name>`: a long option name. Unknown names are
+            // an "invalid option name" error (exit 1, usage to stderr).
+            if (arg == "-o" || arg == "+o")
+                && args
+                    .get(index + 1)
+                    .is_some_and(|next| !next.starts_with('-') && !next.starts_with('+'))
+            {
+                let name = args[index + 1].as_str();
+                let enable = arg == "-o";
+                match name {
+                    "errexit" => self.state.errexit = enable,
+                    "pipefail" => self.state.pipefail = enable,
+                    "xtrace" => self.state.xtrace = enable,
+                    // Accepted long option names that are no-ops here.
+                    "nounset"
+                    | "verbose"
+                    | "noclobber"
+                    | "noglob"
+                    | "allexport"
+                    | "noexec"
+                    | "posix"
+                    | "vi"
+                    | "emacs"
+                    | "notify"
+                    | "monitor"
+                    | "braceexpand"
+                    | "histexpand"
+                    | "physical"
+                    | "functrace"
+                    | "errtrace"
+                    | "privileged"
+                    | "hashall"
+                    | "ignoreeof"
+                    | "interactive-comments"
+                    | "keyword"
+                    | "onecmd" => {}
+                    other => {
+                        return ExecOutput {
+                            stdout: String::new(),
+                            stderr: format!("bash: set: {other}: invalid option name\n{SET_USAGE}"),
+                            exit_code: 1,
+                        };
+                    }
+                }
+                index += 2;
+                continue;
+            }
+
+            // Combined short flags like `-eu`, `+x`, `-z`. Unknown short flags
+            // are an "invalid option" error.
+            if arg.len() > 1
+                && (arg.starts_with('-') || arg.starts_with('+'))
+                && !arg.starts_with("--")
+            {
+                let enable = arg.starts_with('-');
+                let sign = if enable { '-' } else { '+' };
+                for flag in arg[1..].chars() {
+                    match flag {
+                        'e' => self.state.errexit = enable,
+                        'x' => self.state.xtrace = enable,
+                        // Accepted short flags that are no-ops here.
+                        'u' | 'v' | 'f' | 'C' | 'a' | 'n' | 'h' | 'b' | 'm' | 'B' | 'H' | 'P'
+                        | 'T' | 'E' | 'p' => {}
+                        other => {
+                            return ExecOutput {
+                                stdout: String::new(),
+                                stderr: format!(
+                                    "bash: set: {sign}{other}: invalid option\n{SET_USAGE}"
+                                ),
+                                exit_code: 1,
+                            };
+                        }
+                    }
+                }
+                index += 1;
+                continue;
+            }
+
+            index += 1;
+        }
+        ExecOutput::default()
+    }
+
+    /// Render the `set -o` (`list=false` ⇒ leading `+o` form when `commands`)
+    /// option listing. When `commands` is true the `set +o` form prints
+    /// `set -o`/`set +o` lines; otherwise it prints `name  on/off` columns.
+    fn format_set_o_listing(&self, commands: bool) -> String {
+        // (name, current value). Order is alphabetised below to match bash.
+        let implemented: [(&str, bool); 5] = [
+            ("errexit", self.state.errexit),
+            ("nounset", false),
+            ("pipefail", self.state.pipefail),
+            ("verbose", false),
+            ("xtrace", self.state.xtrace),
+        ];
+        let noop = [
+            "allexport",
+            "braceexpand",
+            "emacs",
+            "errtrace",
+            "functrace",
+            "hashall",
+            "histexpand",
+            "ignoreeof",
+            "interactive-comments",
+            "keyword",
+            "monitor",
+            "noclobber",
+            "noexec",
+            "noglob",
+            "notify",
+            "onecmd",
+            "physical",
+            "posix",
+            "privileged",
+            "vi",
+        ];
+        let mut lines: Vec<String> = Vec::new();
+        if commands {
+            for (name, on) in implemented {
+                lines.push(format!("set {} {name}", if on { "-o" } else { "+o" }));
+            }
+            for name in noop {
+                lines.push(format!("set +o {name}"));
+            }
+        } else {
+            for (name, on) in implemented {
+                lines.push(format!("{:<16}{}", name, if on { "on" } else { "off" }));
+            }
+            for name in noop {
+                lines.push(format!("{name:<16}off"));
             }
         }
+        lines.sort();
+        let mut out = lines.join("\n");
+        out.push('\n');
+        out
     }
 
     fn expand_assignments(&mut self, assignments: &[Assignment]) -> Vec<ExpandedAssignment> {
@@ -3622,10 +3785,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
             "unset" => Some(self.execute_unset(args)),
             "local" => Some(self.execute_local(args)),
             "declare" | "typeset" => Some(self.execute_declare(args)),
-            "set" => {
-                self.apply_set_options(args);
-                Some(ExecOutput::default())
-            }
+            "set" => Some(self.apply_set_options(args)),
             "alias" => Some(self.execute_alias(args)),
             "unalias" => Some(self.execute_unalias(args)),
             "exit" => {
@@ -7379,6 +7539,136 @@ mod tests {
                 .exec("set +o pipefail; false | true; echo \"exit: $?\"")
                 .stdout,
             "exit: 0\n"
+        );
+    }
+
+    /// Covers portable `packages/just-bash/src/interpreter/builtins/set.test.ts`
+    /// errexit-exception, pipefail, and nounset-positional rows that exercise
+    /// the `set -e` / `set -o pipefail` / `set -u` interaction with control flow
+    /// through the Rust shell interpreter. Each tuple mirrors one upstream
+    /// `it(...)` assertion on `Bash().exec(...)` stdout/exit code:
+    ///   - L325 errexit aborts on the FINAL failing member of an `&&` list.
+    ///   - L337 errexit ignores a `!`-negated failed command.
+    ///   - L348 a failed `if` CONDITION does not trip errexit (else runs).
+    ///   - L363 a failed command in an `if` BODY trips errexit.
+    ///   - L378 a `while` condition becoming false does not trip errexit.
+    ///   - L393 a failed command in a `while` BODY trips errexit.
+    ///   - L444 pipefail returns the rightmost failing exit code.
+    ///   - L477 errexit + pipefail aborts when the pipeline fails.
+    ///   - L155 a SET positional parameter is read without nounset error.
+    #[test]
+    fn upstream_set_errexit_exception_pipefail_positional_rows() {
+        // (source, expected_stdout, expected_exit_code)
+        for (source, expected_stdout, expected_exit) in [
+            // L325 the final command of an `&&` list fails -> errexit aborts.
+            (
+                "set -e\necho before\ntrue && false\necho after",
+                "before\n",
+                1,
+            ),
+            // L337 a `!`-negated failed command yields success -> no abort.
+            ("set -e\n! false\necho after", "after\n", 0),
+            // L348 a failed `if` condition selects else and does not abort.
+            (
+                "set -e\nif false; then\n  echo \"then\"\nelse\n  echo \"else\"\nfi\necho after",
+                "else\nafter\n",
+                0,
+            ),
+            // L363 a failed command inside the `if` body aborts the script.
+            (
+                "set -e\nif true; then\n  echo \"in body\"\n  false\n  echo \"not reached\"\nfi\necho after",
+                "in body\n",
+                1,
+            ),
+            // L378 a `while` condition becoming false terminates the loop
+            // normally without tripping errexit.
+            (
+                "set -e\nx=0\nwhile [ $x -lt 3 ]; do\n  echo $x\n  x=$((x + 1))\ndone\necho after",
+                "0\n1\n2\nafter\n",
+                0,
+            ),
+            // L393 a failed command inside the `while` body aborts the script.
+            (
+                "set -e\nx=0\nwhile [ $x -lt 3 ]; do\n  echo $x\n  false\n  x=$((x + 1))\ndone\necho after",
+                "0\n",
+                1,
+            ),
+            // L444 pipefail returns the RIGHTMOST failing exit code (3, not 2).
+            (
+                "set -o pipefail\nexit 2 | exit 3 | true\necho \"exit: $?\"",
+                "exit: 3\n",
+                0,
+            ),
+            // L477 errexit + pipefail: a failing pipeline aborts the script.
+            (
+                "set -e\nset -o pipefail\necho before\nfalse | true\necho after",
+                "before\n",
+                1,
+            ),
+            // L155 under nounset, a SET positional parameter reads cleanly.
+            (
+                "myfunc() {\n  set -u\n  echo $1\n}\nmyfunc hello",
+                "hello\n",
+                0,
+            ),
+        ] {
+            let mut sh = shell();
+            let result = sh.exec(source);
+            assert_eq!(result.stdout, expected_stdout, "stdout {source:?}");
+            assert_eq!(result.exit_code, expected_exit, "exit {source:?}");
+        }
+    }
+
+    /// Covers portable `packages/just-bash/src/interpreter/builtins/set.test.ts`
+    /// "set error handling" rows through the Rust shell interpreter:
+    ///   - L492 `set --help` succeeds and prints usage including `-e`.
+    ///   - L500 `set -z` is an "invalid option" error mentioning `-z` (exit 1).
+    ///   - L508 `set -o unknownoption` is an "invalid option name" error
+    ///     mentioning `unknownoption` (exit 1).
+    ///   - L516 `set -o` (no argument) lists options including `errexit`.
+    #[test]
+    fn upstream_set_error_handling_rows() {
+        // L492 `set --help`.
+        let help = shell().exec("set --help");
+        assert_eq!(help.exit_code, 0, "L492 exit");
+        assert!(
+            help.stdout.contains("usage:"),
+            "L492 usage {:?}",
+            help.stdout
+        );
+        assert!(help.stdout.contains("-e"), "L492 -e {:?}", help.stdout);
+
+        // L500 unknown short option.
+        let short = shell().exec("set -z");
+        assert_eq!(short.exit_code, 1, "L500 exit");
+        assert!(short.stderr.contains("-z"), "L500 -z {:?}", short.stderr);
+        assert!(
+            short.stderr.contains("invalid option"),
+            "L500 invalid option {:?}",
+            short.stderr
+        );
+
+        // L508 unknown long option.
+        let long = shell().exec("set -o unknownoption");
+        assert_eq!(long.exit_code, 1, "L508 exit");
+        assert!(
+            long.stderr.contains("unknownoption"),
+            "L508 name {:?}",
+            long.stderr
+        );
+        assert!(
+            long.stderr.contains("invalid option name"),
+            "L508 invalid option name {:?}",
+            long.stderr
+        );
+
+        // L516 `set -o` lists options.
+        let list = shell().exec("set -o");
+        assert_eq!(list.exit_code, 0, "L516 exit");
+        assert!(
+            list.stdout.contains("errexit"),
+            "L516 errexit {:?}",
+            list.stdout
         );
     }
 
