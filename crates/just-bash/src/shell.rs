@@ -3712,6 +3712,14 @@ pub struct ShellState {
     /// assignment-only path can resolve `$?` correctly. Reset to `None` before
     /// each simple command's assignments are expanded.
     command_sub_status: Option<i32>,
+    /// Stdin buffer (remaining unread bytes) available to the `read` builtin
+    /// for the current compound command (a `{ }` group, `( )` subshell, or
+    /// `while`/`until`/`for` loop) that a pipeline fed. When a pipeline pipes
+    /// data into such a compound, the whole compound shares one input cursor;
+    /// each `read` pops one delimited record and advances the cursor, so a
+    /// `while read LINE` loop consumes successive lines. `None` means no piped
+    /// input is attached (a bare `read` then finds EOF).
+    pending_stdin: Option<String>,
 }
 
 /// Active `break`/`continue` signal propagating up through nested compound
@@ -4040,7 +4048,29 @@ impl<D: CommandDispatcher> Interpreter<D> {
             return ExecOutput::default();
         }
 
-        match command {
+        // A pipeline that pipes data into a compound command (`{ }` group,
+        // `( )` subshell, or `while`/`until`/`for` loop) shares one input
+        // cursor across every command inside it, so the `read` builtin can pop
+        // successive records (e.g. `... | while read LINE; do ...; done`). Bind
+        // that cursor here for the compound kinds and restore the prior cursor
+        // afterwards so nested pipelines do not leak input to one another.
+        let attaches_stdin = matches!(
+            command,
+            Command::For(_)
+                | Command::ForArith(_)
+                | Command::While(_)
+                | Command::Until(_)
+                | Command::Subshell(_)
+                | Command::Group(_)
+        );
+        let saved_pending_stdin = if attaches_stdin {
+            let prior = self.state.pending_stdin.take();
+            self.state.pending_stdin = Some(stdin.clone());
+            Some(prior)
+        } else {
+            None
+        };
+        let dispatched = match command {
             Command::Simple(command) => self.execute_simple_command(command, stdin),
             Command::If(command) => self.execute_if(command),
             Command::For(command) => self.execute_for(command),
@@ -4091,7 +4121,11 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 }
             }
             Command::Conditional(expression) => self.execute_conditional(expression),
+        };
+        if let Some(prior) = saved_pending_stdin {
+            self.state.pending_stdin = prior;
         }
+        dispatched
     }
 
     fn execute_simple_command(&mut self, command: &SimpleCommand, stdin: String) -> ExecOutput {
@@ -4627,6 +4661,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
             "break" | "continue" => Some(self.execute_loop_control(name, args)),
             "return" => Some(self.execute_return(args)),
             "shift" => Some(self.execute_shift(args)),
+            "read" => Some(self.execute_read(args)),
             "eval" => Some(self.execute_eval(args)),
             _ => None,
         }
@@ -4767,6 +4802,191 @@ impl<D: CommandDispatcher> Interpreter<D> {
 
         self.state.positionals.drain(0..n);
         ExecOutput::default()
+    }
+
+    /// `read [-r] [-a NAME] [-d DELIM] [-p PROMPT] [NAME ...]` builtin. Reads
+    /// one delimiter-terminated record from the input cursor that the enclosing
+    /// piped compound (`{ }`/`( )`/loop) attached in
+    /// [`ShellState::pending_stdin`], applies IFS field splitting, and assigns
+    /// the fields to the named variables (or `REPLY` when none are given, or one
+    /// array via `-a`). Returns 0 when a full record (terminated by the
+    /// delimiter) was read and 1 on end-of-input. Mirrors
+    /// `interpreter/builtins/read.ts` for the behaviors the conformance suite
+    /// exercises (line/word reads, `-r` raw mode, `-a` arrays, `-d` delimiters,
+    /// empty-`IFS` handling, and `while read` loops).
+    fn execute_read(&mut self, args: &[String]) -> ExecOutput {
+        // Parse options. `-p`/`-d` consume the following argument; `-r`/`-s`
+        // are flags; everything after options is a variable name list. Combined
+        // short flags (e.g. `-ra`) are also accepted.
+        let mut raw = false;
+        let mut array_name: Option<String> = None;
+        let mut delimiter: Option<char> = None;
+        let mut names: Vec<String> = Vec::new();
+        let mut index = 0;
+        let mut parsing_options = true;
+        while index < args.len() {
+            let arg = &args[index];
+            if parsing_options && arg.starts_with('-') && arg.len() >= 2 && arg != "-" {
+                let flags: Vec<char> = arg[1..].chars().collect();
+                let mut consumed_value = false;
+                let mut char_index = 0;
+                while char_index < flags.len() {
+                    match flags[char_index] {
+                        'r' => raw = true,
+                        's' => {} // silent: no-op for non-interactive input
+                        'p' => {
+                            // Prompt argument: the rest of this token, or the
+                            // next argument. Non-interactive input ignores it.
+                            if char_index + 1 < flags.len() {
+                                consumed_value = true;
+                            } else {
+                                index += 1;
+                            }
+                            break;
+                        }
+                        'd' => {
+                            let value: String = if char_index + 1 < flags.len() {
+                                consumed_value = true;
+                                flags[char_index + 1..].iter().collect()
+                            } else {
+                                index += 1;
+                                args.get(index).cloned().unwrap_or_default()
+                            };
+                            delimiter = value.chars().next();
+                            break;
+                        }
+                        'a' => {
+                            let value: String = if char_index + 1 < flags.len() {
+                                consumed_value = true;
+                                flags[char_index + 1..].iter().collect()
+                            } else {
+                                index += 1;
+                                args.get(index).cloned().unwrap_or_default()
+                            };
+                            array_name = Some(value);
+                            break;
+                        }
+                        // Options that take a numeric value but are unused by the
+                        // conformance suite; skip their argument defensively.
+                        'n' | 'N' | 't' | 'u' | 'i' => {
+                            if char_index + 1 >= flags.len() {
+                                index += 1;
+                            }
+                            break;
+                        }
+                        _ => {}
+                    }
+                    char_index += 1;
+                }
+                let _ = consumed_value;
+                index += 1;
+                continue;
+            }
+            parsing_options = false;
+            names.push(arg.clone());
+            index += 1;
+        }
+
+        let delim = delimiter.unwrap_or('\n');
+
+        // Pull the next record from the shared input cursor. `terminated`
+        // reports whether the delimiter was actually found (vs hitting EOF).
+        let (record, terminated) = match self.state.pending_stdin.as_mut() {
+            Some(buffer) if !buffer.is_empty() => {
+                if let Some(position) = buffer.find(delim) {
+                    let record: String = buffer.drain(..=position).collect();
+                    // Trim the trailing delimiter byte.
+                    let mut record = record;
+                    record.pop();
+                    (record, true)
+                } else {
+                    let record = std::mem::take(buffer);
+                    (record, false)
+                }
+            }
+            _ => (String::new(), false),
+        };
+
+        // Apply backslash processing unless `-r` (raw) was requested. Outside
+        // raw mode a backslash escapes the next character (and a trailing
+        // backslash before the delimiter would splice lines, which the cursor
+        // model does not need for the conformance scripts).
+        let processed = if raw {
+            record
+        } else {
+            let mut out = String::new();
+            let mut chars = record.chars();
+            while let Some(c) = chars.next() {
+                if c == '\\' {
+                    if let Some(next) = chars.next() {
+                        out.push(next);
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        };
+
+        let ifs = self.state.get_var("IFS").map(str::to_string);
+        let ifs_ref = ifs.as_deref();
+
+        if let Some(array) = array_name {
+            let fields = split_on_ifs(&processed, ifs_ref);
+            self.state.set_array(array, fields);
+        } else if names.is_empty() {
+            // No variable: store the (IFS-trimmed) record in REPLY.
+            let fields = split_on_ifs(&processed, ifs_ref);
+            self.state.set_var("REPLY", fields.join(" "));
+        } else {
+            self.assign_read_fields(&names, &processed, ifs_ref);
+        }
+
+        ExecOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: i32::from(!terminated),
+        }
+    }
+
+    /// Distribute a read record's IFS fields across the named variables: the
+    /// first N-1 names each receive one field, and the final name receives the
+    /// remaining input with trailing IFS whitespace stripped but interior
+    /// separators preserved (bash's "rest goes to the last variable" rule).
+    fn assign_read_fields(&mut self, names: &[String], record: &str, ifs: Option<&str>) {
+        let ifs_str = ifs.unwrap_or(" \t\n");
+        let ws: Vec<char> = ifs_str
+            .chars()
+            .filter(|c| matches!(c, ' ' | '\t' | '\n'))
+            .collect();
+        // Strip leading IFS whitespace before locating the first fields.
+        let trimmed_start = record.trim_start_matches(|c| ws.contains(&c));
+
+        let mut remaining = trimmed_start.to_string();
+        for (position, name) in names.iter().enumerate() {
+            let is_last = position + 1 == names.len();
+            if is_last {
+                // The last variable gets the rest with trailing IFS whitespace
+                // (and, when IFS is non-empty, surrounding separators) stripped.
+                let value = remaining.trim_end_matches(|c| ws.contains(&c)).to_string();
+                self.state.set_var(name.clone(), value);
+                return;
+            }
+            // Take one field: skip leading whitespace, then read up to the next
+            // IFS separator (whitespace or explicit), advancing `remaining`.
+            let fields = split_on_ifs(&remaining, ifs);
+            if fields.is_empty() {
+                self.state.set_var(name.clone(), String::new());
+                remaining.clear();
+                continue;
+            }
+            let field = fields[0].clone();
+            // Advance `remaining` past this field and one separator run.
+            let after = remaining.trim_start_matches(|c| ws.contains(&c));
+            let after = after.strip_prefix(&field).unwrap_or(after);
+            remaining = after.trim_start_matches(|c| ws.contains(&c)).to_string();
+            self.state.set_var(name.clone(), field);
+        }
     }
 
     /// `eval [arg ...]` builtin. The arguments are joined with single spaces,
@@ -5740,6 +5960,19 @@ impl<D: CommandDispatcher> Interpreter<D> {
         }
 
         if let Some(ParameterOperation::Length) = &parameter.operation {
+            // `${#arr[@]}` / `${#arr[*]}` yields the element COUNT of the array,
+            // not the character length of its flattened contents. (`${#arr}` and
+            // `${#arr[n]}` still measure a single element's character length and
+            // fall through to the byte-length path below.)
+            if let Some((array, ArrayIndex::All)) = parse_array_reference(&parameter.parameter) {
+                if let Some(assoc) = self.state.assoc_arrays.get(array) {
+                    return vec![assoc.values.len().to_string()];
+                }
+                if let Some(values) = self.state.arrays.get(array) {
+                    return vec![values.len().to_string()];
+                }
+                return vec!["0".to_string()];
+            }
             return vec![
                 self.lookup_parameter(&parameter.parameter)
                     .len()
@@ -7638,10 +7871,27 @@ mod tests {
 
     fn fake_echo(args: &[String]) -> CommandResult {
         let mut interpret_escapes = false;
+        let mut suppress_newline = false;
         let mut args = args;
-        if args.first().map(String::as_str) == Some("-e") {
-            interpret_escapes = true;
-            args = &args[1..];
+        // Consume leading `-n`/`-e`/`-E` flags (bash `echo` accepts them in any
+        // order and combined, e.g. `-ne`). A non-flag token ends option parsing.
+        while let Some(first) = args.first() {
+            if first.len() >= 2
+                && first.starts_with('-')
+                && first[1..].chars().all(|c| matches!(c, 'n' | 'e' | 'E'))
+            {
+                for flag in first[1..].chars() {
+                    match flag {
+                        'n' => suppress_newline = true,
+                        'e' => interpret_escapes = true,
+                        'E' => interpret_escapes = false,
+                        _ => {}
+                    }
+                }
+                args = &args[1..];
+            } else {
+                break;
+            }
         }
         let mut stdout = args.join(" ");
         if interpret_escapes {
@@ -7650,7 +7900,9 @@ mod tests {
                 .replace("\\t", "\t")
                 .replace("\\\\", "\\");
         }
-        stdout.push('\n');
+        if !suppress_newline {
+            stdout.push('\n');
+        }
         CommandResult::success(stdout)
     }
 
@@ -15325,5 +15577,87 @@ greet World",
             r.stdout
         );
         assert_eq!(r.stderr, "", "L110 stderr: {:?}", r.stderr);
+    }
+
+    /// Mirrors the portable `it(...)` rows in
+    /// `packages/just-bash/src/interpreter/builtins/read.test.ts` 1:1, exercising
+    /// the Rust `read` builtin reading from a piped compound's shared input
+    /// cursor: basic single/multi-variable reads, the "rest goes to the last
+    /// variable" rule, `read` into `REPLY`, `-r` raw mode, `-p` prompt (ignored
+    /// non-interactively), `-a` array reads, `-d` delimiter, success/EOF exit
+    /// codes, and a `while read` loop over multiple lines. (read.test.ts:116,
+    /// the `${#a[@]}` non-empty empty-IFS row, stays pending: it depends on an
+    /// unrelated `${#array[@]}` element-count expansion bug, not on `read`.)
+    #[test]
+    fn r17_interpreter_builtin_read_matches_upstream() {
+        // L6 read from stdin into variable
+        let r = shell().exec("echo \"hello\" | { read VAR; echo \"got: $VAR\"; }");
+        assert_eq!(r.stdout, "got: hello\n", "L6");
+
+        // L14 read into REPLY when no variable given
+        let r = shell().exec("echo \"test\" | { read; echo \"REPLY=$REPLY\"; }");
+        assert_eq!(r.stdout, "REPLY=test\n", "L14");
+
+        // L22 read multiple words into multiple variables
+        let r = shell().exec("echo \"one two three\" | { read A B C; echo \"A=$A B=$B C=$C\"; }");
+        assert_eq!(r.stdout, "A=one B=two C=three\n", "L22");
+
+        // L30 remaining words go into the last variable
+        let r = shell().exec("echo \"one two three four\" | { read A B; echo \"A=$A B=$B\"; }");
+        assert_eq!(r.stdout, "A=one B=two three four\n", "L30");
+
+        // L40 -r disables backslash escaping
+        let r = shell().exec("echo 'hello\\nworld' | { read -r VAR; echo \"$VAR\"; }");
+        assert_eq!(r.stdout, "hello\\nworld\n", "L40");
+
+        // L48 -p prompt is ignored for non-interactive input
+        let r = shell().exec("echo \"test\" | { read -p \"Enter: \" VAR; echo \"$VAR\"; }");
+        assert_eq!(r.stdout, "test\n", "L48");
+
+        // L56 -a reads fields into an array
+        let r = shell()
+            .exec("echo \"a b c\" | { read -a ARR; echo \"${ARR[0]} ${ARR[1]} ${ARR[2]}\"; }");
+        assert_eq!(r.stdout, "a b c\n", "L56");
+
+        // L66 -d sets the record delimiter
+        let r = shell().exec("echo -n \"hello:world\" | { read -d \":\" VAR; echo \"$VAR\"; }");
+        assert_eq!(r.stdout, "hello\n", "L66");
+
+        // L76 a successful read returns 0
+        let r = shell().exec("echo \"data\" | { read VAR; echo $?; }");
+        assert_eq!(r.stdout, "0\n", "L76");
+
+        // L84 read returns 1 on EOF (empty input)
+        let r = shell().exec("echo -n \"\" | { read VAR; echo $?; }");
+        assert_eq!(r.stdout, "1\n", "L84");
+
+        // L94 read consumes successive lines in a `while read` loop
+        let r = shell().exec(
+            "echo -e \"line1\\nline2\\nline3\" | while read LINE; do\n  echo \"got: $LINE\"\ndone",
+        );
+        assert_eq!(r.stdout, "got: line1\ngot: line2\ngot: line3\n", "L94");
+
+        // L106 -a with empty IFS and empty input yields a zero-length array
+        let r = shell().exec("IFS=\necho '' | (read -a a; echo \"${#a[@]}\")");
+        assert_eq!(r.stdout, "0\n", "L106");
+
+        // L116 -a with empty IFS and non-empty input keeps it as one word
+        let r = shell()
+            .exec("IFS=\necho 'hello world' | (read -a a; echo \"${#a[@]}\"; echo \"${a[0]}\")");
+        assert_eq!(r.stdout, "1\nhello world\n", "L116");
+    }
+
+    /// Maps `packages/just-bash/src/interpreter/builtins/posix-fatal.test.ts:34`
+    /// ("shift works normally without POSIX mode"): a `shift 3` with only two
+    /// positional parameters is a recoverable error (status 1) — it does NOT
+    /// abort the script, so the following `echo status=$?` still runs and prints
+    /// `status=1`, and the script exits 0. (The POSIX-mode fatal variants in the
+    /// same file stay pending: Just Bash does not yet model `set -o posix`
+    /// turning special-builtin errors into whole-script aborts.)
+    #[test]
+    fn r17_interpreter_builtin_posix_fatal_non_posix_shift_matches_upstream() {
+        let r = shell().exec("set -- a b\nshift 3\necho status=$?");
+        assert!(r.stdout.contains("status=1"), "stdout: {:?}", r.stdout);
+        assert_eq!(r.exit_code, 0, "exit: {}", r.exit_code);
     }
 }
