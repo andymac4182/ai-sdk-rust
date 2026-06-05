@@ -477,6 +477,51 @@ const jb06CaseGroups = [
       'r15jb-r13 verifies cat performs byte-clean passthrough of multibyte UTF-8 input piped through stdin (한글 / café / 漢字).',
   },
   {
+    file: 'packages/just-bash/src/commands/diff/diff.binary.test.ts',
+    lines: [6, 20, 33, 46, 62],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::diff',
+    rustTest: 'diff_binary_rows_detect_identical_and_differing_byte_content',
+    notes:
+      'r16jb verifies diff over binary/high-byte/null-byte content: identical high-byte binary files (exit 0, empty), identical null-byte files (exit 0), differing null-byte files (exit 1), high-byte text files differing in one byte (exit 1), and a binary stdin diff via `cat /a.bin | diff - /b.bin` (exit 1). High bytes 0x80-0xff map to \\u{0080}-\\u{00ff} in the virtual filesystem; diff outcome depends on byte equality, preserved verbatim.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/printf/printf.binary.test.ts',
+    lines: [80],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::printf',
+    rustTest: 'binary_and_utf8_stream_command_rows_are_byte_clean',
+    notes:
+      'r16jb verifies binary data survives the printf hex-escape -> cat redirect -> base64 -> base64 -d pipe (0x80 0xff 0x90 0xab round-trips verbatim).',
+  },
+  {
+    file: 'packages/just-bash/src/commands/tee/tee.binary.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::tee',
+    rustTest: 'binary_and_utf8_stream_command_rows_are_byte_clean',
+    notes:
+      'r16jb verifies `cat /input.bin | tee /output.bin` writes the binary "Hi\\n" payload to both stdout and the virtual output file.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/base64/base64.binary.test.ts',
+    lines: [65],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::base64',
+    rustTest: 'binary_and_utf8_stream_command_rows_are_byte_clean',
+    notes:
+      'r16jb verifies binary data round-trips through stdin base64 then `base64 -d` (0x80 0xff 0x90 0xab 0xcd reconstructed verbatim).',
+  },
+  {
+    file: 'packages/just-bash/src/commands/bash/bash.utf8-stdin.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::commands::bash',
+    rustTest: 'binary_and_utf8_stream_command_rows_are_byte_clean',
+    notes:
+      'r16jb verifies bash parses and runs a piped multibyte script (`echo "한글 / café / 漢字"`) read from stdin, emitting the multibyte literal byte-clean.',
+  },
+  {
     file: 'packages/just-bash/src/commands/ls/ls.test.ts',
     lines: [5, 29, 41, 53, 102, 114, 129, 137, 146, 159, 172, 184, 196, 213, 329, 342, 355],
     status: 'portable-verified',
