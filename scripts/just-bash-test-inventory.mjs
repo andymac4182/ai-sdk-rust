@@ -6225,8 +6225,129 @@ const r13jbSortCommandCaseGroups = [
   },
 ];
 
+const r15jbStringsBinaryCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/strings/strings.binary.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::strings',
+    rustTest: 'strings_binary_extracts_strings_with_null_terminators',
+    notes:
+      'just-bash-command-strings verifies the strings builtin extracts NUL-separated printable runs (hello/world) from raw binary fixtures written byte-clean through the virtual filesystem.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/strings/strings.binary.test.ts',
+    lines: [33],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::strings',
+    rustTest: 'strings_binary_handles_mixed_binary_and_text_content',
+    notes:
+      'just-bash-command-strings verifies printable runs (test_func/main) are recovered from an ELF-magic mixed binary/text fixture.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/strings/strings.binary.test.ts',
+    lines: [80],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::strings',
+    rustTest: 'strings_binary_filters_shorter_than_minimum_length',
+    notes:
+      'just-bash-command-strings verifies the default minimum length of 4 drops 2- and 3-char runs and keeps the 4-char run.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/strings/strings.binary.test.ts',
+    lines: [105],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::strings',
+    rustTest: 'strings_binary_handles_n_option',
+    notes:
+      'just-bash-command-strings verifies -n 6 raises the minimum length so only the 6-char run is emitted.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/strings/strings.binary.test.ts',
+    lines: [132],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::strings',
+    rustTest: 'strings_binary_handles_t_d_option',
+    notes:
+      'just-bash-command-strings verifies -t d prints the decimal byte offset (4) before the matched run.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/strings/strings.binary.test.ts',
+    lines: [154],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::strings',
+    rustTest: 'strings_binary_handles_t_x_option',
+    notes:
+      'just-bash-command-strings verifies -t x prints the hexadecimal byte offset (10 for 0x10) before the matched run.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/strings/strings.binary.test.ts',
+    lines: [174],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::strings',
+    rustTest: 'strings_binary_extracts_all_printable_ascii',
+    notes:
+      'just-bash-command-strings verifies the full printable ASCII range 0x20-0x7e (space through tilde) is treated as printable.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/strings/strings.binary.test.ts',
+    lines: [194],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::strings',
+    rustTest: 'strings_binary_ignores_non_printable_bytes',
+    notes:
+      'just-bash-command-strings verifies control bytes (0x01-0x04) and high bytes (0x80-0x83) terminate runs and are excluded from output.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/strings/strings.binary.test.ts',
+    lines: [219],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::strings',
+    rustTest: 'strings_binary_handles_tabs_as_printable',
+    notes:
+      'just-bash-command-strings verifies tab (0x09) is treated as a printable character within a run.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/strings/strings.binary.test.ts',
+    lines: [238],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::strings',
+    rustTest: 'strings_binary_handles_long_file_with_many_strings',
+    notes:
+      'just-bash-command-strings verifies many printable runs separated by binary garbage are all extracted from a longer fixture.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/strings/strings.binary.test.ts',
+    lines: [267],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::strings',
+    rustTest: 'strings_binary_handles_empty_file',
+    notes:
+      'just-bash-command-strings verifies an empty file produces empty output and exit code 0.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/strings/strings.binary.test.ts',
+    lines: [279],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::strings',
+    rustTest: 'strings_binary_handles_only_non_printable_bytes',
+    notes:
+      'just-bash-command-strings verifies a file of only non-printable bytes produces empty output and exit code 0.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/strings/strings.binary.test.ts',
+    lines: [291],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::strings',
+    rustTest: 'strings_binary_handles_string_at_very_end',
+    notes:
+      'just-bash-command-strings verifies a printable run at end-of-file with no trailing NUL is still flushed and emitted.',
+  },
+];
+
 function caseOverrideFor(testCase) {
   const group = [
+    ...r15jbStringsBinaryCaseGroups,
     ...r13jbSortCommandCaseGroups,
     ...r13jbCommandAwkCaseGroups,
     ...r10jbCommandAwkCaseGroups,
