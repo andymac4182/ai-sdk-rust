@@ -51,6 +51,22 @@ pub const JUST_BASH_DEFAULT_MAX_OUTPUT_LENGTH: usize = 50_000;
 /// pathological branch/test loops so they cannot hang.
 const SED_MAX_ITERATIONS: usize = 10_000;
 
+/// Default cap on jq loop iterations (`until`/`while`/`repeat`). Mirrors
+/// upstream `DEFAULT_LIMITS.maxJqIterations` (`limits.ts`), bounding pathological
+/// generators so they terminate with an `ExecutionLimitError` instead of hanging.
+const JQ_MAX_ITERATIONS: usize = 10_000;
+
+/// Cap on jq `range()` output length. Mirrors upstream
+/// `Math.max(ctx.limits.maxIterations * 100, 1_000_000)` so `range(2_000_000)`
+/// is capped rather than exhausting memory.
+const JQ_MAX_RANGE: usize = 1_000_000;
+
+/// Sentinel prefix on jq evaluation errors that should surface as an
+/// `ExecutionLimitError` (exit code [`crate::shell::EXECUTION_LIMIT_EXIT_CODE`])
+/// rather than the generic jq error exit code. Mirrors upstream
+/// `ExecutionLimitError` handling in `commands/jq/jq.ts`.
+const JQ_ITERATION_LIMIT_PREFIX: &str = "\u{0}jq-iteration-limit\u{0}";
+
 /// Cancellation handle used by [`JustBashExecOptions`].
 #[derive(Clone, Default)]
 pub struct JustBashCancelToken {
@@ -16287,7 +16303,7 @@ fn command_jq(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
     for input in inputs {
         let selected = match eval_structured_filter(&input, &input, &options.filter, None) {
             Ok(selected) => selected,
-            Err(error) => return stderr_result(3, format!("jq: {error}\n")),
+            Err(error) => return jq_eval_error_result(&error),
         };
         for value in selected {
             saw_value = true;
@@ -16561,6 +16577,20 @@ fn eval_structured_filter(
         // the pipe split so the `| body` tail stays attached to the binding.
         if let Some(values) = try_eval_variable_binding(value, root, branch.trim(), env)? {
             output.extend(values);
+            continue;
+        }
+        // `reduce SOURCE as $VAR (INIT; UPDATE)` folds each value produced by
+        // SOURCE into an accumulator that starts at INIT. Handled before the
+        // pipe split so a `|` inside the body is not severed.
+        if let Some(result) = eval_reduce(value, root, branch.trim(), env)? {
+            output.push(result);
+            continue;
+        }
+        // `.[] |= UPDATE` (and `+=`, etc.) updates every value of an object or
+        // array in place, skipping unsafe object keys. Handled before the pipe
+        // split because `|=` contains a `|` that the split would otherwise cut.
+        if let Some(result) = eval_iterator_update(value, root, branch.trim(), env)? {
+            output.push(result);
             continue;
         }
         // Path-update assignments (`.path = rhs`, `.path |= f`, `.path += rhs`)
@@ -17032,6 +17062,21 @@ fn eval_structured_expr(
     if expr.is_empty() {
         return Ok(vec![value.clone()]);
     }
+    // A parenthesized sub-expression may itself be a comma generator or pipe
+    // (e.g. `([a], [b])` produced by `fromstream`'s stream argument). A pair of
+    // parens wrapping a top-level comma is not removed by `trim_outer_parens`,
+    // so strip one such pair here and re-enter the full filter evaluator.
+    if expr.starts_with('(') && expr.ends_with(')') {
+        let inner = &expr[1..expr.len() - 1];
+        if split_top_level(inner, ',').len() > 1 || find_jq_top_level_pipe(inner).is_some() {
+            return eval_structured_filter(value, root, inner.trim(), env);
+        }
+    }
+    // When the stripped expression still has a top-level comma or pipe (a paren
+    // pair was already removed above), re-enter the full filter evaluator.
+    if split_top_level(expr, ',').len() > 1 || find_jq_top_level_pipe(expr).is_some() {
+        return eval_structured_filter(value, root, expr, env);
+    }
     // A pipe segment may itself be a path-update assignment (e.g. the `.d = 4`
     // stage of `{...} | .d = 4 | del(.b)`); handle it here too.
     if let Some(updated) = try_eval_path_assignment(value, root, expr, env)? {
@@ -17116,11 +17161,99 @@ fn eval_structured_expr(
             .unwrap_or_default();
         return Ok(vec![JsonValue::Object(object)]);
     }
-    if let Some(result) = eval_conditional_expr(value, root, expr, env)? {
-        return Ok(vec![result]);
+    if let Some(results) = eval_conditional_expr(value, root, expr, env)? {
+        return Ok(results);
     }
     if let Some(inner) = function_arg(expr, "range") {
         return Ok(json_range_values(inner));
+    }
+    // `until(cond; update)` repeatedly applies `update` until `cond` is truthy,
+    // returning the final value. Bounded by JQ_MAX_ITERATIONS so a condition that
+    // never becomes true raises an ExecutionLimitError. Mirrors upstream
+    // control-builtins.ts `until`.
+    if let Some(inner) = function_arg(expr, "until") {
+        let args = split_top_level(inner, ';');
+        if args.len() == 2 {
+            let cond = args[0].trim();
+            let update = args[1].trim();
+            let mut current = value.clone();
+            for _ in 0..JQ_MAX_ITERATIONS {
+                let conds = eval_structured_filter(&current, root, cond, env)?;
+                if conds.iter().any(is_truthy) {
+                    return Ok(vec![current]);
+                }
+                let next = eval_structured_filter(&current, root, update, env)?;
+                match next.into_iter().next() {
+                    Some(value) => current = value,
+                    None => return Ok(vec![current]),
+                }
+            }
+            return Err(jq_iteration_limit_error("until"));
+        }
+    }
+    // `while(cond; update)` emits each value while `cond` stays truthy.
+    if let Some(inner) = function_arg(expr, "while") {
+        let args = split_top_level(inner, ';');
+        if args.len() == 2 {
+            let cond = args[0].trim();
+            let update = args[1].trim();
+            let mut results = Vec::new();
+            let mut current = value.clone();
+            for _ in 0..JQ_MAX_ITERATIONS {
+                let conds = eval_structured_filter(&current, root, cond, env)?;
+                if !conds.iter().any(is_truthy) {
+                    break;
+                }
+                results.push(current.clone());
+                let next = eval_structured_filter(&current, root, update, env)?;
+                match next.into_iter().next() {
+                    Some(value) => current = value,
+                    None => break,
+                }
+            }
+            if results.len() >= JQ_MAX_ITERATIONS {
+                return Err(jq_iteration_limit_error("while"));
+            }
+            return Ok(results);
+        }
+    }
+    // `repeat(update)` emits the input then repeatedly applies `update`,
+    // stopping when `update` yields no value. Bounded to terminate infinite
+    // generators (e.g. `repeat(.)`).
+    if let Some(inner) = function_arg(expr, "repeat") {
+        let update = inner.trim();
+        let mut results = Vec::new();
+        let mut current = value.clone();
+        for _ in 0..JQ_MAX_ITERATIONS {
+            results.push(current.clone());
+            let next = eval_structured_filter(&current, root, update, env)?;
+            match next.into_iter().next() {
+                Some(value) => current = value,
+                None => break,
+            }
+        }
+        if results.len() >= JQ_MAX_ITERATIONS {
+            return Err(jq_iteration_limit_error("repeat"));
+        }
+        return Ok(results);
+    }
+    // `recurse(f)` / `recurse(f; cond)` walk the value tree, emitting each node
+    // and recursing into the values produced by `f`. Depth-bounded.
+    if let Some(inner) = function_arg(expr, "recurse") {
+        let args = split_top_level(inner, ';');
+        let step = args[0].trim();
+        let cond = args.get(1).map(|c| c.trim());
+        let mut results = Vec::new();
+        let mut depth = 0usize;
+        jq_recurse(value, root, step, cond, env, &mut results, &mut depth)?;
+        return Ok(results);
+    }
+    // `fromstream(stream)` reconstructs a value from `[path, value]` stream
+    // pairs (the inverse of `tostream`). Dangerous object keys are dropped so a
+    // crafted stream cannot pollute the result.
+    if let Some(inner) = function_arg(expr, "fromstream") {
+        let items = eval_structured_filter(value, root, inner.trim(), env)?;
+        return Ok(vec![jq_fromstream(&items)]);
     }
     if let Some((left, op, right)) = split_binary_expr(expr, &["//", " or ", " and "]) {
         let left_value = eval_first(value, root, left, env)?;
@@ -17204,6 +17337,189 @@ fn eval_structured_expr(
     Err(format!("unsupported filter '{expr}'"))
 }
 
+/// Depth-bounded `recurse(step; cond?)` walk. Emits `value`, then recurses into
+/// each value produced by `step`, stopping a branch when `cond` (if given) is
+/// not truthy. Bounded by `JQ_MAX_ITERATIONS` to prevent unbounded recursion.
+fn jq_recurse(
+    value: &JsonValue,
+    root: &JsonValue,
+    step: &str,
+    cond: Option<&str>,
+    env: Option<&BTreeMap<String, String>>,
+    results: &mut Vec<JsonValue>,
+    depth: &mut usize,
+) -> Result<(), String> {
+    if *depth > JQ_MAX_ITERATIONS {
+        return Ok(());
+    }
+    *depth += 1;
+    if let Some(cond) = cond {
+        let conds = eval_structured_filter(value, root, cond, env)?;
+        if !conds.iter().any(is_truthy) {
+            return Ok(());
+        }
+    }
+    results.push(value.clone());
+    for next in eval_structured_filter(value, root, step, env)? {
+        if !next.is_null() {
+            jq_recurse(&next, root, step, cond, env, results, depth)?;
+        }
+    }
+    Ok(())
+}
+
+/// Reconstruct a value from a `[path, value]` pair stream (`fromstream`), the
+/// inverse of `tostream`. Dangerous object keys are skipped so a crafted stream
+/// cannot pollute the result. Mirrors upstream object-builtins.ts `fromstream`.
+fn jq_fromstream(items: &[JsonValue]) -> JsonValue {
+    let mut result = JsonValue::Null;
+    for item in items {
+        let JsonValue::Array(pair) = item else {
+            continue;
+        };
+        // End marker `[[]]` (single empty-path element) — skip.
+        if pair.len() == 1 {
+            if let Some(JsonValue::Array(path)) = pair.first() {
+                if path.is_empty() {
+                    continue;
+                }
+            }
+            continue;
+        }
+        if pair.len() != 2 {
+            continue;
+        }
+        let JsonValue::Array(path) = &pair[0] else {
+            continue;
+        };
+        let val = pair[1].clone();
+        if path.is_empty() {
+            result = val;
+            continue;
+        }
+        // Drop the whole assignment if any path segment is an unsafe object key.
+        if path
+            .iter()
+            .any(|p| matches!(p, JsonValue::String(key) if !is_safe_json_object_key(key)))
+        {
+            continue;
+        }
+        if result.is_null() {
+            result = match path[0] {
+                JsonValue::Number(_) => JsonValue::Array(Vec::new()),
+                _ => JsonValue::Object(JsonMap::new()),
+            };
+        }
+        result = json_set_path(&result, path, val);
+    }
+    result
+}
+
+/// Evaluate `reduce SOURCE as $VAR (INIT; UPDATE)`. Returns `Ok(None)` when the
+/// fragment is not a reduce form. Each value produced by SOURCE is bound to
+/// `$VAR` (as a JSON literal substituted into UPDATE) and folded into the
+/// accumulator that starts at INIT.
+fn eval_reduce(
+    value: &JsonValue,
+    root: &JsonValue,
+    expr: &str,
+    env: Option<&BTreeMap<String, String>>,
+) -> Result<Option<JsonValue>, String> {
+    let Some(rest) = expr.strip_prefix("reduce ") else {
+        return Ok(None);
+    };
+    let Some(as_pos) = find_jq_top_level_keyword(rest, "as") else {
+        return Ok(None);
+    };
+    let source_expr = rest[..as_pos].trim();
+    let after_as = rest[as_pos + " as ".len()..].trim_start();
+    let Some(var_name) = after_as.split_whitespace().next() else {
+        return Ok(None);
+    };
+    let Some(var_name) = var_name.strip_prefix('$') else {
+        return Ok(None);
+    };
+    if !is_jq_identifier(var_name) {
+        return Ok(None);
+    }
+    let after_var = after_as[1 + var_name.len()..].trim_start();
+    // The accumulator clause is `(INIT; UPDATE)`.
+    if !after_var.starts_with('(') || !after_var.ends_with(')') {
+        return Ok(None);
+    }
+    let inner = &after_var[1..after_var.len() - 1];
+    let parts = split_top_level(inner, ';');
+    if parts.len() != 2 {
+        return Ok(None);
+    }
+    let init_expr = parts[0].trim();
+    let update_expr = parts[1].trim();
+    let mut acc = eval_first(value, root, init_expr, env)?;
+    for item in eval_structured_filter(value, root, source_expr, env)? {
+        let literal = serde_json::to_string(&item).unwrap_or_else(|_| "null".to_string());
+        let substituted = substitute_jq_variable(update_expr, var_name, &literal);
+        acc = eval_first(&acc, root, &substituted, env)?;
+    }
+    Ok(Some(acc))
+}
+
+/// Evaluate `.[] OP rhs` iterator updates (`|=`, `+=`, `=`, etc.) where the
+/// left-hand side iterates every value of an object or array. Returns
+/// `Ok(None)` when the fragment is not an iterator update. Unsafe object keys
+/// are left untouched so dangerous-key values are never updated.
+fn eval_iterator_update(
+    value: &JsonValue,
+    root: &JsonValue,
+    expr: &str,
+    env: Option<&BTreeMap<String, String>>,
+) -> Result<Option<JsonValue>, String> {
+    let operators = [" |= ", " += ", " -= ", " *= ", " //= ", " = "];
+    let Some((op, op_pos)) = operators
+        .iter()
+        .filter_map(|op| find_jq_top_level_operator(expr, op).map(|pos| (*op, pos)))
+        .min_by_key(|(op, pos)| (*pos, std::cmp::Reverse(op.len())))
+    else {
+        return Ok(None);
+    };
+    let lhs = expr[..op_pos].trim();
+    if lhs != ".[]" {
+        return Ok(None);
+    }
+    let rhs = expr[op_pos + op.len()..].trim();
+    let apply = |current: &JsonValue| -> Result<JsonValue, String> {
+        match op {
+            " |= " => eval_first(current, root, rhs, env),
+            " = " => eval_first(value, root, rhs, env),
+            arithmetic => {
+                let rhs_value = eval_first(value, root, rhs, env)?;
+                let symbol = arithmetic.trim().trim_end_matches('=');
+                apply_json_arithmetic(current, &rhs_value, symbol)
+            }
+        }
+    };
+    match value {
+        JsonValue::Object(map) => {
+            let mut output = JsonMap::new();
+            for (key, child) in map {
+                if is_safe_json_object_key(key) {
+                    output.insert(key.clone(), apply(child)?);
+                } else {
+                    output.insert(key.clone(), child.clone());
+                }
+            }
+            Ok(Some(JsonValue::Object(output)))
+        }
+        JsonValue::Array(items) => {
+            let mut output = Vec::with_capacity(items.len());
+            for child in items {
+                output.push(apply(child)?);
+            }
+            Ok(Some(JsonValue::Array(output)))
+        }
+        _ => Ok(None),
+    }
+}
+
 fn eval_first(
     value: &JsonValue,
     root: &JsonValue,
@@ -17221,7 +17537,7 @@ fn eval_conditional_expr(
     root: &JsonValue,
     expr: &str,
     env: Option<&BTreeMap<String, String>>,
-) -> Result<Option<JsonValue>, String> {
+) -> Result<Option<Vec<JsonValue>>, String> {
     if !expr.starts_with("if ") || !expr.ends_with(" end") {
         return Ok(None);
     }
@@ -17250,17 +17566,19 @@ fn eval_conditional_expr(
             },
         };
         if is_truthy(&eval_first(value, root, condition, env)?) {
-            return Ok(Some(eval_first(value, root, branch, env)?));
+            // Use the full filter evaluator so branches like `empty` (zero
+            // values) or comma generators (multiple values) propagate.
+            return Ok(Some(eval_structured_filter(value, root, branch, env)?));
         }
         match tail {
             // Another elif clause: re-run the loop treating it as a fresh `if`.
             Some((next, true)) => remaining = next,
             // An else clause: evaluate the trailing branch.
             Some((else_expr, false)) => {
-                return Ok(Some(eval_first(value, root, else_expr, env)?));
+                return Ok(Some(eval_structured_filter(value, root, else_expr, env)?));
             }
             // No else: jq yields the input value unchanged.
-            None => return Ok(Some(value.clone())),
+            None => return Ok(Some(vec![value.clone()])),
         }
     }
 }
@@ -18407,19 +18725,69 @@ fn json_contains(value: &JsonValue, needle: &JsonValue) -> bool {
     }
 }
 
+/// Map a jq evaluation error string to a `CommandResult`. Iteration-limit
+/// errors (tagged with [`JQ_ITERATION_LIMIT_PREFIX`]) surface as an
+/// `ExecutionLimitError` with exit code [`crate::shell::EXECUTION_LIMIT_EXIT_CODE`];
+/// all other jq filter errors keep the generic exit code 3. Mirrors upstream
+/// `commands/jq/jq.ts` which special-cases `ExecutionLimitError`.
+fn jq_eval_error_result(error: &str) -> CommandResult {
+    if let Some(message) = error.strip_prefix(JQ_ITERATION_LIMIT_PREFIX) {
+        return stderr_result(
+            crate::shell::EXECUTION_LIMIT_EXIT_CODE,
+            format!("jq: {message}\n"),
+        );
+    }
+    stderr_result(3, format!("jq: {error}\n"))
+}
+
+/// Build the iteration-limit error string for jq loop builtins (`until`,
+/// `while`, `repeat`). The message matches upstream
+/// `control-builtins.ts` (`jq <name>: too many iterations (...)`).
+fn jq_iteration_limit_error(name: &str) -> String {
+    format!(
+        "{JQ_ITERATION_LIMIT_PREFIX}jq {name}: too many iterations ({JQ_MAX_ITERATIONS}), increase executionLimits.maxJqIterations"
+    )
+}
+
 fn json_range_values(inner: &str) -> Vec<JsonValue> {
     let args = split_top_level(inner, ';');
-    let (start, end) = if args.len() == 1 {
-        (0, args[0].trim().parse::<i64>().unwrap_or(0))
+    let (start, end, step) = if args.len() == 1 {
+        (0i64, args[0].trim().parse::<i64>().unwrap_or(0), 1i64)
+    } else if args.len() == 2 {
+        (
+            args[0].trim().parse::<i64>().unwrap_or(0),
+            args[1].trim().parse::<i64>().unwrap_or(0),
+            1,
+        )
     } else {
         (
             args[0].trim().parse::<i64>().unwrap_or(0),
             args[1].trim().parse::<i64>().unwrap_or(0),
+            args[2].trim().parse::<i64>().unwrap_or(1),
         )
     };
-    (start..end)
-        .map(|value| json_number(value as f64))
-        .collect()
+    // Cap output length to mirror upstream's range memory-exhaustion guard.
+    let mut result = Vec::new();
+    if step > 0 {
+        let mut i = start;
+        while i < end {
+            if result.len() >= JQ_MAX_RANGE {
+                break;
+            }
+            result.push(json_number(i as f64));
+            i += step;
+        }
+    } else if step < 0 {
+        let mut i = start;
+        while i > end {
+            if result.len() >= JQ_MAX_RANGE {
+                break;
+            }
+            result.push(json_number(i as f64));
+            i += step;
+        }
+    }
+    result
 }
 
 fn compare_json(left: &JsonValue, right: &JsonValue, op: &str) -> bool {

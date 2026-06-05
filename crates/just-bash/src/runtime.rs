@@ -136,6 +136,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
+    use crate::shell::EXECUTION_LIMIT_EXIT_CODE;
     use crate::{JustBashCustomCommandResult, UPSTREAM_DEFAULT_COMMAND_NAMES};
 
     fn bash() -> Bash {
@@ -12149,6 +12150,99 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         let r = env.exec("jq -n '[range(50000)] | length'");
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout.trim(), "50000");
+    }
+
+    #[test]
+    fn structured_data_jq_loop_iteration_limits_rows() {
+        // Mirrors jq.limits.test.ts:16-78 — until/while/repeat loop protection and
+        // natural termination. Infinite loops surface as an ExecutionLimitError
+        // (exit code 126, "too many iterations"); bounded loops complete.
+        let env = bash();
+
+        // until: infinite condition is bounded.
+        let r = env.exec("echo 'null' | jq 'until(false; .)'");
+        assert_eq!(r.exit_code, EXECUTION_LIMIT_EXIT_CODE);
+        assert!(
+            r.stderr.contains("too many iterations"),
+            "stderr was {:?}",
+            r.stderr
+        );
+        // until: terminating loop returns the final value.
+        let r = env.exec("echo '0' | jq 'until(. >= 5; . + 1)'");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout.trim(), "5");
+
+        // while: always-true condition is bounded.
+        let r = env.exec("echo '0' | jq '[while(true; . + 1)]'");
+        assert_eq!(r.exit_code, EXECUTION_LIMIT_EXIT_CODE);
+        assert!(r.stderr.contains("too many iterations"));
+        // while: terminating loop emits each value.
+        let r = env.exec("echo '1' | jq -c '[while(. < 5; . + 1)]'");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout.trim(), "[1,2,3,4]");
+
+        // repeat: identity produces an infinite stream and is bounded even when
+        // wrapped in limit(100000; ...) — the iteration limit re-propagates.
+        let r = env.exec("echo '1' | jq '[limit(100000; repeat(.))]'");
+        assert_eq!(r.exit_code, EXECUTION_LIMIT_EXIT_CODE);
+        assert!(r.stderr.contains("too many iterations"));
+        // repeat: an update that eventually returns empty terminates naturally.
+        let r =
+            env.exec("echo '5' | jq -c '[limit(10; repeat(if . > 0 then . - 1 else empty end))]'");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout.trim(), "[5,4,3,2,1,0]");
+
+        // recurse with a limit handles non-terminating recursion gracefully.
+        let r =
+            env.exec("echo '{\"a\":{\"a\":{\"a\":{\"a\":{}}}}}' | jq '[limit(10; recurse(.a?))]'");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn structured_data_jq_range_output_cap_rows() {
+        // Mirrors jq.limits.test.ts:98-116 — range() output is capped at 1M to
+        // prevent memory exhaustion, for the one-, two-, and three-arg forms.
+        let env = bash();
+        for filter in [
+            "jq -n '[range(2000000)] | length'",
+            "jq -n '[range(0; 2000000)] | length'",
+            "jq -n '[range(0; 2000000; 1)] | length'",
+        ] {
+            let r = env.exec(filter);
+            assert_eq!(r.exit_code, 0, "{filter}");
+            let length: u64 = r.stdout.trim().parse().expect("numeric length");
+            assert!(length <= 1_000_000, "{filter} produced {length}");
+        }
+    }
+
+    #[test]
+    fn structured_data_jq_fromstream_reduce_iterator_dangerous_key_rows() {
+        // Mirrors jq.prototype-pollution.test.ts:294/309/364 — fromstream,
+        // iterator-update, and reduce must all drop dangerous object keys.
+        let env = bash();
+
+        // fromstream reconstructs from a crafted stream but never writes
+        // __proto__ — the result is null (or {}), not a polluting object.
+        let r =
+            env.exec("echo 'null' | jq -c 'fromstream(([[\"__proto__\"], \"polluted\"], [[]]))'");
+        assert_eq!(r.exit_code, 0);
+        let out = r.stdout.trim().to_string();
+        assert!(out == "null" || out == "{}", "fromstream output {out:?}");
+
+        // `.[] |= update` updates only safe keys; the __proto__ entry keeps its
+        // original value (it is not run through the update filter).
+        let r = env.exec("echo '{\"a\":1,\"__proto__\":2}' | jq -c '.[] |= . + 10'");
+        assert_eq!(r.exit_code, 0);
+        let parsed: serde_json::Value = serde_json::from_str(r.stdout.trim()).expect("json");
+        assert_eq!(parsed["a"], serde_json::json!(11));
+
+        // reduce accumulating object keys drops dangerous keys, keeping only safe.
+        let r = env.exec(
+            "echo '[\"__proto__\", \"safe\", \"constructor\"]' | jq -c 'reduce .[] as $k ({}; .[$k] = 1)'",
+        );
+        assert_eq!(r.exit_code, 0);
+        let parsed: serde_json::Value = serde_json::from_str(r.stdout.trim()).expect("json");
+        assert_eq!(parsed, serde_json::json!({ "safe": 1 }));
     }
 
     #[test]
