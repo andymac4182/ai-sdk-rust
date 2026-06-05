@@ -5252,37 +5252,53 @@ impl<D: CommandDispatcher> Interpreter<D> {
     }
 
     fn execute_conditional(&mut self, expression: &str) -> ExecOutput {
-        let tokens = shell_words(expression);
-        let token_refs = tokens.iter().map(String::as_str).collect::<Vec<_>>();
+        // Lex the `[[ ... ]]` body into raw words so each operand keeps its
+        // parameter expansions / quoting, then expand each word through the
+        // real word-expansion path. `shell_words` collapses any word containing
+        // a `$var`/quoted part to the empty string, which silently corrupts
+        // numeric and string comparisons (e.g. `[[ -n "$VAR" ]]`,
+        // `[[ $1 -gt 0 ]]`). Tokenizing first preserves the operand structure.
+        let raw_tokens: Vec<String> = match Lexer::new(expression).tokenize() {
+            Ok(tokens) => tokens
+                .into_iter()
+                .filter_map(|token| match token.kind {
+                    TokenKind::Word(word) => Some(self.expand_word_to_string(&word)),
+                    _ => None,
+                })
+                .collect(),
+            Err(_) => shell_words(expression),
+        };
+        // Capture the raw operand names (pre-expansion) for `-v`, which takes a
+        // variable name rather than an expanded value.
+        let name_tokens = shell_words(expression);
+        let token_refs = raw_tokens.iter().map(String::as_str).collect::<Vec<_>>();
         let status = match token_refs.as_slice() {
+            // `-n value` is true when the expanded value is non-empty;
+            // `-z value` is true when it is empty.
             ["-n", value] => i32::from(value.is_empty()),
             ["-z", value] => i32::from(!value.is_empty()),
             // `-v name` succeeds when the named variable (or array element) is
-            // set. The operand is a variable name, not an expansion.
-            ["-v", name] => i32::from(!self.parameter_is_set(name)),
+            // set. The operand is a variable name, not an expansion, so use the
+            // unexpanded token.
+            ["-v", _] => {
+                let name = name_tokens.get(1).map(String::as_str).unwrap_or_default();
+                i32::from(!self.parameter_is_set(name))
+            }
             [left, operator, right] => {
-                let left = self.expand_inline_text(left);
-                let right = self.expand_inline_text(right);
                 let matched = match *operator {
                     "=" | "==" => left == right,
                     "!=" => left != right,
-                    "-eq" => parse_i64(&left) == parse_i64(&right),
-                    "-ne" => parse_i64(&left) != parse_i64(&right),
-                    "-lt" => parse_i64(&left) < parse_i64(&right),
-                    "-le" => parse_i64(&left) <= parse_i64(&right),
-                    "-gt" => parse_i64(&left) > parse_i64(&right),
-                    "-ge" => parse_i64(&left) >= parse_i64(&right),
+                    "-eq" => parse_i64(left) == parse_i64(right),
+                    "-ne" => parse_i64(left) != parse_i64(right),
+                    "-lt" => parse_i64(left) < parse_i64(right),
+                    "-le" => parse_i64(left) <= parse_i64(right),
+                    "-gt" => parse_i64(left) > parse_i64(right),
+                    "-ge" => parse_i64(left) >= parse_i64(right),
                     _ => false,
                 };
                 if matched { 0 } else { 1 }
             }
-            [word] => {
-                if self.expand_inline_text(word).is_empty() {
-                    1
-                } else {
-                    0
-                }
-            }
+            [word] => i32::from(word.is_empty()),
             _ => 1,
         };
         ExecOutput {
@@ -14823,5 +14839,175 @@ greet World",
         let r = shell()
             .exec("declare -a arr\narr[5]=value\nK=5\n(( x = arr[K] ))\necho \"got: ${arr[5]}\"");
         assert_eq!(r.stdout.trim(), "got: value", "L167");
+    }
+
+    /// R16JB closes portable rows in `packages/just-bash/src/syntax/
+    /// composition.test.ts` and `parse-errors.test.ts` that compose the Rust
+    /// shell's `if`/`case`/`while`/`for`/function/`local`/arithmetic features.
+    /// These rows depend on `[[ ... ]]` operands being expanded (positional
+    /// `$1`, quoted `"$VAR"`, `$((...))`), which the interpreter now does. Each
+    /// row fails if any of the composed control-flow primitives regress.
+    #[test]
+    fn jbpi_syntax_feature_composition_and_parse_error_rows_match_upstream() {
+        for (source, expected_stdout) in [
+            // composition.test.ts:39 — case statement nested inside an if block.
+            (
+                "export VAR=apple\nif [[ -n \"$VAR\" ]]; then\n  case $VAR in\n    apple) echo \"it's an apple\";;\n    *) echo \"unknown\";;\n  esac\nfi",
+                "it's an apple\n",
+            ),
+            // composition.test.ts:232 — arithmetic in a while-loop condition with
+            // a counter updated each iteration.
+            (
+                "export I=0\nwhile [[ $I -lt 3 ]]; do\n  echo \"i=$I\"\n  export I=$((I + 1))\ndone",
+                "i=0\ni=1\ni=2\n",
+            ),
+            // composition.test.ts:322 — `[[ $1 -gt 0 ]]` test expression inside a
+            // function, exercising positional-parameter expansion in `[[ ]]`.
+            (
+                "is_positive() {\n  if [[ $1 -gt 0 ]]; then\n    echo \"yes\"\n  else\n    echo \"no\"\n  fi\n}\nis_positive 5\nis_positive -3\nis_positive 0",
+                "yes\nno\nno\n",
+            ),
+            // composition.test.ts:393 — nested for loops with an arithmetic
+            // conditional guarding the body.
+            (
+                "for i in 1 2 3; do\n  for j in 1 2; do\n    if [[ $((i * j)) -gt 2 ]]; then\n      echo \"$i*$j=$((i * j))\"\n    fi\n  done\ndone",
+                "2*2=4\n3*1=3\n3*2=6\n",
+            ),
+            // composition.test.ts:407 — function combining `local`, a `for`
+            // loop over `$@`, a `case` with a glob pattern, and arithmetic.
+            (
+                "process_numbers() {\n  local sum=0\n  for n in $@; do\n    case $n in\n      [0-9]) sum=$((sum + n));;\n      *) echo \"skipping $n\";;\n    esac\n  done\n  echo \"sum=$sum\"\n}\nprocess_numbers 1 2 x 3 y 4",
+                "skipping x\nskipping y\nsum=10\n",
+            ),
+            // composition.test.ts:463 — arithmetic expansion compared in a while
+            // condition (`[[ $((N * N)) -le 10 ]]`) with a counter increment.
+            (
+                "export N=1\nwhile [[ $((N * N)) -le 10 ]]; do\n  echo \"$N squared is $((N * N))\"\n  export N=$((N + 1))\ndone",
+                "1 squared is 1\n2 squared is 4\n3 squared is 9\n",
+            ),
+        ] {
+            let r = shell().exec(source);
+            assert_eq!(r.stderr, "", "{source}");
+            assert_eq!(r.stdout, expected_stdout, "{source}");
+            assert_eq!(r.exit_code, 0, "{source}");
+        }
+
+        // parse-errors.test.ts:64 — `for 123 in ...` is a runtime error: bash
+        // validates the loop variable name and exits 1 with "not a valid
+        // identifier" (not a parse-time syntax error).
+        let r = shell().exec("for 123 in a b c; do echo $123; done");
+        assert_eq!(r.exit_code, 1, "L64 exit");
+        assert!(
+            r.stderr.contains("not a valid identifier"),
+            "L64 stderr: {:?}",
+            r.stderr
+        );
+    }
+
+    /// A faithful dispatcher for the `composition.test.ts` and `eval.test.ts`
+    /// rows that pipe interpreter output through real text filters. Each command
+    /// reproduces its just-bash behavior for the mapped inputs so the assertion
+    /// exercises genuine interpreter control flow (functions, `for` loops,
+    /// pipelines, `eval`) composed with faithful command semantics — it fails if
+    /// either side regresses.
+    #[derive(Default)]
+    struct CompositionCommands;
+
+    impl CommandDispatcher for CompositionCommands {
+        fn dispatch(
+            &mut self,
+            invocation: CommandInvocation,
+            files: &mut ShellVirtualFileSystem,
+        ) -> CommandResult {
+            match invocation.name.as_str() {
+                "echo" => fake_echo(&invocation.args),
+                "cat" => fake_cat(&invocation, files),
+                "grep" => fake_grep(&invocation, files),
+                "sort" => tee_fake_sort(&invocation),
+                "tr" => tee_fake_tr(&invocation),
+                "uniq" => {
+                    // GNU `uniq` collapses adjacent duplicate input lines.
+                    let mut out = String::new();
+                    let mut prev: Option<&str> = None;
+                    for line in invocation.stdin.lines() {
+                        if prev != Some(line) {
+                            out.push_str(line);
+                            out.push('\n');
+                            prev = Some(line);
+                        }
+                    }
+                    CommandResult::success(out)
+                }
+                "head" => {
+                    // `head -N` (or default 10) emits the first N input lines.
+                    let n = match invocation.args.first().map(String::as_str) {
+                        Some(flag) if flag.starts_with('-') => {
+                            flag.trim_start_matches('-').parse::<usize>().unwrap_or(10)
+                        }
+                        _ => 10,
+                    };
+                    let out = invocation
+                        .stdin
+                        .lines()
+                        .take(n)
+                        .map(|line| format!("{line}\n"))
+                        .collect::<String>();
+                    CommandResult::success(out)
+                }
+                _ => {
+                    CommandResult::failure(format!("{}: command not found\n", invocation.name), 127)
+                }
+            }
+        }
+    }
+
+    /// R16JB closes the `composition.test.ts` and `eval.test.ts` rows that pipe
+    /// interpreter output through faithful text filters: L425 pipes a function's
+    /// `for`-loop output through `sort -n | uniq | head -3`, and eval L75 runs a
+    /// piped command string through `eval`. Each row fails if the interpreter's
+    /// pipeline/function/`eval` wiring or the filter semantics regress.
+    #[test]
+    fn jbpi_syntax_composition_pipeline_filter_rows_match_upstream() {
+        let mut sh = Interpreter::new(CompositionCommands);
+        // composition.test.ts:425 — function output piped through filters.
+        let r = sh.exec(
+            "generate_data() {\n  for i in 3 1 4 1 5 9 2 6; do\n    echo $i\n  done\n}\ngenerate_data | sort -n | uniq | head -3",
+        );
+        assert_eq!(r.stdout, "1\n2\n3\n", "L425 stdout: {:?}", r.stdout);
+        assert_eq!(r.exit_code, 0, "L425 exit");
+
+        // eval.test.ts:75 — `eval` executes a piped command string.
+        let mut sh = Interpreter::new(CompositionCommands);
+        let r = sh.exec("eval \"echo hello | tr a-z A-Z\"");
+        assert_eq!(r.stdout, "HELLO\n", "eval L75 stdout: {:?}", r.stdout);
+        assert_eq!(r.exit_code, 0, "eval L75 exit");
+    }
+
+    /// R16JB closes additional portable parser/interpreter rows that exercise
+    /// the Rust shell's function/`local`/pipeline/`set -u` behavior:
+    /// `control-flow.test.ts:192` runs a function whose body pipes a file
+    /// through `cat | wc -l`; `set.test.ts:110` proves `$$` (and `set -u`) do
+    /// not abort. Each row fails if the composed behavior regresses.
+    #[test]
+    fn jbpi_syntax_function_pipeline_and_set_u_rows_match_upstream() {
+        // control-flow.test.ts:192 — a function pipes its file argument through
+        // `cat | wc -l`; the script preloads `/data.txt` with three lines.
+        let mut sh = shell();
+        sh.files_mut().write("/data.txt", "line1\nline2\nline3\n");
+        let r = sh.exec("countlines() { cat $1 | wc -l; }; countlines /data.txt");
+        assert_eq!(r.stdout.trim(), "3", "L192 stdout: {:?}", r.stdout);
+        assert_eq!(r.exit_code, 0, "L192 exit");
+
+        // set.test.ts:110 — `$$` must not trip `set -u` (nounset); the special
+        // parameter is always considered set, so the script exits 0 and prints
+        // a non-empty process-id token.
+        let r = shell().exec("set -u\necho $$");
+        assert_eq!(r.exit_code, 0, "L110 exit");
+        assert!(
+            !r.stdout.trim().is_empty(),
+            "L110 stdout non-empty: {:?}",
+            r.stdout
+        );
+        assert_eq!(r.stderr, "", "L110 stderr: {:?}", r.stderr);
     }
 }
