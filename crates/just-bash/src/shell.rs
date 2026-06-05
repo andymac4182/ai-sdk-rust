@@ -3511,6 +3511,12 @@ pub struct ShellState {
     /// exponent). Set by the arithmetic evaluator and drained by the enclosing
     /// command so the error is reported on stderr with a non-zero exit code.
     arith_error: Option<String>,
+    /// Exit status of the most recently executed command substitution. Bash
+    /// gives an assignment-only command (`x=$(cmd)`) the status of the command
+    /// substitution in its right-hand side; this records that status so the
+    /// assignment-only path can resolve `$?` correctly. Reset to `None` before
+    /// each simple command's assignments are expanded.
+    command_sub_status: Option<i32>,
 }
 
 /// Active `break`/`continue` signal propagating up through nested compound
@@ -3786,6 +3792,15 @@ impl<D: CommandDispatcher> Interpreter<D> {
             }
         }
 
+        // Mirror bash's `PIPESTATUS` array: after a pipeline runs, each stage's
+        // raw exit status (before `pipefail`/`!` collapse the pipeline's own
+        // status) is recorded so `${PIPESTATUS[@]}`/`${PIPESTATUS[n]}` can read
+        // it. A single-command pipeline records that one command's status.
+        self.state.set_array(
+            "PIPESTATUS",
+            statuses.iter().map(i32::to_string).collect::<Vec<_>>(),
+        );
+
         let mut status = if self.state.pipefail {
             statuses
                 .iter()
@@ -3869,6 +3884,9 @@ impl<D: CommandDispatcher> Interpreter<D> {
     }
 
     fn execute_simple_command(&mut self, command: &SimpleCommand, stdin: String) -> ExecOutput {
+        // Clear any prior command-substitution status so the assignment-only
+        // path below can detect a substitution in this command's own RHS.
+        self.state.command_sub_status = None;
         let assignments = self.expand_assignments(&command.assignments);
         if let Some(output) = self.take_arith_error() {
             return output;
@@ -3878,7 +3896,20 @@ impl<D: CommandDispatcher> Interpreter<D> {
             for assignment in assignments {
                 self.apply_assignment(assignment);
             }
-            return prepend_trace(ExecOutput::default(), trace);
+            // Bash: a command made only of assignments resolves `$?` to the exit
+            // status of the last command substitution in its right-hand side,
+            // or 0 when there was none (e.g. `x=$(false)` yields `$?` == 1,
+            // while `x=5` yields 0).
+            let exit_code = self.state.command_sub_status.take().unwrap_or(0);
+            self.state.last_status = exit_code;
+            return prepend_trace(
+                ExecOutput {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code,
+                },
+                trace,
+            );
         };
 
         let Some(name) = self.expand_word(name_word, true).into_iter().next() else {
@@ -4204,6 +4235,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
                             .iter()
                             .map(|word| self.expand_word_to_string(word))
                             .collect(),
+                        append: assignment.append,
                     }
                 } else if let Some(index) = assignment.index {
                     ExpandedAssignment::ArrayElement {
@@ -4244,8 +4276,18 @@ impl<D: CommandDispatcher> Interpreter<D> {
                     self.state.assign_var(name, value);
                 }
             }
-            ExpandedAssignment::Array { name, values } => {
-                self.state.arrays.insert(name, values);
+            ExpandedAssignment::Array {
+                name,
+                values,
+                append,
+            } => {
+                if append {
+                    // `arr+=(x y)` appends to the existing array rather than
+                    // replacing it; an unset array starts empty.
+                    self.state.arrays.entry(name).or_default().extend(values);
+                } else {
+                    self.state.arrays.insert(name, values);
+                }
             }
             ExpandedAssignment::ArrayElement {
                 name,
@@ -5185,6 +5227,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
             WordPart::Parameter(parameter) => self.expand_parameter(parameter, quoted),
             WordPart::CommandSubstitution { body, .. } => {
                 let output = self.exec_script(body);
+                self.state.command_sub_status = Some(output.exit_code);
                 let mut stdout = output.stdout;
                 while stdout.ends_with('\n') {
                     stdout.pop();
@@ -5659,6 +5702,7 @@ enum ExpandedAssignment {
     Array {
         name: String,
         values: Vec<String>,
+        append: bool,
     },
     ArrayElement {
         name: String,
@@ -5687,7 +5731,7 @@ fn format_expanded_assignment(assignment: &ExpandedAssignment) -> Option<String>
             if *append { "+=" } else { "=" },
             value = trace_quote_arg(value)
         )),
-        ExpandedAssignment::Array { name, values } => Some(format!(
+        ExpandedAssignment::Array { name, values, .. } => Some(format!(
             "{name}=({})",
             values
                 .iter()
@@ -7245,6 +7289,125 @@ mod tests {
                 line: 675,
                 script: "echo hello |& cat",
                 stdout: "hello\n",
+                stderr: "",
+                exit_code: 0,
+            },
+        ];
+
+        for case in cases {
+            let mut shell = Interpreter::new(TeeSemanticsCommands);
+            let result = shell.exec(case.script);
+            assert_eq!(
+                result.stdout, case.stdout,
+                "stdout for tee-plugin.test.ts:{}",
+                case.line
+            );
+            assert_eq!(
+                result.stderr, case.stderr,
+                "stderr for tee-plugin.test.ts:{}",
+                case.line
+            );
+            assert_eq!(
+                result.exit_code, case.exit_code,
+                "exit code for tee-plugin.test.ts:{}",
+                case.line
+            );
+        }
+    }
+
+    /// Closes the remaining just-bash-core `tee-plugin.test.ts` semantics-
+    /// preservation rows that depend on `PIPESTATUS`, assignment-only `$?`
+    /// propagation, and `if`-condition stderr handling. Upstream registers a
+    /// `TeePlugin` and asserts the wrapped run's stdout/stderr/exitCode equal a
+    /// plain run; the Rust port has no tee transform, so the equivalent proof is
+    /// that the interpreter emits the exact bash-correct output for each row.
+    /// Each assertion fails if `PIPESTATUS` capture, the `result=$(cmd)` exit-
+    /// status rule, `pipefail`, or `if cmd 2>&1` stderr routing regresses.
+    #[test]
+    fn just_bash_core_tee_pipestatus_and_assignment_rows_match_plain_exec() {
+        struct Case {
+            line: u32,
+            script: &'static str,
+            stdout: &'static str,
+            stderr: &'static str,
+            exit_code: i32,
+        }
+
+        let cases = [
+            // tee-plugin.test.ts:409 stderr preserved for compound commands: an
+            // `if` whose condition redirects stderr to stdout. `ls` fails, so the
+            // error text reaches stdout, the condition is false, and the `if`
+            // resolves to exit 0 with no `then` body run.
+            Case {
+                line: 409,
+                script: "if ls /no_such_path_xyz 2>&1; then echo y; fi",
+                stdout: "ls: /no_such_path_xyz: No such file or directory\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:578 command substitution with a failing inner
+            // command: `result=$(grep nope /dev/null 2>&1)` captures empty output
+            // and `$?` becomes grep's exit (1, no match), printed by the echo.
+            Case {
+                line: 578,
+                script: "result=$(grep nope /dev/null 2>&1); echo \"got:$result:$?\"",
+                stdout: "got::1\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:655 PIPESTATUS array preserved after a 3-stage
+            // pipeline: false|true|false -> exit codes 1 0 1.
+            Case {
+                line: 655,
+                script: "false | true | false; echo \"${PIPESTATUS[@]}\"",
+                stdout: "1 0 1\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:659 PIPESTATUS for a 2-command pipeline:
+            // echo (0) | grep nomatch (1) -> 0 1.
+            Case {
+                line: 659,
+                script: "echo hello | grep nomatch; echo \"${PIPESTATUS[@]}\"",
+                stdout: "0 1\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:665 PIPESTATUS with mixed success/failure read
+            // by index: true|false|true -> 0 1 0.
+            Case {
+                line: 665,
+                script: "true | false | true; echo \"${PIPESTATUS[0]} ${PIPESTATUS[1]} ${PIPESTATUS[2]}\"",
+                stdout: "0 1 0\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:679 pipeline in an || chain with a PIPESTATUS
+            // check: echo|grep nope fails (exit 1) so the || branch runs and
+            // prints the captured 0 1 statuses.
+            Case {
+                line: 679,
+                script: "echo hello | grep nope || echo \"fallback:${PIPESTATUS[@]}\"",
+                stdout: "fallback:0 1\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:693 pipefail rightmost-failure exit code: with
+            // `set -o pipefail`, false|true reports the pipeline status 1.
+            Case {
+                line: 693,
+                script: "set -o pipefail; false | true; echo $?",
+                stdout: "1\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:697 pipefail with the pipeline in an && chain:
+            // false|true is a failure under pipefail, so the || branch prints
+            // "fail".
+            Case {
+                line: 697,
+                script: "set -o pipefail; false | true && echo ok || echo fail",
+                stdout: "fail\n",
                 stderr: "",
                 exit_code: 0,
             },
