@@ -31157,7 +31157,9 @@ fn command_history(state: &mut ExecState<'_>, args: &[String]) -> CommandResult 
 
     // `-c` clears the stored history and prints nothing.
     if args.first().map(String::as_str) == Some("-c") {
-        state.env.insert("BASH_HISTORY".to_string(), "[]".to_string());
+        state
+            .env
+            .insert("BASH_HISTORY".to_string(), "[]".to_string());
         return CommandResult::default();
     }
 
@@ -31183,10 +31185,7 @@ fn command_history(state: &mut ExecState<'_>, args: &[String]) -> CommandResult 
 /// empty history.
 fn parse_bash_history(raw: Option<&str>) -> Vec<String> {
     let raw = raw.unwrap_or("[]").trim();
-    match serde_json::from_str::<Vec<String>>(raw) {
-        Ok(entries) => entries,
-        Err(_) => Vec::new(),
-    }
+    serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
 }
 
 /// `clear` - clear the terminal screen. Mirrors upstream

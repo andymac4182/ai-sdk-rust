@@ -935,8 +935,7 @@ and exhibited clearly, with a label attached.\n";
 
         // L20 `history -c` clears the list; a later `history` in the same exec
         // prints nothing.
-        let cleared = with_history(Some("[\"echo hello\",\"ls -la\"]"))
-            .exec("history -c; history");
+        let cleared = with_history(Some("[\"echo hello\",\"ls -la\"]")).exec("history -c; history");
         assert_eq!(cleared.stdout, "", "L20 stdout");
         assert_eq!(cleared.exit_code, 0, "L20 exit");
 
@@ -950,8 +949,8 @@ and exhibited clearly, with a label attached.\n";
 
         // L39 a numeric argument limits output to the last `n` entries, keeping
         // their original line numbers.
-        let limited = with_history(Some("[\"cmd1\",\"cmd2\",\"cmd3\",\"cmd4\",\"cmd5\"]"))
-            .exec("history 2");
+        let limited =
+            with_history(Some("[\"cmd1\",\"cmd2\",\"cmd3\",\"cmd4\",\"cmd5\"]")).exec("history 2");
         assert_eq!(limited.stdout, "    4  cmd4\n    5  cmd5\n", "L39 stdout");
         assert_eq!(limited.exit_code, 0, "L39 exit");
     }
