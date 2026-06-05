@@ -90,7 +90,11 @@ pub struct Assignment {
     pub value: Option<Word>,
     pub append: bool,
     pub array: Option<Vec<Word>>,
-    pub index: Option<usize>,
+    /// Raw subscript text from a `name[subscript]=value` element assignment, if
+    /// any (e.g. `0`, `i+1`, `'foo'`, `"my key"`). The subscript is resolved at
+    /// apply time: for indexed arrays it is evaluated as arithmetic, for
+    /// associative arrays it is dequoted into a literal string key.
+    pub subscript: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1502,6 +1506,17 @@ fn parse_parameter_expansion(content: &str) -> ParameterExpansion {
         }
     }
 
+    // A bare array/subscript reference such as `arr[i+1]` or `A['key']` carries
+    // no parameter operator: the bracketed subscript would otherwise be misread
+    // as a `+`/`-`/`:` operator. Detect a `name[...]` that ends at the closing
+    // `]` and pass it through untouched so the subscript resolver handles it.
+    if parse_subscript_reference(content).is_some() {
+        return ParameterExpansion {
+            parameter: content.to_string(),
+            operation: None,
+        };
+    }
+
     // Operators introduced by a name followed by `@`, `^`, `,`, `:` (substring),
     // or `/` (pattern substitution). These must be checked before the `:-`/`=`
     // default-value operators, but the default operators also start with `:`,
@@ -2068,9 +2083,9 @@ fn serialize_simple_command(command: &SimpleCommand, here_docs: &mut Vec<String>
 
 fn serialize_assignment(assignment: &Assignment) -> String {
     let mut target = assignment.name.clone();
-    if let Some(index) = assignment.index {
+    if let Some(subscript) = &assignment.subscript {
         target.push('[');
-        target.push_str(&index.to_string());
+        target.push_str(subscript);
         target.push(']');
     }
     if assignment.append {
@@ -2263,7 +2278,7 @@ fn make_pipestatus_save(original_indices: &[usize]) -> Pipeline {
                     }),
                     append: false,
                     array: None,
-                    index: None,
+                    subscript: None,
                 })
                 .collect(),
             name: None,
@@ -2830,7 +2845,7 @@ impl Parser {
             };
 
             if command.name.is_none()
-                && let Some((name, index, append, value)) = split_assignment_word(&word)
+                && let Some((name, subscript, append, value)) = split_assignment_word(&word)
             {
                 self.advance();
                 let array = if matches!(self.current().kind, TokenKind::LeftParen) {
@@ -2843,8 +2858,30 @@ impl Parser {
                     value,
                     append,
                     array,
-                    index,
+                    subscript,
                 });
+                continue;
+            }
+
+            // `declare -A A=(...)` / `local arr=(...)`: an array literal that
+            // follows a declaration-builtin command name. The lexer split the
+            // `(...)` into a `LeftParen`-delimited word list, so fold it back
+            // into a single `name=(elem ...)` arg the builtin can parse.
+            if command_name_is_declaration(&command.name)
+                && let Some(prefix) = word.plain_text()
+                && prefix.ends_with('=')
+                && matches!(self.peek(1), TokenKind::LeftParen)
+            {
+                self.advance();
+                let elements = self.parse_array_assignment()?;
+                let serialized = elements
+                    .iter()
+                    .map(serialize_word)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                command
+                    .args
+                    .push(Word::literal(format!("{prefix}({serialized})")));
                 continue;
             }
 
@@ -3233,41 +3270,144 @@ impl TokenKindName {
     }
 }
 
-fn split_assignment_word(word: &Word) -> Option<(String, Option<usize>, bool, Option<Word>)> {
+fn split_assignment_word(word: &Word) -> Option<(String, Option<String>, bool, Option<Word>)> {
     let WordPart::Literal(first) = word.parts.first()? else {
         return None;
     };
-    let equals = first.find('=')?;
-    let mut lhs = first[..equals].to_string();
-    let append = lhs.ends_with('+');
-    if append {
-        lhs.pop();
-    }
-    let (name, index) = parse_assignment_target(&lhs)?;
+    // A bare or numeric-subscript assignment lives entirely in the first literal
+    // part (`name=...`, `arr[0]=...`). A string-key subscript (`arr['foo']=...`)
+    // spans quoted parts, so when the first part has no top-level `=` but does
+    // open a `[` subscript, fold the subsequent quoted/literal parts into the
+    // left-hand side until the matching `]` and the following `=`.
+    if let Some(equals) = assignment_equals_position(first) {
+        let mut lhs = first[..equals].to_string();
+        let append = lhs.ends_with('+');
+        if append {
+            lhs.pop();
+        }
+        let (name, subscript) = parse_assignment_target(&lhs)?;
 
-    let mut value_parts = Vec::new();
-    if equals + 1 < first.len() {
-        value_parts.push(WordPart::Literal(first[equals + 1..].to_string()));
-    }
-    value_parts.extend(word.parts.iter().skip(1).cloned());
+        let mut value_parts = Vec::new();
+        if equals + 1 < first.len() {
+            value_parts.push(WordPart::Literal(first[equals + 1..].to_string()));
+        }
+        value_parts.extend(word.parts.iter().skip(1).cloned());
 
-    Some((
-        name,
-        index,
-        append,
-        Some(Word { parts: value_parts }).filter(|value| !value.parts.is_empty()),
-    ))
+        return Some((
+            name,
+            subscript,
+            append,
+            Some(Word { parts: value_parts }).filter(|value| !value.parts.is_empty()),
+        ));
+    }
+
+    // No top-level `=` in the first part: only a quoted-subscript element
+    // assignment can reach here, and only if the first part opens a subscript.
+    if !first.contains('[') {
+        return None;
+    }
+    split_quoted_subscript_assignment(word)
 }
 
-fn parse_assignment_target(lhs: &str) -> Option<(String, Option<usize>)> {
+/// Handle `name['key']=value` / `name["key"]=value` where the lexer split the
+/// quoted key into its own `WordPart`. Reconstructs the literal key and the
+/// remaining value parts.
+fn split_quoted_subscript_assignment(
+    word: &Word,
+) -> Option<(String, Option<String>, bool, Option<Word>)> {
+    let WordPart::Literal(first) = word.parts.first()? else {
+        return None;
+    };
+    let open = first.find('[')?;
+    let name = first[..open].to_string();
+    if !is_valid_name(&name) {
+        return None;
+    }
+    let mut key = first[open + 1..].to_string();
+    let mut index = 1usize;
+    // Accumulate key parts until a literal part closes the subscript with `]`.
+    loop {
+        let part = word.parts.get(index)?;
+        match part {
+            WordPart::SingleQuoted(value) | WordPart::Escaped(value) => key.push_str(value),
+            WordPart::DoubleQuoted(parts) => {
+                for inner in parts {
+                    match inner {
+                        WordPart::Literal(value)
+                        | WordPart::SingleQuoted(value)
+                        | WordPart::Escaped(value) => key.push_str(value),
+                        _ => return None,
+                    }
+                }
+            }
+            WordPart::Literal(value) => {
+                if let Some(close) = value.find(']') {
+                    key.push_str(&value[..close]);
+                    let rest = &value[close + 1..];
+                    let (append, rest) = match rest.strip_prefix('+') {
+                        Some(stripped) => (true, stripped),
+                        None => (false, rest),
+                    };
+                    let rest = rest.strip_prefix('=')?;
+                    let mut value_parts = Vec::new();
+                    if !rest.is_empty() {
+                        value_parts.push(WordPart::Literal(rest.to_string()));
+                    }
+                    value_parts.extend(word.parts.iter().skip(index + 1).cloned());
+                    return Some((
+                        name,
+                        Some(key),
+                        append,
+                        Some(Word { parts: value_parts }).filter(|v| !v.parts.is_empty()),
+                    ));
+                }
+                key.push_str(value);
+            }
+            _ => return None,
+        }
+        index += 1;
+    }
+}
+
+/// Locate the `=` that separates an assignment target from its value, skipping
+/// any `=` that appears inside a `[...]` subscript (so `arr['a=b']=v` splits at
+/// the trailing `=`). Returns `None` if no top-level `=` exists.
+fn assignment_equals_position(text: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for (index, character) in text.char_indices() {
+        match character {
+            '[' => depth += 1,
+            ']' if depth > 0 => depth -= 1,
+            '=' if depth == 0 => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// True when the (already-set) command name is a declaration builtin that
+/// accepts `name=(...)` array-literal arguments (`declare`, `typeset`, `local`).
+fn command_name_is_declaration(name: &Option<Word>) -> bool {
+    name.as_ref()
+        .and_then(Word::plain_text)
+        .is_some_and(|text| matches!(text.as_str(), "declare" | "typeset" | "local"))
+}
+
+fn parse_assignment_target(lhs: &str) -> Option<(String, Option<String>)> {
     if is_valid_name(lhs) {
         return Some((lhs.to_string(), None));
     }
-    let (name, index) = parse_array_reference(lhs)?;
-    let ArrayIndex::Index(index) = index else {
+    // `name[subscript]` — accept any subscript text (numeric index for indexed
+    // arrays, or a string key for associative arrays). The subscript is resolved
+    // at apply time once the array's type is known.
+    let open = lhs.find('[')?;
+    let inner = lhs.strip_suffix(']')?;
+    let name = &lhs[..open];
+    if !is_valid_name(name) {
         return None;
-    };
-    Some((name.to_string(), Some(index)))
+    }
+    let subscript = &inner[open + 1..];
+    Some((name.to_string(), Some(subscript.to_string())))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -3461,10 +3601,45 @@ impl AliasTable {
     }
 }
 
+/// An associative array (`declare -A`). Keys are arbitrary strings; insertion
+/// order is preserved so `${A[@]}`/`${!A[@]}` enumerate deterministically (bash
+/// leaves the order unspecified, but a stable order keeps the Rust port
+/// reproducible).
+#[derive(Debug, Clone, Default)]
+struct AssocArray {
+    values: BTreeMap<String, String>,
+    order: Vec<String>,
+}
+
+impl AssocArray {
+    fn set(&mut self, key: String, value: String) {
+        if !self.values.contains_key(&key) {
+            self.order.push(key.clone());
+        }
+        self.values.insert(key, value);
+    }
+
+    fn get(&self, key: &str) -> Option<&String> {
+        self.values.get(key)
+    }
+
+    fn ordered_values(&self) -> Vec<String> {
+        self.order
+            .iter()
+            .filter_map(|key| self.values.get(key).cloned())
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ShellState {
     env: BTreeMap<String, String>,
     arrays: BTreeMap<String, Vec<String>>,
+    /// Associative arrays (`declare -A`): name -> ordered key/value map. A name
+    /// in this map is treated as an associative array; subscripts are literal
+    /// string keys rather than arithmetic indices. Insertion order is preserved
+    /// in a parallel key-order list so `${A[@]}` is deterministic.
+    assoc_arrays: BTreeMap<String, AssocArray>,
     aliases: AliasTable,
     functions: BTreeMap<String, FunctionDef>,
     positionals: Vec<String>,
@@ -3584,6 +3759,7 @@ impl ShellState {
         }
         self.env.remove(name);
         self.arrays.remove(name);
+        self.assoc_arrays.remove(name);
     }
 
     fn declare_local(&mut self, name: String, value: Option<String>) -> bool {
@@ -3848,6 +4024,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
             Command::Subshell(body) => {
                 let saved_env = self.state.env.clone();
                 let saved_arrays = self.state.arrays.clone();
+                let saved_assoc_arrays = self.state.assoc_arrays.clone();
                 let saved_xtrace = self.state.xtrace;
                 // A subshell runs in a fresh execution context: any enclosing
                 // loop is invisible to it, so `break`/`continue` inside the
@@ -3862,6 +4039,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 self.state.subshell_depth -= 1;
                 self.state.env = saved_env;
                 self.state.arrays = saved_arrays;
+                self.state.assoc_arrays = saved_assoc_arrays;
                 self.state.xtrace = saved_xtrace;
                 self.state.loop_depth = saved_loop_depth;
                 self.state.loop_control = saved_loop_control;
@@ -4237,10 +4415,10 @@ impl<D: CommandDispatcher> Interpreter<D> {
                             .collect(),
                         append: assignment.append,
                     }
-                } else if let Some(index) = assignment.index {
+                } else if let Some(subscript) = &assignment.subscript {
                     ExpandedAssignment::ArrayElement {
                         name: assignment.name.clone(),
-                        index,
+                        subscript: subscript.clone(),
                         value: assignment
                             .value
                             .as_ref()
@@ -4281,7 +4459,56 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 values,
                 append,
             } => {
-                if append {
+                if self.state.assoc_arrays.contains_key(&name) {
+                    // Associative-array literal: each element is `[key]=value`.
+                    if !append {
+                        self.state
+                            .assoc_arrays
+                            .insert(name.clone(), AssocArray::default());
+                    }
+                    for entry in values {
+                        if let Some((key, value)) = parse_bracket_entry(&entry) {
+                            let key = dequote_subscript(&key);
+                            let value = dequote_subscript(&value);
+                            self.state
+                                .assoc_arrays
+                                .entry(name.clone())
+                                .or_default()
+                                .set(key, value);
+                        }
+                    }
+                } else if values
+                    .iter()
+                    .any(|entry| parse_bracket_entry(entry).is_some())
+                {
+                    // Indexed array with explicit `[index]=value` subscripts
+                    // (possibly mixed with positional entries). Each subscript is
+                    // evaluated as arithmetic; bare entries fill the next slot.
+                    if !append {
+                        self.state.arrays.insert(name.clone(), Vec::new());
+                    }
+                    let mut next = self
+                        .state
+                        .arrays
+                        .get(&name)
+                        .map_or(0, |existing| existing.len());
+                    for entry in values {
+                        let (index, value) = match parse_bracket_entry(&entry) {
+                            Some((subscript, value)) => {
+                                let index =
+                                    usize::try_from(self.eval_arithmetic(&subscript)).unwrap_or(0);
+                                (index, value)
+                            }
+                            None => (next, entry),
+                        };
+                        let slot = self.state.arrays.entry(name.clone()).or_default();
+                        if slot.len() <= index {
+                            slot.resize(index + 1, String::new());
+                        }
+                        slot[index] = value;
+                        next = index + 1;
+                    }
+                } else if append {
                     // `arr+=(x y)` appends to the existing array rather than
                     // replacing it; an unset array starts empty.
                     self.state.arrays.entry(name).or_default().extend(values);
@@ -4291,18 +4518,31 @@ impl<D: CommandDispatcher> Interpreter<D> {
             }
             ExpandedAssignment::ArrayElement {
                 name,
-                index,
+                subscript,
                 value,
                 append,
             } => {
-                let values = self.state.arrays.entry(name).or_default();
-                if values.len() <= index {
-                    values.resize(index + 1, String::new());
-                }
-                if append {
-                    values[index].push_str(&value);
+                if self.state.assoc_arrays.contains_key(&name) {
+                    let key = dequote_subscript(&subscript);
+                    let entry = self.state.assoc_arrays.entry(name).or_default();
+                    if append {
+                        let mut previous = entry.get(&key).cloned().unwrap_or_default();
+                        previous.push_str(&value);
+                        entry.set(key, previous);
+                    } else {
+                        entry.set(key, value);
+                    }
                 } else {
-                    values[index] = value;
+                    let index = usize::try_from(self.eval_arithmetic(&subscript)).unwrap_or(0);
+                    let values = self.state.arrays.entry(name).or_default();
+                    if values.len() <= index {
+                        values.resize(index + 1, String::new());
+                    }
+                    if append {
+                        values[index].push_str(&value);
+                    } else {
+                        values[index] = value;
+                    }
                 }
             }
         }
@@ -4560,19 +4800,61 @@ impl<D: CommandDispatcher> Interpreter<D> {
     }
 
     fn execute_declare(&mut self, args: &[String]) -> ExecOutput {
-        let mut declare_array = false;
-        for arg in args {
+        let mut declare_indexed = false;
+        let mut declare_assoc = false;
+        let mut index = 0;
+        while index < args.len() {
+            let arg = &args[index];
+            index += 1;
             match arg.as_str() {
-                "-a" | "-A" => declare_array = true,
-                _ if declare_array && is_valid_name(arg) => {
-                    self.state.arrays.entry(arg.clone()).or_default();
-                }
+                "-a" => declare_indexed = true,
+                "-A" => declare_assoc = true,
+                // Other single-flag attributes (`-i`, `-r`, `-x`, ...) do not
+                // affect array typing here; ignore them for the array path.
+                _ if arg.starts_with('-') && arg.len() == 2 => {}
                 _ if is_valid_name(arg) => {
-                    self.state.env.entry(arg.clone()).or_default();
+                    if declare_assoc {
+                        // `declare -A name` registers an associative array but
+                        // does NOT reset an existing one (bash behaviour).
+                        self.state.assoc_arrays.entry(arg.clone()).or_default();
+                    } else if declare_indexed {
+                        self.state.arrays.entry(arg.clone()).or_default();
+                    } else {
+                        self.state.env.entry(arg.clone()).or_default();
+                    }
                 }
                 _ => {
-                    if let Some((name, value)) = split_assignment_text(arg) {
-                        self.state.assign_var(name, value);
+                    // `name=...` — may be a scalar assignment or an array
+                    // literal `name=(...)` (possibly spanning multiple args
+                    // because the lexer split on whitespace inside the parens).
+                    if let Some(equals) = assignment_equals_position(arg) {
+                        let name = arg[..equals].to_string();
+                        let rest = &arg[equals + 1..];
+                        if let Some(first) = rest.strip_prefix('(') {
+                            // Gather the parenthesised body across args until the
+                            // closing `)`.
+                            let mut body = first.to_string();
+                            while !body.contains(')') && index < args.len() {
+                                body.push(' ');
+                                body.push_str(&args[index]);
+                                index += 1;
+                            }
+                            let body = body.strip_suffix(')').unwrap_or(&body);
+                            if declare_assoc && is_valid_name(&name) {
+                                let entry = self.state.assoc_arrays.entry(name).or_default();
+                                for token in split_array_literal(body) {
+                                    if let Some((key, value)) = parse_bracket_entry(&token) {
+                                        entry.set(dequote_subscript(&key), value);
+                                    }
+                                }
+                            } else if is_valid_name(&name) {
+                                let values: Vec<String> =
+                                    split_array_literal(body).into_iter().collect();
+                                self.state.arrays.insert(name, values);
+                            }
+                        } else if is_valid_name(&name) {
+                            self.state.assign_var(name, rest.to_string());
+                        }
                     }
                 }
             }
@@ -5253,6 +5535,18 @@ impl<D: CommandDispatcher> Interpreter<D> {
     }
 
     fn expand_parameter(&mut self, parameter: &ParameterExpansion, quoted: bool) -> Vec<String> {
+        // Resolve a dynamic array subscript (`${arr[i]}`, `${A[$key]}`,
+        // `${arr[i+1]}`) into a concrete subscript before lookup. Indexed-array
+        // subscripts are evaluated as arithmetic; associative-array subscripts
+        // have their `$`-parameters expanded and are used as literal keys.
+        if let Some(resolved) = self.resolve_dynamic_subscript(&parameter.parameter) {
+            let parameter = ParameterExpansion {
+                parameter: resolved,
+                operation: parameter.operation.clone(),
+            };
+            return self.expand_parameter(&parameter, quoted);
+        }
+
         if let Some(ParameterOperation::Length) = &parameter.operation {
             return vec![
                 self.lookup_parameter(&parameter.parameter)
@@ -5313,11 +5607,19 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 )]
             }
             Some(ParameterOperation::Indirect) => {
-                // `${!var}`: when `var` names an `arr[@]`-style reference, expand
-                // the underlying array; otherwise treat the value as a plain
-                // parameter name.
+                // `${!var}`: indirect expansion. When the indirected-through value
+                // names an `arr[@]`-style reference, expand the underlying array's
+                // VALUES (bash `ref="arr[@]"; ${!ref}` yields the elements);
+                // otherwise treat the value as a plain parameter name.
                 let target = value;
                 if let Some((array, ArrayIndex::All)) = parse_array_reference(&target) {
+                    if let Some(assoc) = self.state.assoc_arrays.get(array) {
+                        let values = assoc.ordered_values();
+                        if !quoted {
+                            return values;
+                        }
+                        return vec![values.join(" ")];
+                    }
                     if let Some(values) = self.state.arrays.get(array) {
                         if !quoted {
                             return values.clone();
@@ -5607,6 +5909,57 @@ impl<D: CommandDispatcher> Interpreter<D> {
         chars[start as usize..end as usize].iter().collect()
     }
 
+    /// If `parameter` is `name[subscript]` with a subscript that still needs
+    /// resolution, return the rewritten `name[resolved]` form; otherwise `None`.
+    /// Prevents recursion by returning `None` once the subscript is a literal
+    /// numeric index, `@`/`*`, or (for assoc arrays) a `$`-free key.
+    fn resolve_dynamic_subscript(&mut self, parameter: &str) -> Option<String> {
+        let (name, subscript) = parse_subscript_reference(parameter)?;
+        if matches!(subscript, "@" | "*") {
+            return None;
+        }
+        let name = name.to_string();
+        if self.state.assoc_arrays.contains_key(&name) {
+            // Associative array: expand `$`-parameters in the key, but only
+            // rewrite if there is something to expand (avoid recursion).
+            if !subscript.contains('$') {
+                return None;
+            }
+            let key = self.expand_inline_dollar(subscript);
+            return Some(format!("{name}[{key}]"));
+        }
+        // Indexed array: a bare numeric subscript is already resolved.
+        let trimmed = dequote_subscript(subscript);
+        if trimmed.parse::<usize>().is_ok() {
+            return None;
+        }
+        let index = self.eval_arithmetic(&trimmed);
+        Some(format!("{name}[{index}]"))
+    }
+
+    /// Expand `$name` / `${name}` parameter references inside a raw subscript
+    /// string, leaving other text intact. Used to resolve associative-array
+    /// variable keys such as `${A[$key]}` and `${A["$i$i"]}`.
+    fn expand_inline_dollar(&mut self, text: &str) -> String {
+        let chars: Vec<char> = text.chars().collect();
+        let mut result = String::new();
+        let mut index = 0;
+        while index < chars.len() {
+            if chars[index] == '$' {
+                let (value, next) = self.expand_here_doc_dollar(&chars, index);
+                result.push_str(&value);
+                index = next;
+            } else if chars[index] == '\'' || chars[index] == '"' {
+                // Drop surrounding quote characters; their content is literal.
+                index += 1;
+            } else {
+                result.push(chars[index]);
+                index += 1;
+            }
+        }
+        result
+    }
+
     fn lookup_parameter(&self, parameter: &str) -> String {
         match parameter {
             "?" => self.state.last_status.to_string(),
@@ -5625,6 +5978,20 @@ impl<D: CommandDispatcher> Interpreter<D> {
                     .unwrap_or_default()
             }
             _ => {
+                // Associative-array reference (`${A[key]}`, `${A[@]}`): resolve
+                // before the indexed-array path since assoc subscripts are
+                // arbitrary strings rather than numeric indices.
+                if let Some((array, subscript)) = parse_subscript_reference(parameter) {
+                    if let Some(assoc) = self.state.assoc_arrays.get(array) {
+                        return match subscript {
+                            "@" | "*" => assoc.ordered_values().join(" "),
+                            key => assoc
+                                .get(&dequote_subscript(key))
+                                .cloned()
+                                .unwrap_or_default(),
+                        };
+                    }
+                }
                 if let Some((array, index)) = parse_array_reference(parameter) {
                     return self
                         .state
@@ -5648,7 +6015,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
         if matches!(parameter, "?" | "#" | "@" | "*" | "$") {
             return true;
         }
-        if parse_array_reference(parameter).is_some() {
+        if parse_subscript_reference(parameter).is_some() {
             return !self.lookup_parameter(parameter).is_empty();
         }
         self.state.lookup_var(parameter).is_some()
@@ -5706,7 +6073,10 @@ enum ExpandedAssignment {
     },
     ArrayElement {
         name: String,
-        index: usize,
+        /// Raw subscript text (e.g. `0`, `i+1`, `foo`). Whether it is treated as
+        /// an arithmetic index or a literal associative-array key is decided at
+        /// apply time from the array's declared type.
+        subscript: String,
         value: String,
         append: bool,
     },
@@ -5741,11 +6111,11 @@ fn format_expanded_assignment(assignment: &ExpandedAssignment) -> Option<String>
         )),
         ExpandedAssignment::ArrayElement {
             name,
-            index,
+            subscript,
             value,
             append,
         } => Some(format!(
-            "{name}[{index}]{}{value}",
+            "{name}[{subscript}]{}{value}",
             if *append { "+=" } else { "=" },
             value = trace_quote_arg(value)
         )),
@@ -5977,6 +6347,103 @@ fn quote_export_value(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// Parse a `[subscript]=value` array-literal entry into its raw subscript and
+/// value. Returns `None` for a plain positional entry (no leading `[...]=`).
+fn parse_bracket_entry(entry: &str) -> Option<(String, String)> {
+    if !entry.starts_with('[') {
+        return None;
+    }
+    let mut depth = 0i32;
+    let bytes = entry.char_indices();
+    for (index, character) in bytes {
+        match character {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    let subscript = entry[1..index].to_string();
+                    let rest = &entry[index + 1..];
+                    let value = rest.strip_prefix('=').unwrap_or(rest).to_string();
+                    return Some((subscript, value));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Split an array-literal body (the text between the parens of `(...)`) into its
+/// whitespace-separated entries, keeping `[subscript]=value` tokens intact even
+/// when the subscript or value contains spaces inside quotes.
+fn split_array_literal(body: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    for character in body.chars() {
+        match quote {
+            Some(q) => {
+                current.push(character);
+                if character == q {
+                    quote = None;
+                }
+            }
+            None => match character {
+                '\'' | '"' => {
+                    quote = Some(character);
+                    current.push(character);
+                }
+                '[' => {
+                    depth += 1;
+                    current.push(character);
+                }
+                ']' if depth > 0 => {
+                    depth -= 1;
+                    current.push(character);
+                }
+                c if c.is_whitespace() && depth == 0 => {
+                    if !current.is_empty() {
+                        tokens.push(std::mem::take(&mut current));
+                    }
+                }
+                c => current.push(c),
+            },
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// Strip a single matching pair of surrounding single or double quotes from an
+/// associative-array subscript so `'foo'`/`"foo"` both key on `foo`.
+fn dequote_subscript(subscript: &str) -> String {
+    let trimmed = subscript.trim();
+    if trimmed.len() >= 2 {
+        let bytes = trimmed.as_bytes();
+        let first = bytes[0];
+        let last = bytes[trimmed.len() - 1];
+        if (first == b'\'' || first == b'"') && first == last {
+            return trimmed[1..trimmed.len() - 1].to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Split a `name[subscript]` reference into its name and raw (still-quoted)
+/// subscript text, accepting any subscript (numeric, `@`/`*`, or string key).
+fn parse_subscript_reference(parameter: &str) -> Option<(&str, &str)> {
+    let open = parameter.find('[')?;
+    let inner = parameter.strip_suffix(']')?;
+    let name = &parameter[..open];
+    if !is_valid_name(name) {
+        return None;
+    }
+    Some((name, &inner[open + 1..]))
+}
+
 fn parse_array_reference(parameter: &str) -> Option<(&str, ArrayIndex)> {
     let open = parameter.find('[')?;
     let close = parameter.strip_suffix(']')?;
@@ -6159,7 +6626,18 @@ enum ArithToken {
 #[derive(Debug, Clone)]
 enum ArithLValue {
     Scalar(String),
-    Element { name: String, index: usize },
+    /// An indexed-array element `name[index]`: the subscript was evaluated as
+    /// arithmetic to a numeric position.
+    Element {
+        name: String,
+        index: usize,
+    },
+    /// An associative-array element `name[key]`: the subscript is the literal
+    /// string key (bash does not arithmetic-evaluate assoc subscripts).
+    AssocElement {
+        name: String,
+        key: String,
+    },
 }
 
 struct ArithmeticEvaluator<'a> {
@@ -6430,6 +6908,17 @@ impl<'a> ArithmeticEvaluator<'a> {
         };
         self.advance();
         if matches!(self.current(), ArithToken::LeftBracket) {
+            // For an associative array the subscript is a LITERAL string key
+            // (bash: `A[K]` keys on "K", not on K's value); for an indexed array
+            // it is an arithmetic expression yielding a numeric index.
+            if self.state.assoc_arrays.contains_key(&name) {
+                self.advance();
+                let key = self.collect_bracket_key();
+                if matches!(self.current(), ArithToken::RightBracket) {
+                    self.advance();
+                }
+                return Some(ArithLValue::AssocElement { name, key });
+            }
             self.advance();
             let index = self.parse();
             if matches!(self.current(), ArithToken::RightBracket) {
@@ -6442,6 +6931,21 @@ impl<'a> ArithmeticEvaluator<'a> {
         }
     }
 
+    /// Reconstruct the literal key text of an associative-array subscript from
+    /// the arithmetic token stream (the original quotes were already stripped by
+    /// the tokenizer). A single identifier or number token is the key verbatim.
+    fn collect_bracket_key(&mut self) -> String {
+        let mut key = String::new();
+        while !matches!(self.current(), ArithToken::RightBracket | ArithToken::End) {
+            match self.advance() {
+                ArithToken::Ident(text) => key.push_str(&text),
+                ArithToken::Number(value) => key.push_str(&value.to_string()),
+                _ => {}
+            }
+        }
+        key
+    }
+
     fn read_lvalue(&mut self, lvalue: &ArithLValue) -> i64 {
         match lvalue {
             ArithLValue::Scalar(name) => self.resolve_name(name),
@@ -6450,6 +6954,13 @@ impl<'a> ArithmeticEvaluator<'a> {
                 .arrays
                 .get(name)
                 .and_then(|values| values.get(*index))
+                .and_then(|value| parse_arith_literal(value.trim()))
+                .unwrap_or(0),
+            ArithLValue::AssocElement { name, key } => self
+                .state
+                .assoc_arrays
+                .get(name)
+                .and_then(|assoc| assoc.get(key))
                 .and_then(|value| parse_arith_literal(value.trim()))
                 .unwrap_or(0),
         }
@@ -6466,6 +6977,13 @@ impl<'a> ArithmeticEvaluator<'a> {
                     values.resize(*index + 1, String::new());
                 }
                 values[*index] = value.to_string();
+            }
+            ArithLValue::AssocElement { name, key } => {
+                self.state
+                    .assoc_arrays
+                    .entry(name.clone())
+                    .or_default()
+                    .set(key.clone(), value.to_string());
             }
         }
     }
@@ -13959,5 +14477,106 @@ greet World",
         let range = shell().exec("echo {1..100000}");
         assert_eq!(range.exit_code, 0, ":220 exit");
         assert!(range.stdout.len() < 1_000_000, ":220 output length bound");
+    }
+
+    /// Covers the portable associative-array rows of
+    /// `packages/just-bash/src/interpreter/assoc-array.test.ts` through the Rust
+    /// shell. Each tuple mirrors an upstream `it(...)` `Bash().exec(...)`
+    /// stdout assertion, so the test fails if assoc-array declaration,
+    /// string-key assignment, arithmetic-context literal-key semantics, or
+    /// `${A[@]}` enumeration regress.
+    #[test]
+    fn jbpi_interpreter_assoc_array_rows_match_upstream() {
+        // L13 declare -A then `arr['foo']=bar` assignment and lookup.
+        let r = shell().exec("declare -A arr\narr['foo']=bar\necho \"${arr['foo']}\"");
+        assert_eq!(r.stdout.trim(), "bar", "L13");
+        assert_eq!(r.exit_code, 0, "L13 exit");
+
+        // L24 associative-array literal initialisation `declare -A A=(...)`.
+        let r = shell()
+            .exec("declare -A A=(['foo']=bar ['spam']=42)\necho \"${A['foo']} ${A['spam']}\"");
+        assert_eq!(r.stdout.trim(), "bar 42", "L24");
+        assert_eq!(r.exit_code, 0, "L24 exit");
+
+        // L34 redeclaring `declare -A dict` does NOT reset the existing array.
+        let r = shell()
+            .exec("declare -A dict\ndict['foo']=hello\ndeclare -A dict\necho \"${dict['foo']}\"");
+        assert_eq!(r.stdout.trim(), "hello", "L34");
+
+        // L47 single-quoted string key containing a space.
+        let r = shell().exec("declare -A arr\narr['my key']=value\necho \"${arr['my key']}\"");
+        assert_eq!(r.stdout.trim(), "value", "L47");
+
+        // L57 double-quoted string key containing a space.
+        let r = shell().exec("declare -A arr\narr[\"my key\"]=value\necho \"${arr[\"my key\"]}\"");
+        assert_eq!(r.stdout.trim(), "value", "L57");
+
+        // L69 read an assoc element in arithmetic: `(( x = A['x'] ))`.
+        let r = shell().exec("declare -A A\nA['x']=42\n(( x = A['x'] ))\necho \"after: x=$x\"");
+        assert!(r.stdout.contains("42"), "L69 stdout {}", r.stdout);
+
+        // L83 assign to an assoc element in arithmetic with a string key.
+        let r = shell().exec("declare -A A\n(( A['foo'] = 123 ))\necho \"${A['foo']}\"");
+        assert_eq!(r.stdout.trim(), "123", "L83");
+
+        // L93 a bare subscript is a LITERAL key for assoc arrays (`A[K]` keys
+        // on "K", not on K's value).
+        let r = shell().exec("declare -A A\nK=5\nV=42\n(( A[K] = V ))\necho \"${A['K']}\"");
+        assert_eq!(r.stdout.trim(), "42", "L93");
+
+        // L106 string value coerced to integer in arithmetic (`'y'` -> 0).
+        let r = shell().exec(
+            "declare -A A\nA['x']=42\n(( x = A['x'] ))\n(( A['y'] = 'y' ))\necho $x ${A['y']}",
+        );
+        assert_eq!(r.stdout.trim(), "42 0", "L106");
+
+        // L119 compound assignment operator on an assoc element.
+        let r = shell()
+            .exec("declare -A A\nA['count']=10\n(( A['count'] += 5 ))\necho \"${A['count']}\"");
+        assert_eq!(r.stdout.trim(), "15", "L119");
+
+        // L130 post-increment on an assoc element.
+        let r = shell().exec("declare -A A\nA['x']=10\n(( A['x']++ ))\necho \"${A['x']}\"");
+        assert_eq!(r.stdout.trim(), "11", "L130");
+
+        // L182 `${A[@]}` returns all values (order-independent: sorted check).
+        let r = shell().exec("declare -A A\nA['a']=1\nA['b']=2\nA['c']=3\necho \"${A[@]}\"");
+        let mut values: Vec<&str> = r.stdout.trim().split(' ').collect();
+        values.sort_unstable();
+        assert_eq!(values, ["1", "2", "3"], "L182");
+
+        // L196 an unset key expands to the empty string.
+        let r = shell().exec("declare -A A\nA['foo']=bar\necho \"[${A['nonexistent']}]\"");
+        assert_eq!(r.stdout.trim(), "[]", "L196");
+
+        // L220 variable key lookup: `${A[$key]}` and `${A["$i$i"]}`.
+        let r = shell().exec(
+            "declare -A A\nA[\"aa\"]=b\nA[\"foo\"]=bar\nkey=foo\necho ${A[$key]}\ni=a\necho ${A[\"$i$i\"]}",
+        );
+        assert_eq!(r.stdout.trim(), "bar\nb", "L220");
+
+        // L234 self-reference assignment form `bar=(['key']='value1')`.
+        let r = shell().exec("declare -A bar\nbar=(['key']='value1')\necho ${bar['key']}");
+        assert_eq!(r.stdout.trim(), "value1", "L234");
+    }
+
+    /// Covers the portable indexed-array arithmetic-subscript rows of
+    /// `assoc-array.test.ts` through the Rust shell: arithmetic expressions and
+    /// variable VALUES are used for indexed-array subscripts (unlike assoc
+    /// arrays, which key on literal text).
+    #[test]
+    fn jbpi_interpreter_indexed_array_arithmetic_subscript_rows_match_upstream() {
+        // L154 arithmetic expressions in indices: `${arr[i]} ${arr[i+1]}`.
+        let r = shell().exec(
+            "declare -a arr\narr[0]=zero\narr[1]=one\narr[2]=two\ni=1\necho \"${arr[i]} ${arr[i+1]}\"",
+        );
+        assert_eq!(r.stdout.trim(), "one two", "L154");
+        assert_eq!(r.exit_code, 0, "L154 exit");
+
+        // L167 variable VALUE used for an indexed subscript in arithmetic:
+        // `(( x = arr[K] ))` reads arr[5] when K=5.
+        let r = shell()
+            .exec("declare -a arr\narr[5]=value\nK=5\n(( x = arr[K] ))\necho \"got: ${arr[5]}\"");
+        assert_eq!(r.stdout.trim(), "got: value", "L167");
     }
 }
