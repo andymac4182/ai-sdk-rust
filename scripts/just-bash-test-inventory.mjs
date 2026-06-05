@@ -6361,6 +6361,40 @@ const justBashEncodingPipelineByteEmitCaseGroups = [
   },
 ];
 
+const r16jbHistoryCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/history/history.test.ts',
+    lines: [5, 12, 20, 30, 39],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'history_command_listing_clear_and_limit_rows_match_upstream',
+    notes:
+      'r16jb implements the portable history command in the Rust exec dispatcher: it reads the BASH_HISTORY JSON string array and lists entries with right-aligned 5-width line numbers, returns empty for no history, prints help mentioning "command history", clears the list with -c so a later history in the same exec is empty, and limits output to the last n entries (keeping their original numbering). Each upstream it(...) row is asserted byte-for-byte through the real Bash runtime.',
+  },
+];
+
+const r16jbClearHostnameCaseGroups = [
+  {
+    file: 'packages/just-bash/src/commands/clear/clear.test.ts',
+    lines: [5, 12],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest:
+      'clear_command_emits_ansi_sequence_and_help_rows_match_upstream',
+    notes:
+      'r16jb implements the portable clear command in the Rust exec dispatcher: `clear` emits the exact ANSI erase-display + cursor-home sequence (ESC[2J ESC[H) and `clear --help` prints help text mentioning the command and the terminal it clears. Asserted byte-for-byte through the real Bash runtime.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/hostname/hostname.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'hostname_command_returns_localhost_row_matches_upstream',
+    notes:
+      'r16jb implements the portable hostname command in the Rust exec dispatcher: in the sandboxed environment `hostname` always returns "localhost\\n" with exit 0. The L12 command-substitution row (`echo $(hostname)`) stays pending until the runtime exec path expands $(...) command substitution.',
+  },
+];
+
 const r10jbCommandAwkCaseGroups = [
   {
     file: 'packages/just-bash/src/commands/awk/awk.parsing.test.ts',
@@ -6684,6 +6718,8 @@ function caseOverrideFor(testCase) {
     ...justBashCoreSerializeCaseGroups,
     ...justBashTransformPluginsTeeCaseGroups,
     ...justBashEncodingPipelineByteEmitCaseGroups,
+    ...r16jbClearHostnameCaseGroups,
+    ...r16jbHistoryCaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&

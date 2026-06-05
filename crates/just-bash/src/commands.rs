@@ -180,6 +180,9 @@ const PORTABLE_BUILTINS: &[(&str, Builtin)] = &[
     ("timeout", Builtin::Timeout),
     ("which", Builtin::Which),
     ("whoami", Builtin::Whoami),
+    ("hostname", Builtin::Hostname),
+    ("clear", Builtin::Clear),
+    ("history", Builtin::History),
 ];
 
 const NETWORK_BUILTINS: &[(&str, Builtin)] = &[("curl", Builtin::Curl)];
@@ -268,6 +271,9 @@ pub enum Builtin {
     Timeout,
     Which,
     Whoami,
+    Hostname,
+    Clear,
+    History,
     Curl,
 }
 
