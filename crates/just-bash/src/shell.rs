@@ -11425,6 +11425,98 @@ greet World",
         }
     }
 
+    /// R15JB closes additional portable rows in
+    /// `packages/just-bash/src/interpreter/prototype-pollution.test.ts` that the
+    /// in-process interpreter already handles without external shells: prototype
+    /// keywords (`__proto__`, `constructor`, ...) used as `declare`d, `eval`-set,
+    /// `eval`-defined, and `unset -f` function/variable names, including
+    /// array assignment via `eval`, indirect `eval` variable naming, `mapfile`
+    /// into a keyword-named array, `read` in a pipeline subshell, and `return`
+    /// from a keyword-named function. Each tuple mirrors one upstream `it(...)`
+    /// `Bash().exec(...)` assertion; the `stdout`-checked rows fail if expansion
+    /// or builtin dispatch regresses, and the two exit-code-only upstream rows
+    /// (L268 pipeline `read`, L766 `mapfile`) assert only the documented exit 0.
+    #[test]
+    fn r15jb_interpreter_prototype_pollution_builtin_rows_match_upstream() {
+        // stdout-asserting rows: (line, source, expected_stdout).
+        for (line, source, expected_stdout) in [
+            // L404 `declare -r` accepts a prototype-keyword variable name.
+            (
+                "L404",
+                "declare -r __proto__=readonly_value; echo $__proto__",
+                "readonly_value\n",
+            ),
+            // L413 `declare -i` integer attribute on a keyword-named variable.
+            (
+                "L413",
+                "declare -i constructor=42; echo $constructor",
+                "42\n",
+            ),
+            // L587 `eval` assigning a keyword-named variable.
+            (
+                "L587",
+                "eval '__proto__=evaled'; echo $__proto__",
+                "evaled\n",
+            ),
+            // L594 `eval` defining a function whose name is a keyword.
+            (
+                "L594",
+                "eval 'constructor() { echo func; }'; constructor",
+                "func\n",
+            ),
+            // L603 nested `eval` assigning a keyword-named variable.
+            (
+                "L603",
+                "eval 'eval \"__proto__=nested\"'; echo $__proto__",
+                "nested\n",
+            ),
+            // L632 `eval` using an expanded variable as the assignment target name.
+            (
+                "L632",
+                "varname=\"__proto__\"\neval \"${varname}=evaled_value\"\necho $__proto__",
+                "evaled_value\n",
+            ),
+            // L643 `eval` assigning an array to a keyword-named variable.
+            (
+                "L643",
+                "eval \"__proto__=(a b c)\"\necho ${__proto__[@]}",
+                "a b c\n",
+            ),
+            // L787 `unset -f` removes a keyword-named function.
+            (
+                "L787",
+                "constructor() { echo \"func\"; }\nunset -f constructor\nconstructor 2>/dev/null || echo \"function unset\"",
+                "function unset\n",
+            ),
+            // L928 `return` from a keyword-named function sets `$?`.
+            (
+                "L928",
+                "__proto__() {\n  return 42\n}\n__proto__\necho $?",
+                "42\n",
+            ),
+        ] {
+            let mut sh = shell();
+            let result = sh.exec(source);
+            assert_eq!(result.stdout, expected_stdout, "{line} stdout {source:?}");
+            assert_eq!(result.exit_code, 0, "{line} exit {source:?}");
+        }
+
+        // Exit-code-only rows: upstream asserts only `exitCode === 0`.
+        for (line, source) in [
+            // L268 `read` in a pipeline runs in a subshell; only exit 0 is asserted.
+            ("L268", "echo hello | read constructor; echo $constructor"),
+            // L766 `mapfile` into a keyword-named array; only exit 0 is asserted.
+            (
+                "L766",
+                "printf 'a\\nb\\nc\\n' | { mapfile __proto__; echo ${__proto__[@]}; }",
+            ),
+        ] {
+            let mut sh = shell();
+            let result = sh.exec(source);
+            assert_eq!(result.exit_code, 0, "{line} exit {source:?}");
+        }
+    }
+
     /// JBC-50 closes the upstream `local` builtin rows
     /// (packages/just-bash/src/interpreter/builtins/local.test.ts) against the
     /// portable Rust shell interpreter. Each row exercises function-scoped

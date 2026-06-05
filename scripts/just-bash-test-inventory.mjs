@@ -1993,6 +1993,16 @@ const r10jbInterpreterCoreCaseGroups = [
     notes:
       'R10JB verifies JavaScript prototype keywords (constructor, __proto__, prototype, hasOwnProperty, ...) are treated as ordinary bash identifiers as array values/elements, parameter expansions, comparisons, function/alias/local names, while-loop conditions, subshells, and command substitutions.',
   },
+  {
+    file: 'packages/just-bash/src/interpreter/prototype-pollution.test.ts',
+    lines: [268, 404, 413, 587, 594, 603, 632, 643, 766, 787, 928],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::prototype-pollution',
+    rustTest:
+      'r15jb_interpreter_prototype_pollution_builtin_rows_match_upstream',
+    notes:
+      'R15JB verifies prototype keywords (__proto__, constructor, ...) used as declare -r/-i targets, eval-set/eval-defined/unset -f function and variable names (including eval array assignment and indirect eval naming), mapfile into a keyword-named array, read in a pipeline subshell, and return from a keyword-named function. The stdout rows assert exact output; the two exit-code-only upstream rows (L268 pipeline read, L766 mapfile) assert only exit 0.',
+  },
 ];
 
 const jbc16CaseGroups = [
