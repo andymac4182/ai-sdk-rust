@@ -6638,6 +6638,306 @@ mod tests {
         Interpreter::new(FakeCommands::default())
     }
 
+    /// A faithful command dispatcher for the additional `tee-plugin.test.ts`
+    /// semantics-preservation rows. Each command behaves like its real
+    /// just-bash counterpart for the inputs the mapped scripts feed it, so the
+    /// assertion exercises genuine interpreter control flow (brace expansion,
+    /// here-strings, `for` loops, group/`|&` pipelines, functions with `local`)
+    /// composed with real command semantics — it fails if either regresses.
+    #[derive(Default)]
+    struct TeeSemanticsCommands;
+
+    impl CommandDispatcher for TeeSemanticsCommands {
+        fn dispatch(
+            &mut self,
+            invocation: CommandInvocation,
+            files: &mut ShellVirtualFileSystem,
+        ) -> CommandResult {
+            match invocation.name.as_str() {
+                "echo" => fake_echo(&invocation.args),
+                "cat" => fake_cat(&invocation, files),
+                "grep" => fake_grep(&invocation, files),
+                "[" | "test" => fake_test(&invocation.args),
+                "wc" if invocation.args.first().map(String::as_str) == Some("-l") => {
+                    // GNU `wc -l` counts newline characters in the input.
+                    let count = invocation.stdin.matches('\n').count();
+                    CommandResult::success(format!("{count}\n"))
+                }
+                "tr" => tee_fake_tr(&invocation),
+                "sort" => tee_fake_sort(&invocation),
+                "printf" => tee_fake_printf(&invocation.args),
+                "ls" => tee_fake_ls(&invocation, files),
+                _ => {
+                    CommandResult::failure(format!("{}: command not found\n", invocation.name), 127)
+                }
+            }
+        }
+    }
+
+    /// Minimal faithful `tr SET1 SET2` translating each input character. Supports
+    /// the `a-z`/`A-Z` ranges and single-character sets used by the mapped rows.
+    fn tee_fake_tr(invocation: &CommandInvocation) -> CommandResult {
+        let expand = |set: &str| -> Vec<char> {
+            // Interpret the backslash escapes real `tr` accepts in its sets.
+            let unescaped = set
+                .replace("\\n", "\n")
+                .replace("\\t", "\t")
+                .replace("\\\\", "\\");
+            let chars: Vec<char> = unescaped.chars().collect();
+            let mut out = Vec::new();
+            let mut i = 0;
+            while i < chars.len() {
+                if i + 2 < chars.len() && chars[i + 1] == '-' {
+                    let (start, end) = (chars[i], chars[i + 2]);
+                    for code in (start as u32)..=(end as u32) {
+                        if let Some(c) = char::from_u32(code) {
+                            out.push(c);
+                        }
+                    }
+                    i += 3;
+                } else {
+                    out.push(chars[i]);
+                    i += 1;
+                }
+            }
+            out
+        };
+        let Some(set1) = invocation.args.first() else {
+            return CommandResult::failure("tr: missing operand\n", 1);
+        };
+        let set2: Vec<char> = invocation
+            .args
+            .get(1)
+            .map(|s| expand(s))
+            .unwrap_or_default();
+        let from = expand(set1);
+        let stdout: String = invocation
+            .stdin
+            .chars()
+            .map(|c| {
+                if let Some(idx) = from.iter().position(|&f| f == c) {
+                    // Real `tr` maps any source char past the end of SET2 to the
+                    // last char of SET2.
+                    set2.get(idx).or_else(|| set2.last()).copied().unwrap_or(c)
+                } else {
+                    c
+                }
+            })
+            .collect();
+        CommandResult::success(stdout)
+    }
+
+    /// Faithful `sort` supporting the default ascending order and `-r` reverse.
+    fn tee_fake_sort(invocation: &CommandInvocation) -> CommandResult {
+        let reverse = invocation.args.iter().any(|a| a == "-r");
+        let mut lines = invocation
+            .stdin
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        lines.sort();
+        if reverse {
+            lines.reverse();
+        }
+        let mut stdout = lines.join("\n");
+        if !stdout.is_empty() {
+            stdout.push('\n');
+        }
+        CommandResult::success(stdout)
+    }
+
+    /// Faithful `printf FORMAT ARGS...` covering the `%s`, `%d`, `%0Nd`, and
+    /// `\n` conversions the mapped rows use, cycling the format over the
+    /// argument list exactly like real `printf`.
+    fn tee_fake_printf(args: &[String]) -> CommandResult {
+        let Some(format) = args.first() else {
+            return CommandResult::failure("printf: usage: printf format [arguments]\n", 2);
+        };
+        let format = format.replace("\\n", "\n").replace("\\t", "\t");
+        let rest = &args[1..];
+        let specs = format.matches('%').count();
+        let mut out = String::new();
+        let mut arg_index = 0;
+        loop {
+            let mut chars = format.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c != '%' {
+                    out.push(c);
+                    continue;
+                }
+                // Parse an optional flag/width prefix then the conversion char.
+                let mut spec = String::new();
+                while let Some(&n) = chars.peek() {
+                    if n.is_ascii_digit() || n == '-' || n == '.' {
+                        spec.push(n);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                let Some(conv) = chars.next() else { break };
+                if conv == '%' {
+                    out.push('%');
+                    continue;
+                }
+                let arg = rest.get(arg_index).cloned().unwrap_or_default();
+                arg_index += 1;
+                match conv {
+                    's' => out.push_str(&arg),
+                    'd' => {
+                        let value = arg.parse::<i64>().unwrap_or(0);
+                        if let Some(width) = spec.strip_prefix('0') {
+                            let width: usize = width.parse().unwrap_or(0);
+                            out.push_str(&format!("{value:0width$}"));
+                        } else {
+                            out.push_str(&value.to_string());
+                        }
+                    }
+                    _ => out.push_str(&arg),
+                }
+            }
+            if specs == 0 || arg_index >= rest.len() {
+                break;
+            }
+        }
+        CommandResult::success(out)
+    }
+
+    /// Faithful `ls` returning the just-bash "No such file or directory" error
+    /// (exit 2) for the missing paths the mapped rows reference.
+    fn tee_fake_ls(
+        invocation: &CommandInvocation,
+        files: &ShellVirtualFileSystem,
+    ) -> CommandResult {
+        let path = invocation
+            .args
+            .iter()
+            .find(|a| !a.starts_with('-'))
+            .cloned()
+            .unwrap_or_else(|| ".".to_string());
+        if files.read_to_string(&path).is_some() {
+            return CommandResult::success(format!("{path}\n"));
+        }
+        CommandResult::failure(format!("ls: {path}: No such file or directory\n"), 2)
+    }
+
+    /// Closes the remaining just-bash-core `tee-plugin.test.ts` "TeePlugin
+    /// semantics preservation" rows that exercise interpreter control flow
+    /// (brace expansion, here-strings, `for` loops, group/`|&` pipelines,
+    /// functions with `local`/`test`, command substitution) composed with
+    /// faithful command behavior. Upstream registers a `TeePlugin` and asserts
+    /// the wrapped run's stdout/stderr/exitCode equal the plain run — i.e. the
+    /// transform never perturbs observable shell semantics. The Rust port has no
+    /// tee transform, so the equivalent proof is that the interpreter produces
+    /// the exact bash-correct stdout/stderr/exit code for each construct. Each
+    /// assertion fails if the corresponding interpreter or command semantics
+    /// regress.
+    #[test]
+    fn just_bash_core_tee_semantics_control_flow_and_command_rows_match_plain_exec() {
+        struct Case {
+            line: u32,
+            script: &'static str,
+            stdout: &'static str,
+            stderr: &'static str,
+            exit_code: i32,
+        }
+
+        let cases = [
+            // tee-plugin.test.ts:419 nested command substitution with pipeline.
+            // `wc -l` counts the three newlines emitted by `echo -e 'a\nb\nc'`.
+            Case {
+                line: 419,
+                script: "echo \"count: $(echo -e 'a\\nb\\nc' | wc -l)\"",
+                stdout: "count: 3\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:441 here-string fed into a pipeline; `tr a-z A-Z`
+            // upper-cases the here-string body.
+            Case {
+                line: 441,
+                script: "cat <<< \"hello world\" | tr a-z A-Z",
+                stdout: "HELLO WORLD\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:457 function with `local` variable and the `[`
+            // test builtin; `check yes` succeeds (exit 0), `check no` fails (1).
+            Case {
+                line: 457,
+                script: "check() { local v=\"$1\"; [ \"$v\" = \"yes\" ]; }; check yes; echo $?; check no; echo $?",
+                stdout: "0\n1\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:519 brace expansion piped through `tr`+`sort`;
+            // `{a,b,c}{1,2}` expands to six words, spaces become newlines, sorted.
+            Case {
+                line: 519,
+                script: "echo {a,b,c}{1,2} | tr ' ' '\\n' | sort",
+                stdout: "a1\na2\nb1\nb2\nc1\nc2\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:584 `for` loop driving `printf` with `%02d`/`%s`
+            // conversions over the loop body.
+            Case {
+                line: 584,
+                script: "for i in 1 2 3; do printf \"item %02d: %s\\n\" $i \"val$i\"; done",
+                stdout: "item 01: val1\nitem 02: val2\nitem 03: val3\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:614 group command in a pipeline; `sort -r`
+            // reverses the three echoed lines.
+            Case {
+                line: 614,
+                script: "{ echo a; echo b; echo c; } | sort -r",
+                stdout: "c\nb\na\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:671 `|&` pipes stdout+stderr through to the next
+            // command; the `ls` error text reaches `cat` and is echoed verbatim.
+            Case {
+                line: 671,
+                script: "ls /no_such_xyz |& cat",
+                stdout: "ls: /no_such_xyz: No such file or directory\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:675 `|&` with a successful command forwards
+            // stdout (no stderr) to the next command.
+            Case {
+                line: 675,
+                script: "echo hello |& cat",
+                stdout: "hello\n",
+                stderr: "",
+                exit_code: 0,
+            },
+        ];
+
+        for case in cases {
+            let mut shell = Interpreter::new(TeeSemanticsCommands);
+            let result = shell.exec(case.script);
+            assert_eq!(
+                result.stdout, case.stdout,
+                "stdout for tee-plugin.test.ts:{}",
+                case.line
+            );
+            assert_eq!(
+                result.stderr, case.stderr,
+                "stderr for tee-plugin.test.ts:{}",
+                case.line
+            );
+            assert_eq!(
+                result.exit_code, case.exit_code,
+                "exit code for tee-plugin.test.ts:{}",
+                case.line
+            );
+        }
+    }
+
     /// Mirrors the `TeePlugin exec` / `TeePlugin semantics preservation`
     /// describe blocks in upstream
     /// `packages/just-bash/src/transform/plugins/tee-plugin.test.ts`. Those

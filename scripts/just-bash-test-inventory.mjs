@@ -6125,6 +6125,16 @@ const justBashTransformPluginsTeeCaseGroups = [
     notes:
       'just-bash-core verifies the TeePlugin assertSameSemantics rows the real Rust interpreter reproduces with deterministic command fakes: function definition piped to cat, heredoc piped to sort, deeply nested command substitution, quoted-vs-unquoted word splitting, and two sequential here-docs. Each runs the original, serializes the parsed AST, re-executes the serialized form, and asserts both runs match the upstream-correct bytes/exit code.',
   },
+  {
+    file: 'packages/just-bash/src/transform/plugins/tee-plugin.test.ts',
+    lines: [419, 441, 457, 519, 584, 614, 671, 675],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell',
+    rustTest:
+      'just_bash_core_tee_semantics_control_flow_and_command_rows_match_plain_exec',
+    notes:
+      'just-bash-core verifies the remaining TeePlugin semantics-preservation rows that exercise interpreter control flow composed with faithful command behavior through the real Interpreter: nested command substitution feeding wc -l, here-string piped into tr (upper-casing), a function with a local variable plus the [ test builtin, brace expansion {a,b,c}{1,2} piped through tr+sort, a for loop driving printf %02d/%s, a group command piped into sort -r, and |& forwarding stdout+stderr (ls error text and a plain echo) into the next command. The Rust port has no tee transform, so equivalence means the interpreter emits the exact bash-correct stdout/stderr/exit code; each assertion fails if that control-flow or command semantics regresses.',
+  },
 ];
 
 const justBashEncodingPipelineByteEmitCaseGroups = [
