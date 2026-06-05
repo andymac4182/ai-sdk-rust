@@ -862,6 +862,99 @@ and exhibited clearly, with a label attached.\n";
         assert_eq!(env.exec("echo test | grep test").exit_code, 0);
     }
 
+    /// Covers the portable rows of
+    /// `packages/just-bash/src/commands/clear/clear.test.ts`: the `clear`
+    /// command emits the ANSI "erase display + cursor home" escape sequence
+    /// (L5) and prints help mentioning the command and the terminal it clears
+    /// under `--help` (L12). Mirrors upstream
+    /// `packages/just-bash/src/commands/clear/clear.ts`.
+    #[test]
+    fn clear_command_emits_ansi_sequence_and_help_rows_match_upstream() {
+        // L5 `clear` emits the exact ANSI erase-display + cursor-home sequence.
+        let result = bash().exec("clear");
+        assert_eq!(result.stdout, "\u{1b}[2J\u{1b}[H", "L5 stdout");
+        assert_eq!(result.stderr, "", "L5 stderr");
+        assert_eq!(result.exit_code, 0, "L5 exit");
+
+        // L12 `clear --help` prints help text mentioning "clear" and "terminal".
+        let help = bash().exec("clear --help");
+        assert!(help.stdout.contains("clear"), "L12 mentions clear");
+        assert!(help.stdout.contains("terminal"), "L12 mentions terminal");
+        assert_eq!(help.exit_code, 0, "L12 exit");
+    }
+
+    /// Covers the L5 row of
+    /// `packages/just-bash/src/commands/hostname/hostname.test.ts`: in the
+    /// sandboxed environment `hostname` always returns `localhost\n` with a
+    /// zero exit code. Mirrors upstream
+    /// `packages/just-bash/src/commands/hostname/hostname.ts`. The L12
+    /// command-substitution row stays pending until the runtime `$(...)`
+    /// substitution path lands.
+    #[test]
+    fn hostname_command_returns_localhost_row_matches_upstream() {
+        let result = bash().exec("hostname");
+        assert_eq!(result.stdout, "localhost\n", "L5 stdout");
+        assert_eq!(result.stderr, "", "L5 stderr");
+        assert_eq!(result.exit_code, 0, "L5 exit");
+    }
+
+    /// Covers every row of
+    /// `packages/just-bash/src/commands/history/history.test.ts`: the `history`
+    /// builtin lists `BASH_HISTORY` (a JSON string array) with right-aligned
+    /// 5-width line numbers, shows empty output with no history (L5), prints
+    /// help mentioning the command (L12), clears the list with `-c` so a
+    /// later `history` in the same exec is empty (L20), displays numbered
+    /// entries (L30), and limits to the last `n` entries (L39). Mirrors
+    /// upstream `packages/just-bash/src/commands/history/history.ts`.
+    #[test]
+    fn history_command_listing_clear_and_limit_rows_match_upstream() {
+        fn with_history(hist: Option<&str>) -> Bash {
+            let mut env = BTreeMap::new();
+            if let Some(h) = hist {
+                env.insert("BASH_HISTORY".to_string(), h.to_string());
+            }
+            Bash::with_options(BashOptions {
+                env,
+                ..BashOptions::default()
+            })
+        }
+
+        // L5 empty history initially: exit 0 (and no output).
+        let empty = with_history(None).exec("history");
+        assert_eq!(empty.stdout, "", "L5 stdout");
+        assert_eq!(empty.exit_code, 0, "L5 exit");
+
+        // L12 `history --help` mentions the command and "command history".
+        let help = with_history(None).exec("history --help");
+        assert!(help.stdout.contains("history"), "L12 mentions history");
+        assert!(
+            help.stdout.contains("command history"),
+            "L12 mentions command history"
+        );
+        assert_eq!(help.exit_code, 0, "L12 exit");
+
+        // L20 `history -c` clears the list; a later `history` in the same exec
+        // prints nothing.
+        let cleared = with_history(Some("[\"echo hello\",\"ls -la\"]")).exec("history -c; history");
+        assert_eq!(cleared.stdout, "", "L20 stdout");
+        assert_eq!(cleared.exit_code, 0, "L20 exit");
+
+        // L30 displays entries with right-aligned line numbers.
+        let display = with_history(Some("[\"echo hello\",\"ls -la\"]")).exec("history");
+        assert_eq!(
+            display.stdout, "    1  echo hello\n    2  ls -la\n",
+            "L30 stdout"
+        );
+        assert_eq!(display.exit_code, 0, "L30 exit");
+
+        // L39 a numeric argument limits output to the last `n` entries, keeping
+        // their original line numbers.
+        let limited =
+            with_history(Some("[\"cmd1\",\"cmd2\",\"cmd3\",\"cmd4\",\"cmd5\"]")).exec("history 2");
+        assert_eq!(limited.stdout, "    4  cmd4\n    5  cmd5\n", "L39 stdout");
+        assert_eq!(limited.exit_code, 0, "L39 exit");
+    }
+
     #[test]
     fn registry_upstream_bash_commands_only_registers_specified_commands() {
         // maps packages/just-bash/src/Bash.commands.test.ts:20
