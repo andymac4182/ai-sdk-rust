@@ -1617,6 +1617,8 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
         "html-to-markdown" => command_html_to_markdown(state, &tokens[1..], &stdin),
         "which" => command_which(state, &tokens[1..]),
         "whoami" => stdout_result("user\n"),
+        "hostname" => stdout_result("localhost\n"),
+        "clear" => command_clear(&tokens[1..]),
         "sleep" => command_sleep(state, &tokens[1..]),
         "timeout" => command_timeout(state, &tokens[1..], stdin),
         "bash" | "sh" => command_bash(command, state, &tokens[1..], stdin),
@@ -31130,6 +31132,24 @@ fn command_which(state: &ExecState<'_>, args: &[String]) -> CommandResult {
         exit_code,
         ..CommandResult::default()
     }
+}
+
+/// `clear` - clear the terminal screen. Mirrors upstream
+/// `packages/just-bash/src/commands/clear/clear.ts`: emits the ANSI
+/// "erase display + cursor home" sequence, or prints help with `--help`.
+fn command_clear(args: &[String]) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(concat!(
+            "clear - clear the terminal screen\n",
+            "\n",
+            "Usage: clear [OPTIONS]\n",
+            "\n",
+            "Options:\n",
+            "      --help display this help and exit\n",
+        ));
+    }
+    // ESC[2J erases the screen, ESC[H moves the cursor to the top-left.
+    stdout_result("\u{1b}[2J\u{1b}[H")
 }
 
 fn command_test(state: &ExecState<'_>, args: &[String], bracket: bool) -> CommandResult {
