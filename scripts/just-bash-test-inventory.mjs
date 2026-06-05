@@ -6166,6 +6166,16 @@ const justBashTransformPluginsTeeCaseGroups = [
     notes:
       'just-bash-core verifies the remaining TeePlugin semantics-preservation rows that exercise interpreter control flow composed with faithful command behavior through the real Interpreter: nested command substitution feeding wc -l, here-string piped into tr (upper-casing), a function with a local variable plus the [ test builtin, brace expansion {a,b,c}{1,2} piped through tr+sort, a for loop driving printf %02d/%s, a group command piped into sort -r, and |& forwarding stdout+stderr (ls error text and a plain echo) into the next command. The Rust port has no tee transform, so equivalence means the interpreter emits the exact bash-correct stdout/stderr/exit code; each assertion fails if that control-flow or command semantics regresses.',
   },
+  {
+    file: 'packages/just-bash/src/transform/plugins/tee-plugin.test.ts',
+    lines: [409, 578, 655, 659, 665, 679, 693, 697],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell',
+    rustTest:
+      'just_bash_core_tee_pipestatus_and_assignment_rows_match_plain_exec',
+    notes:
+      'just-bash-core verifies the TeePlugin semantics-preservation rows that depend on PIPESTATUS capture, assignment-only $? propagation, and if-condition stderr routing. The Rust Interpreter now records each pipeline stage raw exit status into the PIPESTATUS array (false|true|false -> 1 0 1; true|false|true read by index -> 0 1 0; echo|grep-nomatch -> 0 1; the || fallback prints fallback:0 1), gives an assignment-only command the exit status of its command substitution (result=$(grep nope /dev/null 2>&1) makes $? == 1), routes an if-condition 2>&1 stderr into stdout (ls error text printed, condition false, if exits 0), and honors pipefail (false|true reports 1 and drives the && / || chain to fail). Each assertion fails if any of those behaviors regresses.',
+  },
 ];
 
 const justBashEncodingPipelineByteEmitCaseGroups = [
