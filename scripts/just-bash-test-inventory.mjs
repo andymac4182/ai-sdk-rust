@@ -4875,6 +4875,24 @@ const jbcYqFixturesCaseGroups = [
     notes:
       'JBC-yq verifies the portable yq XML input parser over fixture documents: element/array projection, attribute extraction with the +@ prefix, attribute-based select filtering, and XML-to-JSON scalar conversion.',
   },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.navigation.test.ts',
+    lines: [8, 19, 32, 47, 60, 74, 87, 101, 115, 127, 141, 154, 165],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_yq_navigation_parent_parents_root_rows',
+    notes:
+      'JBC-yq verifies the portable yq navigation operators parent/parent(n)/parents/root, including positive/negative/zero level arguments, array-index paths, root-without-prior-navigation, chained parent calls, and beyond-root/at-root empties. The Rust engine tracks the path used to reach each piped value (mirroring the upstream query engine currentPath) so the operators resolve against the document root.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/yq/yq.fixtures.test.ts',
+    lines: [516, 600, 650, 659, 671, 682, 691, 700, 709, 718],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::structured-data',
+    rustTest: 'structured_data_yq_fixtures_toml_ini_csv_unicode_rows',
+    notes:
+      'JBC-yq verifies portable yq TOML->YAML conversion, JSON unicode raw output, and the INI/CSV input parsers: INI global keys before sections, true/false boolean coercion versus yes-as-string, special-character paths, RFC-4180 quoted/escaped CSV fields, semicolon and tab delimiter auto-detection, and UTF-8 CSV fields.',
+  },
 ];
 
 const jbc44CaseGroups = [
