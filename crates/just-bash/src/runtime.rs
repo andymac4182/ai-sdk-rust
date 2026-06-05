@@ -18807,6 +18807,110 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         );
     }
 
+    /// Closes the portable rows of `sqlite3.fixtures.test.ts` that the in-memory
+    /// SQL engine supports 1:1. Upstream loads binary `.db` fixtures through an
+    /// OverlayFs; here the equivalent users/products/datatypes tables are built
+    /// with CREATE/INSERT and the same queries are run, asserting byte-identical
+    /// output. Each assertion fails if SELECT projection/filtering, ORDER BY,
+    /// COUNT aggregation, `-json` row serialization, `-box` rendering, the
+    /// `-nullvalue` substitution, `-readonly` write suppression, `sqlite_master`
+    /// table listing, or `PRAGMA table_info` regresses.
+    ///
+    /// Fixture cases requiring SQL features the minimal engine does not implement
+    /// (table-alias JOIN at :88/:104, `IN (list)` at :152, `OR`/`IS NULL` at
+    /// :170, named-column INSERT at :206, and float-storage-dependent list-mode
+    /// REAL precision at :71) are intentionally left unmapped for a later round.
+    #[test]
+    fn structured_data_sqlite3_fixtures_queries_and_modes_rows() {
+        let env = bash();
+        env.exec(
+            "sqlite3 /users.db \"CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT, email TEXT, age INTEGER, active INTEGER); INSERT INTO users VALUES(1,'Alice','alice@example.com',30,1),(2,'Bob','bob@example.com',25,1),(3,'Charlie','charlie@example.com',35,0),(4,'Diana','diana@example.com',28,1)\"",
+        );
+
+        // sqlite3.fixtures.test.ts:10 — SELECT * returns every user row in order.
+        assert_eq!(
+            env.exec("sqlite3 /users.db \"SELECT * FROM users\"").stdout,
+            "1|Alice|alice@example.com|30|1\n\
+             2|Bob|bob@example.com|25|1\n\
+             3|Charlie|charlie@example.com|35|0\n\
+             4|Diana|diana@example.com|28|1\n"
+        );
+        // :27 — single-condition WHERE plus ORDER BY on a projected subset.
+        assert_eq!(
+            env.exec(
+                "sqlite3 /users.db \"SELECT name, age FROM users WHERE active = 1 ORDER BY age\""
+            )
+            .stdout,
+            "Bob|25\nDiana|28\nAlice|30\n"
+        );
+        // :41 — COUNT(*) aggregation under a WHERE filter.
+        assert_eq!(
+            env.exec("sqlite3 /users.db \"SELECT COUNT(*) FROM users WHERE active = 1\"")
+                .stdout,
+            "3\n"
+        );
+        // :55 — `-json` serializes the selected columns as a single-object array.
+        assert_eq!(
+            env.exec("sqlite3 -json /users.db \"SELECT id, name FROM users WHERE id = 1\"")
+                .stdout,
+            "[{\"id\":1,\"name\":\"Alice\"}]\n"
+        );
+
+        env.exec(
+            "sqlite3 /products.db \"CREATE TABLE categories(id INTEGER PRIMARY KEY, name TEXT); INSERT INTO categories VALUES(1,'Electronics'),(2,'Books'),(3,'Clothing'); CREATE TABLE products(id INTEGER PRIMARY KEY, name TEXT, price REAL, category_id INTEGER); INSERT INTO products VALUES(1,'Laptop',999.99,1),(2,'Phone',699.5,1),(3,'Headphones',149.99,1),(4,'Python Book',49.99,2),(5,'T-Shirt',19.99,3)\"",
+        );
+        // :119 — `-box` renders the framed grid containing the queried rows.
+        let box_mode = env
+            .exec("sqlite3 -box /products.db \"SELECT id, name FROM products WHERE id <= 2\"")
+            .stdout;
+        assert!(box_mode.contains('┌'));
+        assert!(box_mode.contains('│'));
+        assert!(box_mode.contains("Laptop"));
+        assert!(box_mode.contains("Phone"));
+
+        env.exec(
+            "sqlite3 /datatypes.db \"CREATE TABLE mixed(id INTEGER PRIMARY KEY, int_val INTEGER, real_val REAL, text_val TEXT); INSERT INTO mixed VALUES(1,42,3.14,'hello'),(2,NULL,NULL,NULL),(3,-100,0.001,'world'),(4,0,-99.99,'')\"",
+        );
+        // :138 — `-nullvalue` substitutes the configured token for every NULL.
+        assert_eq!(
+            env.exec(
+                "sqlite3 -nullvalue \"NULL\" /datatypes.db \"SELECT int_val, real_val, text_val FROM mixed WHERE id = 2\""
+            )
+            .stdout,
+            "NULL|NULL|NULL\n"
+        );
+
+        // :186 — `-readonly` suppresses writeback so an attempted INSERT is not
+        // persisted and the row count stays at the original four.
+        env.exec(
+            "sqlite3 -readonly /users.db \"INSERT INTO users (name, email, age) VALUES ('Test', 'test@test.com', 99)\"",
+        );
+        assert_eq!(
+            env.exec("sqlite3 /users.db \"SELECT COUNT(*) FROM users\"")
+                .stdout,
+            "4\n"
+        );
+
+        // :228 — sqlite_master lists the user tables ordered by name.
+        assert_eq!(
+            env.exec(
+                "sqlite3 /products.db \"SELECT name FROM sqlite_master WHERE type='table' ORDER BY name\""
+            )
+            .stdout,
+            "categories\nproducts\n"
+        );
+
+        // :242 — PRAGMA table_info reports the column names and declared types.
+        let pragma = env
+            .exec("sqlite3 /users.db \"PRAGMA table_info(users)\"")
+            .stdout;
+        assert!(pragma.contains("id"));
+        assert!(pragma.contains("name"));
+        assert!(pragma.contains("email"));
+        assert!(pragma.contains("INTEGER"));
+        assert!(pragma.contains("TEXT"));
+    }
+
     /// Closes the portable `sqlite3.test.ts` unknown-option and REAL-precision
     /// rows plus the matching `sqlite3.formatters.test.ts` line-mode rows.
     #[test]
