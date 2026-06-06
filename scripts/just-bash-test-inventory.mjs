@@ -6626,6 +6626,15 @@ const justBashEncodingPipelineByteEmitCaseGroups = [
     notes:
       'just-bash-core verifies that a byte-emitting custom command pipes downstream without double encoding: the emitter carries "안녕\\n" as its stdout byte string and `wc -c` reports exactly 7 bytes, never the 11 a second UTF-8 round-trip of the multibyte codepoints would produce.',
   },
+  {
+    file: 'packages/just-bash/src/encoding-pipeline.test.ts',
+    lines: [97, 200],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'jbc45_encoding_pipeline_byte_text_contract_rows_are_byte_safe',
+    notes:
+      'just-bash-core verifies byte-faithful stdin/redirect handling through the Rust virtual session: a non-UTF-8 binary file (0x80 0xFF 0x00 0x90) round-trips verbatim through `cat /binary.bin | cat | cat > /out.bin` because each byte-clean pipe stage carries its raw `stdout_bytes` forward instead of UTF-8 re-encoding the latin1 carrier (L97); and byte stdin supplied via `with_stdin_bytes` (upstream `stdinKind: "bytes"`) reaches `wc -c` as exactly 4 bytes rather than the 7 a UTF-8 re-encode of the high bytes would yield (L200). Each assertion fails if the byte-tagged pipeline or byte-stdin count regresses.',
+  },
 ];
 
 const r16jbHistoryCaseGroups = [
