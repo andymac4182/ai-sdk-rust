@@ -29,6 +29,7 @@ use crate::encoding::{
 };
 use crate::error::{JustBashError, JustBashErrorKind, JustBashResult};
 use crate::fs::{CpOptions, DirentEntry, FileStat, MkdirOptions, RmOptions, VirtualFileSystem};
+use crate::glob::{GlobOptions, glob_paths};
 use crate::path::{join_path, normalize_path, resolve_path, resolve_symlink_target};
 use crate::security::{
     HttpMethod, NetworkPolicy, NetworkRequest, NetworkResponse, StaticNetworkTransport,
@@ -1458,10 +1459,11 @@ fn execute_simple_command(
         }
         None => stdin,
     };
-    let mut tokens = match tokenize(command, &state.env) {
+    let tokenized = match tokenize_with_quote_flags(command, &state.env) {
         Ok(tokens) => tokens,
         Err(error) => return stderr_result(2, format!("bash: {error}\n")),
     };
+    let mut tokens = expand_glob_tokens(state, tokenized);
     let mut stdout_to_stderr = false;
     let mut stderr_to_stdout = false;
     tokens.retain(|token| match token.as_str() {
@@ -3663,6 +3665,48 @@ fn grep_path_has_glob(path: &str) -> bool {
 /// returned sorted. A glob operand that matches nothing expands to no paths
 /// (grep then searches one fewer file), exactly like the upstream command, while
 /// non-glob operands pass through unchanged. `**` recursive globs are left to the
+/// True when a word carries an unquoted glob metacharacter (`*`, `?`, `[`)
+/// that pathname expansion should attempt to match. Mirrors upstream
+/// `hasGlobPattern` for the standard (non-extglob) character set.
+fn word_has_glob_metachar(value: &str) -> bool {
+    value.contains('*') || value.contains('?') || value.contains('[')
+}
+
+/// Perform pathname (glob) expansion on a tokenized command line, mirroring
+/// upstream just-bash word expansion: every unquoted word containing a glob
+/// metacharacter is expanded against the virtual filesystem. Matches replace the
+/// pattern (sorted ascending, as bash sorts pathname-expansion results); a
+/// pattern that matches nothing is left literally in place (bash default with
+/// neither `nullglob` nor `failglob`). Quoted/escaped words pass through
+/// unchanged so `echo "*.txt"` stays literal.
+fn expand_glob_tokens(state: &ExecState<'_>, tokens: Vec<TokenizedWord>) -> Vec<String> {
+    if !tokens
+        .iter()
+        .any(|token| !token.glob_quoted && word_has_glob_metachar(&token.value))
+    {
+        return tokens.into_iter().map(|token| token.value).collect();
+    }
+    let fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return tokens.into_iter().map(|token| token.value).collect(),
+    };
+    let mut expanded = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        if token.glob_quoted || !word_has_glob_metachar(&token.value) {
+            expanded.push(token.value);
+            continue;
+        }
+        let matches = glob_paths(&fs, &state.cwd, &token.value, GlobOptions::default());
+        if matches.is_empty() {
+            // No match: bash leaves the pattern literal (no nullglob/failglob).
+            expanded.push(token.value);
+        } else {
+            expanded.extend(matches);
+        }
+    }
+    expanded
+}
+
 /// existing recursive path and are not handled here.
 fn grep_expand_glob_paths(state: &ExecState<'_>, paths: &[String]) -> Vec<String> {
     if !paths.iter().any(|path| grep_path_has_glob(path)) {
@@ -32583,10 +32627,33 @@ fn expand_here_doc_body(state: &mut ExecState<'_>, body: &str) -> Result<String,
 }
 
 fn tokenize(input: &str, env: &BTreeMap<String, String>) -> Result<Vec<String>, String> {
+    Ok(tokenize_with_quote_flags(input, env)?
+        .into_iter()
+        .map(|token| token.value)
+        .collect())
+}
+
+/// One tokenized word plus the per-token metadata pathname (glob) expansion
+/// needs. `glob_quoted` is set when ANY portion of the word was quoted or
+/// backslash-escaped: bash performs pathname expansion only on the unquoted
+/// parts of a word, so `echo "*.txt"` and `echo \*.txt` stay literal while the
+/// bare `echo *.txt` globs. Tracking it at the word granularity matches the
+/// behavior every common pattern relies on.
+#[derive(Clone, Debug)]
+struct TokenizedWord {
+    value: String,
+    glob_quoted: bool,
+}
+
+fn tokenize_with_quote_flags(
+    input: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<Vec<TokenizedWord>, String> {
     let chars = input.chars().collect::<Vec<_>>();
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut started = false;
+    let mut glob_quoted = false;
     let mut quote = None::<char>;
     let mut index = 0;
     while index < chars.len() {
@@ -32594,13 +32661,18 @@ fn tokenize(input: &str, env: &BTreeMap<String, String>) -> Result<Vec<String>, 
         match quote {
             None if ch.is_whitespace() => {
                 if started {
-                    tokens.push(std::mem::take(&mut current));
+                    tokens.push(TokenizedWord {
+                        value: std::mem::take(&mut current),
+                        glob_quoted,
+                    });
                     started = false;
+                    glob_quoted = false;
                 }
             }
             None if ch == '\'' || ch == '"' => {
                 quote = Some(ch);
                 started = true;
+                glob_quoted = true;
             }
             None | Some('"') if ch == '$' => {
                 started = true;
@@ -32631,7 +32703,10 @@ fn tokenize(input: &str, env: &BTreeMap<String, String>) -> Result<Vec<String>, 
         return Err("unterminated quoted string".to_string());
     }
     if started {
-        tokens.push(current);
+        tokens.push(TokenizedWord {
+            value: current,
+            glob_quoted,
+        });
     }
     Ok(tokens)
 }

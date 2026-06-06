@@ -5897,6 +5897,520 @@
       }
     },
     {
+      "id": "comparison:glob:bfa75a70c606b65d",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "echo",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/glob.comparison.test.ts",
+        "line": 20,
+        "suite": "glob expansion - Real Bash Comparison",
+        "testName": "should expand single-level glob pattern",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/glob.comparison.fixtures.json",
+        "fixtureId": "bfa75a70c606b65d"
+      },
+      "command": "echo *.txt",
+      "script": "echo *.txt",
+      "initialFiles": {
+        "file1.txt": "content 1",
+        "file2.txt": "content 2",
+        "file3.json": "{}"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "file1.txt file2.txt\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/glob.comparison.test.ts:20:it:should expand single-level glob pattern",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_glob_bfa75a70c606b65d",
+        "notes": "JBC-11 Rust corpus runner exact match: single-level `*.txt` pathname expansion sorts and substitutes the matching files.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "bfa75a70c606b65d",
+        "expectedFixtureId": "bfa75a70c606b65d",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/glob.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_glob_bfa75a70c606b65d",
+      "runnerProof": {
+        "source": "JBC-11",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:glob:f21fa1e2a2f364fd",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "echo",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/glob.comparison.test.ts",
+        "line": 29,
+        "suite": "glob expansion - Real Bash Comparison",
+        "testName": "should expand multi-level glob pattern with wildcard directory",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/glob.comparison.fixtures.json",
+        "fixtureId": "f21fa1e2a2f364fd"
+      },
+      "command": "echo */*.json",
+      "script": "echo */*.json",
+      "initialFiles": {
+        "folder1/data.json": "{\"a\":1}",
+        "folder2/data.json": "{\"b\":2}",
+        "folder3/other.txt": "text"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "folder1/data.json folder2/data.json\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/glob.comparison.test.ts:29:it:should expand multi-level glob pattern with wildcard directory",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_glob_f21fa1e2a2f364fd",
+        "notes": "JBC-11 Rust corpus runner exact match: `*/*.json` expands the wildcard directory segment and selects only matching leaf files.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "f21fa1e2a2f364fd",
+        "expectedFixtureId": "f21fa1e2a2f364fd",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/glob.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_glob_f21fa1e2a2f364fd",
+      "runnerProof": {
+        "source": "JBC-11",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:glob:63d9a4a8524ef1c5",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "echo",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/glob.comparison.test.ts",
+        "line": 38,
+        "suite": "glob expansion - Real Bash Comparison",
+        "testName": "should expand multi-level glob pattern with absolute path",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/glob.comparison.fixtures.json",
+        "fixtureId": "63d9a4a8524ef1c5"
+      },
+      "command": "cat dm/*/*.json",
+      "script": "cat dm/*/*.json",
+      "initialFiles": {
+        "dm/folder1/data.json": "{\"a\":1}",
+        "dm/folder2/data.json": "{\"b\":2}",
+        "dm/folder3/other.txt": "text"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "{\"a\":1}{\"b\":2}",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/glob.comparison.test.ts:38:it:should expand multi-level glob pattern with absolute path",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_glob_63d9a4a8524ef1c5",
+        "notes": "JBC-11 Rust corpus runner exact match: `cat dm/*/*.json` globs a fixed prefix plus wildcard middle segment and cats the sorted matches.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "63d9a4a8524ef1c5",
+        "expectedFixtureId": "63d9a4a8524ef1c5",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/glob.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_glob_63d9a4a8524ef1c5",
+      "runnerProof": {
+        "source": "JBC-11",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:glob:71ed22308ca718e0",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "echo",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/glob.comparison.test.ts",
+        "line": 47,
+        "suite": "glob expansion - Real Bash Comparison",
+        "testName": "should expand triple-level glob pattern",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/glob.comparison.fixtures.json",
+        "fixtureId": "71ed22308ca718e0"
+      },
+      "command": "echo */*/*/*.txt",
+      "script": "echo */*/*/*.txt",
+      "initialFiles": {
+        "a/b/c/file.txt": "abc",
+        "a/d/e/file.txt": "ade",
+        "x/y/z/file.txt": "xyz"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "a/b/c/file.txt a/d/e/file.txt x/y/z/file.txt\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/glob.comparison.test.ts:47:it:should expand triple-level glob pattern",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_glob_71ed22308ca718e0",
+        "notes": "JBC-11 Rust corpus runner exact match: `*/*/*/*.txt` matches four wildcard path segments across nested directories.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "71ed22308ca718e0",
+        "expectedFixtureId": "71ed22308ca718e0",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/glob.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_glob_71ed22308ca718e0",
+      "runnerProof": {
+        "source": "JBC-11",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:glob:78341dea8687b9df",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "echo",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/glob.comparison.test.ts",
+        "line": 56,
+        "suite": "glob expansion - Real Bash Comparison",
+        "testName": "should expand glob with question mark",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/glob.comparison.fixtures.json",
+        "fixtureId": "78341dea8687b9df"
+      },
+      "command": "echo file?.txt",
+      "script": "echo file?.txt",
+      "initialFiles": {
+        "file1.txt": "1",
+        "file2.txt": "2",
+        "file10.txt": "10"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "file1.txt file2.txt\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/glob.comparison.test.ts:56:it:should expand glob with question mark",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_glob_78341dea8687b9df",
+        "notes": "JBC-11 Rust corpus runner exact match: `file?.txt` matches exactly one character so `file10.txt` is excluded.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "78341dea8687b9df",
+        "expectedFixtureId": "78341dea8687b9df",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/glob.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_glob_78341dea8687b9df",
+      "runnerProof": {
+        "source": "JBC-11",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:glob:f39742739256f25c",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "echo",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/glob.comparison.test.ts",
+        "line": 65,
+        "suite": "glob expansion - Real Bash Comparison",
+        "testName": "should expand glob with character class",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/glob.comparison.fixtures.json",
+        "fixtureId": "f39742739256f25c"
+      },
+      "command": "echo file[12].txt",
+      "script": "echo file[12].txt",
+      "initialFiles": {
+        "file1.txt": "1",
+        "file2.txt": "2",
+        "file3.txt": "3",
+        "filea.txt": "a"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "file1.txt file2.txt\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/glob.comparison.test.ts:65:it:should expand glob with character class",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_glob_f39742739256f25c",
+        "notes": "JBC-11 Rust corpus runner exact match: `file[12].txt` character class matches only `file1`/`file2`, excluding `file3` and `filea`.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "f39742739256f25c",
+        "expectedFixtureId": "f39742739256f25c",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/glob.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_glob_f39742739256f25c",
+      "runnerProof": {
+        "source": "JBC-11",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:glob:36e1a6fc5c546c4a",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "grep",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/glob.comparison.test.ts",
+        "line": 82,
+        "suite": "glob expansion - Real Bash Comparison",
+        "testName": "should expand glob with grep command",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/glob.comparison.fixtures.json",
+        "fixtureId": "36e1a6fc5c546c4a"
+      },
+      "command": "grep hello */*.txt",
+      "script": "grep hello */*.txt",
+      "initialFiles": {
+        "dir1/file.txt": "hello world",
+        "dir2/file.txt": "hello there",
+        "dir3/other.txt": "goodbye"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "dir1/file.txt:hello world\ndir2/file.txt:hello there\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/glob.comparison.test.ts:82:it:should expand glob with grep command",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_glob_36e1a6fc5c546c4a",
+        "notes": "JBC-11 Rust corpus runner exact match: the shell expands `*/*.txt` to the sorted file operands and grep prefixes each match with its filename.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "36e1a6fc5c546c4a",
+        "expectedFixtureId": "36e1a6fc5c546c4a",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/glob.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_glob_36e1a6fc5c546c4a",
+      "runnerProof": {
+        "source": "JBC-11",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:glob:1aa828f0cab48e15",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "echo",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/glob.comparison.test.ts",
+        "line": 91,
+        "suite": "glob expansion - Real Bash Comparison",
+        "testName": "should expand glob at root level with subdirectory pattern",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/glob.comparison.fixtures.json",
+        "fixtureId": "1aa828f0cab48e15"
+      },
+      "command": "echo */*/test.ts",
+      "script": "echo */*/test.ts",
+      "initialFiles": {
+        "src/a/test.ts": "test a",
+        "src/b/test.ts": "test b",
+        "lib/c/test.ts": "test c"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "lib/c/test.ts src/a/test.ts src/b/test.ts\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/glob.comparison.test.ts:91:it:should expand glob at root level with subdirectory pattern",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_glob_1aa828f0cab48e15",
+        "notes": "JBC-11 Rust corpus runner exact match: `*/*/test.ts` globs two wildcard segments with a literal trailing segment, sorted ascending.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "1aa828f0cab48e15",
+        "expectedFixtureId": "1aa828f0cab48e15",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/glob.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_glob_1aa828f0cab48e15",
+      "runnerProof": {
+        "source": "JBC-11",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
+      "id": "comparison:glob:34061471e21f2f7b",
+      "kind": "comparison-fixture",
+      "classification": "comparison-golden",
+      "domain": "echo",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/glob.comparison.test.ts",
+        "line": 100,
+        "suite": "glob expansion - Real Bash Comparison",
+        "testName": "should handle mixed glob and literal segments",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/glob.comparison.fixtures.json",
+        "fixtureId": "34061471e21f2f7b"
+      },
+      "command": "cat data/*/config.json",
+      "script": "cat data/*/config.json",
+      "initialFiles": {
+        "data/v1/config.json": "v1 config",
+        "data/v2/config.json": "v2 config",
+        "data/v1/settings.json": "v1 settings"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "v1 configv2 config",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/glob.comparison.test.ts:100:it:should handle mixed glob and literal segments",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_glob_34061471e21f2f7b",
+        "notes": "JBC-11 Rust corpus runner exact match: `data/*/config.json` mixes literal head/tail segments with a wildcard middle and only cats the matching config files.",
+        "found": true
+      },
+      "assertions": [],
+      "sourceFixtureMetadata": {
+        "fixtureId": "34061471e21f2f7b",
+        "expectedFixtureId": "34061471e21f2f7b",
+        "fixtureIdMatchesCommandAndFiles": true,
+        "locked": false,
+        "upstreamFixtureFile": "packages/just-bash/src/comparison-tests/fixtures/glob.comparison.fixtures.json",
+        "commandHashAlgorithm": "sha256(command + \"|||\" + sorted(files)).slice(0, 16)"
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_glob_34061471e21f2f7b",
+      "runnerProof": {
+        "source": "JBC-11",
+        "engine": "rust-just-bash",
+        "assertion": "stdout-stderr-exit-code-exact"
+      }
+    },
+    {
       "id": "comparison:glob:e71d5efd2763b87f",
       "kind": "comparison-fixture",
       "classification": "comparison-golden",
