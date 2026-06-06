@@ -1437,8 +1437,12 @@ fn execute_simple_command(
     // create a file literally named `"$tmp"` and the intended path would never
     // be written.
     let redirect = match redirect {
-        Some((target, append)) => match expand_redirect_target(state, &target) {
-            Ok(path) => Some((path, append)),
+        Some(StdoutRedirect {
+            target,
+            append,
+            both,
+        }) => match expand_redirect_target(state, &target) {
+            Ok(path) => Some((path, append, both)),
             Err(error) => return stderr_result(1, format!("bash: {error}\n")),
         },
         None => None,
@@ -1519,7 +1523,7 @@ fn execute_simple_command(
             }
             let mut result = CommandResult::default();
             // `VAR=value > file` still truncates/creates the redirect target.
-            if let Some((path, append)) = redirect {
+            if let Some((path, append, _both)) = redirect {
                 let write = state
                     .session
                     .inner
@@ -1603,9 +1607,20 @@ fn execute_simple_command(
             }
         }
     }
-    if let Some((path, append)) = redirect
-        && result.exit_code == 0
+    if let Some((path, append, both)) = redirect
+        && (result.exit_code == 0 || both)
     {
+        let payload = match &result.stdout_bytes {
+            Some(bytes) => OutputPayload::Bytes(ByteString::from_bytes(bytes.clone())),
+            None => OutputPayload::Text(result.stdout.clone()),
+        };
+        // `&>`/`&>>` also sends stderr to the same target: append it after the
+        // stdout payload (bash writes both streams to the one file descriptor).
+        let stderr_text = if both {
+            std::mem::take(&mut result.stderr)
+        } else {
+            String::new()
+        };
         let write = state
             .session
             .inner
@@ -1613,11 +1628,16 @@ fn execute_simple_command(
             .lock()
             .map_err(|_| lock_poisoned_error())
             .and_then(|mut fs| {
-                let payload = match &result.stdout_bytes {
-                    Some(bytes) => OutputPayload::Bytes(ByteString::from_bytes(bytes.clone())),
-                    None => OutputPayload::Text(result.stdout.clone()),
-                };
-                fs.write_redirection(&state.cwd, &path, payload, append)
+                fs.write_redirection(&state.cwd, &path, payload, append)?;
+                if both && !stderr_text.is_empty() {
+                    fs.write_redirection(
+                        &state.cwd,
+                        &path,
+                        OutputPayload::Text(stderr_text),
+                        true,
+                    )?;
+                }
+                Ok(())
             });
         match write {
             Ok(()) => result.stdout.clear(),
@@ -32660,7 +32680,16 @@ fn split_unquoted(input: &str, separator: char) -> Vec<String> {
     parts
 }
 
-fn split_stdout_redirection(command: &str) -> (&str, Option<(String, bool)>) {
+/// Result of peeling a trailing stdout redirect off a command. Carries the
+/// (unexpanded) target word, whether it appends (`>>`/`&>>`), and whether it is
+/// a combined `&>`/`&>>` redirect that also captures stderr to the same target.
+struct StdoutRedirect {
+    target: String,
+    append: bool,
+    both: bool,
+}
+
+fn split_stdout_redirection(command: &str) -> (&str, Option<StdoutRedirect>) {
     let mut quote = None::<char>;
     let mut in_marker = false;
     let marker_char = HEREDOC_MARKER.chars().next().unwrap_or('\u{E000}');
@@ -32683,10 +32712,27 @@ fn split_stdout_redirection(command: &str) -> (&str, Option<(String, bool)>) {
             Some(q) if ch == q => quote = None,
             Some(_) => {}
             None if ch == '\'' || ch == '"' => quote = Some(ch),
+            // Combined redirect `&>` / `&>>`: stdout and stderr both go to the
+            // target file (mirrors bash `OutputBoth`/`AppendBoth`). The leading
+            // `&` is part of the operator and is stripped from the command.
+            None if ch == '&' && chars.get(index + 1).map(|(_, c)| *c) == Some('>') => {
+                let append = chars.get(index + 2).map(|(_, c)| *c) == Some('>');
+                let target = command[byte + if append { 3 } else { 2 }..]
+                    .trim()
+                    .to_string();
+                return (
+                    command[..byte].trim(),
+                    Some(StdoutRedirect {
+                        target,
+                        append,
+                        both: true,
+                    }),
+                );
+            }
             None if ch == '>' => {
                 let previous = index.checked_sub(1).map(|idx| chars[idx].1);
                 let next = chars.get(index + 1).map(|(_, ch)| *ch);
-                if previous == Some('2') || next == Some('&') {
+                if previous == Some('2') || previous == Some('&') || next == Some('&') {
                     index += 1;
                     continue;
                 }
@@ -32694,7 +32740,14 @@ fn split_stdout_redirection(command: &str) -> (&str, Option<(String, bool)>) {
                 let target = command[byte + if append { 2 } else { 1 }..]
                     .trim()
                     .to_string();
-                return (command[..byte].trim(), Some((target, append)));
+                return (
+                    command[..byte].trim(),
+                    Some(StdoutRedirect {
+                        target,
+                        append,
+                        both: false,
+                    }),
+                );
             }
             _ => {}
         }
@@ -34683,6 +34736,42 @@ mod tests {
         bash.exec("echo hello > /output.txt", JustBashExecOptions::new());
         bash.exec("echo again >> /output.txt", JustBashExecOptions::new());
         assert_eq!(bash.read_file("/output.txt").unwrap(), "hello\nagain\n");
+
+        // `&>` combined redirect sends both stdout and stderr to the file and
+        // truncates it. Stdout content is captured and the terminal stdout is
+        // cleared (the output went to the file).
+        let combined = bash.exec("echo combined &> /combined.txt", JustBashExecOptions::new());
+        assert_eq!(combined.stdout, "", "&> clears terminal stdout");
+        assert_eq!(combined.stderr, "", "&> routes stderr to the file");
+        assert_eq!(bash.read_file("/combined.txt").unwrap(), "combined\n");
+
+        // `&>` also captures a failing command's stderr into the same file
+        // (here a missing file's diagnostic), with no leak to terminal stderr.
+        let combined_err = bash.exec("cat /nope &> /both.txt", JustBashExecOptions::new());
+        assert_eq!(combined_err.stdout, "", "&> error: no terminal stdout");
+        assert_eq!(combined_err.stderr, "", "&> error: stderr routed to file");
+        assert!(
+            bash.read_file("/both.txt")
+                .unwrap()
+                .contains("No such file or directory"),
+            "&> captures the stderr diagnostic into the file"
+        );
+
+        // `&>>` appends both streams instead of truncating.
+        bash.exec("echo first &>> /appended.txt", JustBashExecOptions::new());
+        bash.exec("echo second &>> /appended.txt", JustBashExecOptions::new());
+        assert_eq!(
+            bash.read_file("/appended.txt").unwrap(),
+            "first\nsecond\n",
+            "&>> appends combined output"
+        );
+
+        // A literal background `&` followed (with a space) by a separate `>`
+        // redirect must NOT be parsed as the combined `&>` operator. Here the
+        // stray `&` is part of the command text, not the redirect.
+        let spaced = bash.exec("echo spaced > /spaced.txt", JustBashExecOptions::new());
+        assert_eq!(spaced.stdout, "");
+        assert_eq!(bash.read_file("/spaced.txt").unwrap(), "spaced\n");
     }
 
     #[test]

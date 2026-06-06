@@ -21101,4 +21101,68 @@ but Watson, Doctor has to have it taken out for him and dusted,\n"
             "no replacement key without -r",
         );
     }
+
+    /// R17JB closes the three pending `redirections.binary.test.ts` rows that
+    /// route raw high-byte data through a pipe-then-redirect or a combined `&>`
+    /// redirect, mirroring upstream `new Bash({ files: { ...Uint8Array } })`
+    /// seeded binary files. Upstream asserts on `result.stdout.charCodeAt(i)`;
+    /// the registry runtime carries the latin1 (one-char-per-byte) carrier in
+    /// `stdout`, so each char code equals the original byte. Each row fails if
+    /// the pipe stops carrying bytes verbatim or the `&>` combined operator
+    /// regresses.
+    #[test]
+    fn r17jb_interpreter_redirections_binary_pipe_and_combined_rows_match_upstream() {
+        // L78 `cat binary | cat > out` preserves [0x80,0xff,0x90,0xab].
+        let b78 = Bash::with_options(BashOptions {
+            binary_files: BTreeMap::from([(
+                "/binary.bin".to_string(),
+                vec![0x80, 0xff, 0x90, 0xab],
+            )]),
+            ..BashOptions::default()
+        });
+        b78.exec("cat /binary.bin | cat > /output.bin");
+        let s78 = b78.exec("cat /output.bin").stdout;
+        let bytes78: Vec<u32> = s78.chars().map(|c| c as u32).collect();
+        assert_eq!(bytes78.len(), 4, "L78 length");
+        assert_eq!(
+            bytes78,
+            vec![0x80, 0xff, 0x90, 0xab],
+            "L78 bytes via pipe+redirect"
+        );
+
+        // L95 `cat binary | cat | cat > out` preserves [0x80,0xff,0x00,0x90]
+        // (including an embedded null byte) through multiple pipes.
+        let b95 = Bash::with_options(BashOptions {
+            binary_files: BTreeMap::from([(
+                "/binary.bin".to_string(),
+                vec![0x80, 0xff, 0x00, 0x90],
+            )]),
+            ..BashOptions::default()
+        });
+        b95.exec("cat /binary.bin | cat | cat > /output.bin");
+        let s95 = b95.exec("cat /output.bin").stdout;
+        let bytes95: Vec<u32> = s95.chars().map(|c| c as u32).collect();
+        assert_eq!(bytes95.len(), 4, "L95 length");
+        assert_eq!(
+            bytes95,
+            vec![0x80, 0xff, 0x00, 0x90],
+            "L95 bytes via multiple pipes"
+        );
+
+        // L114 `cat binary &> out` (combined stdout+stderr redirect) preserves
+        // [0x80,0x90,0xa0] in the target file.
+        let b114 = Bash::with_options(BashOptions {
+            binary_files: BTreeMap::from([("/binary.bin".to_string(), vec![0x80, 0x90, 0xa0])]),
+            ..BashOptions::default()
+        });
+        b114.exec("cat /binary.bin &> /output.bin");
+        let s114 = b114.exec("cat /output.bin").stdout;
+        let bytes114: Vec<u32> = s114.chars().map(|c| c as u32).collect();
+        assert_eq!(bytes114.len(), 3, "L114 length");
+        assert_eq!(
+            bytes114,
+            vec![0x80, 0x90, 0xa0],
+            "L114 bytes via &> combined redirect"
+        );
+    }
 }
