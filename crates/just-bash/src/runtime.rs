@@ -17,6 +17,10 @@ pub struct BashOptions {
     pub commands: Option<Vec<String>>,
     /// Initial virtual files.
     pub files: BTreeMap<String, String>,
+    /// Initial virtual files seeded from raw bytes. Mirrors upstream's
+    /// `files: { path: Uint8Array }` shape: the bytes are stored verbatim
+    /// without UTF-8 re-encoding so non-UTF-8 binaries round-trip exactly.
+    pub binary_files: BTreeMap<String, Vec<u8>>,
     /// Base environment.
     pub env: BTreeMap<String, String>,
     /// Base working directory.
@@ -50,8 +54,10 @@ impl Bash {
     /// Creates a session with explicit upstream-style options.
     pub fn with_options(options: BashOptions) -> Self {
         let mut session_options = JustBashSessionOptions::new();
-        let create_default_layout = options.cwd.is_none() && options.files.is_empty();
+        let create_default_layout =
+            options.cwd.is_none() && options.files.is_empty() && options.binary_files.is_empty();
         session_options.files = options.files;
+        session_options.binary_files = options.binary_files;
         session_options.env = options.env;
         session_options.cwd = options.cwd.or_else(|| {
             if create_default_layout {
@@ -20328,8 +20334,12 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     /// accents and German umlauts via `read_file_buffer` (the exact byte
     /// sequences upstream asserts), the null-byte redirection that survives a
     /// `> file` round-trip, and the gzip/gunzip `-c` text round-trips through
-    /// `>` and a pipe. Each row fails if redirection, gzip, or UTF-8 byte
-    /// preservation regresses.
+    /// `>` and a pipe. R17JB additionally closes the raw high-byte rows seeded
+    /// from `Uint8Array`-style `binary_files` and read back exactly via
+    /// `read_file_buffer`: `cat binary > out` (L6), the all-256-values
+    /// redirection (L37), binary append `>>` (L57), and a binary gzip/gunzip
+    /// round-trip through redirection (L158). Each row fails if redirection,
+    /// gzip, or byte preservation regresses.
     #[test]
     fn r16jb_interpreter_redirections_binary_rows_match_upstream() {
         // L178 echo "Ü Ö Ä" > file preserves UTF-8 bytes via readFileBuffer.
@@ -20393,6 +20403,65 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         assert_eq!(
             g145.exec("gunzip -c /compressed.gz").stdout,
             "piped compression test"
+        );
+
+        // L6 `cat binary > output` preserves high bytes [0x80,0x90,0xa0,0xb0,0xff].
+        let b6 = Bash::with_options(BashOptions {
+            binary_files: BTreeMap::from([(
+                "/binary.bin".to_string(),
+                vec![0x80, 0x90, 0xa0, 0xb0, 0xff],
+            )]),
+            ..BashOptions::default()
+        });
+        b6.exec("cat /binary.bin > /output.bin");
+        assert_eq!(
+            b6.read_file_buffer("/output.bin").unwrap(),
+            vec![0x80, 0x90, 0xa0, 0xb0, 0xff]
+        );
+
+        // L37 redirecting a 256-byte all-values file preserves every byte 0..=255.
+        let all_bytes: Vec<u8> = (0u16..256).map(|i| i as u8).collect();
+        let b37 = Bash::with_options(BashOptions {
+            binary_files: BTreeMap::from([("/allbytes.bin".to_string(), all_bytes.clone())]),
+            ..BashOptions::default()
+        });
+        b37.exec("cat /allbytes.bin > /output.bin");
+        let round_tripped = b37.read_file_buffer("/output.bin").unwrap();
+        assert_eq!(round_tripped.len(), 256, "L37 length");
+        assert_eq!(round_tripped, all_bytes, "L37 every byte");
+
+        // L57 `cat a > out; cat b >> out` appends binary bytes in order.
+        let b57 = Bash::with_options(BashOptions {
+            binary_files: BTreeMap::from([
+                ("/a.bin".to_string(), vec![0x80, 0x90]),
+                ("/b.bin".to_string(), vec![0xa0, 0xb0]),
+            ]),
+            ..BashOptions::default()
+        });
+        b57.exec("cat /a.bin > /output.bin");
+        b57.exec("cat /b.bin >> /output.bin");
+        assert_eq!(
+            b57.read_file_buffer("/output.bin").unwrap(),
+            vec![0x80, 0x90, 0xa0, 0xb0]
+        );
+
+        // L158 `gzip -c binary > out; gunzip -c out` round-trips a binary file
+        // (including a null byte) through compression and redirection.
+        let b158 = Bash::with_options(BashOptions {
+            binary_files: BTreeMap::from([(
+                "/binary.bin".to_string(),
+                vec![0x80, 0xff, 0x00, 0x90, 0xab],
+            )]),
+            ..BashOptions::default()
+        });
+        b158.exec("gzip -c /binary.bin > /binary.bin.gz");
+        // `stdout` is the latin1 (char-per-byte) carrier, so each char code is
+        // the original byte value (mirrors upstream `stdout.charCodeAt(i)`).
+        let g158 = b158.exec("gunzip -c /binary.bin.gz").stdout;
+        assert_eq!(
+            g158.chars().map(|c| c as u32).collect::<Vec<u32>>(),
+            vec![0x80, 0xff, 0x00, 0x90, 0xab],
+            "L158 gzip/gunzip binary round-trip"
         );
     }
 
