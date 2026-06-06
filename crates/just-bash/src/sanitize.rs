@@ -152,3 +152,37 @@ fn replace_unc_paths(input: &str) -> String {
     output.push_str(&input[index..]);
     output
 }
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_error_message;
+
+    // packages/just-bash/src/commands/ln/ln.error-forwarding.test.ts
+    //
+    // Upstream injects a host filesystem error via a JS Proxy that overrides
+    // `fs.symlink` / `fs.link` to throw a string carrying an attacker host path
+    // and a node:internal stack reference, then asserts `ln` forwards a sanitized
+    // message (`<path>` / `<internal>` redactions). The Proxy-based fs-error
+    // injection harness is JavaScript-only — the Rust port's in-memory filesystem
+    // never produces host-path errors — so the rows are documented js-only.
+    // The redaction behavior the upstream test ultimately verifies IS portable:
+    // these assertions pin `sanitize_error_message` against the exact upstream
+    // payloads so the documented exception fails if redaction ever regresses.
+    #[test]
+    fn ln_error_forwarding_sanitizes_symlink_and_hardlink_payloads() {
+        // :29 symlink error forwarding: host path -> <path>, node:internal -> <internal>.
+        assert_eq!(
+            sanitize_error_message(
+                "symlink failed at /Users/attacker/private/secret.py via node:internal/modules/cjs/loader:999"
+            ),
+            "symlink failed at <path> via <internal>:999",
+        );
+        // :46 hard-link error forwarding: host path -> <path>, node:internal -> <internal>.
+        assert_eq!(
+            sanitize_error_message(
+                "link fault near /Users/attacker/workspace at node:internal/process/task_queues:95"
+            ),
+            "link fault near <path> at <internal>:95",
+        );
+    }
+}
