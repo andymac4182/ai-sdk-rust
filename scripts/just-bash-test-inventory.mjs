@@ -7043,8 +7043,32 @@ const r13jbParserInterpreterCaseGroups = [
   },
 ];
 
+const r22jbParserInterpreterCaseGroups = [
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/posix-fatal.test.ts',
+    lines: [5, 19, 47, 65],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::builtins::posix-fatal',
+    rustTest:
+      'r22jb_interpreter_posix_fatal_special_builtin_rows_match_upstream',
+    notes:
+      'R22JB implements POSIX-conformance fatal-error mode (`set -o posix`) for the special builtins `shift` (count out of range / non-numeric) and `set` (invalid `-o` option name): in posix mode the error aborts the whole script with exit 1 (upstream PosixFatalError) so trailing statements never run, while outside posix mode the same errors stay non-fatal (guarded against L34, already mapped). The spec-format rows (L47/L65) enable posix only when `$BASH_VERSION` is set. Each row asserts the exact stdout/exit, failing if the abort regresses.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/prototype-pollution.test.ts',
+    lines: [422, 732, 741],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'r22jb_interpreter_prototype_pollution_read_and_export_rows_match_upstream',
+    notes:
+      'R22JB closes the prototype-keyword `declare -x`/`read` rows: `declare -x prototype=exported` exports the keyword-named variable so a child command observes it via `printenv` (L422), and `read`/`read -a` assign stdin into keyword-named scalar/array variables (L732/L741). The Rust port has no shared Object.prototype, so these names behave like ordinary identifiers; each row asserts exact stdout and exit 0. The remaining keyword rows (nameref L499/L510, getopts L700, read -A L750, compgen L800) stay pending until those builtins/features land.',
+  },
+];
+
 function caseOverrideFor(testCase) {
   const group = [
+    ...r22jbParserInterpreterCaseGroups,
     ...r13jbParserInterpreterCaseGroups,
     ...r16jbParserInterpreterCaseGroups,
     ...r19jbParserInterpreterCaseGroups,
