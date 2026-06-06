@@ -3531,10 +3531,22 @@ fn split_quoted_subscript_assignment(
                         WordPart::Literal(value)
                         | WordPart::SingleQuoted(value)
                         | WordPart::Escaped(value) => key.push_str(value),
+                        // A `$var`/`${var}`/`$(...)`/`$((...))` inside the quoted
+                        // subscript (`name["$key"]=value`) is reconstructed to its
+                        // raw source so the subscript carries the expansion text;
+                        // `expand_subscript_text` resolves it at apply time.
+                        WordPart::Parameter(_)
+                        | WordPart::CommandSubstitution { .. }
+                        | WordPart::Arithmetic(_) => key.push_str(&serialize_word_part(inner)),
                         _ => return None,
                     }
                 }
             }
+            // A bare (unquoted) dynamic subscript part `name[$key]=value`: keep
+            // its raw source text in the key so it expands at apply time.
+            WordPart::Parameter(_)
+            | WordPart::CommandSubstitution { .. }
+            | WordPart::Arithmetic(_) => key.push_str(&serialize_word_part(part)),
             WordPart::Literal(value) => {
                 if let Some(close) = value.find(']') {
                     key.push_str(&value[..close]);
@@ -4492,6 +4504,19 @@ impl<D: CommandDispatcher> Interpreter<D> {
             };
         }
 
+        // `set` with no arguments prints all shell variables (scalars, indexed
+        // arrays, and associative arrays) sorted by name, mirroring upstream
+        // `handleSet`'s no-argument branch. Associative arrays render in bash's
+        // `name=([key]="value" ... )` form (trailing space before the paren,
+        // keys sorted).
+        if args.is_empty() {
+            return ExecOutput {
+                stdout: self.format_set_variable_listing(),
+                stderr: String::new(),
+                exit_code: 0,
+            };
+        }
+
         // `set -- [arg ...]` replaces the positional parameters with the
         // following arguments (and `set --` alone clears them). Bash treats
         // everything after the first bare `--` as positional parameters.
@@ -4693,6 +4718,72 @@ impl<D: CommandDispatcher> Interpreter<D> {
         out
     }
 
+    /// Render the `set` (no arguments) variable listing: every shell variable
+    /// printed `name=value`, sorted by name. Scalars use `quoteValue`-style
+    /// quoting, indexed arrays render `name=([0]="v0" [1]="v1")`, and
+    /// associative arrays render `name=([key]="value" ... )` with a trailing
+    /// space before the closing paren and keys sorted (bash behaviour). An
+    /// associative array's element entries are stored structurally, so they
+    /// never leak out as separate scalar lines. Mirrors upstream `handleSet`'s
+    /// no-argument branch.
+    fn format_set_variable_listing(&self) -> String {
+        let mut lines: Vec<(String, String)> = Vec::new();
+
+        // Scalars: every valid-name entry in the current environment that is not
+        // also typed as an indexed or associative array.
+        for (name, value) in &self.state.env {
+            if !is_valid_name(name) {
+                continue;
+            }
+            if self.state.arrays.contains_key(name) || self.state.assoc_arrays.contains_key(name) {
+                continue;
+            }
+            lines.push((name.clone(), format!("{name}={}", quote_set_scalar(value))));
+        }
+
+        // Indexed arrays: `name=([0]="a" [1]="b")` (no trailing space).
+        for (name, values) in &self.state.arrays {
+            let elements = values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| format!("[{index}]={}", quote_array_value(value)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            lines.push((name.clone(), format!("{name}=({elements})")));
+        }
+
+        // Associative arrays: keys sorted, trailing space before `)`.
+        for (name, array) in &self.state.assoc_arrays {
+            let mut keys: Vec<&String> = array.values.keys().collect();
+            keys.sort();
+            if keys.is_empty() {
+                lines.push((name.clone(), format!("{name}=()")));
+                continue;
+            }
+            let elements = keys
+                .iter()
+                .map(|key| {
+                    let value = array.values.get(*key).map_or("", String::as_str);
+                    format!("[{}]={}", quote_assoc_key(key), quote_array_value(value))
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            lines.push((name.clone(), format!("{name}=({elements} )")));
+        }
+
+        lines.sort_by(|left, right| left.0.cmp(&right.0));
+        if lines.is_empty() {
+            return String::new();
+        }
+        let mut out = lines
+            .into_iter()
+            .map(|(_, rendered)| rendered)
+            .collect::<Vec<_>>()
+            .join("\n");
+        out.push('\n');
+        out
+    }
+
     fn expand_assignments(&mut self, assignments: &[Assignment]) -> Vec<ExpandedAssignment> {
         assignments
             .iter()
@@ -4707,9 +4798,16 @@ impl<D: CommandDispatcher> Interpreter<D> {
                         append: assignment.append,
                     }
                 } else if let Some(subscript) = &assignment.subscript {
+                    // Expand any `$var`/`${var}` references in the subscript
+                    // (e.g. `dict[$key]=foo` / `dict["$key"]=foo`) before storing
+                    // it. The apply path then dequotes the key for associative
+                    // arrays or arithmetic-evaluates it for indexed arrays. A
+                    // literal subscript with no `$` passes through unchanged, so
+                    // `A[K]` still keys on the literal text `K`.
+                    let subscript = self.expand_subscript_text(subscript);
                     ExpandedAssignment::ArrayElement {
                         name: assignment.name.clone(),
-                        subscript: subscript.clone(),
+                        subscript,
                         value: assignment
                             .value
                             .as_ref()
@@ -6985,6 +7083,48 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
+/// Quote a scalar value for the `set` (no-argument) listing, mirroring
+/// upstream `quoteValue`: values made only of the bash "safe" characters are
+/// printed verbatim, otherwise single-quoted with embedded `'` escaped as
+/// `'\''`.
+fn quote_set_scalar(value: &str) -> String {
+    if value.chars().all(|character| {
+        character.is_ascii_alphanumeric()
+            || matches!(
+                character,
+                '_' | '/' | '.' | ':' | '-' | '@' | '%' | '+' | ',' | '='
+            )
+    }) {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+/// Quote an array element value for `set`/array output, mirroring upstream
+/// `quoteArrayValue`: bash always wraps array element values in double quotes,
+/// escaping backslashes and double quotes.
+fn quote_array_value(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+/// Quote an associative-array key for `set` output, mirroring upstream
+/// `quoteAssocKey`: keys made only of `[A-Za-z0-9_]` are printed bare, others
+/// are double-quoted with backslashes and double quotes escaped.
+fn quote_assoc_key(key: &str) -> String {
+    if !key.is_empty()
+        && key
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        key.to_string()
+    } else {
+        let escaped = key.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{escaped}\"")
+    }
+}
+
 pub fn shell_join_args<I, S>(args: I) -> String
 where
     I: IntoIterator<Item = S>,
@@ -8198,13 +8338,21 @@ mod tests {
                 haystack.push_str(content);
             }
         }
-        if haystack.contains(pattern) {
+        // Support a leading `^` line-start anchor (the only regex metacharacter
+        // these conformance scripts use) in addition to plain substring match.
+        let line_matches = |line: &str| -> bool {
+            match pattern.strip_prefix('^') {
+                Some(rest) => line.starts_with(rest),
+                None => line.contains(pattern.as_str()),
+            }
+        };
+        if haystack.lines().any(line_matches) {
             if quiet {
                 CommandResult::success("")
             } else {
                 let matches = haystack
                     .lines()
-                    .filter(|line| line.contains(pattern))
+                    .filter(|line| line_matches(line))
                     .map(|line| format!("{line}\n"))
                     .collect::<String>();
                 CommandResult::success(matches)
@@ -15838,6 +15986,105 @@ greet World",
         let r = shell()
             .exec("declare -a arr\narr[5]=value\nK=5\n(( x = arr[K] ))\necho \"got: ${arr[5]}\"");
         assert_eq!(r.stdout.trim(), "got: value", "L167");
+    }
+
+    /// r17jb closes the two portable `set` (no-argument) listing rows of
+    /// `packages/just-bash/src/interpreter/builtins/set.test.ts` (L6, L20)
+    /// through the Rust shell: an associative array declared with `typeset -A`
+    /// and populated with a spaced quoted key plus a bare key lists as a single
+    /// `name=([key]="value" ... )` line (bash format: keys sorted ASCII, values
+    /// double-quoted, trailing space before the closing paren) rather than as
+    /// separate scalar entries. The assertions fail if the bash-format quoting,
+    /// the key sort order, or the "structural, never-scalar" element storage
+    /// regresses.
+    #[test]
+    fn jbpi_interpreter_set_lists_assoc_arrays_in_bash_format_rows_match_upstream() {
+        // L6: `set | grep '^__assoc='` prints the full bash-format array line.
+        // Keys are sorted, so `a` comes before `k e y`; the spaced key is
+        // double-quoted; bash leaves a trailing space before the `)`.
+        let r = shell().exec(
+            "typeset -A __assoc\n__assoc['k e y']='v a l'\n__assoc[a]=b\nset | grep '^__assoc='",
+        );
+        assert_eq!(r.exit_code, 0, "L6 exit");
+        assert_eq!(
+            r.stdout, "__assoc=([a]=\"b\" [\"k e y\"]=\"v a l\" )\n",
+            "L6 stdout"
+        );
+
+        // L20: the array must surface as exactly ONE `set` line, never as a set
+        // of per-element scalar lines (`__assoc_a=b`, ...).
+        let r = shell().exec("typeset -A __assoc\n__assoc[a]=b\nset | grep '^__assoc' | wc -l");
+        assert_eq!(r.exit_code, 0, "L20 exit");
+        assert_eq!(r.stdout.trim(), "1", "L20 stdout");
+    }
+
+    /// r17jb closes the two portable `unset` associative-array-element rows of
+    /// `packages/just-bash/src/interpreter/builtins/unset.test.ts` (L126, L140)
+    /// through the Rust shell: `unset -v 'dict["$key"]'` removes the element
+    /// whose key is the VALUE of `$key`, whether the key is an ordinary word or
+    /// contains `[`/`]`/`,` metacharacters. This depends on element ASSIGNMENT
+    /// `dict["$key"]=foo` expanding the variable in the quoted subscript (now
+    /// fixed: split_quoted_subscript_assignment carries the raw `$key` text and
+    /// expand_assignments resolves it before the key is stored), which is what
+    /// the upstream rows set up before the `unset`. Each assertion fails if the
+    /// subscript expansion on either the assignment or the unset side regresses.
+    #[test]
+    fn jbpi_interpreter_unset_assoc_element_variable_key_rows_match_upstream() {
+        // L126 variable key: `dict["$key"]=foo` then `unset -v 'dict["$key"]'`.
+        let r = shell().exec(
+            "declare -A dict=()\nkey=mykey\ndict[\"$key\"]=foo\necho \"before: ${dict[mykey]}\"\nunset -v 'dict[\"$key\"]'\necho \"after: ${dict[mykey]}\"",
+        );
+        assert_eq!(r.exit_code, 0, "L126 exit");
+        assert_eq!(r.stdout, "before: foo\nafter: \n", "L126 stdout");
+
+        // L140 special-character key `1],a[1`: the element-count drops 1 -> 0
+        // after the unset, proving the metacharacter key round-trips through
+        // both the assignment and the unset.
+        let r = shell().exec(
+            "declare -A dict=()\nkey='1],a[1'\ndict[\"$key\"]=foo\necho \"${#dict[@]}\"\nunset -v 'dict[\"$key\"]'\necho \"${#dict[@]}\"",
+        );
+        assert_eq!(r.exit_code, 0, "L140 exit");
+        assert_eq!(r.stdout, "1\n0\n", "L140 stdout");
+    }
+
+    /// r17jb documents the two upstream-skipped (`it.skip`) parser-interpreter
+    /// rows that the Rust port intentionally does not yet reproduce, pinning the
+    /// CURRENT behavior so the documented exception fails if it silently
+    /// changes:
+    ///
+    /// - `assoc-array.test.ts:208` "key-value sequence initialization":
+    ///   upstream skips `declare -A A=(1 2 3)` (which bash would fold into
+    ///   `['1']=2 ['3']=''`). The Rust port does not implement positional
+    ///   key-value-sequence initialisation for associative arrays, so the
+    ///   array is left empty — matching the upstream "TODO: spec test fixes"
+    ///   skip rather than the eventual bash semantics.
+    /// - `execution-protection.test.ts:373` "recursive arithmetic in parameter
+    ///   expansion": upstream skips `f() { echo $(($(f))); }; f` because a
+    ///   function call inside `$(...)` inside `$((...))` hits a separate bug;
+    ///   the recursion-protection itself is covered by the recursive
+    ///   command-substitution row. The Rust port likewise does not recurse here
+    ///   (the inner command substitution yields an empty arithmetic operand, so
+    ///   `$((...))` evaluates to 0 and the script exits 0).
+    #[test]
+    fn jbpi_interpreter_upstream_skipped_assoc_and_recursive_arith_rows_documented() {
+        // assoc-array.test.ts:208 — key-value-sequence init is unsupported, so
+        // the assoc array stays empty (no `['1']=2 ['3']=''` elements).
+        let r = shell().exec("declare -A A=(1 2 3)\necho \"keys=[${!A[@]}] vals=[${A[@]}]\"");
+        assert_eq!(r.exit_code, 0, "skip208 exit");
+        assert_eq!(r.stdout.trim(), "keys=[] vals=[]", "skip208 stdout");
+
+        // execution-protection.test.ts:373 — recursive arithmetic in parameter
+        // expansion does not recurse; the inner command substitution is empty,
+        // so the arithmetic evaluates to 0 and the script exits cleanly (no
+        // execution-limit abort, matching the upstream skip rationale).
+        let r = shell().exec("f() { echo $(($(f))); }\nf");
+        assert_eq!(r.exit_code, 0, "skip373 exit");
+        assert_eq!(r.stdout.trim(), "0", "skip373 stdout");
+        assert!(
+            !r.stderr.contains("stack"),
+            "skip373 must not native-stack-overflow, stderr={:?}",
+            r.stderr
+        );
     }
 
     /// R16JB closes portable rows in `packages/just-bash/src/syntax/
