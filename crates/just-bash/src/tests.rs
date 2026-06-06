@@ -2037,3 +2037,67 @@ fn upstream_error_sanitization_cases() {
         "<path> at <path>"
     );
 }
+
+/// r20-just-bash-spec-comparison closes the tee and pipes/redirection comparison
+/// rows that exercise the runtime `Bash` facade against real-bash golden output:
+///   - tee.comparison.test.ts:82  append mode `-a` keeps the existing content and
+///     appends the piped line (file-content comparison).
+///   - tee.comparison.test.ts:104 multiline `echo -e` input streams through tee to
+///     stdout unchanged (stdout comparison).
+///   - pipes-redirections.comparison.test.ts:401 `sort < input > output` reads the
+///     input file via stdin redirection and writes the sorted result to the output
+///     file (output-file comparison).
+///   - pipes-redirections.comparison.test.ts:421 `cat < nonexistent.txt` errors with
+///     exit code 1 and a "No such file" diagnostic.
+/// Each assertion mirrors upstream `compareOutputs`/`env.exec` vs real bash and
+/// fails if redirection, tee append, or the missing-input diagnostic regresses.
+#[test]
+fn r20_tee_and_pipe_redirection_rows_match_upstream() {
+    // tee.comparison.test.ts:82 — `tee -a` appends to existing file content.
+    let bash = Bash::with_options(BashOptions {
+        cwd: Some("/w".to_string()),
+        files: BTreeMap::from([(
+            "/w/existing.txt".to_string(),
+            "existing content\n".to_string(),
+        )]),
+        ..BashOptions::default()
+    });
+    let appended = bash.exec("echo appended | tee -a existing.txt > /dev/null; cat existing.txt");
+    assert_eq!(appended.stdout, "existing content\nappended\n");
+    assert_eq!(appended.exit_code, 0, "stderr: {}", appended.stderr);
+
+    // tee.comparison.test.ts:104 — multiline `echo -e` input streams unchanged.
+    let bash = Bash::with_options(BashOptions {
+        cwd: Some("/w".to_string()),
+        ..BashOptions::default()
+    });
+    let multiline = bash.exec("echo -e \"line1\\nline2\\nline3\" | tee output.txt");
+    assert_eq!(multiline.stdout, "line1\nline2\nline3\n");
+    assert_eq!(multiline.exit_code, 0, "stderr: {}", multiline.stderr);
+
+    // pipes-redirections.comparison.test.ts:401 — stdin+stdout redirection sorts.
+    let bash = Bash::with_options(BashOptions {
+        cwd: Some("/w".to_string()),
+        files: BTreeMap::from([(
+            "/w/input.txt".to_string(),
+            "cherry\napple\nbanana\n".to_string(),
+        )]),
+        ..BashOptions::default()
+    });
+    let redir = bash.exec("sort < input.txt > output.txt; cat output.txt");
+    assert_eq!(redir.stdout, "apple\nbanana\ncherry\n");
+    assert_eq!(redir.exit_code, 0, "stderr: {}", redir.stderr);
+
+    // pipes-redirections.comparison.test.ts:421 — missing input file errors.
+    let bash = Bash::with_options(BashOptions {
+        cwd: Some("/w".to_string()),
+        ..BashOptions::default()
+    });
+    let missing = bash.exec("cat < nonexistent.txt");
+    assert_eq!(missing.exit_code, 1);
+    assert!(
+        missing.stderr.contains("No such file"),
+        "stderr: {:?}",
+        missing.stderr
+    );
+}

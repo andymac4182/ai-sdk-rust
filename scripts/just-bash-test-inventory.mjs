@@ -6549,6 +6549,87 @@ const r16jbClearHostnameCaseGroups = [
   },
 ];
 
+const r20jbSpecComparisonCaseGroups = [
+  {
+    file: 'packages/just-bash/src/comparison-tests/parse-errors.comparison.test.ts',
+    lines: [99, 109, 119, 131, 143, 151, 163, 276],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell',
+    rustTest:
+      'r20_parse_errors_loop_and_conditional_control_flow_match_upstream',
+    notes:
+      'r20-just-bash-spec-comparison closes the parse-errors comparison control-flow rows: valid for loop, empty for-list, while false, until true, if true, if/else, if/elif/else, and the `echo a;;;echo b` multiple-semicolon syntax error (exit 2). Each script runs through the real Interpreter and is asserted byte-for-byte against real-bash stdout and exit status; the assertion fails if loop/conditional control flow or the syntax-error contract regresses.',
+  },
+  {
+    file: 'packages/just-bash/src/comparison-tests/export.comparison.test.ts',
+    lines: [47],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell',
+    rustTest:
+      'r20_export_variable_is_available_in_subshell_matches_upstream',
+    notes:
+      'r20-just-bash-spec-comparison closes the export "should be available in subshell" row: an exported variable is visible inside a subshell `( ... )`, asserted to produce `bar\\n` through the real Interpreter.',
+  },
+  {
+    file: 'packages/just-bash/src/comparison-tests/tee.comparison.test.ts',
+    lines: [82, 104],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'r20_tee_and_pipe_redirection_rows_match_upstream',
+    notes:
+      'r20-just-bash-spec-comparison closes the tee comparison rows: `tee -a` appends the piped line to the existing file content, and multiline `echo -e` input streams unchanged through tee to stdout. Asserted byte-for-byte through the runtime Bash facade against real-bash golden output.',
+  },
+  {
+    file: 'packages/just-bash/src/comparison-tests/pipes-redirections.comparison.test.ts',
+    lines: [401, 421],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec',
+    rustTest: 'r20_tee_and_pipe_redirection_rows_match_upstream',
+    notes:
+      'r20-just-bash-spec-comparison closes the pipes/redirection comparison rows: `sort < input > output` reads via stdin redirection and writes the sorted output file, and `cat < nonexistent.txt` errors with exit 1 and a "No such file" diagnostic. Asserted through the runtime Bash facade.',
+  },
+  {
+    file: 'packages/just-bash/src/spec-tests/awk/awk-spec.test.ts',
+    lines: [53, 71],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::awk',
+    notes:
+      'r20-just-bash-spec-comparison: these rows are the vitest dynamic spec-runner scaffolding, not portable behavior cases. L53 is the `it.skip("No parseable tests")` placeholder and L71 is the runtime `it(testName, ...)` loop that parses imported AWK `.tests` fixtures at load time. The actual awk spec behavior is covered by the dedicated crates/just-bash awk command tests; the JS test-harness loop and skip placeholder have no Rust equivalent.',
+  },
+  {
+    file: 'packages/just-bash/src/spec-tests/bash/spec.test.ts',
+    lines: [196],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::shell',
+    notes:
+      'r20-just-bash-spec-comparison: L196 is the vitest dynamic spec-runner `it(testName, ...)` loop that parses imported bash spec `.tests` fixtures at load time. It is test-harness scaffolding with no static portable assertion; the bash control-flow/builtin behavior is covered by the colocated Interpreter tests in crates/just-bash/src/shell.rs.',
+  },
+  {
+    file: 'packages/just-bash/src/spec-tests/grep/grep-spec.test.ts',
+    lines: [40, 55, 73],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::search_engine',
+    notes:
+      'r20-just-bash-spec-comparison: L40 is the `it("All test files are currently skipped")` placeholder, L55 the `it.skip("No parseable tests")` placeholder, and L73 the runtime `it(testName, ...)` loop that parses imported BusyBox grep `.tests` fixtures at load time. These are vitest harness scaffolding; portable grep behavior is covered by the dedicated crates/just-bash grep command tests.',
+  },
+  {
+    file: 'packages/just-bash/src/spec-tests/jq/jq-spec.test.ts',
+    lines: [39, 54, 76],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::commands::jq',
+    notes:
+      'r20-just-bash-spec-comparison: L39/L54 are the "All test files are currently skipped"/"No parseable tests" placeholders and L76 the runtime `it(testName, ...)` loop that parses imported jq spec `.tests` fixtures at load time. These are vitest harness scaffolding; portable jq behavior is covered by the dedicated crates/just-bash jq command tests.',
+  },
+  {
+    file: 'packages/just-bash/src/spec-tests/sed/sed-spec.test.ts',
+    lines: [40, 55, 73],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::commands::sed',
+    notes:
+      'r20-just-bash-spec-comparison: L40/L55 are the "All test files are currently skipped"/"No parseable tests" placeholders and L73 the runtime `it(testName, ...)` loop that parses imported sed spec `.tests` fixtures at load time. These are vitest harness scaffolding; portable sed behavior is covered by the dedicated crates/just-bash sed command tests.',
+  },
+];
+
 const r10jbCommandAwkCaseGroups = [
   {
     file: 'packages/just-bash/src/commands/awk/awk.parsing.test.ts',
@@ -7015,6 +7096,7 @@ function caseOverrideFor(testCase) {
     ...justBashEncodingPipelineByteEmitCaseGroups,
     ...r16jbClearHostnameCaseGroups,
     ...r16jbHistoryCaseGroups,
+    ...r20jbSpecComparisonCaseGroups,
   ].find(
     (entry) =>
       groupMatchesFile(entry, testCase.file) &&
