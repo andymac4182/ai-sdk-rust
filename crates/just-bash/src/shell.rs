@@ -324,6 +324,13 @@ pub enum ParameterOperation {
         global: bool,
         anchor: PatternAnchor,
     },
+    /// `${var#pat}` (shortest prefix) / `${var##pat}` (longest prefix) and
+    /// `${var%pat}` (shortest suffix) / `${var%%pat}` (longest suffix) removal.
+    RemoveAffix {
+        pattern: String,
+        prefix: bool,
+        longest: bool,
+    },
     /// `${!var}` indirect expansion: the value of `var` names the parameter to
     /// expand.
     Indirect,
@@ -2021,6 +2028,32 @@ fn parse_parameter_operator(rest: &str) -> Option<ParameterOperation> {
                 }),
             }
         }
+        '#' => {
+            // `${var#pat}` removes the shortest matching prefix; `${var##pat}`
+            // removes the longest matching prefix.
+            let (longest, pattern) = match remainder.strip_prefix('#') {
+                Some(rest) => (true, rest),
+                None => (false, remainder),
+            };
+            Some(ParameterOperation::RemoveAffix {
+                pattern: pattern.to_string(),
+                prefix: true,
+                longest,
+            })
+        }
+        '%' => {
+            // `${var%pat}` removes the shortest matching suffix; `${var%%pat}`
+            // removes the longest matching suffix.
+            let (longest, pattern) = match remainder.strip_prefix('%') {
+                Some(rest) => (true, rest),
+                None => (false, remainder),
+            };
+            Some(ParameterOperation::RemoveAffix {
+                pattern: pattern.to_string(),
+                prefix: false,
+                longest,
+            })
+        }
         '/' => {
             let (anchor, body) = match remainder.chars().next() {
                 Some('/') => (PatternAnchor::None, &remainder[1..]), // `//` global
@@ -2214,6 +2247,41 @@ fn apply_pattern_substitute(
             result
         }
     }
+}
+
+/// Applies `${var#pat}`/`${var##pat}` (prefix removal) and
+/// `${var%pat}`/`${var%%pat}` (suffix removal). The pattern is a bash glob.
+/// `longest` selects the longest matching affix (`##`/`%%`); otherwise the
+/// shortest matching affix is removed (`#`/`%`). With no match the value is
+/// returned unchanged.
+fn apply_remove_affix(value: &str, pattern: &str, prefix: bool, longest: bool) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    if prefix {
+        let lengths: Vec<usize> = if longest {
+            (0..=chars.len()).rev().collect()
+        } else {
+            (0..=chars.len()).collect()
+        };
+        for len in lengths {
+            let candidate: String = chars[..len].iter().collect();
+            if pattern_matches(pattern, &candidate) {
+                return chars[len..].iter().collect();
+            }
+        }
+    } else {
+        let starts: Vec<usize> = if longest {
+            (0..=chars.len()).collect()
+        } else {
+            (0..=chars.len()).rev().collect()
+        };
+        for start in starts {
+            let candidate: String = chars[start..].iter().collect();
+            if pattern_matches(pattern, &candidate) {
+                return chars[..start].iter().collect();
+            }
+        }
+    }
+    value.to_string()
 }
 
 /// Applies `${var@Q}` (single-quote for safe reuse) and `${var@A}`
@@ -2802,6 +2870,20 @@ fn serialize_parameter(parameter: &ParameterExpansion) -> String {
                 pattern
             )
         }
+        Some(ParameterOperation::RemoveAffix {
+            pattern,
+            prefix,
+            longest,
+        }) => {
+            let symbol = if *prefix { '#' } else { '%' };
+            let count = if *longest { 2 } else { 1 };
+            format!(
+                "${{{}{}{}}}",
+                parameter.parameter,
+                symbol.to_string().repeat(count),
+                pattern
+            )
+        }
         Some(ParameterOperation::PatternSubstitute {
             pattern,
             replacement,
@@ -2957,6 +3039,7 @@ fn collect_word_part(part: &WordPart, names: &mut std::collections::BTreeSet<Str
             | Some(ParameterOperation::Substring { .. })
             | Some(ParameterOperation::CaseModify { .. })
             | Some(ParameterOperation::PatternSubstitute { .. })
+            | Some(ParameterOperation::RemoveAffix { .. })
             | Some(ParameterOperation::Indirect)
             | Some(ParameterOperation::Transform { .. })
             | None => {}
@@ -6692,11 +6775,38 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 vec![value.clone()]
             }
             WordPart::DoubleQuoted(parts) => {
-                let mut values = vec![String::new()];
+                // Inside double quotes most expansions concatenate into a single
+                // field. The exception is `"${arr[@]}"` / `"$@"`, where each
+                // array element (or positional) stays a SEPARATE field: the
+                // first element joins the preceding text and the last joins the
+                // following text (bash quoted `@` semantics). Build the field
+                // list incrementally so a multi-element expansion splits the
+                // surrounding literal text correctly.
+                let mut fields: Vec<String> = vec![String::new()];
                 for part in parts {
-                    values = append_expanded_values(values, self.expand_part(part, true));
+                    let expanded = if let WordPart::Parameter(parameter) = part {
+                        self.expand_quoted_at_parameter(parameter)
+                    } else {
+                        vec![self.expand_part(part, true).join(" ")]
+                    };
+                    if expanded.len() <= 1 {
+                        let piece = expanded.into_iter().next().unwrap_or_default();
+                        if let Some(last) = fields.last_mut() {
+                            last.push_str(&piece);
+                        }
+                    } else {
+                        // Join the first element onto the current field, append
+                        // the middle elements as their own fields, and leave the
+                        // last element as the new current field for trailing text.
+                        let mut iter = expanded.into_iter();
+                        if let (Some(first), Some(last_field)) = (iter.next(), fields.last_mut()) {
+                            last_field.push_str(&first);
+                        }
+                        let rest: Vec<String> = iter.collect();
+                        fields.extend(rest);
+                    }
                 }
-                vec![values.join(" ")]
+                fields
             }
             WordPart::Parameter(parameter) => self.expand_parameter(parameter, quoted),
             WordPart::CommandSubstitution { body, .. } => {
@@ -6724,6 +6834,45 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 }
             }
         }
+    }
+
+    /// Expand a parameter that appears inside double quotes, returning the
+    /// FIELD list. For `"${arr[@]}"` and `"$@"` this yields one field per array
+    /// element / positional parameter (bash keeps them separate even inside
+    /// double quotes); `"${arr[*]}"` / `"$*"` and every other expansion yield a
+    /// single joined field. Operators (e.g. `"${x%% *}"`) are never split.
+    fn expand_quoted_at_parameter(&mut self, parameter: &ParameterExpansion) -> Vec<String> {
+        if parameter.operation.is_none() {
+            if parameter.parameter == "@" {
+                return self.state.positionals.clone();
+            }
+            if let Some(resolved) = self.resolve_dynamic_subscript(&parameter.parameter) {
+                if let Some((array, ArrayIndex::All)) = parse_array_reference(&resolved) {
+                    if !resolved.contains("[*]") {
+                        if let Some(assoc) = self.state.assoc_arrays.get(array) {
+                            return assoc.ordered_values();
+                        }
+                        if let Some(values) = self.state.arrays.get(array) {
+                            return values.clone();
+                        }
+                        return Vec::new();
+                    }
+                }
+            } else if let Some((array, ArrayIndex::All)) =
+                parse_array_reference(&parameter.parameter)
+            {
+                if !parameter.parameter.contains("[*]") {
+                    if let Some(assoc) = self.state.assoc_arrays.get(array) {
+                        return assoc.ordered_values();
+                    }
+                    if let Some(values) = self.state.arrays.get(array) {
+                        return values.clone();
+                    }
+                    return Vec::new();
+                }
+            }
+        }
+        vec![self.expand_parameter(parameter, true).join(" ")]
     }
 
     fn expand_parameter(&mut self, parameter: &ParameterExpansion, quoted: bool) -> Vec<String> {
@@ -6811,6 +6960,19 @@ impl<D: CommandDispatcher> Interpreter<D> {
                     *anchor,
                 )]
             }
+            Some(ParameterOperation::RemoveAffix {
+                pattern,
+                prefix,
+                longest,
+            }) => {
+                let expanded_pattern = self.expand_inline_text(pattern);
+                vec![apply_remove_affix(
+                    &value,
+                    &expanded_pattern,
+                    *prefix,
+                    *longest,
+                )]
+            }
             Some(ParameterOperation::Indirect) => {
                 // `${!var}`: indirect expansion. When the indirected-through value
                 // names an `arr[@]`-style reference, expand the underlying array's
@@ -6860,10 +7022,32 @@ impl<D: CommandDispatcher> Interpreter<D> {
                         Some(format!("bash: {}: unbound variable\n", parameter.parameter));
                 }
                 if matches!(parameter.parameter.as_str(), "@" | "*") && !quoted {
-                    self.state.positionals.clone()
-                } else {
-                    vec![value]
+                    return self.state.positionals.clone();
                 }
+                // `${arr[@]}` / `${arr[*]}` expand to the array elements as
+                // separate words so `for x in "${arr[@]}"` iterates every
+                // element. `"${arr[*]}"` joins on the first IFS char. Without
+                // an operator, return the element list rather than a single
+                // space-joined string so word-splitting is correct.
+                if let Some((array, ArrayIndex::All)) = parse_array_reference(&parameter.parameter)
+                {
+                    let star = parameter.parameter.contains("[*]");
+                    if let Some(assoc) = self.state.assoc_arrays.get(array) {
+                        let values = assoc.ordered_values();
+                        if quoted && star {
+                            return vec![values.join(" ")];
+                        }
+                        return values;
+                    }
+                    if let Some(values) = self.state.arrays.get(array) {
+                        if quoted && star {
+                            return vec![values.join(" ")];
+                        }
+                        return values.clone();
+                    }
+                    return Vec::new();
+                }
+                vec![value]
             }
         }
     }
@@ -9614,6 +9798,24 @@ mod tests {
             Case {
                 script: "for f in foo.txt bar.sh baz.py; do case \"$f\" in *.txt) echo text;; *.sh) echo shell;; *) echo other;; esac; done",
                 stdout: "text\nshell\nother\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:473 arrays: declare, append, iterate. The
+            // quoted `"${arr[@]}"` expansion keeps each element a separate word,
+            // so the `for` loop iterates all four values one per line.
+            Case {
+                script: "arr=(one two three); arr+=(four); for x in \"${arr[@]}\"; do echo $x; done",
+                stdout: "one\ntwo\nthree\nfour\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:485 parameter expansion operators: `${X^^}`
+            // (uppercase all), `${X%% *}` (strip longest trailing ` *` suffix),
+            // `${X#* }` (strip shortest leading `* ` prefix), `${#X}` (length).
+            Case {
+                script: "X=\"hello world\"; echo ${X^^}; echo ${X%% *}; echo ${X#* }; echo ${#X}",
+                stdout: "HELLO WORLD\nhello\nworld\n11\n",
                 stderr: "",
                 exit_code: 0,
             },
