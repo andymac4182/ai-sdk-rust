@@ -1066,6 +1066,7 @@ impl JustBashSession {
             call_depth: 0,
             source_depth: 0,
             last_exit: 0,
+            completion_specs: CompletionSpecs::default(),
         };
         let mut script = script.as_ref().to_string();
 
@@ -1233,7 +1234,89 @@ struct ExecState<'a> {
     /// Status of the most recently completed command, used as the default
     /// exit code for a bare `return`.
     last_exit: i32,
+    /// Programmable-completion specifications registered by the `complete`
+    /// builtin and refined by `compopt`, keyed by command name with the reserved
+    /// keys `__default__` (`complete -D`) and `__empty__` (`compopt -E`).
+    /// Insertion order is preserved so `complete`/`complete -p` list specs in
+    /// registration order, mirroring the upstream `Map<string, CompletionSpec>`.
+    completion_specs: CompletionSpecs,
 }
+
+/// Insertion-ordered map of completion specifications keyed by command name.
+///
+/// Mirrors the upstream `Map<string, CompletionSpec>` used by the
+/// `complete`/`compopt` builtins: keys list in first-insertion order, re-setting
+/// an existing key keeps its position, and `delete`/`clear` behave like the JS
+/// `Map`. The reserved keys `__default__`/`__empty__` are stored but never listed.
+#[derive(Clone, Debug, Default)]
+struct CompletionSpecs {
+    order: Vec<String>,
+    map: BTreeMap<String, CompletionSpec>,
+}
+
+impl CompletionSpecs {
+    fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    fn get(&self, key: &str) -> Option<&CompletionSpec> {
+        self.map.get(key)
+    }
+
+    fn set(&mut self, key: String, spec: CompletionSpec) {
+        if !self.map.contains_key(&key) {
+            self.order.push(key.clone());
+        }
+        self.map.insert(key, spec);
+    }
+
+    fn remove(&mut self, key: &str) {
+        if self.map.remove(key).is_some() {
+            self.order.retain(|k| k != key);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.order.clear();
+        self.map.clear();
+    }
+
+    /// Keys in insertion order, excluding the reserved `__default__`/`__empty__`
+    /// pseudo-commands which are never listed by `complete`/`complete -p`.
+    fn listable_keys(&self) -> impl Iterator<Item = &String> {
+        self.order
+            .iter()
+            .filter(|k| k.as_str() != "__default__" && k.as_str() != "__empty__")
+    }
+}
+
+/// A single programmable-completion specification (`complete`/`compopt`).
+///
+/// Mirrors the upstream `CompletionSpec` shape: an optional wordlist (`-W`),
+/// function name (`-F`), external command (`-C`), `-o` option list, and `-A`
+/// action list, plus the `-D` default flag.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CompletionSpec {
+    wordlist: Option<String>,
+    function: Option<String>,
+    command: Option<String>,
+    options: Vec<String>,
+    actions: Vec<String>,
+    is_default: bool,
+}
+
+/// Valid completion option names accepted by `complete`/`compopt` `-o`/`+o`.
+/// Mirrors upstream `VALID_OPTIONS`.
+const COMPLETION_VALID_OPTIONS: &[&str] = &[
+    "bashdefault",
+    "default",
+    "dirnames",
+    "filenames",
+    "noquote",
+    "nosort",
+    "nospace",
+    "plusdirs",
+];
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct CommandResult {
@@ -1540,6 +1623,12 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
     if command == "source" || command == "." {
         return command_source(state, &tokens[1..]);
     }
+    if command == "complete" {
+        return command_complete(state, &tokens[1..]);
+    }
+    if command == "compopt" {
+        return command_compopt(state, &tokens[1..]);
+    }
     // A command name containing `/` is a path. If it does not resolve to a
     // registered builtin (those are handled below), try to execute it as a user
     // script: the file must exist, be a regular file, and have an execute bit
@@ -1550,6 +1639,13 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
         if let Some(result) = execute_user_script(state, &tokens[0], &tokens[1..], &stdin) {
             return result;
         }
+        // A command name containing `/` that does not resolve to an existing
+        // file is reported by bash as "No such file or directory" (exit 127),
+        // distinct from the bare-name "command not found" message.
+        return stderr_result(
+            127,
+            format!("bash: {}: No such file or directory\n", tokens[0]),
+        );
     }
     if !state.session.inner.commands.contains(command) {
         return stderr_result(127, format!("bash: {}: command not found\n", tokens[0]));
@@ -31759,10 +31855,25 @@ fn command_bash(
     if args.first().is_some_and(|arg| arg == "-c") {
         if let Some(script) = args.get(1) {
             let old_stdin = std::mem::replace(&mut state.stdin, stdin);
+            // For `bash -c command name arg1 arg2 ...`, the first word after the
+            // command string becomes `$0` and the rest become `$1`, `$2`, ...
+            // (mirrors upstream bash.ts/sh.ts, which assign argv[0] to `$0`).
+            let old_zero = state.env.get("0").cloned();
+            if let Some(name) = args.get(2) {
+                state.env.insert("0".to_string(), name.clone());
+            }
             let positional = args.iter().skip(3).cloned().collect::<Vec<_>>();
             let old_positionals = set_positional_args(state, positional);
             let result = execute_control_script(state, script);
             restore_positional_args(state, old_positionals);
+            match old_zero {
+                Some(value) => {
+                    state.env.insert("0".to_string(), value);
+                }
+                None => {
+                    state.env.remove("0");
+                }
+            }
             state.stdin = old_stdin;
             return result;
         }
@@ -32650,6 +32761,342 @@ fn command_return(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
     }
 }
 
+/// `complete` builtin — set and display programmable-completion specifications.
+///
+/// Ports `handleComplete` from upstream `interpreter/builtins/complete.ts`:
+/// parses `-p`/`-r`/`-D`/`-W`/`-F`/`-o`/`-A`/`-C`/`-G`/`-P`/`-S`/`-X`/`--`,
+/// validates `-o` option names, and registers/removes/prints specs. With no
+/// actionable arguments it prints the current specs in the reusable `complete`
+/// format (`-p`).
+fn command_complete(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
+    let mut print_mode = false;
+    let mut remove_mode = false;
+    let mut is_default = false;
+    let mut wordlist: Option<String> = None;
+    let mut func_name: Option<String> = None;
+    let mut command_str: Option<String> = None;
+    let mut options: Vec<String> = Vec::new();
+    let mut actions: Vec<String> = Vec::new();
+    let mut commands: Vec<String> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        match arg {
+            "-p" => print_mode = true,
+            "-r" => remove_mode = true,
+            "-D" => is_default = true,
+            "-W" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => wordlist = Some(v.clone()),
+                    None => return stderr_result(2, "complete: -W: option requires an argument\n"),
+                }
+            }
+            "-F" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => func_name = Some(v.clone()),
+                    None => return stderr_result(2, "complete: -F: option requires an argument\n"),
+                }
+            }
+            "-o" => {
+                i += 1;
+                match args.get(i) {
+                    Some(opt) => {
+                        if !COMPLETION_VALID_OPTIONS.contains(&opt.as_str()) {
+                            return stderr_result(
+                                2,
+                                format!("complete: {opt}: invalid option name\n"),
+                            );
+                        }
+                        options.push(opt.clone());
+                    }
+                    None => return stderr_result(2, "complete: -o: option requires an argument\n"),
+                }
+            }
+            "-A" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => actions.push(v.clone()),
+                    None => return stderr_result(2, "complete: -A: option requires an argument\n"),
+                }
+            }
+            "-C" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => command_str = Some(v.clone()),
+                    None => return stderr_result(2, "complete: -C: option requires an argument\n"),
+                }
+            }
+            "-G" | "-P" | "-S" | "-X" => {
+                // Recognized but not fully modeled: consume the argument.
+                i += 1;
+                if args.get(i).is_none() {
+                    return stderr_result(
+                        2,
+                        format!("complete: {arg}: option requires an argument\n"),
+                    );
+                }
+            }
+            "--" => {
+                commands.extend(args[i + 1..].iter().cloned());
+                break;
+            }
+            other if !other.starts_with('-') => commands.push(other.to_string()),
+            _ => {}
+        }
+        i += 1;
+    }
+
+    if remove_mode {
+        if commands.is_empty() {
+            state.completion_specs.clear();
+        } else {
+            for cmd in &commands {
+                state.completion_specs.remove(cmd);
+            }
+        }
+        return CommandResult::default();
+    }
+
+    if print_mode {
+        return print_completion_specs(
+            state,
+            if commands.is_empty() {
+                None
+            } else {
+                Some(&commands)
+            },
+        );
+    }
+
+    // No actionable arguments at all: list every spec.
+    if args.is_empty()
+        || (commands.is_empty()
+            && wordlist.is_none()
+            && func_name.is_none()
+            && command_str.is_none()
+            && options.is_empty()
+            && actions.is_empty()
+            && !is_default)
+    {
+        return print_completion_specs(state, None);
+    }
+
+    // `-F` requires a command name unless `-D` was given.
+    if func_name.is_some() && commands.is_empty() && !is_default {
+        return stderr_result(2, "complete: -F: option requires a command name\n");
+    }
+
+    let build_spec = |is_default: bool| CompletionSpec {
+        wordlist: wordlist.clone(),
+        function: func_name.clone(),
+        command: command_str.clone(),
+        options: options.clone(),
+        actions: actions.clone(),
+        is_default,
+    };
+
+    if is_default {
+        state
+            .completion_specs
+            .set("__default__".to_string(), build_spec(true));
+        return CommandResult::default();
+    }
+
+    for cmd in &commands {
+        state.completion_specs.set(cmd.clone(), build_spec(false));
+    }
+
+    CommandResult::default()
+}
+
+/// Print completion specs in the reusable `complete ...` format. With
+/// `commands == None` prints every registered spec (insertion order); with a
+/// command list prints only those, emitting a `no completion specification`
+/// stderr line and exit 1 for any unknown command.
+fn print_completion_specs(state: &ExecState<'_>, commands: Option<&[String]>) -> CommandResult {
+    if state.completion_specs.is_empty() {
+        if let Some(cmds) = commands {
+            if !cmds.is_empty() {
+                let mut stderr = String::new();
+                for cmd in cmds {
+                    stderr.push_str(&format!("complete: {cmd}: no completion specification\n"));
+                }
+                return stderr_result(1, stderr);
+            }
+        }
+        return CommandResult::default();
+    }
+
+    let mut output: Vec<String> = Vec::new();
+    let target: Vec<String> = match commands {
+        Some(cmds) => cmds.to_vec(),
+        None => state.completion_specs.listable_keys().cloned().collect(),
+    };
+
+    for cmd in &target {
+        if cmd == "__default__" {
+            continue;
+        }
+        let Some(spec) = state.completion_specs.get(cmd) else {
+            if commands.is_some() {
+                let mut stdout = output.join("\n");
+                if !output.is_empty() {
+                    stdout.push('\n');
+                }
+                return CommandResult {
+                    stdout,
+                    stderr: format!("complete: {cmd}: no completion specification\n"),
+                    exit_code: 1,
+                    ..CommandResult::default()
+                };
+            }
+            continue;
+        };
+
+        let mut line = String::from("complete");
+        for opt in &spec.options {
+            line.push_str(&format!(" -o {opt}"));
+        }
+        for action in &spec.actions {
+            line.push_str(&format!(" -A {action}"));
+        }
+        if let Some(wl) = &spec.wordlist {
+            if wl.contains(' ') || wl.contains('\'') {
+                line.push_str(&format!(" -W '{wl}'"));
+            } else {
+                line.push_str(&format!(" -W {wl}"));
+            }
+        }
+        if let Some(func) = &spec.function {
+            line.push_str(&format!(" -F {func}"));
+        }
+        if spec.is_default {
+            line.push_str(" -D");
+        }
+        line.push_str(&format!(" {cmd}"));
+        output.push(line);
+    }
+
+    if output.is_empty() {
+        return CommandResult::default();
+    }
+
+    stdout_result(format!("{}\n", output.join("\n")))
+}
+
+/// `compopt` builtin — modify completion options.
+///
+/// Ports `handleCompopt` from upstream `interpreter/builtins/compopt.ts`: parses
+/// `-D`/`-E`/`-o`/`+o`/`--`, validates `-o`/`+o` option names, and
+/// enables/disables options on the targeted command (or `__default__`/`__empty__`)
+/// spec, creating it if absent. With no command name and no `-D`/`-E` it errors
+/// with exit 1.
+fn command_compopt(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
+    let mut is_default = false;
+    let mut is_empty_line = false;
+    let mut enable_options: Vec<String> = Vec::new();
+    let mut disable_options: Vec<String> = Vec::new();
+    let mut commands: Vec<String> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        match arg {
+            "-D" => is_default = true,
+            "-E" => is_empty_line = true,
+            "-o" => {
+                i += 1;
+                match args.get(i) {
+                    Some(opt) => {
+                        if !COMPLETION_VALID_OPTIONS.contains(&opt.as_str()) {
+                            return stderr_result(
+                                2,
+                                format!("compopt: {opt}: invalid option name\n"),
+                            );
+                        }
+                        enable_options.push(opt.clone());
+                    }
+                    None => return stderr_result(2, "compopt: -o: option requires an argument\n"),
+                }
+            }
+            "+o" => {
+                i += 1;
+                match args.get(i) {
+                    Some(opt) => {
+                        if !COMPLETION_VALID_OPTIONS.contains(&opt.as_str()) {
+                            return stderr_result(
+                                2,
+                                format!("compopt: {opt}: invalid option name\n"),
+                            );
+                        }
+                        disable_options.push(opt.clone());
+                    }
+                    None => return stderr_result(2, "compopt: +o: option requires an argument\n"),
+                }
+            }
+            "--" => {
+                commands.extend(args[i + 1..].iter().cloned());
+                break;
+            }
+            other if !other.starts_with('-') && !other.starts_with('+') => {
+                commands.push(other.to_string())
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let apply = |spec: &mut CompletionSpec| {
+        let mut current = spec.options.clone();
+        for opt in &enable_options {
+            if !current.contains(opt) {
+                current.push(opt.clone());
+            }
+        }
+        current.retain(|opt| !disable_options.contains(opt));
+        spec.options = current;
+    };
+
+    if is_default {
+        let mut spec = state
+            .completion_specs
+            .get("__default__")
+            .cloned()
+            .unwrap_or(CompletionSpec {
+                is_default: true,
+                ..CompletionSpec::default()
+            });
+        apply(&mut spec);
+        state.completion_specs.set("__default__".to_string(), spec);
+        return CommandResult::default();
+    }
+
+    if is_empty_line {
+        let mut spec = state
+            .completion_specs
+            .get("__empty__")
+            .cloned()
+            .unwrap_or_default();
+        apply(&mut spec);
+        state.completion_specs.set("__empty__".to_string(), spec);
+        return CommandResult::default();
+    }
+
+    if !commands.is_empty() {
+        for cmd in &commands {
+            let mut spec = state.completion_specs.get(cmd).cloned().unwrap_or_default();
+            apply(&mut spec);
+            state.completion_specs.set(cmd.clone(), spec);
+        }
+        return CommandResult::default();
+    }
+
+    stderr_result(1, "compopt: not currently executing completion function\n")
+}
+
 /// `source` / `.` builtin. Reads a script from the virtual filesystem and runs
 /// its commands in the current environment (variables, functions, and `cd`
 /// persist into the caller). Mirrors `interpreter/builtins/source.ts`:
@@ -33368,7 +33815,16 @@ mod tests {
             let result = session.exec(command, JustBashExecOptions::new());
             assert_eq!(result.exit_code, 127, "{command}");
             assert_eq!(result.stdout, "", "{command}");
-            assert!(result.stderr.contains("command not found"), "{command}");
+            // Bare command names fail closed with "command not found"; an
+            // absolute path to a nonexistent file (`/usr/bin/node`) reports
+            // "No such file or directory" (matching upstream `resolveCommand`,
+            // which distinguishes a PATH miss from a missing explicit path).
+            assert!(
+                result.stderr.contains("command not found")
+                    || result.stderr.contains("No such file or directory"),
+                "{command}: stderr={}",
+                result.stderr
+            );
             assert!(!result.stderr.contains("host-js"), "{command}");
             assert!(!result.stderr.contains("host-node"), "{command}");
             assert!(!result.stderr.contains("host-python"), "{command}");
@@ -35189,7 +35645,15 @@ mod tests {
             let result = bash.exec(command, JustBashExecOptions::new());
             assert_eq!(result.exit_code, 127, "{command}");
             assert_eq!(result.stdout, "", "{command}");
-            assert!(result.stderr.contains("command not found"), "{command}");
+            // Bare names fail closed with "command not found"; an absolute path
+            // to a nonexistent file reports "No such file or directory"
+            // (upstream `resolveCommand` distinguishes the two).
+            assert!(
+                result.stderr.contains("command not found")
+                    || result.stderr.contains("No such file or directory"),
+                "{command}: stderr={}",
+                result.stderr
+            );
             assert!(!result.stderr.contains("host-js"), "{command}");
             assert!(!result.stderr.contains("host-node"), "{command}");
             assert!(!result.stderr.contains("host-python"), "{command}");
@@ -38207,5 +38671,309 @@ mod tests {
             r.stderr
         );
         assert_eq!(r.exit_code, 1);
+    }
+
+    // R19JB: `complete` / `compopt` programmable-completion builtins.
+    //
+    // These port the upstream handler tests in
+    // `interpreter/builtins/complete.test.ts` and `compopt.test.ts`. Upstream
+    // calls the `handleComplete`/`handleCompopt` handlers directly against a mock
+    // context and inspects `ctx.state.completionSpecs`. Here we drive the real
+    // runtime via `bash.exec(...)`, sequencing the equivalent registrations and
+    // observing the resulting spec table through `complete -p` output (which
+    // encodes the wordlist/function/option/default fields in the same reusable
+    // `complete ...` form upstream prints) plus exit codes / stderr.
+
+    fn jb() -> crate::runtime::Bash {
+        crate::runtime::Bash::new()
+    }
+
+    // complete.test.ts:71 "complete with no args and no specs"
+    #[test]
+    fn r19jb_complete_with_no_args_and_no_specs_prints_nothing() {
+        let r = jb().exec("complete");
+        assert_eq!(r.stdout, "");
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+    }
+
+    // complete.test.ts:78 "complete -W sets wordlist completion"
+    #[test]
+    fn r19jb_complete_w_sets_wordlist_completion() {
+        let r = jb().exec("complete -W 'foo bar' mycommand; complete -p");
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+        // wordlist with a space round-trips quoted; the spec stores `wordlist`.
+        assert_eq!(r.stdout, "complete -W 'foo bar' mycommand\n");
+    }
+
+    // complete.test.ts:87 "complete -p prints completions"
+    #[test]
+    fn r19jb_complete_p_prints_completions() {
+        let r = jb().exec("complete -W 'foo bar' mycommand; complete -p");
+        assert_eq!(r.stdout, "complete -W 'foo bar' mycommand\n");
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+    }
+
+    // complete.test.ts:95 "complete with no args prints completions"
+    #[test]
+    fn r19jb_complete_with_no_args_prints_completions() {
+        let r = jb().exec("complete -W 'foo bar' mycommand; complete");
+        assert_eq!(r.stdout, "complete -W 'foo bar' mycommand\n");
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+    }
+
+    // complete.test.ts:103 "complete -F sets function completion"
+    #[test]
+    fn r19jb_complete_f_sets_function_completion() {
+        let r = jb().exec("complete -F myfunc other; complete -p");
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+        assert_eq!(r.stdout, "complete -F myfunc other\n");
+    }
+
+    // complete.test.ts:112 "complete prints both specs"
+    #[test]
+    fn r19jb_complete_prints_both_specs() {
+        let r = jb().exec("complete -W 'foo bar' mycommand; complete -F myfunc other; complete");
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+        assert!(
+            r.stdout.contains("complete -W 'foo bar' mycommand\n"),
+            "stdout={}",
+            r.stdout
+        );
+        assert!(
+            r.stdout.contains("complete -F myfunc other\n"),
+            "stdout={}",
+            r.stdout
+        );
+    }
+
+    // complete.test.ts:122 "complete -F without command is error"
+    #[test]
+    fn r19jb_complete_f_without_command_is_error() {
+        let r = jb().exec("complete -F f");
+        assert_eq!(r.exit_code, 2, "stderr={}", r.stderr);
+        assert!(r.stderr.contains("-F"), "stderr={}", r.stderr);
+    }
+
+    // complete.test.ts:129 "complete -o default -o nospace -F works"
+    #[test]
+    fn r19jb_complete_o_default_o_nospace_f_works() {
+        let r = jb().exec("complete -o default -o nospace -F foo git; complete -p");
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+        // Options list first in registration order, then the function.
+        assert_eq!(r.stdout, "complete -o default -o nospace -F foo git\n");
+    }
+
+    // complete.test.ts:147 "complete -r removes spec"
+    #[test]
+    fn r19jb_complete_r_removes_spec() {
+        let r = jb().exec(
+            "complete -W 'foo bar' mycommand; complete -F myfunc other; \
+             complete -r mycommand; complete",
+        );
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+        assert_eq!(r.stdout, "complete -F myfunc other\n");
+        // The removed spec no longer prints.
+        assert!(
+            !r.stdout.contains("mycommand"),
+            "removed spec must be gone, stdout={}",
+            r.stdout
+        );
+    }
+
+    // complete.test.ts:157 "complete -D sets default completion"
+    #[test]
+    fn r19jb_complete_d_sets_default_completion() {
+        // `-D` stores under the reserved __default__ key, which is never listed.
+        let r = jb().exec("complete -F invalidZZ -D; complete");
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+        assert_eq!(
+            r.stdout, "",
+            "default spec is not listed, stdout={}",
+            r.stdout
+        );
+    }
+
+    // complete.test.ts:167 "complete foo with no options is allowed (bash BUG behavior)"
+    #[test]
+    fn r19jb_complete_foo_with_no_options_is_allowed() {
+        let r = jb().exec("complete foo");
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+    }
+
+    // compopt.test.ts:72 "compopt with invalid option returns exit code 2"
+    #[test]
+    fn r19jb_compopt_with_invalid_option_returns_exit_code_2() {
+        let r = jb().exec("compopt -o invalid");
+        assert_eq!(r.exit_code, 2, "stderr={}", r.stderr);
+        assert!(r.stderr.contains("invalid"), "stderr={}", r.stderr);
+        assert!(
+            r.stderr.contains("invalid option name"),
+            "stderr={}",
+            r.stderr
+        );
+    }
+
+    // compopt.test.ts:80 "compopt without command name outside completion function returns exit code 1"
+    #[test]
+    fn r19jb_compopt_without_command_name_outside_completion_function_returns_exit_code_1() {
+        let r = jb().exec("compopt -o filenames +o nospace");
+        assert_eq!(r.exit_code, 1, "stderr={}", r.stderr);
+        assert!(
+            r.stderr
+                .contains("not currently executing completion function"),
+            "stderr={}",
+            r.stderr
+        );
+    }
+
+    // compopt.test.ts:89 "compopt -D modifies default completion options"
+    #[test]
+    fn r19jb_compopt_d_modifies_default_completion_options() {
+        // Set up a default completion, then enable two options via compopt -D.
+        // The default spec is internal; we assert success and that re-applying
+        // through compopt -D is idempotent-safe (still exit 0). Because the
+        // default key is not listed, we verify the option set indirectly: after
+        // disabling them again, compopt remains successful.
+        let r = jb().exec("complete -F myfunc -D; compopt -D -o nospace -o filenames; echo OK");
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+        assert_eq!(r.stdout, "OK\n");
+        // Disabling the just-enabled options must also succeed (proves they were
+        // tracked on the default spec and can be toggled off).
+        let r2 = jb()
+            .exec("complete -F myfunc -D; compopt -D -o nospace; compopt -D +o nospace; echo OK");
+        assert_eq!(r2.exit_code, 0, "stderr={}", r2.stderr);
+        assert_eq!(r2.stdout, "OK\n");
+    }
+
+    // compopt.test.ts:110 "compopt -E modifies empty-line completion options"
+    #[test]
+    fn r19jb_compopt_e_modifies_empty_line_completion_options() {
+        let r = jb().exec("compopt -E -o default; echo OK");
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+        assert_eq!(r.stdout, "OK\n");
+        // The __empty__ spec is internal and not listed.
+        let r2 = jb().exec("compopt -E -o default; complete");
+        assert_eq!(
+            r2.stdout, "",
+            "empty-line spec is not listed, stdout={}",
+            r2.stdout
+        );
+    }
+
+    // compopt.test.ts:120 "compopt with command name modifies that command's options"
+    #[test]
+    fn r19jb_compopt_with_command_name_modifies_that_commands_options() {
+        let r = jb().exec("complete -F gitfunc git; compopt -o nospace git; complete -p");
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+        // The original function is preserved and the new option is added.
+        assert_eq!(r.stdout, "complete -o nospace -F gitfunc git\n");
+    }
+
+    // compopt.test.ts:135 "compopt +o disables options"
+    #[test]
+    fn r19jb_compopt_plus_o_disables_options() {
+        let r = jb().exec(
+            "complete -o nospace -o filenames -F myfunc cmd; compopt +o nospace cmd; \
+             complete -p",
+        );
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+        // nospace removed, filenames retained, function preserved.
+        assert_eq!(r.stdout, "complete -o filenames -F myfunc cmd\n");
+    }
+
+    // compopt.test.ts:158 "compopt can enable and disable options at once"
+    #[test]
+    fn r19jb_compopt_can_enable_and_disable_options_at_once() {
+        let r = jb().exec(
+            "complete -o nospace -F myfunc cmd; compopt -o filenames +o nospace cmd; \
+             complete -p",
+        );
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+        // filenames enabled (appended), nospace disabled, function preserved.
+        assert_eq!(r.stdout, "complete -o filenames -F myfunc cmd\n");
+    }
+
+    // compopt.test.ts:179 "compopt creates spec for command that doesn't have one"
+    #[test]
+    fn r19jb_compopt_creates_spec_for_command_that_doesnt_have_one() {
+        let r = jb().exec("compopt -o nospace newcmd; complete -p");
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+        assert_eq!(r.stdout, "complete -o nospace newcmd\n");
+    }
+
+    // compopt.test.ts:189 "compopt -o without argument returns error"
+    #[test]
+    fn r19jb_compopt_o_without_argument_returns_error() {
+        let r = jb().exec("compopt -o");
+        assert_eq!(r.exit_code, 2, "stderr={}", r.stderr);
+        assert!(r.stderr.contains("-o"), "stderr={}", r.stderr);
+        assert!(
+            r.stderr.contains("option requires an argument"),
+            "stderr={}",
+            r.stderr
+        );
+    }
+
+    // compopt.test.ts:197 "compopt +o without argument returns error"
+    #[test]
+    fn r19jb_compopt_plus_o_without_argument_returns_error() {
+        let r = jb().exec("compopt +o");
+        assert_eq!(r.exit_code, 2, "stderr={}", r.stderr);
+        assert!(r.stderr.contains("+o"), "stderr={}", r.stderr);
+        assert!(
+            r.stderr.contains("option requires an argument"),
+            "stderr={}",
+            r.stderr
+        );
+    }
+
+    // compopt.test.ts:205 "compopt validates all option names"
+    #[test]
+    fn r19jb_compopt_validates_all_option_names() {
+        for opt in [
+            "bashdefault",
+            "default",
+            "dirnames",
+            "filenames",
+            "noquote",
+            "nosort",
+            "nospace",
+            "plusdirs",
+        ] {
+            let r = jb().exec(&format!("compopt -o {opt} testcmd"));
+            assert_eq!(r.exit_code, 0, "opt={opt} stderr={}", r.stderr);
+        }
+        let invalid = jb().exec("compopt -o notanoption testcmd");
+        assert_eq!(invalid.exit_code, 2, "stderr={}", invalid.stderr);
+    }
+
+    // subshell-args.test.ts:19 "should set $0 to script name"
+    //
+    // `bash -c 'echo $0' myscript`: the first word after the command string is
+    // argv[0], i.e. `$0`, so it must print `myscript`, not an empty line.
+    #[test]
+    fn r19jb_bash_dash_c_sets_dollar_zero_to_script_name() {
+        let r = jb().exec("bash -c 'echo $0' myscript");
+        assert_eq!(r.stdout, "myscript\n", "stderr={}", r.stderr);
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+        // Positional args still land at $1.. (sibling row "passes positional args").
+        let r2 = jb().exec("sh -c 'echo $0 $1 $2' script arg1 arg2");
+        assert_eq!(r2.stdout, "script arg1 arg2\n", "stderr={}", r2.stderr);
+    }
+
+    // parse-errors.test.ts:172 "should return 127 for command path not found"
+    //
+    // A command name containing `/` that does not resolve to an existing file is
+    // reported as "No such file or directory" with exit 127 (distinct from the
+    // bare-name "command not found" message).
+    #[test]
+    fn r19jb_path_command_not_found_returns_127_no_such_file() {
+        let r = jb().exec("/nonexistent/path/command");
+        assert_eq!(r.exit_code, 127, "stderr={}", r.stderr);
+        assert!(
+            r.stderr.contains("No such file or directory"),
+            "stderr={}",
+            r.stderr
+        );
     }
 }

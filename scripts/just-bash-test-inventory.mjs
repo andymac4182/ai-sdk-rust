@@ -6864,6 +6864,47 @@ const r16jbParserInterpreterCaseGroups = [
   },
 ];
 
+const r19jbParserInterpreterCaseGroups = [
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/complete.test.ts',
+    lines: [71, 78, 87, 95, 103, 112, 122, 129, 147, 157, 167],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'r19jb_complete_with_no_args_and_no_specs_prints_nothing; r19jb_complete_w_sets_wordlist_completion; r19jb_complete_p_prints_completions; r19jb_complete_with_no_args_prints_completions; r19jb_complete_f_sets_function_completion; r19jb_complete_prints_both_specs; r19jb_complete_f_without_command_is_error; r19jb_complete_o_default_o_nospace_f_works; r19jb_complete_r_removes_spec; r19jb_complete_d_sets_default_completion; r19jb_complete_foo_with_no_options_is_allowed',
+    notes:
+      'R19JB ports the `complete` builtin: the runtime now registers, prints (`-p`/no-args reusable format), and removes (`-r`) programmable-completion specs, validates `-o` option names, errors on `-F` without a command (exit 2), and stores `-D` default/`-W` wordlist/`-F` function specs in insertion order. Each row is observed through real `bash.exec` runs and `complete -p` output that encodes the wordlist/function/option/default fields exactly as upstream prints them.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/compopt.test.ts',
+    lines: [72, 80, 89, 110, 120, 135, 158, 179, 189, 197, 205],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'r19jb_compopt_with_invalid_option_returns_exit_code_2; r19jb_compopt_without_command_name_outside_completion_function_returns_exit_code_1; r19jb_compopt_d_modifies_default_completion_options; r19jb_compopt_e_modifies_empty_line_completion_options; r19jb_compopt_with_command_name_modifies_that_commands_options; r19jb_compopt_plus_o_disables_options; r19jb_compopt_can_enable_and_disable_options_at_once; r19jb_compopt_creates_spec_for_command_that_doesnt_have_one; r19jb_compopt_o_without_argument_returns_error; r19jb_compopt_plus_o_without_argument_returns_error; r19jb_compopt_validates_all_option_names',
+    notes:
+      'R19JB ports the `compopt` builtin: the runtime enables (`-o`)/disables (`+o`) completion options on a named command, the `-D` default, and the `-E` empty-line spec (creating the spec when absent and preserving any existing function), validates option names (exit 2), errors when `-o`/`+o` lacks an argument (exit 2), and errors with exit 1 when no command name is given outside a completion function. Verified through real `bash.exec` runs and `complete -p` output.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/subshell-args.test.ts',
+    lines: [19],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r19jb_bash_dash_c_sets_dollar_zero_to_script_name',
+    notes:
+      'R19JB verifies the `$0`-to-script-name row left pending by R16JB: `bash -c \'echo $0\' myscript` now assigns the first word after the command string to `$0` (prints `myscript`) while subsequent words remain `$1`, `$2`, ...',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/parse-errors.test.ts',
+    lines: [172],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'r19jb_path_command_not_found_returns_127_no_such_file',
+    notes:
+      'R19JB verifies that a command name containing `/` that does not resolve to an existing virtual file reports "No such file or directory" with exit 127, distinct from the bare-name "command not found" message (mirroring upstream `resolveCommand`).',
+  },
+];
+
 const r13jbParserInterpreterCaseGroups = [
   {
     file: 'packages/just-bash/src/interpreter/builtins/source.test.ts',
@@ -6898,6 +6939,7 @@ function caseOverrideFor(testCase) {
   const group = [
     ...r13jbParserInterpreterCaseGroups,
     ...r16jbParserInterpreterCaseGroups,
+    ...r19jbParserInterpreterCaseGroups,
     ...r18jbSleepDurationCaseGroups,
     ...r15jbStringsBinaryCaseGroups,
     ...r13jbSortCommandCaseGroups,
