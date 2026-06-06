@@ -37,6 +37,10 @@ pub struct BashOptions {
     pub network_responses: BTreeMap<String, NetworkResponse>,
     /// Optional logger for execution tracing (see [`BashLogger`]).
     pub logger: Option<Arc<dyn BashLogger>>,
+    /// Optional maximum working-string-buffer size (bytes). Mirrors upstream
+    /// `executionLimits.maxStringLength` (default 10 MB); bounds sed hold and
+    /// pattern space growth via the `H`/`G` commands.
+    pub max_string_length: Option<usize>,
 }
 
 /// Portable `Bash` facade for Just Bash command-registry parity tests.
@@ -73,6 +77,7 @@ impl Bash {
         session_options.network_policy = options.network_policy;
         session_options.network_responses = options.network_responses;
         session_options.logger = options.logger;
+        session_options.max_string_length = options.max_string_length;
         Self {
             session: JustBashSession::with_options(session_options),
         }
@@ -558,6 +563,50 @@ mod tests {
             .join("\n");
         let r = sed_session(&[("/input.txt", hundred.as_str())]).exec("sed ':a; N; ba' /input.txt");
         assert_eq!(r.exit_code, 0);
+
+        // :100 hold space size limit with H. With maxStringLength=1000, appending
+        // 200 lines of 10 chars (2000+ bytes) into the hold space via `H` exceeds
+        // the limit and aborts with the dedicated execution-limit exit code. `-n`
+        // suppresses auto-print so the output limit cannot trigger first.
+        let two_hundred = std::iter::repeat("0123456789")
+            .take(200)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let hold_limited = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/input.txt".to_string(), two_hundred)]),
+            cwd: Some("/".to_string()),
+            max_string_length: Some(1000),
+            ..BashOptions::default()
+        });
+        let r = hold_limited.exec("sed -n 'H' /input.txt");
+        assert_eq!(r.exit_code, EXECUTION_LIMIT_EXIT_CODE);
+        assert!(
+            r.stderr.contains("hold space size limit exceeded"),
+            "stderr was {:?}",
+            r.stderr
+        );
+
+        // :115 pattern space size limit with G. With maxStringLength=500, `H`
+        // accumulates into the hold space and on the last line `G` appends the
+        // hold space back onto the pattern space, exceeding the limit. The abort
+        // uses the execution-limit exit code and reports "size limit exceeded".
+        let one_hundred = std::iter::repeat("0123456789")
+            .take(100)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let pattern_limited = Bash::with_options(BashOptions {
+            files: BTreeMap::from([("/input.txt".to_string(), one_hundred)]),
+            cwd: Some("/".to_string()),
+            max_string_length: Some(500),
+            ..BashOptions::default()
+        });
+        let r = pattern_limited.exec("sed -n 'H; ${G; p}' /input.txt");
+        assert_eq!(r.exit_code, EXECUTION_LIMIT_EXIT_CODE);
+        assert!(
+            r.stderr.contains("size limit exceeded"),
+            "stderr was {:?}",
+            r.stderr
+        );
     }
 
     #[test]
