@@ -1208,6 +1208,159 @@ impl Lexer {
         Err(ShellError::new("unclosed single quote", line, column))
     }
 
+    /// Reads an ANSI-C `$'...'` quoted string. The opening `$'` has already been
+    /// consumed by the caller (the `$` in `read_dollar_expansion`, then the `'`
+    /// here). Backslash escape sequences are interpreted exactly like upstream
+    /// `parseAnsiCQuoted` in `packages/just-bash/src/parser/word-parser.ts`
+    /// (`\n`, `\t`, `\r`, `\\`, `\'`, `\"`, `\a`, `\b`, `\e`/`\E`, `\f`, `\v`,
+    /// `\xHH`, `\uHHHH`, `\cX`, octal `\NNN`). The resulting string is returned
+    /// as a quoted literal: it is NOT subject to further expansion or word
+    /// splitting.
+    fn read_ansi_c_quoted(&mut self, line: usize, column: usize) -> ShellResult<String> {
+        let mut result = String::new();
+        while let Some(character) = self.peek() {
+            if character == '\'' {
+                self.advance();
+                return Ok(result);
+            }
+            if character == '\\' {
+                if let Some(next) = self.peek_offset(1) {
+                    match next {
+                        'n' => {
+                            result.push('\n');
+                            self.take(2);
+                        }
+                        't' => {
+                            result.push('\t');
+                            self.take(2);
+                        }
+                        'r' => {
+                            result.push('\r');
+                            self.take(2);
+                        }
+                        '\\' => {
+                            result.push('\\');
+                            self.take(2);
+                        }
+                        '\'' => {
+                            result.push('\'');
+                            self.take(2);
+                        }
+                        '"' => {
+                            result.push('"');
+                            self.take(2);
+                        }
+                        'a' => {
+                            result.push('\u{07}');
+                            self.take(2);
+                        }
+                        'b' => {
+                            result.push('\u{08}');
+                            self.take(2);
+                        }
+                        'e' | 'E' => {
+                            result.push('\u{1b}');
+                            self.take(2);
+                        }
+                        'f' => {
+                            result.push('\u{0c}');
+                            self.take(2);
+                        }
+                        'v' => {
+                            result.push('\u{0b}');
+                            self.take(2);
+                        }
+                        'x' => {
+                            // \xHH hex escape (1-2 hex digits).
+                            let mut hex = String::new();
+                            let mut offset = 2;
+                            while hex.len() < 2 {
+                                match self.peek_offset(offset) {
+                                    Some(c) if c.is_ascii_hexdigit() => {
+                                        hex.push(c);
+                                        offset += 1;
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            if hex.is_empty() {
+                                result.push_str("\\x");
+                                self.take(2);
+                            } else {
+                                let code = u32::from_str_radix(&hex, 16).unwrap_or(0);
+                                result.push(char::from_u32(code).unwrap_or('\u{fffd}'));
+                                self.take(offset);
+                            }
+                        }
+                        'u' => {
+                            // \uHHHH unicode escape (up to 4 hex digits).
+                            let mut hex = String::new();
+                            let mut offset = 2;
+                            while hex.len() < 4 {
+                                match self.peek_offset(offset) {
+                                    Some(c) if c.is_ascii_hexdigit() => {
+                                        hex.push(c);
+                                        offset += 1;
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            if hex.is_empty() {
+                                result.push_str("\\u");
+                                self.take(2);
+                            } else {
+                                let code = u32::from_str_radix(&hex, 16).unwrap_or(0);
+                                result.push(char::from_u32(code).unwrap_or('\u{fffd}'));
+                                self.take(offset);
+                            }
+                        }
+                        'c' => {
+                            // \cX control-character escape: X & 0x1f.
+                            if let Some(ctrl) = self.peek_offset(2) {
+                                let code = (ctrl as u32) & 0x1f;
+                                result.push(char::from_u32(code).unwrap_or('\u{0}'));
+                                self.take(3);
+                            } else {
+                                result.push_str("\\c");
+                                self.take(2);
+                            }
+                        }
+                        '0'..='7' => {
+                            // \NNN octal escape (up to 3 octal digits).
+                            let mut octal = String::new();
+                            let mut offset = 1;
+                            while octal.len() < 3 {
+                                match self.peek_offset(offset) {
+                                    Some(c @ '0'..='7') => {
+                                        octal.push(c);
+                                        offset += 1;
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            let code = u32::from_str_radix(&octal, 8).unwrap_or(0);
+                            result.push(char::from_u32(code & 0xff).unwrap_or('\u{0}'));
+                            self.take(offset);
+                        }
+                        _ => {
+                            // Unknown escape: keep the backslash, advance past it.
+                            result.push('\\');
+                            self.advance();
+                        }
+                    }
+                    continue;
+                }
+                // Trailing backslash at end of input.
+                result.push('\\');
+                self.advance();
+                continue;
+            }
+            result.push(character);
+            self.advance();
+        }
+        Err(ShellError::new("unclosed single quote", line, column))
+    }
+
     fn read_double_quoted(&mut self, line: usize, column: usize) -> ShellResult<Vec<WordPart>> {
         self.advance();
         let mut parts = Vec::new();
@@ -1298,6 +1451,12 @@ impl Lexer {
                 body: parse(&body)?,
                 legacy: false,
             });
+        }
+
+        if self.peek() == Some('\'') {
+            self.advance();
+            let value = self.read_ansi_c_quoted(line, column)?;
+            return Ok(WordPart::SingleQuoted(value));
         }
 
         if self.peek() == Some('{') {
@@ -3737,6 +3896,12 @@ pub struct ShellState {
     loop_control: Option<LoopControl>,
     command_count: usize,
     alias_depth: usize,
+    /// Number of `eval` invocations currently nested on the call stack. A
+    /// self-referential `eval "$cmd"` (where `cmd='eval "$cmd"'`) would recurse
+    /// forever and overflow the native stack; this counter bounds it by the same
+    /// `maxCallDepth` limit bash/just-bash apply to function recursion, so the
+    /// runaway aborts with the execution-limit diagnostic instead of crashing.
+    eval_depth: usize,
     /// Number of loops the interpreter is currently executing inside (in this
     /// shell/subshell context). `break`/`continue` are no-ops at depth 0.
     loop_depth: u32,
@@ -5058,8 +5223,25 @@ impl<D: CommandDispatcher> Interpreter<D> {
         if program.trim().is_empty() {
             return ExecOutput::default();
         }
+        // Guard re-entrant `eval` against unbounded recursion. A self-referential
+        // `cmd='eval "$cmd"'; eval "$cmd"` would recurse forever and overflow the
+        // native stack before any other limit fires, so bound the nesting by
+        // `maxCallDepth` (the same limit applied to function recursion) and abort
+        // with the upstream execution-limit diagnostic instead of crashing.
+        if self.state.eval_depth >= self.limits.max_call_depth {
+            self.state.execution_limit = Some(format!(
+                "eval: maximum recursion depth ({}) exceeded, increase executionLimits.maxCallDepth",
+                self.limits.max_call_depth
+            ));
+            return ExecOutput::default();
+        }
         match parse(&program) {
-            Ok(script) => self.exec_script(&script),
+            Ok(script) => {
+                self.state.eval_depth += 1;
+                let output = self.exec_script(&script);
+                self.state.eval_depth -= 1;
+                output
+            }
             Err(error) => ExecOutput {
                 stdout: String::new(),
                 stderr: format!("bash: eval: Parse error: {error}\n"),
@@ -15924,5 +16106,59 @@ greet World",
         let r = shell().exec("export FOO=bar; (echo $FOO)");
         assert_eq!(r.stdout, "bar\n", "stdout: {:?}", r.stdout);
         assert_eq!(r.exit_code, 0, "exit: {}", r.exit_code);
+    }
+
+    /// r17jb-just-bash-parser-interpreter closes two prompt-expansion rows that
+    /// depend on ANSI-C `$'...'` quoting feeding `${var@P}`:
+    /// `packages/just-bash/src/interpreter/expansion/prompt.test.ts:6`
+    /// ("should expand \n to newline") and `:15` ("should expand \r to carriage
+    /// return"). The `$'...'` quoting (newly implemented in `read_ansi_c_quoted`)
+    /// must decode the escape into a real control byte, and `${var@P}` must then
+    /// pass it through unchanged. Each assertion fails if either step regresses.
+    #[test]
+    fn jbpi_interpreter_prompt_ansi_c_quoting_rows_match_upstream() {
+        // L6: `PS4=$'line1\nline2\n'; echo "${PS4@P}"` → the ANSI-C newlines
+        // survive `@P` and `echo` appends one more.
+        let r = shell().exec("PS4=$'line1\\nline2\\n'; echo \"${PS4@P}\"");
+        assert_eq!(r.stdout, "line1\nline2\n\n", "L6 stdout: {:?}", r.stdout);
+        assert_eq!(r.exit_code, 0, "L6 exit");
+
+        // L15: `x=$'a\rb'; echo "${x@P}"` → the ANSI-C carriage return survives.
+        let r = shell().exec("x=$'a\\rb'; echo \"${x@P}\"");
+        assert_eq!(r.stdout, "a\rb\n", "L15 stdout: {:?}", r.stdout);
+        assert_eq!(r.exit_code, 0, "L15 exit");
+    }
+
+    /// r17jb-just-bash-parser-interpreter closes the recursive-eval execution
+    /// protection row
+    /// `packages/just-bash/src/syntax/execution-protection.test.ts:275`
+    /// ("should protect against recursive eval"): with `maxCallDepth: 20`, a
+    /// self-referential `cmd='eval "$cmd"'; eval "$cmd"` must abort with the
+    /// execution-limit exit code (126) and a diagnostic, NOT a native stack
+    /// overflow. The newly added `eval_depth` guard in `execute_eval` bounds the
+    /// re-entrant eval nesting; the assertion fails if the guard regresses.
+    #[test]
+    fn jbpi_interpreter_recursive_eval_protection_row_matches_upstream() {
+        let r = Interpreter::new(FakeCommands::default())
+            .with_limits(ExecutionLimits {
+                max_call_depth: 20,
+                ..ExecutionLimits::default()
+            })
+            .exec("cmd='eval \"$cmd\"'\neval \"$cmd\"");
+        assert_eq!(
+            r.exit_code, EXECUTION_LIMIT_EXIT_CODE,
+            "expected execution-limit exit, stderr={:?}",
+            r.stderr
+        );
+        assert!(
+            !r.stderr.is_empty(),
+            "expected a diagnostic message, stderr={:?}",
+            r.stderr
+        );
+        assert!(
+            !r.stderr.contains("stack"),
+            "must not be a native stack overflow, stderr={:?}",
+            r.stderr
+        );
     }
 }

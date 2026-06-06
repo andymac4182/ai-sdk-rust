@@ -4843,7 +4843,25 @@ const jbpiParserInterpreterCaseGroups = [
     owner: 'crates/just-bash::parser-interpreter',
     rustTest: 'jbpi_interpreter_prompt_expansion_rows_match_upstream',
     notes:
-      'R14JB verifies portable `${var@P}` prompt-string transform rows through the Rust shell (crates/just-bash/src/shell.rs expand_prompt): the deterministic backslash escapes (\\\\, \\a, \\e, \\$, octal \\NNN with 256-wraparound, \\# / \\! command/history number from __COMMAND_NUMBER, \\[ / \\] non-printing-delimiter removal, unknown-escape and \\D literal passthrough), the environment-driven escapes (\\u, \\h short / \\H full hostname, \\w tilde-collapsed / full path, \\W basename), fixed shell-info escapes (\\s bash, \\v 5.0, \\V 5.0.0, \\j 0, \\l tty), the combined PS1-like prompt, and the wall-clock escapes (\\t, \\T, \\@, \\A, \\d, \\D{strftime}) asserted by the upstream format regex. The two `$\'...\'` ANSI-C-quoting rows (L6 \\n, L15 \\r) stay pending until ANSI-C `$\'...\'` quoting lands in the lexer.',
+      'R14JB verifies portable `${var@P}` prompt-string transform rows through the Rust shell (crates/just-bash/src/shell.rs expand_prompt): the deterministic backslash escapes (\\\\, \\a, \\e, \\$, octal \\NNN with 256-wraparound, \\# / \\! command/history number from __COMMAND_NUMBER, \\[ / \\] non-printing-delimiter removal, unknown-escape and \\D literal passthrough), the environment-driven escapes (\\u, \\h short / \\H full hostname, \\w tilde-collapsed / full path, \\W basename), fixed shell-info escapes (\\s bash, \\v 5.0, \\V 5.0.0, \\j 0, \\l tty), the combined PS1-like prompt, and the wall-clock escapes (\\t, \\T, \\@, \\A, \\d, \\D{strftime}) asserted by the upstream format regex. The two `$\'...\'` ANSI-C-quoting rows (L6 \\n, L15 \\r) are now closed by the dedicated jbpi_interpreter_prompt_ansi_c_quoting_rows_match_upstream test.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/expansion/prompt.test.ts',
+    lines: [6, 15],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_interpreter_prompt_ansi_c_quoting_rows_match_upstream',
+    notes:
+      'r17jb closes the two prompt rows that feed ANSI-C `$\'...\'` quoting into `${var@P}`: L6 (`PS4=$\'line1\\nline2\\n\'; echo "${PS4@P}"` -> line1<LF>line2<LF><LF>) and L15 (`x=$\'a\\rb\'; echo "${x@P}"` -> a<CR>b<LF>). ANSI-C quoting is newly implemented in crates/just-bash/src/shell.rs read_ansi_c_quoted (mirroring upstream parseAnsiCQuoted in parser/word-parser.ts: \\n \\t \\r \\\\ \\\' \\" \\a \\b \\e/\\E \\f \\v \\xHH \\uHHHH \\cX octal \\NNN), producing a quoted literal that `@P` passes through unchanged. The assertion fails if either the escape decode or the @P passthrough regresses.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/execution-protection.test.ts',
+    lines: [275],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest: 'jbpi_interpreter_recursive_eval_protection_row_matches_upstream',
+    notes:
+      'r17jb closes the recursive-eval protection row: with maxCallDepth=20, a self-referential `cmd=\'eval "$cmd"\'; eval "$cmd"` aborts with the ExecutionLimitError exit code (126) and a diagnostic, NOT a native stack overflow. Implemented via the new eval_depth guard in crates/just-bash/src/shell.rs execute_eval, which bounds re-entrant eval nesting by maxCallDepth (the same limit bash/just-bash apply to function recursion). The assertion fails if the guard regresses (hang / stack overflow / wrong exit code / missing message).',
   },
   {
     file: 'packages/just-bash/src/syntax/execution-protection.test.ts',
@@ -4857,7 +4875,7 @@ const jbpiParserInterpreterCaseGroups = [
     owner: 'crates/just-bash::parser-interpreter',
     rustTest: 'jbpi_syntax_execution_protection_rows_match_upstream',
     notes:
-      'JB-PI verifies portable execution-protection rows through the Rust interpreter: recursion depth (maxCallDepth), command count (maxCommandCount), and loop iterations (maxLoopIterations) are bounded with the upstream ExecutionLimitError exit code (126) and a non-stack-overflow diagnostic whether the runaway is reached via plain/mutual recursion, eval-in-loop, function-with-loop, command substitution, arithmetic, subshells (incl. subshell-in-loop), pipelines, case, local, simulated-select, trap-guarded, empty-body or comment-only loops; bounded brace/range/char-range expansion, deep finite command substitution, many tokens/args, long finite pipelines, PROMPT_COMMAND assignment and self-referential variables exit 0 with the documented output; oversized input is rejected with a "too large" parser error. The large-arithmetic-overflow row (L359) now exits 0 because eval_arith_binary uses 64-bit wrapping arithmetic (matching bash fixed-width and Just Bash double-precision: no trap). The recursive-eval row (L275) stays pending an eval-recursion guard, and the upstream-skipped recursive-arith-in-param-expansion row (L373) stays pending.',
+      'JB-PI verifies portable execution-protection rows through the Rust interpreter: recursion depth (maxCallDepth), command count (maxCommandCount), and loop iterations (maxLoopIterations) are bounded with the upstream ExecutionLimitError exit code (126) and a non-stack-overflow diagnostic whether the runaway is reached via plain/mutual recursion, eval-in-loop, function-with-loop, command substitution, arithmetic, subshells (incl. subshell-in-loop), pipelines, case, local, simulated-select, trap-guarded, empty-body or comment-only loops; bounded brace/range/char-range expansion, deep finite command substitution, many tokens/args, long finite pipelines, PROMPT_COMMAND assignment and self-referential variables exit 0 with the documented output; oversized input is rejected with a "too large" parser error. The large-arithmetic-overflow row (L359) now exits 0 because eval_arith_binary uses 64-bit wrapping arithmetic (matching bash fixed-width and Just Bash double-precision: no trap). The recursive-eval row (L275) is now closed by jbpi_interpreter_recursive_eval_protection_row_matches_upstream (eval_depth guard), and the upstream-skipped recursive-arith-in-param-expansion row (L373) stays pending.',
   },
 ];
 
