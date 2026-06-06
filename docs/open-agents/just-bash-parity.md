@@ -19,11 +19,11 @@ Rows are intentionally fail-closed: no row is verified until a sibling implement
 | Non-test TS/TSX source files | 423 |
 | Test files | 485 |
 | Test cases | 9936 |
-| Portable pending cases | 8 |
-| Portable verified cases | 8729 |
+| Portable pending cases | 6 |
+| Portable verified cases | 8731 |
 | JS-only documented cases | 1199 |
 | Type-system impossible cases | 0 |
-| Strict gate gaps | 8 |
+| Strict gate gaps | 6 |
 | Inventory check command | node scripts/just-bash-test-inventory.mjs --check |
 | Strict gate command | node scripts/just-bash-test-inventory.mjs --strict |
 | Conformance plan | docs/open-agents/just-bash-conformance.md |
@@ -266,7 +266,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | command:rg | 590 | 0 | 508 | 82 | 0 |
 | packages/just-bash | command:rm | 15 | 0 | 15 | 0 | 0 |
 | packages/just-bash | command:search-engine | 53 | 0 | 53 | 0 | 0 |
-| packages/just-bash | command:sed | 231 | 2 | 229 | 0 | 0 |
+| packages/just-bash | command:sed | 231 | 0 | 231 | 0 | 0 |
 | packages/just-bash | command:seq | 23 | 0 | 23 | 0 | 0 |
 | packages/just-bash | command:shared | 50 | 0 | 50 | 0 | 0 |
 | packages/just-bash | command:sleep | 14 | 0 | 14 | 0 | 0 |
@@ -334,7 +334,6 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | Rust owner crate/module | Gap reason | Rows |
 | --- | --- | --- |
 | pending:just-bash-command-base64 | portable-pending | 1 |
-| pending:just-bash-command-sed | portable-pending | 2 |
 | pending:just-bash-command-timeout | portable-pending | 1 |
 | pending:just-bash-core | portable-pending | 2 |
 | pending:just-bash-fs | portable-pending | 1 |
@@ -565,7 +564,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | command:sed | packages/just-bash/src/commands/sed/sed.binary.test.ts | 1 | 0 | 1 | 0 | 0 | crates/just-bash::conformance_corpus |
 | packages/just-bash | command:sed | packages/just-bash/src/commands/sed/sed.commands.test.ts | 33 | 0 | 33 | 0 | 0 | crates/just-bash::conformance_corpus; crates/just-bash::runtime::sed; crates/just-bash::runtime::text-search |
 | packages/just-bash | command:sed | packages/just-bash/src/commands/sed/sed.errors.test.ts | 27 | 0 | 27 | 0 | 0 | crates/just-bash::runtime::sed; crates/just-bash::runtime::text-search |
-| packages/just-bash | command:sed | packages/just-bash/src/commands/sed/sed.limits.test.ts | 17 | 2 | 15 | 0 | 0 | crates/just-bash::conformance_corpus; crates/just-bash::runtime::sed; pending:just-bash-command-sed |
+| packages/just-bash | command:sed | packages/just-bash/src/commands/sed/sed.limits.test.ts | 17 | 0 | 17 | 0 | 0 | crates/just-bash::conformance_corpus; crates/just-bash::runtime::sed |
 | packages/just-bash | command:sed | packages/just-bash/src/commands/sed/sed.regex.test.ts | 42 | 0 | 42 | 0 | 0 | crates/just-bash::conformance_corpus; crates/just-bash::runtime::sed; crates/just-bash::runtime::text-search |
 | packages/just-bash | command:sed | packages/just-bash/src/commands/sed/sed.security.test.ts | 3 | 0 | 3 | 0 | 0 | crates/just-bash::conformance_corpus; crates/just-bash::runtime::sed |
 | packages/just-bash | command:sed | packages/just-bash/src/commands/sed/sed.test.ts | 91 | 0 | 91 | 0 | 0 | crates/just-bash::conformance_corpus; crates/just-bash::runtime::sed; crates/just-bash::runtime::text-search |
@@ -5388,8 +5387,8 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | command:sed | packages/just-bash/src/commands/sed/sed.limits.test.ts | 69 | infinite loop protection | should limit output from repeated substitution | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_69_830799776356684a | JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features). |
 | packages/just-bash | command:sed | packages/just-bash/src/commands/sed/sed.limits.test.ts | 79 | substitution limits | should handle large hold space operations | it | portable-verified | crates/just-bash::runtime::sed | sed_limits_iteration_and_resource_rows | R12JB verifies sed runaway-compute protection and bounded large-input handling: branch-loop (`:loop; b loop`) and test-loop (`:loop; s/./&/; t loop`) infinite loops hit the 10000-iteration cap and fail with exit code 126 and an "exceeded maximum iterations" message, an unconditional `b; p` completes, and 100k-char global substitution, 1000-line hold-space append, 10k-char buffer exchange, 10k-line step addressing, 100 chained commands, deeply nested `{ { { p } } }` blocks, and `:a; N; ba` accumulation all complete with exit 0. The two execution-limit-option rows (L100, L115) remain pending without runtime executionLimits wiring. |
 | packages/just-bash | command:sed | packages/just-bash/src/commands/sed/sed.limits.test.ts | 90 | substitution limits | should handle exchange with large buffers | it | portable-verified | crates/just-bash::runtime::sed | sed_limits_iteration_and_resource_rows | R12JB verifies sed runaway-compute protection and bounded large-input handling: branch-loop (`:loop; b loop`) and test-loop (`:loop; s/./&/; t loop`) infinite loops hit the 10000-iteration cap and fail with exit code 126 and an "exceeded maximum iterations" message, an unconditional `b; p` completes, and 100k-char global substitution, 1000-line hold-space append, 10k-char buffer exchange, 10k-line step addressing, 100 chained commands, deeply nested `{ { { p } } }` blocks, and `:a; N; ba` accumulation all complete with exit 0. The two execution-limit-option rows (L100, L115) remain pending without runtime executionLimits wiring. |
-| packages/just-bash | command:sed | packages/just-bash/src/commands/sed/sed.limits.test.ts | 100 | substitution limits | should enforce hold space size limit with H command | it | portable-pending | pending:just-bash-command-sed | pending:just-bash-command-sed | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
-| packages/just-bash | command:sed | packages/just-bash/src/commands/sed/sed.limits.test.ts | 115 | substitution limits | should enforce pattern space size limit with G command | it | portable-pending | pending:just-bash-command-sed | pending:just-bash-command-sed | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
+| packages/just-bash | command:sed | packages/just-bash/src/commands/sed/sed.limits.test.ts | 100 | substitution limits | should enforce hold space size limit with H command | it | portable-verified | crates/just-bash::runtime::sed | sed_limits_iteration_and_resource_rows | R19JB wires the `executionLimits.maxStringLength` option (default 10 MB) through `BashOptions::max_string_length` into the sed runtime and enforces it on the hold space after every `H` (`sed_check_space_size`). With `maxStringLength: 1000`, `sed -n 'H'` over 200 lines of 10 chars overflows the hold space and aborts with exit code 126 (EXECUTION_LIMIT_EXIT_CODE) and stderr `sed: hold space size limit exceeded (1000 bytes)`. The test asserts that exit code and message. |
+| packages/just-bash | command:sed | packages/just-bash/src/commands/sed/sed.limits.test.ts | 115 | substitution limits | should enforce pattern space size limit with G command | it | portable-verified | crates/just-bash::runtime::sed | sed_limits_iteration_and_resource_rows | R19JB enforces `executionLimits.maxStringLength` on the pattern space after every `G` (and the hold space after `H`). With `maxStringLength: 500`, `sed -n 'H; ${G; p}'` over 100 lines of 10 chars overflows the buffer and aborts with exit code 126 (EXECUTION_LIMIT_EXIT_CODE) and a `size limit exceeded` stderr message. The test asserts that exit code and message. |
 | packages/just-bash | command:sed | packages/just-bash/src/commands/sed/sed.limits.test.ts | 133 | hold space limits | should handle pathological regex patterns | it.skip | portable-verified | crates/just-bash::runtime::sed | sed_regex_re2_backref_and_pathological_rows_match_engine | R23JB closes the upstream `it.skip` pathological-regex row (:133): the `(a+)+` ReDoS pattern that the upstream skips because BRE->ERE conversion would build a catastrophic-backtracking pattern. The Rust RE2 engine matches in guaranteed linear time, so `sed /^\\(a\\+\\)\\+$/p` completes with a defined exit code (0) and autoprints the non-matching line exactly once. The test asserts that completion and output. |
 | packages/just-bash | command:sed | packages/just-bash/src/commands/sed/sed.limits.test.ts | 144 | hold space limits | should handle complex alternation | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_144_87701af96ec415bc | JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features). |
 | packages/just-bash | command:sed | packages/just-bash/src/commands/sed/sed.limits.test.ts | 155 | regex limits | should handle large line number addresses | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::comparison_sed_sed_cmd_155_175ca7d597cdba7e | JBC sed Rust corpus runner exact match for stdout, stderr, and exit code (step/negation/$/bracket/backref/quit features). |

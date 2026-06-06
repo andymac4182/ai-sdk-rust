@@ -48,6 +48,12 @@ pub const JUST_BASH_DEFAULT_TIMEOUT_MS: u64 = 30_000;
 /// Default maximum captured stdout or stderr length.
 pub const JUST_BASH_DEFAULT_MAX_OUTPUT_LENGTH: usize = 50_000;
 
+/// Default maximum size (in bytes) of a single working string buffer before an
+/// execution-limit error is raised. Mirrors the upstream
+/// `DEFAULT_LIMITS.maxStringLength` of 10 MB in just-bash's `interpreter/
+/// limits.ts`.
+pub const JUST_BASH_DEFAULT_MAX_STRING_LENGTH: usize = 10 * 1024 * 1024;
+
 /// Default cap on the number of sed command executions per run. Matches the
 /// upstream `DEFAULT_MAX_ITERATIONS` in just-bash's sed executor and bounds
 /// pathological branch/test loops so they cannot hang.
@@ -721,6 +727,11 @@ pub struct JustBashSessionOptions {
     pub max_output_length: Option<usize>,
     /// Maximum simple commands per exec.
     pub max_command_count: Option<usize>,
+    /// Maximum size (in bytes) of a single working string buffer before an
+    /// execution-limit error is raised. Mirrors upstream `executionLimits.
+    /// maxStringLength` (default 10 MB); currently enforced on sed's hold and
+    /// pattern spaces (`H`/`G`) to bound runaway buffer growth.
+    pub max_string_length: Option<usize>,
     /// Optional executor command registry.
     pub executor: Option<JustBashExecutor>,
     /// Optional portable command allow-list.
@@ -752,6 +763,7 @@ impl Default for JustBashSessionOptions {
             default_timeout_ms: None,
             max_output_length: None,
             max_command_count: None,
+            max_string_length: None,
             executor: None,
             commands: None,
             custom_commands: Vec::new(),
@@ -812,6 +824,14 @@ impl JustBashSessionOptions {
     /// Sets the maximum command count.
     pub fn with_max_command_count(mut self, max_command_count: usize) -> Self {
         self.max_command_count = Some(max_command_count);
+        self
+    }
+
+    /// Sets the maximum working-string-buffer size (mirrors upstream
+    /// `executionLimits.maxStringLength`). Used to bound sed hold/pattern space
+    /// growth via the `H`/`G` commands.
+    pub fn with_max_string_length(mut self, max_string_length: usize) -> Self {
+        self.max_string_length = Some(max_string_length);
         self
     }
 
@@ -915,6 +935,7 @@ struct JustBashSessionInner {
     default_timeout_ms: u64,
     max_output_length: usize,
     max_command_count: usize,
+    max_string_length: usize,
     executor: Option<JustBashExecutor>,
     commands: CommandRegistry,
     custom_commands: BTreeMap<String, JustBashCustomCommand>,
@@ -1022,6 +1043,9 @@ impl JustBashSession {
                     .max_output_length
                     .unwrap_or(JUST_BASH_DEFAULT_MAX_OUTPUT_LENGTH),
                 max_command_count: options.max_command_count.unwrap_or(10_000),
+                max_string_length: options
+                    .max_string_length
+                    .unwrap_or(JUST_BASH_DEFAULT_MAX_STRING_LENGTH),
                 executor: options.executor,
                 commands,
                 custom_commands: options
@@ -9915,7 +9939,13 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
                 .lines()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>();
-            let result = run_sed_program(&program, lines, quiet, input_ends_with_newline);
+            let result = run_sed_program(
+                &program,
+                lines,
+                quiet,
+                input_ends_with_newline,
+                state.session.inner.max_string_length,
+            );
             if result.exit_code != 0 {
                 return result;
             }
@@ -9936,8 +9966,14 @@ fn command_sed(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
     let input_ends_with_newline = input.ends_with('\n');
     let lines = input.lines().map(ToString::to_string).collect::<Vec<_>>();
     let mut writes: Vec<(String, String)> = Vec::new();
-    let result =
-        run_sed_program_collecting(&program, lines, quiet, input_ends_with_newline, &mut writes);
+    let result = run_sed_program_collecting(
+        &program,
+        lines,
+        quiet,
+        input_ends_with_newline,
+        state.session.inner.max_string_length,
+        &mut writes,
+    );
     if result.exit_code != 0 {
         return result;
     }
@@ -10564,9 +10600,32 @@ fn run_sed_program(
     lines: Vec<String>,
     quiet: bool,
     input_ends_with_newline: bool,
+    max_string_length: usize,
 ) -> CommandResult {
     let mut writes: Vec<(String, String)> = Vec::new();
-    run_sed_program_collecting(program, lines, quiet, input_ends_with_newline, &mut writes)
+    run_sed_program_collecting(
+        program,
+        lines,
+        quiet,
+        input_ends_with_newline,
+        max_string_length,
+        &mut writes,
+    )
+}
+
+/// Enforce the configured working-buffer size limit on a sed hold or pattern
+/// space, mirroring upstream `checkSpaceSize` in `commands/sed/executor.ts`.
+/// Returns an `ExecutionLimitError`-style diagnostic (exit code 126) when the
+/// buffer exceeds `max_len` bytes; `max_len == 0` disables the check.
+fn sed_check_space_size(space: &str, max_len: usize, space_name: &str) -> Option<CommandResult> {
+    if max_len > 0 && space.len() > max_len {
+        Some(stderr_result(
+            crate::shell::EXECUTION_LIMIT_EXIT_CODE,
+            format!("sed: {space_name} size limit exceeded ({max_len} bytes)\n"),
+        ))
+    } else {
+        None
+    }
 }
 
 /// Like [`run_sed_program`] but also records `w file` writes into `writes` as
@@ -10577,6 +10636,7 @@ fn run_sed_program_collecting(
     lines: Vec<String>,
     quiet: bool,
     input_ends_with_newline: bool,
+    max_string_length: usize,
     writes: &mut Vec<(String, String)>,
 ) -> CommandResult {
     let total = lines.len();
@@ -10784,6 +10844,11 @@ fn run_sed_program_collecting(
                         hold.push('\n');
                         hold.push_str(&pattern);
                     }
+                    if let Some(result) =
+                        sed_check_space_size(&hold, max_string_length, "hold space")
+                    {
+                        return result;
+                    }
                     pc += 1;
                 }
                 SedOp::GetCopy => {
@@ -10793,6 +10858,11 @@ fn run_sed_program_collecting(
                 SedOp::GetAppend => {
                     pattern.push('\n');
                     pattern.push_str(&hold);
+                    if let Some(result) =
+                        sed_check_space_size(&pattern, max_string_length, "pattern space")
+                    {
+                        return result;
+                    }
                     pc += 1;
                 }
                 SedOp::Exchange => {
