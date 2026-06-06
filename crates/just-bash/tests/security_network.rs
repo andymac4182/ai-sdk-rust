@@ -165,7 +165,19 @@ fn just_bash_security_sandbox_command_rows_are_virtual_and_registry_bound() {
     );
     assert_eq!(path_hijack.exit_code, 0);
     assert!(path_hijack.stdout.contains("registry-only"));
-    assert!(path_hijack.stdout.contains("/bin/ls: command not found"));
+    // `/bin/ls` is an absolute path to a file that does not exist in the virtual
+    // filesystem (and `ls` is not in this restricted registry), so it fails
+    // closed with "No such file or directory" — matching upstream
+    // `resolveCommand`, which reports a missing explicit path distinctly from a
+    // bare-name PATH miss. A registered `$PATH` directory hijack cannot smuggle
+    // in a host binary.
+    assert!(
+        path_hijack
+            .stdout
+            .contains("/bin/ls: No such file or directory"),
+        "stdout={}",
+        path_hijack.stdout
+    );
 
     let unknown = bash.exec("nonexistent_command 2>&1 || echo not-found");
     assert_eq!(unknown.exit_code, 0);
