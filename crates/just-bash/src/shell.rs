@@ -4598,7 +4598,21 @@ impl<D: CommandDispatcher> Interpreter<D> {
         // so an `exit` inside one stage only sets that stage's status and must
         // not terminate the parent script.
         let multi_stage = pipeline.commands.len() > 1;
+        // Mirror upstream `pipeline-execution.ts`: in a multi-command pipeline,
+        // only the first command may fall back to the enclosing group/subshell
+        // stdin. After the first stage, suppress that fallback so later stages
+        // see only the (possibly empty) output piped from the previous stage —
+        // otherwise a stage receiving empty pipe output (e.g. `grep` with no
+        // matches feeding `head`) would wrongly re-read the original group input.
+        let saved_pipeline_pending_stdin = if multi_stage {
+            self.state.pending_stdin.clone()
+        } else {
+            None
+        };
         for (index, command) in pipeline.commands.iter().enumerate() {
+            if multi_stage && index == 1 {
+                self.state.pending_stdin = None;
+            }
             let command_stdin = std::mem::take(&mut stdin);
             let saved_exited = if multi_stage {
                 self.state.exited.take()
@@ -4625,6 +4639,10 @@ impl<D: CommandDispatcher> Interpreter<D> {
             if self.state.exited.is_some() {
                 break;
             }
+        }
+
+        if multi_stage {
+            self.state.pending_stdin = saved_pipeline_pending_stdin;
         }
 
         // Mirror bash's `PIPESTATUS` array: after a pipeline runs, each stage's
@@ -4841,7 +4859,17 @@ impl<D: CommandDispatcher> Interpreter<D> {
             }
         }
 
-        let prepared_stdin = self.apply_input_redirections(stdin, &redirections);
+        let mut prepared_stdin = self.apply_input_redirections(stdin, &redirections);
+        // Mirror upstream `builtin-dispatch.ts`: a command that receives no
+        // stdin from a pipeline or redirection falls back to the enclosing
+        // group/subshell stdin (`stdin || ctx.state.groupStdin || ""`). This is
+        // what lets a plain byte consumer (e.g. `wc -c`) inside `... | { ...; }`
+        // or `... | ( ... )` see the data piped into the compound command.
+        if prepared_stdin.is_empty()
+            && let Some(group_stdin) = &self.state.pending_stdin
+        {
+            prepared_stdin = group_stdin.clone();
+        }
         let invocation = CommandInvocation {
             name,
             args,
@@ -9283,6 +9311,75 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Minimal byte-counting command set used to prove that data piped into a
+    /// `{ ...; }` group or `( ... )` subshell reaches a plain byte consumer
+    /// inside the compound command. `wc -c` reports the UTF-8 byte length of the
+    /// stdin it receives, exactly like the GNU tool the upstream encoding rows
+    /// exercise.
+    struct StdinByteCounterCommands;
+    impl CommandDispatcher for StdinByteCounterCommands {
+        fn dispatch(
+            &mut self,
+            invocation: CommandInvocation,
+            _files: &mut ShellVirtualFileSystem,
+        ) -> CommandResult {
+            match invocation.name.as_str() {
+                "echo" => fake_echo(&invocation.args),
+                // Sandboxed `hostname` always reports `localhost\n`, mirroring
+                // upstream `commands/hostname/hostname.ts`.
+                "hostname" => CommandResult::success("localhost\n"),
+                "wc" if invocation.args.first().map(String::as_str) == Some("-c") => {
+                    CommandResult::success(format!("{}\n", invocation.stdin.len()))
+                }
+                _ => {
+                    CommandResult::failure(format!("{}: command not found\n", invocation.name), 127)
+                }
+            }
+        }
+    }
+
+    /// Closes `hostname.test.ts:12`: `hostname` works inside `$(...)` command
+    /// substitution. Upstream runs `echo $(hostname)` and asserts stdout is
+    /// `localhost\n` with exit 0 — the substitution captures the command's
+    /// stdout, strips the trailing newline, and `echo` re-adds one. The Rust
+    /// interpreter expands the command substitution through the real dispatcher;
+    /// the assertion fails if `$(...)` capture or trailing-newline trimming
+    /// regresses.
+    #[test]
+    fn just_bash_command_hostname_works_in_command_substitution() {
+        let mut shell = Interpreter::new(StdinByteCounterCommands);
+        let result = shell.exec("echo $(hostname)");
+        assert_eq!(result.stdout, "localhost\n", "L12 stdout");
+        assert_eq!(result.stderr, "", "L12 stderr");
+        assert_eq!(result.exit_code, 0, "L12 exit");
+    }
+
+    /// Closes `encoding-pipeline.test.ts:151` and `:157`: data piped into a
+    /// `{ ...; }` group command and into a `( ... )` subshell must reach a plain
+    /// byte consumer inside the compound command. Upstream runs
+    /// `echo 한 | { wc -c; }` / `echo 한 | (wc -c)` and asserts `wc -c` reports
+    /// `4` (the three UTF-8 bytes of `한` plus the trailing newline). The Rust
+    /// interpreter now forwards the enclosing group/subshell stdin as the
+    /// fallback input for commands that read no pipeline/redirection stdin,
+    /// mirroring upstream `builtin-dispatch.ts`. Each assertion fails if that
+    /// group/subshell stdin handoff regresses.
+    #[test]
+    fn just_bash_core_group_and_subshell_preserve_piped_stdin_for_byte_consumer() {
+        // encoding-pipeline.test.ts:151 group command preserves piped stdin.
+        let mut shell = Interpreter::new(StdinByteCounterCommands);
+        let result = shell.exec("echo \u{d55c} | { wc -c; }");
+        assert_eq!(result.stdout, "4\n", "L151 group stdout");
+        assert_eq!(result.stderr, "", "L151 group stderr");
+        assert_eq!(result.exit_code, 0, "L151 group exit");
+
+        // encoding-pipeline.test.ts:157 subshell preserves piped stdin.
+        let mut shell = Interpreter::new(StdinByteCounterCommands);
+        let result = shell.exec("echo \u{d55c} | (wc -c)");
+        assert_eq!(result.stdout, "4\n", "L157 subshell stdout");
+        assert_eq!(result.stderr, "", "L157 subshell stderr");
+        assert_eq!(result.exit_code, 0, "L157 subshell exit");
     }
 
     /// Minimal faithful `tr SET1 SET2` translating each input character. Supports
