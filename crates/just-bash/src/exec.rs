@@ -1429,6 +1429,28 @@ fn execute_simple_command(
     }
 
     let (command, redirect) = split_stdout_redirection(command);
+    // The redirect target is sliced verbatim from the raw command, so a
+    // variable/quoted path such as `> "$tmp"` still carries its `$tmp`/quotes.
+    // Bash performs parameter expansion and quote removal on the redirect word
+    // (command substitutions have already been resolved upstream), so expand it
+    // here before any write reaches the filesystem; otherwise `> "$tmp"` would
+    // create a file literally named `"$tmp"` and the intended path would never
+    // be written.
+    let redirect = match redirect {
+        Some((target, append)) => match expand_redirect_target(state, &target) {
+            Ok(path) => Some((path, append)),
+            Err(error) => return stderr_result(1, format!("bash: {error}\n")),
+        },
+        None => None,
+    };
+    let (command, stderr_redirect) = split_stderr_redirection(command);
+    let stderr_redirect = match stderr_redirect {
+        Some((target, append)) => match expand_redirect_target(state, &target) {
+            Ok(path) => Some((path, append)),
+            Err(error) => return stderr_result(1, format!("bash: {error}\n")),
+        },
+        None => None,
+    };
     let (command, stdin_redirect) = split_stdin_redirection(command);
     let stdin = match stdin_redirect {
         Some(StdinSource::File(path)) => {
@@ -1559,6 +1581,27 @@ fn execute_simple_command(
     if stderr_to_stdout {
         result.stdout.push_str(&result.stderr);
         result.stderr.clear();
+    }
+    // `cmd 2> file` / `cmd 2>> file` routes the command's diagnostics to a file
+    // (or discards them for `/dev/null`). Apply after the fd-duplication handling
+    // above so explicit file targets win over the captured stderr text.
+    if let Some((path, append)) = stderr_redirect {
+        let captured = std::mem::take(&mut result.stderr);
+        if path != "/dev/null" {
+            let write = state
+                .session
+                .inner
+                .fs
+                .lock()
+                .map_err(|_| lock_poisoned_error())
+                .and_then(|mut fs| {
+                    fs.write_redirection(&state.cwd, &path, OutputPayload::Text(captured), append)
+                });
+            if let Err(error) = write {
+                result.stderr.push_str(&format!("bash: {error}\n"));
+                result.exit_code = 1;
+            }
+        }
     }
     if let Some((path, append)) = redirect
         && result.exit_code == 0
@@ -30031,7 +30074,15 @@ fn command_tar_list(state: &ExecState<'_>, options: &TarOptions, stdin: &str) ->
         if options.verbose {
             stdout.push_str(&format_tar_verbose_entry(entry));
         } else {
+            // Upstream stores directory entries with a trailing slash in the
+            // archive (tar/archive.ts: `if (entry.isDirectory && !name.endsWith("/"))`)
+            // and `tar -t` prints the stored name verbatim, so directory entries
+            // list as `mydir/`. Mirror that here where the virtual entry tracks the
+            // directory kind but keeps the slash-free name.
             stdout.push_str(tar_display_name(&entry.name));
+            if entry.kind == VirtualTarEntryKind::Directory && !entry.name.ends_with('/') {
+                stdout.push('/');
+            }
             stdout.push('\n');
         }
     }
@@ -32510,6 +32561,52 @@ fn split_stdout_redirection(command: &str) -> (&str, Option<(String, bool)>) {
     (command, None)
 }
 
+/// Split a trailing stderr redirect (`2> FILE` / `2>> FILE`) off the command.
+/// Returns the command with the redirect removed plus the raw (unexpanded)
+/// target word and whether it appends. Quotes and here-doc markers are skipped
+/// so a `>` inside them is not mistaken for the redirect. `2>&1`/`2>&2` fd
+/// duplications are intentionally left in place — they are handled separately as
+/// token-level swaps.
+fn split_stderr_redirection(command: &str) -> (&str, Option<(String, bool)>) {
+    let mut quote = None::<char>;
+    let mut in_marker = false;
+    let marker_char = HEREDOC_MARKER.chars().next().unwrap_or('\u{E000}');
+    let chars = command.char_indices().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        let (byte, ch) = chars[index];
+        if ch == marker_char {
+            in_marker = !in_marker;
+            index += 1;
+            continue;
+        }
+        if in_marker {
+            index += 1;
+            continue;
+        }
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => {}
+            None if ch == '\'' || ch == '"' => quote = Some(ch),
+            None if ch == '2' && chars.get(index + 1).map(|(_, c)| *c) == Some('>') => {
+                let after_gt = chars.get(index + 2).map(|(_, c)| *c);
+                // Leave fd duplications (`2>&1`) for token-level handling.
+                if after_gt == Some('&') {
+                    index += 1;
+                    continue;
+                }
+                let append = after_gt == Some('>');
+                let skip = if append { 3 } else { 2 };
+                let target = command[byte + skip..].trim().to_string();
+                return (command[..byte].trim(), Some((target, append)));
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    (command, None)
+}
+
 /// Source of stdin for a simple command, from a `<`, `<<<`, or `<<` redirect.
 enum StdinSource {
     /// `< file` — read the named file.
@@ -32567,6 +32664,22 @@ fn split_stdin_redirection(command: &str) -> (&str, Option<StdinSource>) {
 /// Expand a here-string word: parameter/quote-strip via [`tokenize`] (joining
 /// any resulting words with a single space) and append a trailing newline, the
 /// way bash feeds `<<< word` to a command's stdin.
+/// Expand a redirection target word (`> WORD`): apply parameter expansion and
+/// quote removal so `> "$tmp"` or `> $dir/out` resolves to the real path.
+/// Command substitutions are already resolved by the control-flow layer before a
+/// simple command runs, so reusing `tokenize` (parameter expansion + quote
+/// stripping) matches bash word evaluation for the common cases. A target that
+/// expands to multiple fields is an "ambiguous redirect" in bash; mirror that as
+/// an error rather than silently writing to a surprising path.
+fn expand_redirect_target(state: &ExecState<'_>, target: &str) -> Result<String, String> {
+    let tokens = tokenize(target, &state.env)?;
+    match tokens.len() {
+        0 => Ok(String::new()),
+        1 => Ok(tokens.into_iter().next().expect("len checked")),
+        _ => Err(format!("{target}: ambiguous redirect")),
+    }
+}
+
 fn expand_here_string_word(state: &mut ExecState<'_>, word: &str) -> Result<String, String> {
     let expanded = expand_here_doc_body(state, word)?;
     let tokens = tokenize(&expanded, &state.env)?;
@@ -32753,7 +32866,11 @@ fn read_variable(
             // `printf -v name[key]` (see `command_printf_dispatch`).
             Ok(env.get(&key).cloned().unwrap_or_default())
         } else {
-            Ok(env.get(&expression).cloned().unwrap_or_default())
+            Ok(env
+                .get(&expression)
+                .cloned()
+                .or_else(|| virtual_special_parameter(&expression))
+                .unwrap_or_default())
         }
     } else if next.is_ascii_alphabetic() || *next == '_' {
         let mut end = start + 1;
@@ -32762,15 +32879,39 @@ fn read_variable(
         }
         let name = chars[start + 1..end].iter().collect::<String>();
         *index = end - 1;
-        Ok(env.get(&name).cloned().unwrap_or_default())
+        Ok(env
+            .get(&name)
+            .cloned()
+            .or_else(|| virtual_special_parameter(&name))
+            .unwrap_or_default())
     } else if next.is_ascii_digit() || matches!(*next, '#' | '@' | '*' | '?' | '$' | '!') {
         // Unbraced special parameters (`$?`, `$#`, `$@`, `$*`, `$$`, `$!`, `$0`..)
         // resolve from the env map that exec.rs populates with their current
         // values. `$?` in particular carries the previous command's exit status.
         *index = start + 1;
-        Ok(env.get(&next.to_string()).cloned().unwrap_or_default())
+        let key = next.to_string();
+        Ok(env
+            .get(&key)
+            .cloned()
+            .or_else(|| virtual_special_parameter(&key))
+            .unwrap_or_default())
     } else {
         Ok("$".to_string())
+    }
+}
+
+/// Resolve the virtual process/identity special parameters that upstream
+/// exposes from interpreter state rather than the environment map
+/// (interpreter/expansion/variable.ts: `$$`, `$PPID`, `$UID`, `$EUID`,
+/// `$BASHPID`). These never leak the host's real PID/UID; they default to the
+/// fixed virtual values bash.ts seeds (pid 1, ppid 0, uid 1000). They resolve
+/// only as a fallback when the env map has no explicit override.
+fn virtual_special_parameter(name: &str) -> Option<String> {
+    match name {
+        "$" | "BASHPID" => Some("1".to_string()),
+        "PPID" => Some("0".to_string()),
+        "UID" | "EUID" => Some("1000".to_string()),
+        _ => None,
     }
 }
 
