@@ -9084,6 +9084,84 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
     }
 
     #[test]
+    fn rg_imported_regression_skip_marker_and_edge_rows_are_portable() {
+        // packages/just-bash/src/commands/rg/imported-tests/regression.test.ts
+        //
+        // These upstream rows are it.skip in the TypeScript suite (the upstream
+        // engine never runs them). They fall into two groups:
+        //   - empty-body SKIP markers (r2208 1333, r2990 1443, r3179 1538) that
+        //     assert nothing upstream and are documented as engine-limitation
+        //     exceptions in the parity ledger; and
+        //   - bodied edge cases (r2236 1337, r3180 1542) whose expectations the
+        //     Rust ripgrep engine does not reproduce.
+        // This test pins the ACTUAL deterministic Rust behavior for the bodied
+        // rows so the documented exceptions fail if that behavior silently
+        // changes, plus one row (r3173 1523) that IS portable and matches
+        // upstream exactly.
+
+        // 1523 - r3173: a hidden-whitelist `!.foo.txt` rule in .ignore surfaces
+        // the otherwise-hidden dotfile via `rg --files` (portable, matches upstream).
+        let r3173 = home_bash(&[("subdir/.foo.txt", "text\n"), (".ignore", "!.foo.txt\n")])
+            .exec("rg --files");
+        assert_eq!(r3173.exit_code, 0, "r3173 exit");
+        assert_eq!(
+            r3173.stdout, "subdir/.foo.txt\n",
+            "r3173 surfaces whitelisted dotfile"
+        );
+        assert_eq!(r3173.stderr, "", "r3173 stderr");
+
+        // 1337 - r2236: upstream skips this; it expects an escaped-slash `foo\/`
+        // ignore rule to hide `foo/bar` (exit 1). The Rust gitignore engine does
+        // not honor the escaped-slash form, so the file is still searched and the
+        // match is reported. Pin that behavior: a clean match, never a panic.
+        let r2236 = home_bash(&[(".ignore", "foo\\/\n"), ("foo/bar", "test\n")]).exec("rg test");
+        assert_eq!(
+            r2236.exit_code, 0,
+            "r2236 escaped-slash ignore not honored: file still matched"
+        );
+        assert_eq!(r2236.stdout, "foo/bar:1:test\n", "r2236 reports the match");
+        assert_eq!(r2236.stderr, "", "r2236 stderr");
+
+        // 1542 - r3180: upstream skips this complex `-U -r` multiline replace
+        // pattern; the intent of the row is "must not panic". Assert the Rust
+        // engine handles it cleanly (no panic) with a deterministic exit code.
+        let r3180 = home_bash(&[("haystack", " b b b b b b b b\nc\n")])
+            .exec("rg '(^|[^a-z])((([a-z]+)?)s)?b(s([a-z]+)?)($|[^a-z])' haystack -U -r x");
+        assert_eq!(
+            r3180.exit_code, 1,
+            "r3180 completes without panic, no match"
+        );
+        assert_eq!(r3180.stdout, "", "r3180 no replacement output");
+
+        // 1538 - r3179: this is an empty-body upstream skip marker ("requires
+        // --ignore-file") left over from when the just-bash JS port lacked the
+        // flag. The Rust rg port DOES implement --ignore-file, so the behavior is
+        // portable: patterns loaded from the named ignore file suppress matching
+        // files while other files still match.
+        let r3179 = home_bash(&[
+            ("my-ignore", "ignored.txt\n"),
+            ("ignored.txt", "hello\n"),
+            ("included.txt", "hello\n"),
+        ])
+        .exec("rg --ignore-file my-ignore hello");
+        assert_eq!(r3179.exit_code, 0, "r3179 --ignore-file exit");
+        assert!(
+            r3179.stdout.contains("included.txt:"),
+            "r3179 keeps included"
+        );
+        assert!(
+            !r3179.stdout.contains("ignored.txt:"),
+            "r3179 suppresses ignore-file match"
+        );
+
+        // 1333 - r2208 (complex regex with named groups) and 1443 - r2990
+        // (trailing dot directory edge case) are empty-body upstream skip markers
+        // that assert nothing in TypeScript. They are documented engine-limitation
+        // exceptions; this test row records their classification alongside the
+        // bodied edge cases above.
+    }
+
+    #[test]
     fn rg_imported_regression_misc_pattern_file_context_and_filter_rows_are_portable() {
         // packages/just-bash/src/commands/rg/imported-tests/regression.test.ts
         // 247 - r105: gitignore with full path pattern hides foo/sherlock but keeps foo/watson

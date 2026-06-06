@@ -1407,6 +1407,24 @@ const jbc10CaseGroups = [
       'JBC-10 classifies the upstream `it.skip` regression rg rows that require unimplemented features: PCRE2 look-ahead/look-behind (r1401_x2, r1412, r1573, r3139), --crlf (r1765), --no-unicode (r2574), and --null-data (r2658). The Rust rg port rejects PCRE2/look-around regex and these flags as unrecognized options, asserted by the named Rust test.',
   },
   {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [1523, 1538],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_regression_skip_marker_and_edge_rows_are_portable',
+    notes:
+      'r21-just-bash-command-rg closes two upstream `it.skip` regression rows whose behavior IS portable in the Rust rg port: r3173 (1523) surfaces a `!.foo.txt` hidden-whitelist .ignore rule via `rg --files` (exact `subdir/.foo.txt` output), and r3179 (1538), an empty-body marker left from when the JS port lacked `--ignore-file`, now verifies that ignore-file patterns suppress matching files while others still match. The named Rust test asserts the exact output so it fails if either behavior regresses.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/rg/imported-tests/regression.test.ts',
+    lines: [1333, 1337, 1443, 1542],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::runtime::rg',
+    rustTest: 'rg_imported_regression_skip_marker_and_edge_rows_are_portable',
+    notes:
+      'r21-just-bash-command-rg classifies the remaining upstream `it.skip` regression rg rows that the Rust port does not reproduce: r2208 (1333, complex named-group regex) and r2990 (1443, trailing-dot directory) are empty-body skip markers asserting nothing upstream, r2236 (1337) escaped-slash `foo\\/` gitignore is not honored so the file is still matched (exit 0), and r3180 (1542) `-U -r` multiline replace completes without panic (exit 1, no output). The named Rust test pins the actual deterministic Rust behavior for the bodied rows so the documented exceptions fail if that behavior silently changes.',
+  },
+  {
     file: 'packages/just-bash/src/commands/rg/rg-parser-threads.test.ts',
     lines: [30, 35, 40, 45, 50, 57],
     status: 'portable-verified',
@@ -5372,6 +5390,15 @@ const jbc38CaseGroups = [
     rustTest: 'jbc38_small_posix_path_commands_match_upstream_rows',
     notes:
       'JBC-38 verifies portable which, basename, dirname, ln/readlink, chmod/stat, and test/[ rows against the virtual filesystem and registry-bound command lookup.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/ln/ln.error-forwarding.test.ts',
+    lines: [29, 46],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::sanitize',
+    rustTest: 'ln_error_forwarding_sanitizes_symlink_and_hardlink_payloads',
+    notes:
+      'r21-just-bash-command-rg classifies the ln error-forwarding rows as js-only: upstream injects a host fs error via a JavaScript Proxy that overrides fs.symlink/fs.link to throw a string carrying an attacker host path and a node:internal stack frame, a harness mechanism with no analog in the Rust in-memory filesystem (which never emits host-path errors). The redaction the rows ultimately verify IS portable; the named Rust test asserts sanitize_error_message redacts the exact upstream payloads (`/Users/attacker/... -> <path>`, `node:internal/... -> <internal>`), so the exception fails if redaction regresses.',
   },
   {
     file: 'packages/just-bash/src/commands/base64/base64.test.ts',
