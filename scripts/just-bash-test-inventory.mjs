@@ -4893,7 +4893,47 @@ const jbpiParserInterpreterCaseGroups = [
     owner: 'crates/just-bash::parser-interpreter',
     rustTest: 'jbpi_syntax_execution_protection_rows_match_upstream',
     notes:
-      'JB-PI verifies portable execution-protection rows through the Rust interpreter: recursion depth (maxCallDepth), command count (maxCommandCount), and loop iterations (maxLoopIterations) are bounded with the upstream ExecutionLimitError exit code (126) and a non-stack-overflow diagnostic whether the runaway is reached via plain/mutual recursion, eval-in-loop, function-with-loop, command substitution, arithmetic, subshells (incl. subshell-in-loop), pipelines, case, local, simulated-select, trap-guarded, empty-body or comment-only loops; bounded brace/range/char-range expansion, deep finite command substitution, many tokens/args, long finite pipelines, PROMPT_COMMAND assignment and self-referential variables exit 0 with the documented output; oversized input is rejected with a "too large" parser error. The large-arithmetic-overflow row (L359) now exits 0 because eval_arith_binary uses 64-bit wrapping arithmetic (matching bash fixed-width and Just Bash double-precision: no trap). The recursive-eval row (L275) is now closed by jbpi_interpreter_recursive_eval_protection_row_matches_upstream (eval_depth guard), and the upstream-skipped recursive-arith-in-param-expansion row (L373) stays pending.',
+      'JB-PI verifies portable execution-protection rows through the Rust interpreter: recursion depth (maxCallDepth), command count (maxCommandCount), and loop iterations (maxLoopIterations) are bounded with the upstream ExecutionLimitError exit code (126) and a non-stack-overflow diagnostic whether the runaway is reached via plain/mutual recursion, eval-in-loop, function-with-loop, command substitution, arithmetic, subshells (incl. subshell-in-loop), pipelines, case, local, simulated-select, trap-guarded, empty-body or comment-only loops; bounded brace/range/char-range expansion, deep finite command substitution, many tokens/args, long finite pipelines, PROMPT_COMMAND assignment and self-referential variables exit 0 with the documented output; oversized input is rejected with a "too large" parser error. The large-arithmetic-overflow row (L359) now exits 0 because eval_arith_binary uses 64-bit wrapping arithmetic (matching bash fixed-width and Just Bash double-precision: no trap). The recursive-eval row (L275) is now closed by jbpi_interpreter_recursive_eval_protection_row_matches_upstream (eval_depth guard), and the upstream-skipped recursive-arith-in-param-expansion row (L373) is documented as js-only by jbpi_interpreter_upstream_skipped_assoc_and_recursive_arith_rows_documented.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/set.test.ts',
+    lines: [6, 20],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'jbpi_interpreter_set_lists_assoc_arrays_in_bash_format_rows_match_upstream',
+    notes:
+      'r17jb closes the two `set` (no-argument) listing rows: a `typeset -A` associative array populated with a spaced quoted key and a bare key lists as a single `name=([key]="value" ... )` line (bash format — keys sorted ASCII so `a` precedes `k e y`, values double-quoted, trailing space before the `)`), never as separate per-element scalar lines. Implemented via the new format_set_variable_listing in crates/just-bash/src/shell.rs (apply_set_options no-arg branch) plus the quote_set_scalar/quote_array_value/quote_assoc_key helpers; fake_grep now honours a leading `^` anchor so the `set | grep \'^__assoc=\'` pipeline is exercised end-to-end. The assertions fail if the bash-format quoting, key sort order, or structural element storage regresses.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/builtins/unset.test.ts',
+    lines: [126, 140],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'jbpi_interpreter_unset_assoc_element_variable_key_rows_match_upstream',
+    notes:
+      'r17jb closes the two `unset` associative-array-element rows: `unset -v \'dict["$key"]\'` removes the element keyed by the VALUE of `$key` for both an ordinary key and a metacharacter key (`1],a[1`). The fix is on the ASSIGNMENT side — `dict["$key"]=foo` now expands the variable in the quoted subscript (split_quoted_subscript_assignment carries the raw `$key`/`${...}`/`$(...)` source and expand_assignments resolves it before the key is stored in crates/just-bash/src/shell.rs); the `unset` path already expanded and dequoted the subscript. The Rust test asserts the before/after element state so it fails if either side regresses.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/assoc-array.test.ts',
+    lines: [208],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'jbpi_interpreter_upstream_skipped_assoc_and_recursive_arith_rows_documented',
+    notes:
+      'Upstream `it.skip` ("TODO: spec test fixes" / key-value sequence initialization): bash would fold `declare -A A=(1 2 3)` into `[\'1\']=2 [\'3\']=\'\'`. The Rust port does not implement positional key-value-sequence initialisation for associative arrays, so the array is left empty — matching the upstream skip rather than the eventual bash semantics. The named Rust test pins the current empty-array behavior so this documented exception fails if it silently changes.',
+  },
+  {
+    file: 'packages/just-bash/src/syntax/execution-protection.test.ts',
+    lines: [373],
+    status: 'js-only-documented',
+    owner: 'crates/just-bash::parser-interpreter',
+    rustTest:
+      'jbpi_interpreter_upstream_skipped_assoc_and_recursive_arith_rows_documented',
+    notes:
+      'Upstream `it.skip` ("recursive arithmetic in parameter expansion"): `f() { echo $(($(f))); }; f` is skipped upstream because a function call inside `$(...)` inside `$((...))` hits a separate bug; the recursion-protection itself is covered by the recursive command-substitution row. The Rust port likewise does not recurse here (the inner command substitution yields an empty arithmetic operand, so `$((...))` evaluates to 0 and the script exits 0 with no native stack overflow). The named Rust test pins this behavior so the documented exception fails if it silently changes.',
   },
 ];
 
