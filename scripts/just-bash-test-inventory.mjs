@@ -2106,6 +2106,16 @@ const r10jbInterpreterCoreCaseGroups = [
   },
   {
     file: 'packages/just-bash/src/interpreter/prototype-pollution.test.ts',
+    lines: [499, 510, 700, 750, 800],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::shell::prototype-pollution',
+    rustTest:
+      'r17jb_interpreter_prototype_pollution_nameref_getopts_compgen_rows_match_upstream',
+    notes:
+      'R17JB adds the previously-missing builtins that carry dangerous keywords (__proto__, constructor, OPTARG): `declare -n` namerefs that point AT (L499) or are NAMED with (L510) a keyword resolve reads and write-throughs to the target variable; `getopts "a:"` parses `-a __proto__` into opt=a/OPTARG=__proto__ over the positional parameters (L700); an assoc-array element keyed by an array-element expansion `${pairs[0]}` after `read -a` stores under the literal key (L750, fixed by routing subscript `${...}` expansion through the full parameter path); and `compgen -v __proto__` completes a keyword-named variable with prefix filtering (L800). Each row asserts exact stdout/exit and the test guards nameref write-through and compgen prefix filtering so a regression fails.',
+  },
+  {
+    file: 'packages/just-bash/src/interpreter/prototype-pollution.test.ts',
     lines: [943, 953],
     status: 'js-only-documented',
     owner: 'docs/just-bash::interpreter-host-prototype-isolation',
