@@ -19,11 +19,11 @@ Rows are intentionally fail-closed: no row is verified until a sibling implement
 | Non-test TS/TSX source files | 423 |
 | Test files | 485 |
 | Test cases | 9936 |
-| Portable pending cases | 30 |
-| Portable verified cases | 8707 |
+| Portable pending cases | 24 |
+| Portable verified cases | 8713 |
 | JS-only documented cases | 1199 |
 | Type-system impossible cases | 0 |
-| Strict gate gaps | 30 |
+| Strict gate gaps | 24 |
 | Inventory check command | node scripts/just-bash-test-inventory.mjs --check |
 | Strict gate command | node scripts/just-bash-test-inventory.mjs --strict |
 | Conformance plan | docs/open-agents/just-bash-conformance.md |
@@ -293,7 +293,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | command:xan | 201 | 0 | 200 | 1 | 0 |
 | packages/just-bash | command:xargs | 35 | 0 | 35 | 0 | 0 |
 | packages/just-bash | command:yq | 215 | 2 | 211 | 2 | 0 |
-| packages/just-bash | comparison-tests | 530 | 6 | 524 | 0 | 0 |
+| packages/just-bash | comparison-tests | 530 | 0 | 530 | 0 | 0 |
 | packages/just-bash | core | 213 | 4 | 187 | 22 | 0 |
 | packages/just-bash | fs:core | 263 | 1 | 248 | 14 | 0 |
 | packages/just-bash | fs:in-memory-fs | 86 | 0 | 72 | 14 | 0 |
@@ -341,7 +341,6 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | pending:just-bash-core | portable-pending | 10 |
 | pending:just-bash-fs | portable-pending | 1 |
 | pending:just-bash-parser-interpreter | portable-pending | 6 |
-| pending:just-bash-spec-comparison | portable-pending | 6 |
 
 ## Test File Inventory
 
@@ -682,7 +681,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/sed.comparison.test.ts | 22 | 0 | 22 | 0 | 0 | crates/just-bash::conformance_corpus |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/sort.comparison.test.ts | 24 | 0 | 24 | 0 | 0 | crates/just-bash::conformance_corpus; crates/just-bash::runtime::comparison-core |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/strings-split.comparison.test.ts | 11 | 0 | 11 | 0 | 0 | crates/just-bash::conformance_corpus |
-| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/substitution-desync.comparison.test.ts | 6 | 6 | 0 | 0 | 0 | pending:just-bash-spec-comparison |
+| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/substitution-desync.comparison.test.ts | 6 | 0 | 6 | 0 | 0 | crates/just-bash::shell |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tar.comparison.test.ts | 10 | 0 | 10 | 0 | 0 | crates/just-bash::conformance_corpus |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tee.comparison.test.ts | 5 | 0 | 5 | 0 | 0 | crates/just-bash::exec; crates/just-bash::runtime::comparison-core |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/test.comparison.test.ts | 40 | 0 | 40 | 0 | 0 | crates/just-bash::conformance_corpus |
@@ -7124,12 +7123,12 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/strings-split.comparison.test.ts | 87 | strings command - Real Bash Comparison | should split by bytes and verify chunk | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::comparison_strings_split_89796601f0abcc5f | JBC-45 Rust corpus runner exact match for generated comparison fixture stdout, stderr, exit code, and fixture setup; mismatching command-family rows stay pending. |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/strings-split.comparison.test.ts | 94 | strings command - Real Bash Comparison | should handle empty input | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::comparison_strings_split_899bac38cd056fb1 | JBC-45 Rust corpus runner exact match for generated comparison fixture stdout, stderr, exit code, and fixture setup; mismatching command-family rows stay pending. |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/strings-split.comparison.test.ts | 99 | strings command - Real Bash Comparison | should read from stdin and verify chunk | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::comparison_strings_split_ce1a3c68c8be39ff | JBC-45 Rust corpus runner exact match for generated comparison fixture stdout, stderr, exit code, and fixture setup; mismatching command-family rows stay pending. |
-| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/substitution-desync.comparison.test.ts | 21 | (top-level) | keeps arithmetic-command-sub payload text as data (dollar-paren) | it | portable-pending | pending:just-bash-spec-comparison | pending:just-bash-spec-comparison | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
-| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/substitution-desync.comparison.test.ts | 30 | (top-level) | keeps arithmetic-command-sub payload text as data (backticks) | it | portable-pending | pending:just-bash-spec-comparison | pending:just-bash-spec-comparison | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
-| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/substitution-desync.comparison.test.ts | 39 | (top-level) | does not execute marker write from comment-like substitution boundary confusion | it | portable-pending | pending:just-bash-spec-comparison | pending:just-bash-spec-comparison | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
-| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/substitution-desync.comparison.test.ts | 64 | (top-level) | treats $(( (cmd) \|\| (cmd2) )) as arithmetic context | it | portable-pending | pending:just-bash-spec-comparison | pending:just-bash-spec-comparison | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
-| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/substitution-desync.comparison.test.ts | 73 | (top-level) | distinguishes $( (cmd) \|\| (cmd2) ) command substitution control case | it | portable-pending | pending:just-bash-spec-comparison | pending:just-bash-spec-comparison | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
-| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/substitution-desync.comparison.test.ts | 82 | (top-level) | keeps $((cmd)redirection) parsed as command substitution form | it | portable-pending | pending:just-bash-spec-comparison | pending:just-bash-spec-comparison | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
+| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/substitution-desync.comparison.test.ts | 21 | (top-level) | keeps arithmetic-command-sub payload text as data (dollar-paren) | it | portable-verified | crates/just-bash::shell | r17jb_substitution_boundary_desync_rows_match_upstream | r17jb-just-bash-spec-comparison: the `$(printf ...)` payload inside `$(( ... ))` is kept as data — the embedded `;`/`#`/`>` never desync the scan — so the marker write does not run (marker stays absent). Verified via the real Interpreter and its virtual filesystem. |
+| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/substitution-desync.comparison.test.ts | 30 | (top-level) | keeps arithmetic-command-sub payload text as data (backticks) | it | portable-verified | crates/just-bash::shell | r17jb_substitution_boundary_desync_rows_match_upstream | r17jb-just-bash-spec-comparison: same as the dollar-paren case but with a backtick command substitution inside `$(( ... ))`; the payload stays data and the marker stays absent. |
+| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/substitution-desync.comparison.test.ts | 39 | (top-level) | does not execute marker write from comment-like substitution boundary confusion | it | portable-verified | crates/just-bash::shell | r17jb_substitution_boundary_desync_rows_match_upstream | r17jb-just-bash-spec-comparison: `$(echo SAFE #)` closes at the inner `)` with the `#` commenting the rest of that sub-command; the trailing `; echo DESYNC > marker )` is literal data inside the outer double quotes, so the marker stays absent and stdout is `SAFE ; echo DESYNC > marker )`. |
+| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/substitution-desync.comparison.test.ts | 64 | (top-level) | treats $(( (cmd) \|\| (cmd2) )) as arithmetic context | it | portable-verified | crates/just-bash::shell | r17jb_substitution_boundary_desync_rows_match_upstream | r17jb-just-bash-spec-comparison: `$(( (cmd) \|\| (cmd2) ))` is arithmetic — the inner parens are grouping, not subshells — so no command runs and the marker stays absent (`dollar_dparen_is_subshell` returns false). |
+| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/substitution-desync.comparison.test.ts | 73 | (top-level) | distinguishes $( (cmd) \|\| (cmd2) ) command substitution control case | it | portable-verified | crates/just-bash::shell | r17jb_substitution_boundary_desync_rows_match_upstream | r17jb-just-bash-spec-comparison: `$( (cmd) \|\| (cmd2) )` is a command substitution whose left subshell runs and writes the marker (marker becomes present), the control case proving the arithmetic vs command-substitution split. |
+| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/substitution-desync.comparison.test.ts | 82 | (top-level) | keeps $((cmd)redirection) parsed as command substitution form | it | portable-verified | crates/just-bash::shell | r17jb_substitution_boundary_desync_rows_match_upstream | r17jb-just-bash-spec-comparison: `$((cmd)redirection)` is reparsed as command substitution wrapping a subshell (`dollar_dparen_is_subshell` returns true because the inner `)` is followed by content), producing word-split `AA BB` matching the upstream golden fixture. |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tar.comparison.test.ts | 21 | (top-level) | should create and list single file archive | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::comparison_tar_76755482c30f6729 | JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code. |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tar.comparison.test.ts | 32 | (top-level) | should create and list multiple files | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::comparison_tar_ea3d17f6c34f860d | JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code. |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tar.comparison.test.ts | 44 | (top-level) | should create and list directory archive | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::comparison_tar_c0f8ce57cb363e70 | JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code. |
