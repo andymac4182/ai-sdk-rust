@@ -35106,6 +35106,24 @@ mod tests {
     }
 
     #[test]
+    fn just_bash_jq_processes_glob_expanded_json_files_in_order() {
+        // commands/jq/jq.test.ts:195 "should work with glob patterns via shell
+        // expansion": `jq '.n' /data/*.json` glob-expands to the three JSON
+        // files in alphabetical order and applies the filter to each, emitting
+        // 1, 2, 3 on successive lines. Fails if glob expansion or multi-file jq
+        // ordering regresses.
+        let session = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/data/a.json", "{\"n\":1}")
+                .with_file("/data/b.json", "{\"n\":2}")
+                .with_file("/data/c.json", "{\"n\":3}"),
+        );
+        let result = session.exec("jq '.n' /data/*.json", JustBashExecOptions::new());
+        assert_eq!(result.stdout, "1\n2\n3\n");
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
     fn just_bash_session_with_binary_file_seeds_raw_bytes_verbatim() {
         // `JustBashSessionOptions::with_binary_file` mirrors upstream's
         // `files: { path: Uint8Array }` shape: the raw bytes land in the
