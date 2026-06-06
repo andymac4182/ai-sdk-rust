@@ -19,11 +19,11 @@ Rows are intentionally fail-closed: no row is verified until a sibling implement
 | Non-test TS/TSX source files | 423 |
 | Test files | 485 |
 | Test cases | 9936 |
-| Portable pending cases | 42 |
-| Portable verified cases | 8697 |
+| Portable pending cases | 39 |
+| Portable verified cases | 8700 |
 | JS-only documented cases | 1197 |
 | Type-system impossible cases | 0 |
-| Strict gate gaps | 42 |
+| Strict gate gaps | 39 |
 | Inventory check command | node scripts/just-bash-test-inventory.mjs --check |
 | Strict gate command | node scripts/just-bash-test-inventory.mjs --strict |
 | Conformance plan | docs/open-agents/just-bash-conformance.md |
@@ -280,8 +280,8 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | command:tar | 164 | 0 | 164 | 0 | 0 |
 | packages/just-bash | command:tee | 9 | 0 | 9 | 0 | 0 |
 | packages/just-bash | command:test | 40 | 0 | 40 | 0 | 0 |
-| packages/just-bash | command:time | 1 | 1 | 0 | 0 | 0 |
-| packages/just-bash | command:timeout | 23 | 3 | 20 | 0 | 0 |
+| packages/just-bash | command:time | 1 | 0 | 1 | 0 | 0 |
+| packages/just-bash | command:timeout | 23 | 1 | 22 | 0 | 0 |
 | packages/just-bash | command:touch | 8 | 0 | 8 | 0 | 0 |
 | packages/just-bash | command:tr | 27 | 0 | 27 | 0 | 0 |
 | packages/just-bash | command:tree | 11 | 0 | 11 | 0 | 0 |
@@ -336,8 +336,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | pending:just-bash-command-base64 | portable-pending | 1 |
 | pending:just-bash-command-hostname | portable-pending | 1 |
 | pending:just-bash-command-sed | portable-pending | 2 |
-| pending:just-bash-command-time | portable-pending | 1 |
-| pending:just-bash-command-timeout | portable-pending | 3 |
+| pending:just-bash-command-timeout | portable-pending | 1 |
 | pending:just-bash-command-yq | portable-pending | 2 |
 | pending:just-bash-core | portable-pending | 10 |
 | pending:just-bash-fs | portable-pending | 1 |
@@ -611,9 +610,9 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | command:tee | packages/just-bash/src/commands/tee/tee.test.ts | 6 | 0 | 6 | 0 | 0 | crates/just-bash::runtime::small-posix-stream |
 | packages/just-bash | command:tee | packages/just-bash/src/commands/tee/tee.utf8-stdin.test.ts | 2 | 0 | 2 | 0 | 0 | crates/just-bash::runtime::small-posix-stream |
 | packages/just-bash | command:test | packages/just-bash/src/commands/test/test.test.ts | 40 | 0 | 40 | 0 | 0 | crates/just-bash::runtime::small-posix-path |
-| packages/just-bash | command:time | packages/just-bash/src/commands/time/time.utf8-stdin.test.ts | 1 | 1 | 0 | 0 | 0 | pending:just-bash-command-time |
+| packages/just-bash | command:time | packages/just-bash/src/commands/time/time.utf8-stdin.test.ts | 1 | 0 | 1 | 0 | 0 | crates/just-bash::exec::time |
 | packages/just-bash | command:timeout | packages/just-bash/src/commands/timeout/timeout.command-name-quoting.test.ts | 1 | 0 | 1 | 0 | 0 | crates/just-bash::exec::timeout |
-| packages/just-bash | command:timeout | packages/just-bash/src/commands/timeout/timeout.nested-cancellation.test.ts | 3 | 3 | 0 | 0 | 0 | pending:just-bash-command-timeout |
+| packages/just-bash | command:timeout | packages/just-bash/src/commands/timeout/timeout.nested-cancellation.test.ts | 3 | 1 | 2 | 0 | 0 | crates/just-bash::exec::timeout; pending:just-bash-command-timeout |
 | packages/just-bash | command:timeout | packages/just-bash/src/commands/timeout/timeout.test.ts | 18 | 0 | 18 | 0 | 0 | crates/just-bash::exec::timeout |
 | packages/just-bash | command:timeout | packages/just-bash/src/commands/timeout/timeout.utf8-stdin.test.ts | 1 | 0 | 1 | 0 | 0 | crates/just-bash::exec |
 | packages/just-bash | command:touch | packages/just-bash/src/commands/touch/touch.test.ts | 8 | 0 | 8 | 0 | 0 | crates/just-bash::runtime::small-command-leftovers |
@@ -6109,11 +6108,11 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | command:test | packages/just-bash/src/commands/test/test.test.ts | 243 | single argument | works with && for true condition | it | portable-verified | crates/just-bash::runtime::small-posix-path | jbc38_small_posix_path_commands_match_upstream_rows | JBC-38 verifies portable which, basename, dirname, ln/readlink, chmod/stat, and test/[ rows against the virtual filesystem and registry-bound command lookup. |
 | packages/just-bash | command:test | packages/just-bash/src/commands/test/test.test.ts | 251 | single argument | works with \|\| for false condition | it | portable-verified | crates/just-bash::runtime::small-posix-path | jbc38_small_posix_path_commands_match_upstream_rows | JBC-38 verifies portable which, basename, dirname, ln/readlink, chmod/stat, and test/[ rows against the virtual filesystem and registry-bound command lookup. |
 | packages/just-bash | command:test | packages/just-bash/src/commands/test/test.test.ts | 259 | single argument | [ ] works with && and \|\| | it | portable-verified | crates/just-bash::runtime::small-posix-path | jbc38_small_posix_path_commands_match_upstream_rows | JBC-38 verifies portable which, basename, dirname, ln/readlink, chmod/stat, and test/[ rows against the virtual filesystem and registry-bound command lookup. |
-| packages/just-bash | command:time | packages/just-bash/src/commands/time/time.utf8-stdin.test.ts | 5 | (top-level) | byte-clean passthrough to the wrapped command | it | portable-pending | pending:just-bash-command-time | pending:just-bash-command-time | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
+| packages/just-bash | command:time | packages/just-bash/src/commands/time/time.utf8-stdin.test.ts | 5 | (top-level) | byte-clean passthrough to the wrapped command | it | portable-verified | crates/just-bash::exec::time | jbc_time_command_times_wrapper_and_forwards_stdin | R17JB implements the portable `time` command wrapper (mirroring upstream commands/time/time.ts): it times the wrapped command, forwards UTF-8 stdin byte-for-byte to it, writes the GNU-style timing line to `-o FILE` or stderr (with `-p` POSIX and `-v`/`-f` formats), and forwards the wrapped command’s stdout and exit code verbatim. |
 | packages/just-bash | command:timeout | packages/just-bash/src/commands/timeout/timeout.command-name-quoting.test.ts | 5 | (top-level) | executes quoted command names containing spaces | it | portable-verified | crates/just-bash::exec::timeout | jbc20_timeout_command_rows_use_cooperative_in_process_cancellation | R15JB verifies a quoted executable path containing spaces (`timeout 1 '/bin/my cmd.sh'`) resolves to the user script verbatim and runs it: the path-with-space command name reaches command resolution as a single token, the executable bit is honored, and the script body (echo TIMEOUT_OK) executes with exit 0. Backed by execute_user_script path-based script execution. |
-| packages/just-bash | command:timeout | packages/just-bash/src/commands/timeout/timeout.nested-cancellation.test.ts | 8 | (top-level) | cancels xargs subcommands and prevents late side effects | it | portable-pending | pending:just-bash-command-timeout | pending:just-bash-command-timeout | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
+| packages/just-bash | command:timeout | packages/just-bash/src/commands/timeout/timeout.nested-cancellation.test.ts | 8 | (top-level) | cancels xargs subcommands and prevents late side effects | it | portable-verified | crates/just-bash::exec::timeout | jbc_timeout_nested_cancellation_prevents_late_side_effects | R17JB verifies that an enclosing `timeout 0.01` cancels a nested subcommand driven by xargs (line 8) and by the /usr/bin/time wrapper (line 64): the cooperative deadline returns exit 124 while the inner `bash -c sleep` is still running, so the subcommand’s post-sleep marker write never reaches the virtual filesystem now or after a further wait. The find -exec case at line 35 stays portable-pending: it depends on backslash-escaped `\\;` terminator handling in command splitting, deferred to a focused find/escaping unit. |
 | packages/just-bash | command:timeout | packages/just-bash/src/commands/timeout/timeout.nested-cancellation.test.ts | 35 | (top-level) | cancels find -exec subcommands and prevents late side effects | it | portable-pending | pending:just-bash-command-timeout | pending:just-bash-command-timeout | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
-| packages/just-bash | command:timeout | packages/just-bash/src/commands/timeout/timeout.nested-cancellation.test.ts | 64 | (top-level) | cancels /usr/bin/time wrapped command and prevents late side effects | it | portable-pending | pending:just-bash-command-timeout | pending:just-bash-command-timeout | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
+| packages/just-bash | command:timeout | packages/just-bash/src/commands/timeout/timeout.nested-cancellation.test.ts | 64 | (top-level) | cancels /usr/bin/time wrapped command and prevents late side effects | it | portable-verified | crates/just-bash::exec::timeout | jbc_timeout_nested_cancellation_prevents_late_side_effects | R17JB verifies that an enclosing `timeout 0.01` cancels a nested subcommand driven by xargs (line 8) and by the /usr/bin/time wrapper (line 64): the cooperative deadline returns exit 124 while the inner `bash -c sleep` is still running, so the subcommand’s post-sleep marker write never reaches the virtual filesystem now or after a further wait. The find -exec case at line 35 stays portable-pending: it depends on backslash-escaped `\\;` terminator handling in command splitting, deferred to a focused find/escaping unit. |
 | packages/just-bash | command:timeout | packages/just-bash/src/commands/timeout/timeout.test.ts | 7 | (top-level) | should run command that completes before timeout | it | portable-verified | crates/just-bash::exec::timeout | jbc20_timeout_command_rows_use_cooperative_in_process_cancellation | JBC-20 verifies portable timeout command duration parsing, ignored foreground/kill/signal options, operand diagnostics, cooperative 124 cancellation, no post-timeout output or file side effects, and help output. |
 | packages/just-bash | command:timeout | packages/just-bash/src/commands/timeout/timeout.test.ts | 17 | (top-level) | should timeout slow command | it | portable-verified | crates/just-bash::exec::timeout | jbc20_timeout_command_rows_use_cooperative_in_process_cancellation | JBC-20 verifies portable timeout command duration parsing, ignored foreground/kill/signal options, operand diagnostics, cooperative 124 cancellation, no post-timeout output or file side effects, and help output. |
 | packages/just-bash | command:timeout | packages/just-bash/src/commands/timeout/timeout.test.ts | 29 | (top-level) | should pass arguments to command | it | portable-verified | crates/just-bash::exec::timeout | jbc20_timeout_command_rows_use_cooperative_in_process_cancellation | JBC-20 verifies portable timeout command duration parsing, ignored foreground/kill/signal options, operand diagnostics, cooperative 124 cancellation, no post-timeout output or file side effects, and help output. |
