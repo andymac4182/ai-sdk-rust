@@ -1044,6 +1044,9 @@ impl JustBashSession {
         env.insert("PWD".to_string(), cwd.clone());
         env.entry("OLDPWD".to_string())
             .or_insert_with(|| cwd.clone());
+        // `$?` starts at 0 for a fresh exec; the control loop refreshes it after
+        // each command. Stored in the env map like other special parameters.
+        env.insert("?".to_string(), "0".to_string());
 
         let mut state = ExecState {
             session: self,
@@ -1271,6 +1274,13 @@ fn execute_control_script(state: &mut ExecState<'_>, script: &str) -> CommandRes
         combined.exit_code = result.exit_code;
         last_exit = result.exit_code;
         state.last_exit = result.exit_code;
+        // Expose `$?` (the last command's exit status) to subsequent simple
+        // commands in this list. exec.rs resolves special parameters through the
+        // env map (see `read_variable`), so the freshly computed status must be
+        // written there as bash does between `;`/newline-separated commands.
+        state
+            .env
+            .insert("?".to_string(), result.exit_code.to_string());
         if result.exit_requested {
             combined.exit_requested = true;
             break;
@@ -2252,6 +2262,7 @@ fn command_env(state: &mut ExecState<'_>, args: &[String], stdin: &str) -> Comma
     if index == args.len() {
         let stdout: String = env
             .iter()
+            .filter(|(key, _)| !is_special_parameter_key(key))
             .map(|(key, value)| format!("{key}={value}\n"))
             .collect();
         return stdout_result(stdout);
@@ -3650,10 +3661,13 @@ fn grep_inputs(
                 let text = fs
                     .read_file(&child_path)
                     .map_err(|_| format!("{child_path}: No such file or directory"))?;
-                inputs.push(NamedTextInput {
-                    label: child_path,
-                    text,
-                });
+                // Real grep prints recursive matches relative to the literal
+                // operand (e.g. `dir/file.txt`), not the resolved absolute path.
+                let label = child_path
+                    .strip_prefix(&format!("{path}/"))
+                    .map(|suffix| format!("{}/{}", original.trim_end_matches('/'), suffix))
+                    .unwrap_or_else(|| child_path.clone());
+                inputs.push(NamedTextInput { label, text });
             }
         } else {
             if grep_path_basename_excluded(&path, exclude_globs) {
@@ -3780,40 +3794,57 @@ fn command_ls(state: &ExecState<'_>, args: &[String]) -> CommandResult {
     let mut stderr = String::new();
     let mut exit_code = 0;
     let multi = paths.len() > 1;
-    for (index, raw_path) in paths.iter().enumerate() {
+    // GNU `ls` groups non-directory operands first (as a single block), then
+    // lists each directory operand under its own header. A blank line separates
+    // consecutive blocks, so `ls file.txt dir` prints the file, a blank line,
+    // then `dir:` and its contents.
+    let mut file_block = String::new();
+    let mut dir_blocks: Vec<String> = Vec::new();
+    for raw_path in paths.iter() {
         let path = resolve_path(&state.cwd, raw_path);
         match fs.stat(&path) {
             Ok(stat) if stat.is_file || (options.directories_only && stat.is_directory) => {
-                stdout.push_str(&format_ls_name(&fs, raw_path, &path, &stat, &options));
-                stdout.push('\n');
+                file_block.push_str(&format_ls_name(&fs, raw_path, &path, &stat, &options));
+                file_block.push('\n');
             }
             Ok(_) => {
                 // GNU `ls` echoes the directory operand exactly as the user
                 // typed it in the header (and in recursive sub-headers),
                 // including `.` for the implicit current-directory operand.
                 let display_path = raw_path.as_str();
+                let mut block = String::new();
                 if multi || options.recursive {
-                    stdout.push_str(display_path);
-                    stdout.push_str(":\n");
+                    block.push_str(display_path);
+                    block.push_str(":\n");
                 }
-                stdout.push_str(&format_ls_directory(&fs, &path, &options));
+                block.push_str(&format_ls_directory(&fs, &path, &options));
                 if options.recursive {
-                    stdout.push_str(&format_ls_recursive_children(
+                    block.push_str(&format_ls_recursive_children(
                         &fs,
                         &path,
                         display_path,
                         &options,
                     ));
                 }
-                if multi && index + 1 < paths.len() {
-                    stdout.push('\n');
-                }
+                dir_blocks.push(block);
             }
             Err(_) => {
                 stderr.push_str(&format!("ls: {path}: No such file or directory\n"));
                 exit_code = 2;
             }
         }
+    }
+    let mut emitted_block = false;
+    if !file_block.is_empty() {
+        stdout.push_str(&file_block);
+        emitted_block = true;
+    }
+    for block in dir_blocks {
+        if emitted_block {
+            stdout.push('\n');
+        }
+        stdout.push_str(&block);
+        emitted_block = true;
     }
     CommandResult {
         stdout,
@@ -31482,17 +31513,22 @@ fn collect_named_text_inputs(
         .map_err(|_| "filesystem lock poisoned".to_string())?;
     let mut inputs = Vec::new();
     for path in paths {
-        let path = resolve_path(&state.cwd, path);
+        let resolved = resolve_path(&state.cwd, path);
         let stat = fs
-            .stat(&path)
-            .map_err(|_| format!("{path}: No such file or directory"))?;
+            .stat(&resolved)
+            .map_err(|_| format!("{resolved}: No such file or directory"))?;
         if stat.is_directory {
-            return Err(format!("{path}: Is a directory"));
+            return Err(format!("{resolved}: Is a directory"));
         }
         let text = fs
-            .read_file(&path)
-            .map_err(|_| format!("{path}: No such file or directory"))?;
-        inputs.push(NamedTextInput { label: path, text });
+            .read_file(&resolved)
+            .map_err(|_| format!("{resolved}: No such file or directory"))?;
+        // `head`/`tail` print the literal operand (not the resolved absolute
+        // path) in their `==> name <==` multi-file headers, matching real bash.
+        inputs.push(NamedTextInput {
+            label: path.clone(),
+            text,
+        });
     }
     Ok(inputs)
 }
@@ -32489,6 +32525,15 @@ fn tokenize(input: &str, env: &BTreeMap<String, String>) -> Result<Vec<String>, 
     Ok(tokens)
 }
 
+/// Whether an env-map key names a shell special parameter (`$?`, `$#`, `$@`,
+/// `$*`, `$$`, `$!`, `$-`, and `$0`..`$9`). exec.rs stores these in the env map
+/// so expansion can read them, but builtins like `env` must not list them as
+/// ordinary environment variables.
+fn is_special_parameter_key(key: &str) -> bool {
+    matches!(key, "?" | "#" | "@" | "*" | "$" | "!" | "-")
+        || (key.len() == 1 && key.chars().next().is_some_and(|c| c.is_ascii_digit()))
+}
+
 fn read_variable(
     chars: &[char],
     index: &mut usize,
@@ -32532,7 +32577,10 @@ fn read_variable(
         let name = chars[start + 1..end].iter().collect::<String>();
         *index = end - 1;
         Ok(env.get(&name).cloned().unwrap_or_default())
-    } else if next.is_ascii_digit() || matches!(*next, '#' | '@' | '*') {
+    } else if next.is_ascii_digit() || matches!(*next, '#' | '@' | '*' | '?' | '$' | '!') {
+        // Unbraced special parameters (`$?`, `$#`, `$@`, `$*`, `$$`, `$!`, `$0`..)
+        // resolve from the env map that exec.rs populates with their current
+        // values. `$?` in particular carries the previous command's exit status.
         *index = start + 1;
         Ok(env.get(&next.to_string()).cloned().unwrap_or_default())
     } else {
