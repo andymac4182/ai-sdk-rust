@@ -8603,6 +8603,57 @@ mod tests {
         }
 
         let cases = [
+            // tee-plugin.test.ts:383 mixed pipeline with compound: a piped
+            // `while read x` loop consumes the single `echo hello` record and
+            // echoes it back with a `got ` prefix.
+            Case {
+                line: 383,
+                script: "echo hello | while read x; do echo got $x; done",
+                stdout: "got hello\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:435 a `while read line` loop consuming pipeline
+            // output: `echo -e 'a\nb\nc'` emits three records that the loop wraps
+            // in brackets one per iteration.
+            Case {
+                line: 435,
+                script: "echo -e 'a\\nb\\nc' | while read line; do echo \"[$line]\"; done",
+                stdout: "[a]\n[b]\n[c]\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:479 associative-array lookup: `declare -A` plus
+            // `m[a]=1; m[b]=2` indexed assignments, then `${m[a]} ${m[b]}` reads
+            // the two values back on one line.
+            Case {
+                line: 479,
+                script: "declare -A m; m[a]=1; m[b]=2; echo ${m[a]} ${m[b]}",
+                stdout: "1 2\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:590 `read` with multiple variable names in a
+            // non-piped-style loop: `read a b c` field-splits "one two three"
+            // into the three names, echoed back reversed.
+            Case {
+                line: 590,
+                script: "echo \"one two three\" | while read a b c; do echo \"$c $b $a\"; done",
+                stdout: "three two one\n",
+                stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:596 a pipeline feeding a `while read` loop that
+            // runs alongside surrounding statements: each of the three records is
+            // echoed with a `line: ` prefix, then `after` prints once the loop
+            // ends.
+            Case {
+                line: 596,
+                script: "sum=0\necho -e '10\\n20\\n30' | while read n; do\n  echo \"line: $n\"\ndone\necho after",
+                stdout: "line: 10\nline: 20\nline: 30\nafter\n",
+                stderr: "",
+                exit_code: 0,
+            },
             // tee-plugin.test.ts:419 nested command substitution with pipeline.
             // `wc -l` counts the three newlines emitted by `echo -e 'a\nb\nc'`.
             Case {
