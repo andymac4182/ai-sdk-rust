@@ -15660,4 +15660,71 @@ greet World",
         assert!(r.stdout.contains("status=1"), "stdout: {:?}", r.stdout);
         assert_eq!(r.exit_code, 0, "exit: {}", r.exit_code);
     }
+
+    /// r20-just-bash-spec-comparison closes the parse-errors comparison rows for
+    /// loop and conditional control flow plus the `;;;` syntax-error row
+    /// (packages/just-bash/src/comparison-tests/parse-errors.comparison.test.ts).
+    /// Each script runs through the real Interpreter control flow and must match
+    /// real-bash stdout and exit status exactly; the assertions fail if for/while/
+    /// until/if/elif/else handling or the multiple-semicolon syntax-error contract
+    /// regresses. Mirrors upstream `runVirtualBash` vs `runRealBash` comparison.
+    #[test]
+    fn r20_parse_errors_loop_and_conditional_control_flow_match_upstream() {
+        // L99 valid for loop iterates each word in order.
+        let r = shell().exec("for i in a b c; do echo $i; done");
+        assert_eq!(r.stdout, "a\nb\nc\n", "for stdout: {:?}", r.stdout);
+        assert_eq!(r.exit_code, 0, "for exit: {}", r.exit_code);
+
+        // L109 empty list for loop runs zero iterations and exits 0.
+        let r = shell().exec("for i in; do echo $i; done");
+        assert_eq!(r.stdout, "", "empty-for stdout: {:?}", r.stdout);
+        assert_eq!(r.exit_code, 0, "empty-for exit: {}", r.exit_code);
+
+        // L119 while false: condition immediately false -> zero iterations.
+        let r = shell().exec("while false; do echo loop; done");
+        assert_eq!(r.stdout, "", "while-false stdout: {:?}", r.stdout);
+        assert_eq!(r.exit_code, 0, "while-false exit: {}", r.exit_code);
+
+        // L131 until true: condition immediately true -> zero iterations.
+        let r = shell().exec("until true; do echo loop; done");
+        assert_eq!(r.stdout, "", "until-true stdout: {:?}", r.stdout);
+        assert_eq!(r.exit_code, 0, "until-true exit: {}", r.exit_code);
+
+        // L143 if true branch.
+        let r = shell().exec("if true; then echo yes; fi");
+        assert_eq!(r.stdout, "yes\n", "if-true stdout: {:?}", r.stdout);
+        assert_eq!(r.exit_code, 0, "if-true exit: {}", r.exit_code);
+
+        // L151 else branch taken when the condition is false.
+        let r = shell().exec("if false; then echo yes; else echo no; fi");
+        assert_eq!(r.stdout, "no\n", "if-else stdout: {:?}", r.stdout);
+        assert_eq!(r.exit_code, 0, "if-else exit: {}", r.exit_code);
+
+        // L163 elif branch taken when the leading condition is false.
+        let r = shell().exec("if false; then echo 1; elif true; then echo 2; else echo 3; fi");
+        assert_eq!(r.stdout, "2\n", "elif stdout: {:?}", r.stdout);
+        assert_eq!(r.exit_code, 0, "elif exit: {}", r.exit_code);
+
+        // L276 `;;;` is a syntax error (in bash `;;` is a case delimiter); the
+        // interpreter reports a parse error and exits 2 like real bash.
+        let r = shell().exec("echo a;;;echo b");
+        assert_eq!(
+            r.exit_code, 2,
+            "syntax-error exit: {} ({:?})",
+            r.exit_code, r.stderr
+        );
+    }
+
+    /// r20-just-bash-spec-comparison closes the export comparison row
+    /// (packages/just-bash/src/comparison-tests/export.comparison.test.ts:47
+    /// "should be available in subshell"): an exported variable is visible inside
+    /// a subshell `( ... )`. Runs through the real Interpreter and must match the
+    /// real-bash stdout `bar\n`; the assertion fails if export visibility does not
+    /// propagate into the subshell environment.
+    #[test]
+    fn r20_export_variable_is_available_in_subshell_matches_upstream() {
+        let r = shell().exec("export FOO=bar; (echo $FOO)");
+        assert_eq!(r.stdout, "bar\n", "stdout: {:?}", r.stdout);
+        assert_eq!(r.exit_code, 0, "exit: {}", r.exit_code);
+    }
 }
