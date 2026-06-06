@@ -1439,6 +1439,20 @@ impl Lexer {
     fn read_dollar_expansion(&mut self, line: usize, column: usize) -> ShellResult<WordPart> {
         self.advance();
         if self.starts_with("((") {
+            // `$((` is normally arithmetic expansion, but bash reinterprets it as a
+            // command substitution wrapping a subshell — `$( ( ... ) ... )` — when
+            // the `((` does NOT close with an adjacent `))` and instead the inner
+            // `)` is followed by more content (e.g. `$((cmd)2>/dev/null)`) or the
+            // top level contains a `||`/`&&`/`|` operator. Mirrors upstream
+            // `isDollarDparenSubshell` in parser-substitution.ts.
+            if self.dollar_dparen_is_subshell() {
+                self.advance();
+                let body = self.read_command_substitution_body(line, column)?;
+                return Ok(WordPart::CommandSubstitution {
+                    body: parse(&body)?,
+                    legacy: false,
+                });
+            }
             self.take(2);
             let source = self.read_until_arithmetic_expansion_end(line, column)?;
             return Ok(WordPart::Arithmetic(ArithmeticExpression { source }));
@@ -1484,27 +1498,179 @@ impl Lexer {
         }
     }
 
+    /// Decide whether a `$((` at the current position (with `self.peek()` on the
+    /// first `(`) should be parsed as a command substitution wrapping a subshell
+    /// rather than as an arithmetic expansion. Pure lookahead — does not consume
+    /// input. Port of upstream `isDollarDparenSubshell`.
+    fn dollar_dparen_is_subshell(&self) -> bool {
+        // We start having "seen" `((`, so begin at depth 2 two chars in.
+        let mut offset = 2usize;
+        let mut depth = 2i32;
+        let mut in_single = false;
+        let mut in_double = false;
+        while let Some(character) = self.peek_offset(offset) {
+            if depth <= 0 {
+                break;
+            }
+            if in_single {
+                if character == '\'' {
+                    in_single = false;
+                }
+                offset += 1;
+                continue;
+            }
+            if in_double {
+                if character == '\\' {
+                    offset += 2;
+                    continue;
+                }
+                if character == '"' {
+                    in_double = false;
+                }
+                offset += 1;
+                continue;
+            }
+            match character {
+                '\'' => {
+                    in_single = true;
+                    offset += 1;
+                }
+                '"' => {
+                    in_double = true;
+                    offset += 1;
+                }
+                '\\' => offset += 2,
+                '(' => {
+                    depth += 1;
+                    offset += 1;
+                }
+                ')' => {
+                    depth -= 1;
+                    if depth == 1 {
+                        // Closed the inner subshell. Adjacent `)` means `))` =
+                        // arithmetic; anything else after it means a subshell with
+                        // trailing content (e.g. `(cmd)2>/dev/null)`).
+                        return self.peek_offset(offset + 1) != Some(')');
+                    }
+                    if depth == 0 {
+                        return false;
+                    }
+                    offset += 1;
+                }
+                _ => {
+                    // At the top arithmetic level (depth 1, i.e. outside any inner
+                    // paren group) a `||`, `&&`, or `|` joins commands, so this is
+                    // a command context, not arithmetic.
+                    if depth == 1 {
+                        if character == '|' {
+                            return true;
+                        }
+                        if character == '&' && self.peek_offset(offset + 1) == Some('&') {
+                            return true;
+                        }
+                    }
+                    offset += 1;
+                }
+            }
+        }
+        false
+    }
+
     fn read_until_arithmetic_expansion_end(
         &mut self,
         line: usize,
         column: usize,
     ) -> ShellResult<String> {
         let mut expression = String::new();
-        let mut depth = 0usize;
+        // Mirror upstream `parseArithmeticExpansion`: track `arith_depth` for the
+        // `((`/`))` arithmetic nesting and `paren_depth` for plain `(` groups and
+        // command-substitution parens. `$(` is opaque so a `)` belonging to a
+        // nested `$(...)`/backtick payload (which may also carry `;`, `#`, quotes)
+        // never closes the surrounding `$(( ... ))`. The opening `((` has already
+        // been consumed by the caller, so we start at `arith_depth == 1`.
+        let mut arith_depth = 1usize;
+        let mut paren_depth = 0usize;
         while let Some(character) = self.peek() {
+            // A nested `$(...)` command substitution (or backtick form) is opaque:
+            // its body may legitimately contain `)`, `;`, `#`, and quotes that must
+            // not desync the arithmetic scan. Consume it as a single unit.
+            if character == '$' && self.peek_offset(1) == Some('(') {
+                if self.peek_offset(2) == Some('(') {
+                    // Nested arithmetic `$((` — adds one arithmetic nesting level.
+                    arith_depth += 1;
+                    expression.push_str("$((");
+                    self.take(3);
+                } else {
+                    expression.push_str("$(");
+                    self.take(2);
+                    self.consume_nested_command_substitution(&mut expression);
+                }
+                continue;
+            }
+            if character == '`' {
+                expression.push('`');
+                self.advance();
+                while let Some(inner) = self.peek() {
+                    expression.push(inner);
+                    self.advance();
+                    if inner == '\\' {
+                        if let Some(escaped) = self.peek() {
+                            expression.push(escaped);
+                            self.advance();
+                        }
+                    } else if inner == '`' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            // Single-quoted text inside arithmetic is literal data.
+            if character == '\'' {
+                expression.push('\'');
+                self.advance();
+                while let Some(inner) = self.peek() {
+                    expression.push(inner);
+                    self.advance();
+                    if inner == '\'' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            // A nested `((` opens another arithmetic level.
+            if character == '(' && self.peek_offset(1) == Some('(') {
+                arith_depth += 1;
+                expression.push_str("((");
+                self.take(2);
+                continue;
+            }
+            if character == ')' && self.peek_offset(1) == Some(')') {
+                if paren_depth > 0 {
+                    // The first `)` closes a pending plain/command-sub paren; the
+                    // second is handled on the next iteration.
+                    paren_depth -= 1;
+                    expression.push(')');
+                    self.advance();
+                } else {
+                    // Closing arithmetic `))`.
+                    arith_depth -= 1;
+                    self.take(2);
+                    if arith_depth == 0 {
+                        return Ok(expression.trim().to_string());
+                    }
+                    expression.push_str("))");
+                }
+                continue;
+            }
             if character == '(' {
-                depth += 1;
-                expression.push(character);
+                paren_depth += 1;
+                expression.push('(');
                 self.advance();
                 continue;
             }
             if character == ')' {
-                if depth == 0 && self.peek_offset(1) == Some(')') {
-                    self.take(2);
-                    return Ok(expression.trim().to_string());
-                }
-                depth = depth.saturating_sub(1);
-                expression.push(character);
+                paren_depth = paren_depth.saturating_sub(1);
+                expression.push(')');
                 self.advance();
                 continue;
             }
@@ -1516,6 +1682,53 @@ impl Lexer {
             line,
             column,
         ))
+    }
+
+    /// Consume a nested `$(...)` command-substitution payload, copying it verbatim
+    /// into `out`, with the opening `$(` already consumed by the caller. Respects
+    /// quotes and nested parens so the matching `)` is found correctly.
+    fn consume_nested_command_substitution(&mut self, out: &mut String) {
+        let mut depth = 1usize;
+        let mut quote: Option<char> = None;
+        while let Some(character) = self.peek() {
+            if let Some(quote_char) = quote {
+                out.push(character);
+                self.advance();
+                if character == '\\' && quote_char == '"' {
+                    if let Some(next) = self.peek() {
+                        out.push(next);
+                        self.advance();
+                    }
+                } else if character == quote_char {
+                    quote = None;
+                }
+                continue;
+            }
+            match character {
+                '\'' | '"' => {
+                    quote = Some(character);
+                    out.push(character);
+                    self.advance();
+                }
+                '(' => {
+                    depth += 1;
+                    out.push(character);
+                    self.advance();
+                }
+                ')' => {
+                    depth -= 1;
+                    out.push(character);
+                    self.advance();
+                    if depth == 0 {
+                        return;
+                    }
+                }
+                _ => {
+                    out.push(character);
+                    self.advance();
+                }
+            }
+        }
     }
 
     fn read_command_substitution_body(
@@ -16391,6 +16604,100 @@ greet World",
             "syntax-error exit: {} ({:?})",
             r.exit_code, r.stderr
         );
+    }
+
+    /// r17jb-just-bash-spec-comparison closes the six substitution-boundary
+    /// desync comparison rows in
+    /// `packages/just-bash/src/comparison-tests/substitution-desync.comparison.test.ts`
+    /// (lines 21, 30, 39, 64, 73, 82). Each upstream case probes whether a
+    /// substitution payload that *textually* contains `echo DESYNC > marker`
+    /// desyncs the parser into actually executing that write. Real bash keeps the
+    /// payload as data, so the marker file is created only in the genuine
+    /// command-substitution control case. Marker state is read directly from the
+    /// interpreter's virtual filesystem (`MARKER_ABSENT` == `None`,
+    /// `MARKER_PRESENT` == `Some`), mirroring upstream's `[ -f marker ]` probe;
+    /// arithmetic/command-substitution stdout is asserted byte-for-byte against
+    /// the upstream golden fixtures. Each assertion fails if the boundary scanner
+    /// regresses and lets the embedded `> marker` write leak out.
+    #[test]
+    fn r17jb_substitution_boundary_desync_rows_match_upstream() {
+        // L21: arithmetic-command-sub payload kept as data (dollar-paren). The
+        // `$(printf ...)` body holds a `)`, `;`, `>` and a `#`, none of which may
+        // terminate the surrounding `$(( ... ))`. Marker must stay absent.
+        // The arithmetic on the malformed payload is a runtime error in bash too;
+        // upstream wraps the probe in `( ... ) 2>/dev/null || true` so the script
+        // as a whole exits 0 and only the marker state is observed.
+        let mut sh = shell();
+        let r = sh.exec(
+            r#"( echo $(( $(printf "%s\n" ") ; echo DESYNC > marker ; #") + 1 )) >/dev/null ) 2>/dev/null || true"#,
+        );
+        assert_eq!(r.exit_code, 0, "L21 exit: {} ({:?})", r.exit_code, r.stderr);
+        assert_eq!(
+            sh.files().read_to_string("marker"),
+            None,
+            "L21 marker must stay ABSENT"
+        );
+
+        // L30: same as L21 but the inner substitution is a backtick form.
+        let mut sh = shell();
+        let r = sh.exec(
+            "( echo $(( `printf \"%s\\n\" \") ; echo DESYNC > marker ; #\"` + 1 )) >/dev/null ) 2>/dev/null || true",
+        );
+        assert_eq!(r.exit_code, 0, "L30 exit: {} ({:?})", r.exit_code, r.stderr);
+        assert_eq!(
+            sh.files().read_to_string("marker"),
+            None,
+            "L30 marker must stay ABSENT"
+        );
+
+        // L39: comment-like boundary confusion. `$(echo SAFE #)` ends at the inner
+        // `)`; the `#` only comments out the rest of that substitution line. The
+        // trailing `; echo DESYNC > marker )` sits inside the outer double quotes
+        // and is therefore literal data — printed, never executed.
+        let mut sh = shell();
+        let r = sh.exec(r#"echo "$(echo SAFE #) ; echo DESYNC > marker )""#);
+        assert_eq!(
+            r.stdout, "SAFE ; echo DESYNC > marker )\n",
+            "L39 stdout: {:?}",
+            r.stdout
+        );
+        assert_eq!(
+            sh.files().read_to_string("marker"),
+            None,
+            "L39 marker must stay ABSENT"
+        );
+
+        // L64: `$(( (cmd) || (cmd2) ))` is an arithmetic context — the inner
+        // parens are grouping, not subshells, so no command (and no marker write)
+        // executes. Marker stays absent.
+        let mut sh = shell();
+        let r = sh.exec(
+            "( echo $(( (echo LEFT; echo DESYNC > marker) || (echo RIGHT) )) >/dev/null ) 2>/dev/null || true",
+        );
+        assert_eq!(r.exit_code, 0, "L64 exit: {} ({:?})", r.exit_code, r.stderr);
+        assert_eq!(
+            sh.files().read_to_string("marker"),
+            None,
+            "L64 arithmetic context must NOT execute the marker write"
+        );
+
+        // L73: `$( (cmd) || (cmd2) )` is the command-substitution control case —
+        // the left subshell runs first, succeeds, and writes the marker. Marker
+        // becomes present.
+        let mut sh = shell();
+        sh.exec("echo $( (echo LEFT; echo DESYNC > marker) || (echo RIGHT) ) >/dev/null");
+        assert_eq!(
+            sh.files().read_to_string("marker"),
+            Some("DESYNC\n"),
+            "L73 command substitution MUST run the left subshell and write the marker"
+        );
+
+        // L82: `$((cmd)redirection)` is reparsed as command substitution wrapping a
+        // subshell — `$( (echo AA; false || echo BB)2>/dev/null )` — yielding the
+        // word-split `AA BB`, matching the upstream golden fixture.
+        let r = shell().exec("echo $((echo AA; false || echo BB)2>/dev/null)");
+        assert_eq!(r.stdout, "AA BB\n", "L82 stdout: {:?}", r.stdout);
+        assert_eq!(r.exit_code, 0, "L82 exit: {}", r.exit_code);
     }
 
     /// r20-just-bash-spec-comparison closes the export comparison row
