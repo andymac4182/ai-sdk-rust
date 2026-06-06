@@ -19,11 +19,11 @@ Rows are intentionally fail-closed: no row is verified until a sibling implement
 | Non-test TS/TSX source files | 423 |
 | Test files | 485 |
 | Test cases | 9936 |
-| Portable pending cases | 10 |
-| Portable verified cases | 8727 |
+| Portable pending cases | 8 |
+| Portable verified cases | 8729 |
 | JS-only documented cases | 1199 |
 | Type-system impossible cases | 0 |
-| Strict gate gaps | 10 |
+| Strict gate gaps | 8 |
 | Inventory check command | node scripts/just-bash-test-inventory.mjs --check |
 | Strict gate command | node scripts/just-bash-test-inventory.mjs --strict |
 | Conformance plan | docs/open-agents/just-bash-conformance.md |
@@ -292,7 +292,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | command:worker-bridge | 4 | 0 | 0 | 4 | 0 |
 | packages/just-bash | command:xan | 201 | 0 | 200 | 1 | 0 |
 | packages/just-bash | command:xargs | 35 | 0 | 35 | 0 | 0 |
-| packages/just-bash | command:yq | 215 | 2 | 211 | 2 | 0 |
+| packages/just-bash | command:yq | 215 | 0 | 213 | 2 | 0 |
 | packages/just-bash | comparison-tests | 530 | 0 | 530 | 0 | 0 |
 | packages/just-bash | core | 213 | 0 | 191 | 22 | 0 |
 | packages/just-bash | fs:core | 263 | 1 | 248 | 14 | 0 |
@@ -336,7 +336,6 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | pending:just-bash-command-base64 | portable-pending | 1 |
 | pending:just-bash-command-sed | portable-pending | 2 |
 | pending:just-bash-command-timeout | portable-pending | 1 |
-| pending:just-bash-command-yq | portable-pending | 2 |
 | pending:just-bash-core | portable-pending | 2 |
 | pending:just-bash-fs | portable-pending | 1 |
 | pending:just-bash-parser-interpreter | portable-pending | 1 |
@@ -649,11 +648,11 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | command:xargs | packages/just-bash/src/commands/xargs/xargs.test.ts | 33 | 0 | 33 | 0 | 0 | crates/just-bash::runtime::small-posix-table |
 | packages/just-bash | command:xargs | packages/just-bash/src/commands/xargs/xargs.utf8-stdin.test.ts | 1 | 0 | 1 | 0 | 0 | crates/just-bash::runtime::small-posix-table |
 | packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.env.test.ts | 8 | 0 | 8 | 0 | 0 | crates/just-bash::runtime::structured-data |
-| packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.fixtures.test.ts | 68 | 1 | 67 | 0 | 0 | crates/just-bash::conformance_corpus; crates/just-bash::runtime::structured-data; pending:just-bash-command-yq |
+| packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.fixtures.test.ts | 68 | 0 | 68 | 0 | 0 | crates/just-bash::conformance_corpus; crates/just-bash::runtime::structured-data |
 | packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.format-strings.test.ts | 25 | 0 | 25 | 0 | 0 | crates/just-bash::runtime::structured-data |
 | packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.navigation.test.ts | 14 | 0 | 14 | 0 | 0 | crates/just-bash::conformance_corpus; crates/just-bash::runtime::structured-data |
 | packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.prototype-pollution.test.ts | 12 | 0 | 10 | 2 | 0 | crates/just-bash::runtime::structured-data; docs/just-bash::yq-host-prototype-isolation |
-| packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.test.ts | 75 | 1 | 74 | 0 | 0 | crates/just-bash::conformance_corpus; crates/just-bash::runtime::structured-data; pending:just-bash-command-yq |
+| packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.test.ts | 75 | 0 | 75 | 0 | 0 | crates/just-bash::conformance_corpus; crates/just-bash::runtime::structured-data |
 | packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.utf8-stdin.test.ts | 1 | 0 | 1 | 0 | 0 | crates/just-bash::runtime::structured-data |
 | packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.yaml-security.test.ts | 12 | 0 | 12 | 0 | 0 | crates/just-bash::runtime::structured-data |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/alias.comparison.test.ts | 3 | 0 | 3 | 0 | 0 | crates/just-bash::conformance_corpus |
@@ -6559,7 +6558,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.fixtures.test.ts | 436 | TOML fixtures | should convert YAML to JSON | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::yq_command_conv_y2j | JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code. |
 | packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.fixtures.test.ts | 445 | TOML fixtures | should convert JSON to YAML | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::yq_command_conv_j2y | JBC yq command parity: Rust corpus runner exact match for yq filter stdout, stderr, and exit code. |
 | packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.fixtures.test.ts | 454 | TOML fixtures | should convert CSV to JSON | it | portable-verified | crates/just-bash::runtime::structured-data | structured_data_yq_xml_io_and_format_conversion_rows | JBC-yq verifies portable yq XML input/output (element/attribute projection, custom attribute prefix, XML emit), JSON-to-CSV emission with preserved key order, and YAML/CSV/INI/TOML format conversion plus add/length/group_by/map object-construction queries over the fixtures. |
-| packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.fixtures.test.ts | 465 | TOML fixtures | should convert JSON to CSV | it | portable-pending | pending:just-bash-command-yq | pending:just-bash-command-yq | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
+| packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.fixtures.test.ts | 465 | TOML fixtures | should convert JSON to CSV | it | portable-verified | crates/just-bash::runtime::structured-data | structured_data_yq_xml_io_and_format_conversion_rows | JBC-yq verifies portable yq XML input/output (element/attribute projection, custom attribute prefix, XML emit), JSON-to-CSV emission with preserved key order (including projecting .users from a JSON fixture to a name,age,email,active CSV), and YAML/CSV/INI/TOML format conversion plus add/length/group_by/map object-construction queries over the fixtures. |
 | packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.fixtures.test.ts | 475 | TOML fixtures | should convert YAML to INI | it | portable-verified | crates/just-bash::runtime::structured-data | structured_data_yq_xml_io_and_format_conversion_rows | JBC-yq verifies portable yq XML input/output (element/attribute projection, custom attribute prefix, XML emit), JSON-to-CSV emission with preserved key order, and YAML/CSV/INI/TOML format conversion plus add/length/group_by/map object-construction queries over the fixtures. |
 | packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.fixtures.test.ts | 485 | TOML fixtures | should convert INI to JSON | it | portable-verified | crates/just-bash::runtime::structured-data | structured_data_yq_xml_io_and_format_conversion_rows | JBC-yq verifies portable yq XML input/output (element/attribute projection, custom attribute prefix, XML emit), JSON-to-CSV emission with preserved key order, and YAML/CSV/INI/TOML format conversion plus add/length/group_by/map object-construction queries over the fixtures. |
 | packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.fixtures.test.ts | 497 | TOML fixtures | should convert XML to JSON | it | portable-verified | crates/just-bash::runtime::structured-data | structured_data_yq_format_conversion_frontmatter_and_autodetect_rows | JBC-yq verifies the portable yq XML input parser over fixture documents: element/array projection, attribute extraction with the +@ prefix, attribute-based select filtering, and XML-to-JSON scalar conversion. |
@@ -6678,7 +6677,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.test.ts | 438 | INI format | should read CSV with headers | it | portable-verified | crates/just-bash::runtime::structured-data | structured_data_yq_format_conversion_frontmatter_and_autodetect_rows | JBC-yq verifies portable yq format validation, INI/CSV/TOML/TSV input and INI/CSV/TOML output conversion, --no-csv-header and --csv-delimiter handling, in-place error reporting, YAML/TOML front-matter extraction, and extension-based format auto-detection. |
 | packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.test.ts | 449 | INI format | should read CSV and get all names | it | portable-verified | crates/just-bash::runtime::structured-data | structured_data_yq_format_conversion_frontmatter_and_autodetect_rows | JBC-yq verifies portable yq format validation, INI/CSV/TOML/TSV input and INI/CSV/TOML output conversion, --no-csv-header and --csv-delimiter handling, in-place error reporting, YAML/TOML front-matter extraction, and extension-based format auto-detection. |
 | packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.test.ts | 460 | INI format | should filter CSV rows | it | portable-verified | crates/just-bash::runtime::structured-data | structured_data_yq_format_conversion_frontmatter_and_autodetect_rows | JBC-yq verifies portable yq format validation, INI/CSV/TOML/TSV input and INI/CSV/TOML output conversion, --no-csv-header and --csv-delimiter handling, in-place error reporting, YAML/TOML front-matter extraction, and extension-based format auto-detection. |
-| packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.test.ts | 474 | INI format | should output as CSV | it | portable-pending | pending:just-bash-command-yq | pending:just-bash-command-yq | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
+| packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.test.ts | 474 | INI format | should output as CSV | it | portable-verified | crates/just-bash::runtime::structured-data | structured_data_yq_format_conversion_frontmatter_and_autodetect_rows | JBC-yq verifies portable yq -o csv output from a YAML array of objects: the header row is the union of object keys in insertion order and each record emits its values, matching papaparse unparse. |
 | packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.test.ts | 492 | INI format | should convert JSON to CSV | it | portable-verified | crates/just-bash::runtime::structured-data | structured_data_yq_xml_io_and_format_conversion_rows | JBC-yq verifies portable yq XML input/output (element/attribute projection, custom attribute prefix, XML emit), JSON-to-CSV emission with preserved key order, and YAML/CSV/INI/TOML format conversion plus add/length/group_by/map object-construction queries over the fixtures. |
 | packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.test.ts | 506 | INI format | should handle custom delimiter | it | portable-verified | crates/just-bash::runtime::structured-data | structured_data_yq_format_conversion_frontmatter_and_autodetect_rows | JBC-yq verifies portable yq format validation, INI/CSV/TOML/TSV input and INI/CSV/TOML output conversion, --no-csv-header and --csv-delimiter handling, in-place error reporting, YAML/TOML front-matter extraction, and extension-based format auto-detection. |
 | packages/just-bash | command:yq | packages/just-bash/src/commands/yq/yq.test.ts | 521 | CSV format | should not print newlines with -j | it | portable-verified | crates/just-bash::runtime::structured-data | structured_data_yq_deep_query_env_and_security_rows | JBC-24 verifies additional portable yq join output, custom JSON indentation, combined short options, and jq-compatible unique/sort_by/reverse/group_by rows. |
