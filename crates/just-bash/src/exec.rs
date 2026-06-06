@@ -2470,30 +2470,50 @@ fn command_cat(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
         Ok(fs) => fs,
         Err(_) => return stderr_result(1, "cat: filesystem lock poisoned\n"),
     };
+    // `cat` is byte-clean for FILE inputs: each file is read as a raw byte
+    // buffer. Valid UTF-8 is decoded to a proper Unicode string so downstream
+    // text commands operate on characters; non-UTF-8 bytes fall back to the
+    // latin1 (char-per-byte) carrier. The concatenated raw file bytes are
+    // exposed via `stdout_bytes` so a `> file` / `>> file` redirection writes
+    // them verbatim instead of UTF-8 re-encoding the carrier (preserving high
+    // bytes). The `-` (stdin) input keeps the upstream text path: its UTF-8
+    // bytes are what a redirection would already have written. The `-n`
+    // numbering path stays text-oriented.
     let mut stdout = String::new();
+    let mut stdout_bytes: Vec<u8> = Vec::new();
     let mut stderr = String::new();
     let mut exit_code = 0;
     let mut next_line_number = 1;
     for path in paths {
-        let content = if path == "-" {
-            Ok(stdin.to_string())
-        } else {
-            let path = resolve_path(&state.cwd, path);
-            fs.read_file(&path)
-                .map_err(|_| format!("cat: {path}: No such file or directory\n"))
-        };
-        match content {
-            Ok(content) => {
+        if path == "-" {
+            let content = stdin.to_string();
+            if number_lines {
+                let (numbered, next) = number_text(&content, next_line_number);
+                stdout_bytes.extend_from_slice(numbered.as_bytes());
+                stdout.push_str(&numbered);
+                next_line_number = next;
+            } else {
+                stdout_bytes.extend_from_slice(content.as_bytes());
+                stdout.push_str(&content);
+            }
+            continue;
+        }
+        let resolved = resolve_path(&state.cwd, path);
+        match fs.read_file_buffer(&resolved) {
+            Ok(bytes) => {
+                let content = ByteString::from_bytes(bytes.clone()).decode_utf8_or_latin1();
                 if number_lines {
                     let (numbered, next) = number_text(&content, next_line_number);
+                    stdout_bytes.extend_from_slice(numbered.as_bytes());
                     stdout.push_str(&numbered);
                     next_line_number = next;
                 } else {
+                    stdout_bytes.extend_from_slice(&bytes);
                     stdout.push_str(&content);
                 }
             }
-            Err(error) => {
-                stderr.push_str(&error);
+            Err(_) => {
+                stderr.push_str(&format!("cat: {resolved}: No such file or directory\n"));
                 exit_code = 1;
             }
         }
@@ -2502,6 +2522,7 @@ fn command_cat(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
         stdout,
         stderr,
         exit_code,
+        stdout_bytes: Some(stdout_bytes),
         ..CommandResult::default()
     }
 }
