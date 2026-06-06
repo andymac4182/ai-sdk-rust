@@ -19,11 +19,11 @@ Rows are intentionally fail-closed: no row is verified until a sibling implement
 | Non-test TS/TSX source files | 423 |
 | Test files | 485 |
 | Test cases | 9936 |
-| Portable pending cases | 15 |
-| Portable verified cases | 8722 |
+| Portable pending cases | 14 |
+| Portable verified cases | 8723 |
 | JS-only documented cases | 1199 |
 | Type-system impossible cases | 0 |
-| Strict gate gaps | 15 |
+| Strict gate gaps | 14 |
 | Inventory check command | node scripts/just-bash-test-inventory.mjs --check |
 | Strict gate command | node scripts/just-bash-test-inventory.mjs --strict |
 | Conformance plan | docs/open-agents/just-bash-conformance.md |
@@ -327,7 +327,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | spec:jq | 3 | 0 | 0 | 3 | 0 |
 | packages/just-bash | spec:sed | 3 | 0 | 0 | 3 | 0 |
 | packages/just-bash | syntax | 485 | 0 | 484 | 1 | 0 |
-| packages/just-bash | transform | 369 | 4 | 365 | 0 | 0 |
+| packages/just-bash | transform | 369 | 3 | 366 | 0 | 0 |
 
 ## Strict Gap Summary
 
@@ -338,7 +338,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | pending:just-bash-command-sed | portable-pending | 2 |
 | pending:just-bash-command-timeout | portable-pending | 1 |
 | pending:just-bash-command-yq | portable-pending | 2 |
-| pending:just-bash-core | portable-pending | 6 |
+| pending:just-bash-core | portable-pending | 5 |
 | pending:just-bash-fs | portable-pending | 1 |
 | pending:just-bash-parser-interpreter | portable-pending | 1 |
 
@@ -829,7 +829,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | syntax | packages/just-bash/src/syntax/variables.test.ts | 43 | 0 | 43 | 0 | 0 | crates/just-bash::parser-interpreter |
 | packages/just-bash | transform | packages/just-bash/src/transform/plugins/command-collector.test.ts | 8 | 0 | 8 | 0 | 0 | crates/just-bash::transform::command-collector |
 | packages/just-bash | transform | packages/just-bash/src/transform/plugins/tee-plugin.test.ts | 98 | 3 | 95 | 0 | 0 | crates/just-bash::runtime; crates/just-bash::shell; crates/just-bash::transform::tee; pending:just-bash-core |
-| packages/just-bash | transform | packages/just-bash/src/transform/serialize.test.ts | 236 | 1 | 235 | 0 | 0 | crates/just-bash::shell; crates/just-bash::transform::serialize; pending:just-bash-core |
+| packages/just-bash | transform | packages/just-bash/src/transform/serialize.test.ts | 236 | 0 | 236 | 0 | 0 | crates/just-bash::shell; crates/just-bash::transform::serialize |
 | packages/just-bash | transform | packages/just-bash/src/transform/transform.test.ts | 27 | 0 | 27 | 0 | 0 | crates/just-bash::transform::command-collector; crates/just-bash::transform::pipeline; crates/just-bash::transform::tee |
 
 ## Source File Inventory
@@ -10966,7 +10966,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | transform | packages/just-bash/src/transform/serialize.test.ts | 74 | lists and operators | here-string | it | portable-verified | crates/just-bash::transform::serialize | jbc12_transform_serialize_round_trips_core_ast_rows | JBC-12 verifies Rust AST parse/serialize/parse equivalence for the mapped simple-command, pipeline, list, redirection, word-part, parameter, and compound-command rows. |
 | packages/just-bash | transform | packages/just-bash/src/transform/serialize.test.ts | 75 | lists and operators | noclobber redirect | it | portable-verified | crates/just-bash::transform::serialize | jbc12_transform_serialize_round_trips_core_ast_rows | JBC-12 verifies Rust AST parse/serialize/parse equivalence for the mapped simple-command, pipeline, list, redirection, word-part, parameter, and compound-command rows. |
 | packages/just-bash | transform | packages/just-bash/src/transform/serialize.test.ts | 76 | lists and operators | read-write redirect | it | portable-verified | crates/just-bash::transform::serialize | jbc12_transform_serialize_round_trips_core_ast_rows | JBC-12 verifies Rust AST parse/serialize/parse equivalence for the mapped simple-command, pipeline, list, redirection, word-part, parameter, and compound-command rows. |
-| packages/just-bash | transform | packages/just-bash/src/transform/serialize.test.ts | 77 | lists and operators | fd variable | it | portable-pending | pending:just-bash-core | pending:just-bash-core | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
+| packages/just-bash | transform | packages/just-bash/src/transform/serialize.test.ts | 77 | lists and operators | fd variable | it | portable-verified | crates/just-bash::transform::serialize | just_bash_core_serialize_round_trips_param_op_and_compound_rows | just-bash-core implements bash auto-fd `{var}>file` redirection across the lexer (new `FdVariable` token scanned only when `{name}` is immediately followed by a redirection operator), parser (binds the name into the new `Redirection.fd_variable` field), and serializer (re-emits the `{name}` prefix), then asserts `exec {fd}> file.txt` parse/serialize/parse equivalence. The assertion fails if the fd-variable lexing, parsing, or serialization regresses. |
 | packages/just-bash | transform | packages/just-bash/src/transform/serialize.test.ts | 81 | redirections | single quoted | it | portable-verified | crates/just-bash::transform::serialize | jbc12_transform_serialize_round_trips_core_ast_rows | JBC-12 verifies Rust AST parse/serialize/parse equivalence for the mapped simple-command, pipeline, list, redirection, word-part, parameter, and compound-command rows. |
 | packages/just-bash | transform | packages/just-bash/src/transform/serialize.test.ts | 82 | redirections | double quoted | it | portable-verified | crates/just-bash::transform::serialize | jbc12_transform_serialize_round_trips_core_ast_rows | JBC-12 verifies Rust AST parse/serialize/parse equivalence for the mapped simple-command, pipeline, list, redirection, word-part, parameter, and compound-command rows. |
 | packages/just-bash | transform | packages/just-bash/src/transform/serialize.test.ts | 83 | redirections | escaped char | it | portable-verified | crates/just-bash::transform::serialize | jbc12_transform_serialize_round_trips_core_ast_rows | JBC-12 verifies Rust AST parse/serialize/parse equivalence for the mapped simple-command, pipeline, list, redirection, word-part, parameter, and compound-command rows. |

@@ -103,6 +103,10 @@ pub struct Redirection {
     pub operator: RedirectionOperator,
     pub target: Word,
     pub here_doc: Option<HereDoc>,
+    /// Name of the shell variable that receives the dynamically allocated file
+    /// descriptor for `{var}>file` style redirections (bash auto-fd syntax).
+    /// `None` for ordinary redirections; mutually exclusive with `fd`.
+    pub fd_variable: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -405,6 +409,10 @@ enum TokenKind {
     LeftBrace,
     RightBrace,
     Redirection(RedirectionOperator),
+    /// `{name}` fd-variable prefix immediately preceding a redirection operator
+    /// (bash auto-fd allocation, e.g. `exec {fd}> file`). Carries the variable
+    /// name; the following `Redirection` token supplies the operator/target.
+    FdVariable(String),
     ArithmeticCommand(ArithmeticExpression),
     ConditionalCommand(String),
     Eof,
@@ -835,6 +843,16 @@ impl Lexer {
                 continue;
             }
 
+            if let Some(name) = self.scan_fd_variable() {
+                tokens.push(Token {
+                    kind: TokenKind::FdVariable(name),
+                    line,
+                    column,
+                    preceded_by_space: token_preceded_by_space,
+                });
+                continue;
+            }
+
             if let Some(kind) = self.read_operator() {
                 if let TokenKind::Redirection(operator) = &kind
                     && matches!(
@@ -1016,6 +1034,44 @@ impl Lexer {
             line,
             column,
         ))
+    }
+
+    /// Scans a bash auto-fd prefix `{name}` that is immediately followed (no
+    /// intervening space) by a redirection operator (`<`/`>`), as in
+    /// `exec {fd}> file`. Returns the variable name and consumes `{name}` only
+    /// when the full pattern matches; otherwise leaves the cursor untouched so
+    /// `{` keeps its normal group-command / brace-expansion meaning.
+    fn scan_fd_variable(&mut self) -> Option<String> {
+        if self.peek() != Some('{') {
+            return None;
+        }
+        // The variable name must be a non-empty identifier ([A-Za-z_][A-Za-z0-9_]*).
+        let mut offset = 1usize;
+        match self.peek_offset(offset) {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+            _ => return None,
+        }
+        offset += 1;
+        while let Some(c) = self.peek_offset(offset) {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                offset += 1;
+            } else {
+                break;
+            }
+        }
+        // Require the closing brace immediately followed by a redirection char.
+        if self.peek_offset(offset) != Some('}') {
+            return None;
+        }
+        match self.peek_offset(offset + 1) {
+            Some('<') | Some('>') => {}
+            _ => return None,
+        }
+        let name: String = (1..offset).filter_map(|i| self.peek_offset(i)).collect();
+        // Consume `{name}` (offset+1 characters); the redirection operator that
+        // follows is tokenized separately on the next loop iteration.
+        self.take(offset + 1);
+        Some(name)
     }
 
     fn read_operator(&mut self) -> Option<TokenKind> {
@@ -2674,7 +2730,13 @@ fn serialize_redirections(redirections: &[Redirection]) -> String {
 }
 
 fn serialize_redirection(redirection: &Redirection, here_docs: &mut Vec<String>) -> String {
-    let mut output = redirection.fd.map(|fd| fd.to_string()).unwrap_or_default();
+    // An fd-variable prefix `{name}` takes the slot the numeric fd would occupy
+    // (bash auto-fd `{var}>file`); the two are mutually exclusive.
+    let mut output = if let Some(name) = &redirection.fd_variable {
+        format!("{{{name}}}")
+    } else {
+        redirection.fd.map(|fd| fd.to_string()).unwrap_or_default()
+    };
     output.push_str(match redirection.operator {
         RedirectionOperator::Input => "<",
         RedirectionOperator::Output => ">",
@@ -3297,6 +3359,21 @@ impl Parser {
                 break;
             }
 
+            // An fd-variable prefix `{name}` binds the dynamically allocated
+            // descriptor to `name` (bash auto-fd, e.g. `exec {fd}> file`). The
+            // lexer only emits this token when a redirection operator follows.
+            if let TokenKind::FdVariable(name) = self.current().kind.clone() {
+                self.advance();
+                let operator = match self.advance().kind {
+                    TokenKind::Redirection(operator) => operator,
+                    _ => return Err(self.error_previous("expected redirection after fd variable")),
+                };
+                let mut redirection = self.parse_redirection(None, operator)?;
+                redirection.fd_variable = Some(name);
+                command.redirections.push(redirection);
+                continue;
+            }
+
             // A leading digit word binds as the redirection file descriptor only
             // when the redirection operator is adjacent to it (`1>file`). When a
             // space separates them (`echo 1 > file`), the digit is an ordinary
@@ -3405,12 +3482,14 @@ impl Parser {
                 operator,
                 target,
                 here_doc: None,
+                fd_variable: None,
             }),
             TokenKind::HereDocTarget { target, here_doc } => Ok(Redirection {
                 fd,
                 operator,
                 target,
                 here_doc: Some(here_doc),
+                fd_variable: None,
             }),
             _ => Err(self.error_previous("expected redirection target")),
         }
@@ -12456,6 +12535,8 @@ esac"#,
             // compound: subshell/group with redirections (serialize.test.ts:176,177)
             "(echo sub) > out.txt",
             "{ echo group; } > out.txt",
+            // redirections: fd variable allocation (serialize.test.ts:77)
+            "exec {fd}> file.txt",
         ] {
             assert_round_trip(source);
         }
