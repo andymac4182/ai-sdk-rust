@@ -3096,6 +3096,24 @@ const jbc20CaseGroups = [
     notes:
       'JBC-20 verifies portable pipeline stderr propagation from first/middle/last commands, stdout/stderr separation, multiple error collection, and last-command exit status.',
   },
+  {
+    file: 'packages/just-bash/src/commands/timeout/timeout.nested-cancellation.test.ts',
+    lines: [8, 64],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::timeout',
+    rustTest: 'jbc_timeout_nested_cancellation_prevents_late_side_effects',
+    notes:
+      'R17JB verifies that an enclosing `timeout 0.01` cancels a nested subcommand driven by xargs (line 8) and by the /usr/bin/time wrapper (line 64): the cooperative deadline returns exit 124 while the inner `bash -c sleep` is still running, so the subcommand’s post-sleep marker write never reaches the virtual filesystem now or after a further wait. The find -exec case at line 35 stays portable-pending: it depends on backslash-escaped `\\;` terminator handling in command splitting, deferred to a focused find/escaping unit.',
+  },
+  {
+    file: 'packages/just-bash/src/commands/time/time.utf8-stdin.test.ts',
+    lines: [5],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::exec::time',
+    rustTest: 'jbc_time_command_times_wrapper_and_forwards_stdin',
+    notes:
+      'R17JB implements the portable `time` command wrapper (mirroring upstream commands/time/time.ts): it times the wrapped command, forwards UTF-8 stdin byte-for-byte to it, writes the GNU-style timing line to `-o FILE` or stderr (with `-p` POSIX and `-v`/`-f` formats), and forwards the wrapped command’s stdout and exit code verbatim.',
+  },
 ];
 
 const jbc22CaseGroups = [

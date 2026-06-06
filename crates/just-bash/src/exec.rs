@@ -1824,6 +1824,7 @@ fn execute_tokens(state: &mut ExecState<'_>, tokens: &[String], stdin: String) -
         "history" => command_history(state, &tokens[1..]),
         "sleep" => command_sleep(state, &tokens[1..]),
         "timeout" => command_timeout(state, &tokens[1..], stdin),
+        "time" => command_time(state, &tokens[1..], stdin),
         "bash" | "sh" => command_bash(command, state, &tokens[1..], stdin),
         _ => stderr_result(127, format!("bash: {}: command not found\n", tokens[0])),
     }
@@ -31925,6 +31926,126 @@ fn command_timeout(state: &mut ExecState<'_>, args: &[String], stdin: String) ->
     result
 }
 
+/// `time [OPTIONS] COMMAND [ARGS...]` — times the wrapped command's execution
+/// and emits GNU-`time`-style statistics. Mirrors upstream `time.ts`: options
+/// are parsed permissively (unknown `-x` flags are skipped), the wrapped command
+/// runs under the current cooperative deadline, and the timing line is written to
+/// `-o FILE` (truncating, or appending with `-a`) or appended to stderr. Since
+/// this in-process interpreter has no real CPU/memory accounting, `%M`/`%S`/`%U`
+/// render as zero, matching upstream's documented JS limitation. The wrapped
+/// command's stdin, stdout, and exit code are forwarded verbatim, so a timed
+/// command cancelled by an enclosing `timeout` still returns 124 and never
+/// performs its post-cancellation side effects.
+fn command_time(state: &mut ExecState<'_>, args: &[String], stdin: String) -> CommandResult {
+    let mut format = "%e %M".to_string();
+    let mut output_file = None::<String>;
+    let mut append_mode = false;
+    let mut posix_format = false;
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-f" | "--format" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "time: missing argument to '-f'\n");
+                };
+                format = value.clone();
+                index += 2;
+            }
+            "-o" | "--output" => {
+                let Some(value) = args.get(index + 1) else {
+                    return stderr_result(1, "time: missing argument to '-o'\n");
+                };
+                output_file = Some(value.clone());
+                index += 2;
+            }
+            "-a" | "--append" => {
+                append_mode = true;
+                index += 1;
+            }
+            "-v" | "--verbose" => {
+                format = "Command being timed: %C\nElapsed (wall clock) time: %e seconds\nMaximum resident set size (kbytes): %M".to_string();
+                index += 1;
+            }
+            "-p" | "--portability" => {
+                posix_format = true;
+                index += 1;
+            }
+            "--" => {
+                index += 1;
+                break;
+            }
+            _ if arg.starts_with('-') => index += 1,
+            _ => break,
+        }
+    }
+
+    let command = &args[index..];
+    if command.is_empty() {
+        // No command: GNU `time` succeeds silently.
+        return CommandResult::default();
+    }
+
+    let display_command = command.join(" ");
+    let start = Instant::now();
+    let mut result = execute_tokens(state, command, stdin);
+    let elapsed_seconds = start.elapsed().as_secs_f64();
+
+    let timing_output = if posix_format {
+        format!("real {0:.2}\nuser 0.00\nsys 0.00\n", elapsed_seconds)
+    } else {
+        let mut formatted = format
+            .replace("%e", &format!("{:.2}", elapsed_seconds))
+            .replace("%E", &format_time_elapsed(elapsed_seconds))
+            .replace("%M", "0")
+            .replace("%S", "0.00")
+            .replace("%U", "0.00")
+            .replace("%P", "0%")
+            .replace("%C", &display_command);
+        if !formatted.ends_with('\n') {
+            formatted.push('\n');
+        }
+        formatted
+    };
+
+    if let Some(output_file) = output_file {
+        let write = state
+            .session
+            .inner
+            .fs
+            .lock()
+            .map_err(|_| lock_poisoned_error())
+            .and_then(|mut fs| {
+                fs.write_redirection(
+                    &state.cwd,
+                    &output_file,
+                    OutputPayload::Text(timing_output),
+                    append_mode,
+                )
+            });
+        if let Err(error) = write {
+            result
+                .stderr
+                .push_str(&format!("time: cannot write to '{output_file}': {error}\n"));
+        }
+    } else {
+        result.stderr.push_str(&timing_output);
+    }
+
+    result
+}
+
+/// Formats elapsed seconds as `[h:]mm:ss.ss`, mirroring upstream `%E`.
+fn format_time_elapsed(seconds: f64) -> String {
+    let hours = (seconds / 3600.0).floor() as u64;
+    let minutes = ((seconds % 3600.0) / 60.0).floor() as u64;
+    let secs = seconds % 60.0;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{secs:05.2}")
+    } else {
+        format!("{minutes}:{secs:05.2}")
+    }
+}
+
 fn parse_duration_ms(raw: &str) -> Result<u64, ()> {
     let (number, multiplier) = match raw.chars().last() {
         Some('s') => (&raw[..raw.len() - 1], 1_000.0),
@@ -35876,6 +35997,108 @@ mod tests {
         assert_eq!(quoted_run.stdout, "TIMEOUT_OK\n");
         assert_eq!(quoted_run.stderr, "");
         assert_eq!(quoted_run.exit_code, 0);
+    }
+
+    #[test]
+    fn jbc_timeout_nested_cancellation_prevents_late_side_effects() {
+        // timeout.nested-cancellation.test.ts mirrors nested-process cancellation
+        // scenarios. In each, `timeout 0.01` wraps an outer tool (xargs /
+        // /usr/bin/time) that drives an inner `bash -c 'sleep 0.05; echo ... >
+        // MARKER'`. The cooperative deadline must fire (exit 124) while the inner
+        // `sleep` is still running, so the marker file is never written — neither
+        // while the wrapped command was running nor after a further wait. Upstream
+        // proves this by checking the marker is absent (`NOW_ABSENT`/`LATE_ABSENT`)
+        // after the timeout returns 124; here we assert the same observable
+        // behavior directly against the virtual filesystem, which is a strictly
+        // stronger check than the `[ -f ]` probe.
+        //
+        // timeout.nested-cancellation.test.ts:8 — cancels xargs subcommands and
+        // prevents late side effects.
+        let xargs = JustBashSession::new();
+        let xargs_result = xargs.exec(
+            "printf \"item\\n\" | timeout 0.01 xargs -I {} bash -c 'sleep 0.05; echo XARGS_LATE > /tmp/timeout-nested-xargs-marker'",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(xargs_result.exit_code, JUST_BASH_TIMEOUT_EXIT_CODE);
+        assert_eq!(xargs_result.stdout, "");
+        assert!(
+            !xargs.file_exists("/tmp/timeout-nested-xargs-marker"),
+            "xargs subcommand side effect leaked past the timeout deadline",
+        );
+        // The marker must stay absent even after waiting well past the inner
+        // sleep's nominal duration: the cancelled subcommand never resumes.
+        assert_eq!(
+            xargs
+                .exec("sleep 0.15", JustBashExecOptions::new())
+                .exit_code,
+            0
+        );
+        assert!(!xargs.file_exists("/tmp/timeout-nested-xargs-marker"));
+
+        // timeout.nested-cancellation.test.ts:64 — cancels /usr/bin/time wrapped
+        // command and prevents late side effects. The absolute `/usr/bin/time`
+        // path resolves to the portable `time` wrapper, which forwards the inner
+        // `bash -c` under the same cooperative deadline.
+        let time = JustBashSession::new();
+        let time_result = time.exec(
+            "timeout 0.01 /usr/bin/time -o /tmp/timeout-nested-time.out bash -c 'sleep 0.05; echo TIME_LATE > /tmp/timeout-nested-time-marker'",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(time_result.exit_code, JUST_BASH_TIMEOUT_EXIT_CODE);
+        assert_eq!(time_result.stdout, "");
+        assert!(
+            !time.file_exists("/tmp/timeout-nested-time-marker"),
+            "/usr/bin/time wrapped subcommand side effect leaked past the timeout deadline",
+        );
+        assert_eq!(
+            time.exec("sleep 0.15", JustBashExecOptions::new())
+                .exit_code,
+            0
+        );
+        assert!(!time.file_exists("/tmp/timeout-nested-time-marker"));
+    }
+
+    #[test]
+    fn jbc_time_command_times_wrapper_and_forwards_stdin() {
+        // time.utf8-stdin.test.ts:5 — `cat /in.txt | time cat` forwards the
+        // UTF-8 stdin byte-for-byte to the wrapped `cat`; the timing statistics go
+        // to stderr (or `-o FILE`), never polluting the wrapped command's stdout.
+        let utf8 = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/in.txt", "한글 / café\n"),
+        );
+        let passthrough = utf8.exec("cat /in.txt | time cat", JustBashExecOptions::new());
+        assert_eq!(passthrough.exit_code, 0);
+        assert_eq!(passthrough.stdout, "한글 / café\n");
+        // Default `%e %M` timing render reaches stderr (elapsed seconds + zero RSS).
+        assert!(
+            passthrough.stderr.ends_with(" 0\n"),
+            "stderr={:?}",
+            passthrough.stderr
+        );
+
+        // `-o FILE` redirects the timing line to a virtual file instead of stderr,
+        // leaving the wrapped command's own stderr untouched.
+        let to_file = JustBashSession::new();
+        let result = to_file.exec(
+            "time -o /tmp/time.out echo hello",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "hello\n");
+        assert_eq!(result.stderr, "");
+        assert!(to_file.file_exists("/tmp/time.out"));
+
+        // `-p` portability format emits the POSIX `real/user/sys` block on stderr.
+        let posix = JustBashSession::new();
+        let posix_result = posix.exec("time -p echo hi", JustBashExecOptions::new());
+        assert_eq!(posix_result.stdout, "hi\n");
+        assert!(posix_result.stderr.starts_with("real "));
+        assert!(posix_result.stderr.contains("\nuser 0.00\nsys 0.00\n"));
+
+        // The wrapped command's non-zero exit code is forwarded verbatim.
+        let failing = JustBashSession::new();
+        let failing_result = failing.exec("time false", JustBashExecOptions::new());
+        assert_eq!(failing_result.exit_code, 1);
     }
 
     #[test]
