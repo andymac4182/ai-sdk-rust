@@ -292,6 +292,14 @@ fn run_case(case: &CorpusCase) -> Result<CaseOutcome, String> {
     });
     let result = bash.exec_with_options(command, exec_options(&case.options));
 
+    // Upstream `compareOutputs` (comparison-tests/fixture-runner.ts) asserts only
+    // stdout and exitCode against recorded real-bash golden output; it never
+    // compares stderr (real bash and the Just Bash engine intentionally emit
+    // different diagnostic prefixes such as `/bin/bash: line 1:` vs `bash:`).
+    // Mirror that contract for `comparison-fixture` cases; keep stderr strict for
+    // the engine-recorded golden corpus where stderr is part of the proof.
+    let compare_stderr = case.kind.as_deref() != Some("comparison-fixture");
+
     let mut mismatches = Vec::new();
     if result.stdout != expected_stdout {
         mismatches.push(format!(
@@ -299,7 +307,7 @@ fn run_case(case: &CorpusCase) -> Result<CaseOutcome, String> {
             expected_stdout, result.stdout
         ));
     }
-    if result.stderr != expected_stderr {
+    if compare_stderr && result.stderr != expected_stderr {
         mismatches.push(format!(
             "stderr expected {:?}, got {:?}",
             expected_stderr, result.stderr

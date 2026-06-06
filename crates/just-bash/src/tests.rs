@@ -1497,7 +1497,10 @@ fn jbc36_read_write_piping_large_virtual_data_rows() {
     assert_eq!(bash.exec("cat large.txt | wc -l").stdout.trim(), "2000");
     let direct_wc = bash.exec("wc -l large.txt");
     assert_exec_success(&direct_wc);
-    assert_eq!(direct_wc.stdout, "2000 /home/user/large.txt\n");
+    // `wc` (like head/tail/grep) labels output with the literal operand the
+    // user typed, not the resolved absolute path — matching upstream
+    // `readFiles` (utils/file-reader.ts) and real coreutils.
+    assert_eq!(direct_wc.stdout, "2000 large.txt\n");
     assert_eq!(
         bash.exec("cat dupes.txt | sort | uniq | wc -l")
             .stdout
