@@ -22225,7 +22225,7 @@
       "args": [],
       "options": {},
       "expected": {
-        "stdout": "emptydir\n",
+        "stdout": "emptydir/\n",
         "stderr": "emptydir\n",
         "exitCode": 0
       },
@@ -22409,7 +22409,7 @@
       "args": [],
       "options": {},
       "expected": {
-        "stdout": "dir\ndir/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt\n",
+        "stdout": "dir/\ndir/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt\n",
         "stderr": "dir\ndir/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt\n",
         "exitCode": 0
       },
@@ -23099,7 +23099,7 @@
       "args": [],
       "options": {},
       "expected": {
-        "stdout": "dir\ndir/file1.txt\ndir/file3.txt\n",
+        "stdout": "dir/\ndir/file1.txt\ndir/file3.txt\n",
         "stderr": "",
         "exitCode": 0
       },
@@ -23147,7 +23147,7 @@
       "args": [],
       "options": {},
       "expected": {
-        "stdout": "dir\ndir/file1.txt\n",
+        "stdout": "dir/\ndir/file1.txt\n",
         "stderr": "",
         "exitCode": 0
       },
@@ -27890,6 +27890,83 @@
         "found": true
       },
       "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_tar_1eefde366bd2d5f4"
+    },
+    {
+      "id": "comparison:tar:c0f8ce57cb363e70",
+      "kind": "comparison-fixture",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts",
+        "line": 44,
+        "testName": "should create and list directory archive",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/tar.comparison.fixtures.json",
+        "fixtureId": "c0f8ce57cb363e70"
+      },
+      "command": "tar -cf archive.tar mydir && tar -tf archive.tar | sort",
+      "script": "tar -cf archive.tar mydir && tar -tf archive.tar | sort",
+      "initialFiles": {
+        "mydir/file1.txt": "Content 1\n",
+        "mydir/file2.txt": "Content 2\n"
+      },
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "mydir/\nmydir/file1.txt\nmydir/file2.txt\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts:44:it:should create and list directory archive",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_tar_c0f8ce57cb363e70",
+        "notes": "JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_tar_c0f8ce57cb363e70"
+    },
+    {
+      "id": "comparison:tar:b95fc24482c00a57",
+      "kind": "comparison-fixture",
+      "domain": "tar",
+      "upstream": {
+        "repository": "vercel-labs/just-bash",
+        "file": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts",
+        "line": 91,
+        "testName": "should strip leading slash on extract by default",
+        "declaration": "it",
+        "fixtureFile": "packages/just-bash/src/comparison-tests/fixtures/tar.comparison.fixtures.json",
+        "fixtureId": "b95fc24482c00a57"
+      },
+      "command": "tmp=/tmp/jb-tar-abs-$PPID.txt && printf 'abs\\n' > \"$tmp\" && tar -cf archive.tar \"$tmp\" 2>/dev/null && mkdir -p out && tar -xf archive.tar -C out && cat out/tmp/jb-tar-abs-$PPID.txt && rm -f \"$tmp\"",
+      "script": "tmp=/tmp/jb-tar-abs-$PPID.txt && printf 'abs\\n' > \"$tmp\" && tar -cf archive.tar \"$tmp\" 2>/dev/null && mkdir -p out && tar -xf archive.tar -C out && cat out/tmp/jb-tar-abs-$PPID.txt && rm -f \"$tmp\"",
+      "initialFiles": {},
+      "cwd": ".",
+      "env": {},
+      "stdin": null,
+      "args": [],
+      "options": {},
+      "expected": {
+        "stdout": "abs\n",
+        "stderr": "",
+        "exitCode": 0
+      },
+      "status": "portable-verified",
+      "parity": {
+        "ledgerKey": "packages/just-bash/src/comparison-tests/tar.comparison.test.ts:91:it:should strip leading slash on extract by default",
+        "status": "portable-verified",
+        "owner": "crates/just-bash::conformance_corpus",
+        "rustTest": "just_bash_runs_shared_conformance_corpus::comparison_tar_b95fc24482c00a57",
+        "notes": "JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code.",
+        "found": true
+      },
+      "rustTestName": "just_bash_runs_shared_conformance_corpus::comparison_tar_b95fc24482c00a57"
     },
     {
       "id": "comparison:utf8-bytestring:38",

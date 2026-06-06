@@ -19,11 +19,11 @@ Rows are intentionally fail-closed: no row is verified until a sibling implement
 | Non-test TS/TSX source files | 423 |
 | Test files | 485 |
 | Test cases | 9936 |
-| Portable pending cases | 58 |
-| Portable verified cases | 8681 |
+| Portable pending cases | 56 |
+| Portable verified cases | 8683 |
 | JS-only documented cases | 1197 |
 | Type-system impossible cases | 0 |
-| Strict gate gaps | 58 |
+| Strict gate gaps | 56 |
 | Inventory check command | node scripts/just-bash-test-inventory.mjs --check |
 | Strict gate command | node scripts/just-bash-test-inventory.mjs --strict |
 | Conformance plan | docs/open-agents/just-bash-conformance.md |
@@ -293,7 +293,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | command:xan | 201 | 0 | 200 | 1 | 0 |
 | packages/just-bash | command:xargs | 35 | 0 | 35 | 0 | 0 |
 | packages/just-bash | command:yq | 215 | 2 | 211 | 2 | 0 |
-| packages/just-bash | comparison-tests | 530 | 8 | 522 | 0 | 0 |
+| packages/just-bash | comparison-tests | 530 | 6 | 524 | 0 | 0 |
 | packages/just-bash | core | 213 | 4 | 187 | 22 | 0 |
 | packages/just-bash | fs:core | 263 | 1 | 248 | 14 | 0 |
 | packages/just-bash | fs:in-memory-fs | 86 | 0 | 72 | 14 | 0 |
@@ -343,7 +343,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | pending:just-bash-core | portable-pending | 15 |
 | pending:just-bash-fs | portable-pending | 1 |
 | pending:just-bash-parser-interpreter | portable-pending | 23 |
-| pending:just-bash-spec-comparison | portable-pending | 8 |
+| pending:just-bash-spec-comparison | portable-pending | 6 |
 
 ## Test File Inventory
 
@@ -685,7 +685,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/sort.comparison.test.ts | 24 | 0 | 24 | 0 | 0 | crates/just-bash::conformance_corpus; crates/just-bash::runtime::comparison-core |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/strings-split.comparison.test.ts | 11 | 0 | 11 | 0 | 0 | crates/just-bash::conformance_corpus |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/substitution-desync.comparison.test.ts | 6 | 6 | 0 | 0 | 0 | pending:just-bash-spec-comparison |
-| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tar.comparison.test.ts | 10 | 2 | 8 | 0 | 0 | crates/just-bash::conformance_corpus; pending:just-bash-spec-comparison |
+| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tar.comparison.test.ts | 10 | 0 | 10 | 0 | 0 | crates/just-bash::conformance_corpus |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tee.comparison.test.ts | 5 | 0 | 5 | 0 | 0 | crates/just-bash::exec; crates/just-bash::runtime::comparison-core |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/test.comparison.test.ts | 40 | 0 | 40 | 0 | 0 | crates/just-bash::conformance_corpus |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/text-processing.comparison.test.ts | 30 | 0 | 30 | 0 | 0 | crates/just-bash::conformance_corpus |
@@ -7134,11 +7134,11 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/substitution-desync.comparison.test.ts | 82 | (top-level) | keeps $((cmd)redirection) parsed as command substitution form | it | portable-pending | pending:just-bash-spec-comparison | pending:just-bash-spec-comparison | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tar.comparison.test.ts | 21 | (top-level) | should create and list single file archive | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::comparison_tar_76755482c30f6729 | JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code. |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tar.comparison.test.ts | 32 | (top-level) | should create and list multiple files | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::comparison_tar_ea3d17f6c34f860d | JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code. |
-| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tar.comparison.test.ts | 44 | (top-level) | should create and list directory archive | it | portable-pending | pending:just-bash-spec-comparison | pending:just-bash-spec-comparison | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
+| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tar.comparison.test.ts | 44 | (top-level) | should create and list directory archive | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::comparison_tar_c0f8ce57cb363e70 | JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code. |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tar.comparison.test.ts | 58 | create and list (-c -t) | should create and extract single file | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::comparison_tar_cdaa68944a83396b | JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code. |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tar.comparison.test.ts | 69 | create and list (-c -t) | should create and extract directory | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::comparison_tar_2ba72b80d7e2315e | JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code. |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tar.comparison.test.ts | 80 | create and list (-c -t) | should extract to different directory with -C | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::comparison_tar_87cc3d174c5bf2cd | JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code. |
-| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tar.comparison.test.ts | 91 | create and list (-c -t) | should strip leading slash on extract by default | it | portable-pending | pending:just-bash-spec-comparison | pending:just-bash-spec-comparison | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
+| packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tar.comparison.test.ts | 91 | create and list (-c -t) | should strip leading slash on extract by default | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::comparison_tar_b95fc24482c00a57 | JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code. |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tar.comparison.test.ts | 102 | extract (-x) | should create and list gzip compressed archive | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::comparison_tar_4e2cbf2e913c29c9 | JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code. |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tar.comparison.test.ts | 113 | extract (-x) | should create and extract gzip compressed archive | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::comparison_tar_53ef5bd7218ab0f6 | JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code. |
 | packages/just-bash | comparison-tests | packages/just-bash/src/comparison-tests/tar.comparison.test.ts | 126 | gzip compression (-z) | should strip leading path components on extract | it | portable-verified | crates/just-bash::conformance_corpus | just_bash_runs_shared_conformance_corpus::comparison_tar_1eefde366bd2d5f4 | JBC-11 Rust corpus runner exact match for the generated comparison fixture stdout, stderr, and exit code. |
