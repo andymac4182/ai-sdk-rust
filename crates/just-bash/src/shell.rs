@@ -365,6 +365,12 @@ struct Token {
     kind: TokenKind,
     line: usize,
     column: usize,
+    /// True when this token was preceded by inline whitespace (space/tab) or is
+    /// at the start of input. Used to distinguish an fd-prefixed redirection
+    /// (`1>file`, no space) from a numeric word followed by a separate
+    /// redirection (`echo 1 > file`, space): only the former binds the digit as
+    /// the redirection file descriptor.
+    preceded_by_space: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -763,14 +769,22 @@ impl Lexer {
 
     fn tokenize(mut self) -> ShellResult<Vec<Token>> {
         let mut tokens = Vec::new();
+        // The first token of the input counts as preceded by whitespace (it is
+        // not adjacent to any prior word), and any token that follows skipped
+        // space/tab is too. This lets the parser tell `1>file` (fd redirect)
+        // from `1 >file` (numeric word + redirect).
+        let mut preceded_by_space = true;
         while let Some(character) = self.peek() {
             if matches!(character, ' ' | '\t' | '\r') {
                 self.advance();
+                preceded_by_space = true;
                 continue;
             }
 
             let line = self.line;
             let column = self.column;
+            let token_preceded_by_space = preceded_by_space;
+            preceded_by_space = false;
 
             if character == '\n' {
                 self.advance();
@@ -778,7 +792,11 @@ impl Lexer {
                     kind: TokenKind::Newline,
                     line,
                     column,
+                    preceded_by_space: token_preceded_by_space,
                 });
+                // A newline separates words, so the next token is never adjacent
+                // to a prior word.
+                preceded_by_space = true;
                 self.read_pending_here_docs(&mut tokens, line, column)?;
                 continue;
             }
@@ -794,6 +812,7 @@ impl Lexer {
                     kind: TokenKind::ArithmeticCommand(ArithmeticExpression { source: expression }),
                     line,
                     column,
+                    preceded_by_space: token_preceded_by_space,
                 });
                 continue;
             }
@@ -804,6 +823,7 @@ impl Lexer {
                     kind: TokenKind::ConditionalCommand(expression),
                     line,
                     column,
+                    preceded_by_space: token_preceded_by_space,
                 });
                 continue;
             }
@@ -817,7 +837,12 @@ impl Lexer {
                 {
                     self.pending_here_doc_operator = Some(*operator);
                 }
-                tokens.push(Token { kind, line, column });
+                tokens.push(Token {
+                    kind,
+                    line,
+                    column,
+                    preceded_by_space: token_preceded_by_space,
+                });
                 continue;
             }
 
@@ -828,6 +853,7 @@ impl Lexer {
                 kind: TokenKind::Word(word),
                 line,
                 column,
+                preceded_by_space: token_preceded_by_space,
             });
             if let Some(operator) = pending_here_doc_operator {
                 let TokenKind::Word(word) = &tokens[token_index].kind else {
@@ -853,6 +879,7 @@ impl Lexer {
             kind: TokenKind::Eof,
             line: self.line,
             column: self.column,
+            preceded_by_space: true,
         });
         Ok(tokens)
     }
@@ -2815,10 +2842,19 @@ impl Parser {
                 break;
             }
 
+            // A leading digit word binds as the redirection file descriptor only
+            // when the redirection operator is adjacent to it (`1>file`). When a
+            // space separates them (`echo 1 > file`), the digit is an ordinary
+            // argument and the redirection uses the default fd — so require the
+            // operator token to NOT be preceded by whitespace.
             if let TokenKind::Word(fd_word) = self.current().kind.clone()
                 && let Some(fd_text) = fd_word.plain_text()
                 && fd_text.chars().all(|character| character.is_ascii_digit())
                 && matches!(self.peek(1), TokenKind::Redirection(_))
+                && !self
+                    .tokens
+                    .get(self.pos + 1)
+                    .is_some_and(|token| token.preceded_by_space)
             {
                 let fd = fd_text.parse::<u8>().ok();
                 self.advance();
@@ -12852,6 +12888,17 @@ esac"#,
             .exec("until grep -q yes /check.txt; do echo step; echo yes > /check.txt; done");
         assert_eq!(result.stdout, "step\n");
         assert_eq!(result.exit_code, 0);
+
+        // loops.test.ts L108 until loop "executes until condition becomes true":
+        // seed the flag false, then the multi-statement body prints `waiting`
+        // and flips the flag so the next condition check passes — exactly one
+        // iteration, single line of output.
+        let mut until108 = shell();
+        until108.exec("echo 0 > /flag.txt");
+        let result =
+            until108.exec("until grep -q 1 /flag.txt; do echo waiting; echo 1 > /flag.txt; done");
+        assert_eq!(result.stdout, "waiting\n", "loops L108 stdout");
+        assert_eq!(result.exit_code, 0, "loops L108 exit");
     }
 
     #[test]

@@ -4769,12 +4769,12 @@ const jbpiParserInterpreterCaseGroups = [
   },
   {
     file: 'packages/just-bash/src/syntax/loops.test.ts',
-    lines: [124],
+    lines: [108, 124],
     status: 'portable-verified',
     owner: 'crates/just-bash::parser-interpreter',
     rustTest: 'r10jb_syntax_composition_operator_and_loop_rows_match_upstream',
     notes:
-      'R10JB verifies the portable until-loop row that executes once when its condition is initially false (a grep -q over a virtual file) through the Rust shell.',
+      'R10JB verifies the portable until-loop rows through the Rust shell: L124 executes once when the condition is initially false, and L108 "executes until condition becomes true" — its multi-statement body prints once and flips the grep-tested flag so the next condition check terminates the loop (this also exercises the R17JB lexer fix that keeps a space-separated leading digit, e.g. `echo 1 > /flag.txt`, as an ARGUMENT rather than an fd-redirect prefix).',
   },
   {
     file: 'packages/just-bash/src/syntax/operators.test.ts',
@@ -6909,12 +6909,12 @@ const r18jbSleepDurationCaseGroups = [
 const r16jbParserInterpreterCaseGroups = [
   {
     file: 'packages/just-bash/src/interpreter/redirections.binary.test.ts',
-    lines: [24, 132, 145, 178, 188, 198, 208],
+    lines: [6, 24, 37, 57, 132, 145, 158, 178, 188, 198, 208],
     status: 'portable-verified',
     owner: 'crates/just-bash::parser-interpreter',
     rustTest: 'r16jb_interpreter_redirections_binary_rows_match_upstream',
     notes:
-      'R16JB verifies the portable redirections.binary rows whose payloads are representable through the String-backed VFS: UTF-8 round-trips of Latin-1/French/German text via read_file_buffer (the exact upstream byte sequences), the null-byte `> file` round-trip, and the gzip/gunzip `-c` text round-trips through `>` and a pipe. The remaining high-byte binary-input rows stay pending until a binary-input VFS facade lands.',
+      'R16JB verifies the portable redirections.binary rows: UTF-8 round-trips of Latin-1/French/German text via read_file_buffer (the exact upstream byte sequences), the null-byte `> file` round-trip, and the gzip/gunzip `-c` text round-trips through `>` and a pipe. R17JB adds the raw high-byte rows seeded from Uint8Array-style binary_files and read back byte-exact via read_file_buffer: `cat binary > out` (L6), the all-256-values redirection (L37), binary append `>>` (L57), and a binary gzip/gunzip round-trip through redirection (L158). The pipe-then-redirect rows (L78/L95) and the `&>` row (L114) stay pending until the registry runtime carries piped binary stdin byte-clean and implements the `&>` combined operator.',
   },
   {
     file: 'packages/just-bash/src/syntax/composition.test.ts',
