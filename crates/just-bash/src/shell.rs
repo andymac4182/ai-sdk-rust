@@ -3669,6 +3669,12 @@ pub struct ShellState {
     /// `bash: NAME: unbound variable` on stderr, and aborts the script with
     /// exit code 1.
     nounset: bool,
+    /// `set -o posix`: enable POSIX-conformance mode. When enabled, errors from
+    /// the *special* builtins `shift` (count out of range / non-numeric) and
+    /// `set` (invalid `-o`/`+o` option name) are fatal and abort the whole
+    /// script (mirrors upstream `PosixFatalError`), rather than merely returning
+    /// a non-zero status. Mirrors `interpreter/builtins/{shift,set}.ts`.
+    posix: bool,
     /// Pending `nounset` ("unbound variable") error raised while expanding the
     /// current command's words. Carries the full stderr line. Drained by the
     /// enclosing simple command, where it becomes a fatal exit-1 abort.
@@ -4352,13 +4358,15 @@ impl<D: CommandDispatcher> Interpreter<D> {
                     "pipefail" => self.state.pipefail = enable,
                     "xtrace" => self.state.xtrace = enable,
                     "nounset" => self.state.nounset = enable,
+                    // `set -o posix` toggles POSIX-conformance mode (used to make
+                    // the special builtins `shift`/`set` errors fatal).
+                    "posix" => self.state.posix = enable,
                     // Accepted long option names that are no-ops here.
                     "verbose"
                     | "noclobber"
                     | "noglob"
                     | "allexport"
                     | "noexec"
-                    | "posix"
                     | "vi"
                     | "emacs"
                     | "notify"
@@ -4375,6 +4383,12 @@ impl<D: CommandDispatcher> Interpreter<D> {
                     | "keyword"
                     | "onecmd" => {}
                     other => {
+                        // `set -o <invalid>` is fatal in POSIX mode (`set` is a
+                        // special builtin): the whole script aborts. Otherwise it
+                        // returns a non-zero status and execution continues.
+                        if self.state.posix {
+                            self.state.exited = Some(1);
+                        }
                         return ExecOutput {
                             stdout: String::new(),
                             stderr: format!("bash: set: {other}: invalid option name\n{SET_USAGE}"),
@@ -4779,6 +4793,11 @@ impl<D: CommandDispatcher> Interpreter<D> {
             match arg.parse::<i64>() {
                 Ok(value) if value >= 0 => n = value as usize,
                 _ => {
+                    // `shift` is a special builtin: in POSIX mode a non-numeric
+                    // argument aborts the whole script (upstream PosixFatalError).
+                    if self.state.posix {
+                        self.state.exited = Some(1);
+                    }
                     return ExecOutput {
                         stdout: String::new(),
                         stderr: format!("bash: shift: {arg}: numeric argument required\n"),
@@ -4789,6 +4808,11 @@ impl<D: CommandDispatcher> Interpreter<D> {
         }
 
         if n > self.state.positionals.len() {
+            // `shift` count out of range is fatal in POSIX mode (special builtin):
+            // the script aborts rather than continuing with a non-zero status.
+            if self.state.posix {
+                self.state.exited = Some(1);
+            }
             return ExecOutput {
                 stdout: String::new(),
                 stderr: "bash: shift: shift count out of range\n".to_string(),
@@ -8027,6 +8051,133 @@ mod tests {
 
     fn shell() -> Interpreter<FakeCommands> {
         Interpreter::new(FakeCommands::default())
+    }
+
+    /// Dispatcher used by the prototype-pollution `printenv` row: it answers
+    /// `printenv NAME` from the per-command environment the interpreter exports,
+    /// so the test observes that an exported keyword-named variable round-trips
+    /// out to a child command. Everything else is "command not found".
+    #[derive(Default)]
+    struct PrintenvCommands;
+
+    impl CommandDispatcher for PrintenvCommands {
+        fn dispatch(
+            &mut self,
+            invocation: CommandInvocation,
+            _files: &mut ShellVirtualFileSystem,
+        ) -> CommandResult {
+            if invocation.name == "printenv" {
+                if let Some(name) = invocation.args.first() {
+                    return match invocation.env.get(name) {
+                        Some(value) => CommandResult::success(format!("{value}\n")),
+                        None => CommandResult {
+                            stdout: String::new(),
+                            stderr: String::new(),
+                            exit_code: 1,
+                        },
+                    };
+                }
+            }
+            CommandResult::failure(format!("{}: command not found\n", invocation.name), 127)
+        }
+    }
+
+    /// R22JB closes the four portable rows in
+    /// `packages/just-bash/src/interpreter/builtins/posix-fatal.test.ts`
+    /// (L5, L19, L47, L65) that exercise POSIX-conformance fatal-error mode.
+    /// In `set -o posix`, the *special* builtins `shift` (count out of range)
+    /// and `set` (invalid `-o` option name) abort the whole script with exit 1
+    /// instead of merely returning non-zero, so the statements after them never
+    /// run (upstream `PosixFatalError`). The spec-format rows (L47/L65) enable
+    /// posix only when `$BASH_VERSION` is set. Each assertion fails if the abort
+    /// regresses (a trailing `echo` would otherwise print and the exit code drop
+    /// to 0).
+    #[test]
+    fn r22jb_interpreter_posix_fatal_special_builtin_rows_match_upstream() {
+        // L5 `shift 3` with two positionals is fatal in POSIX mode: stdout stays
+        // empty (the `echo status=$?` after it never runs) and stderr mentions
+        // `shift`, exit 1.
+        let mut l5 = shell();
+        let r5 = l5.exec("set -o posix\nset -- a b\nshift 3\necho status=$?\n");
+        assert_eq!(r5.stdout, "", "L5 stdout");
+        assert!(r5.stderr.contains("shift"), "L5 stderr={:?}", r5.stderr);
+        assert_eq!(r5.exit_code, 1, "L5 exit");
+
+        // L19 `set -o invalid_` is fatal in POSIX mode: `echo ok` (after a
+        // non-special `shopt` failure guarded by `|| true`) prints, but the
+        // trailing `echo should not get here` never runs; exit 1.
+        let mut l19 = shell();
+        let r19 = l19.exec(
+            "set -o posix\nshopt -s invalid_ || true\necho ok\nset -o invalid_ || true\necho should not get here\n",
+        );
+        assert!(r19.stdout.contains("ok"), "L19 stdout={:?}", r19.stdout);
+        assert!(
+            !r19.stdout.contains("should not get here"),
+            "L19 stdout must not continue past fatal set: {:?}",
+            r19.stdout
+        );
+        assert_eq!(r19.exit_code, 1, "L19 exit");
+
+        // L47 spec-format: posix is enabled only when $BASH_VERSION is set, then
+        // `shift 3` aborts the script (empty stdout, non-zero exit).
+        let mut l47 = shell().with_env([("BASH_VERSION", "5.0")]);
+        let r47 = l47.exec(
+            "if test -n \"$BASH_VERSION\"; then\n  set -o posix\nfi\nset -- a b\nshift 3\necho status=$?\n",
+        );
+        assert_eq!(r47.stdout, "", "L47 stdout");
+        assert_ne!(r47.exit_code, 0, "L47 exit");
+
+        // L65 spec-format: with $BASH_VERSION set, `set -o invalid_` aborts after
+        // `echo ok`; stdout is exactly "ok\n" and exit is non-zero.
+        let mut l65 = shell().with_env([("BASH_VERSION", "5.0")]);
+        let r65 = l65.exec(
+            "if test -n \"$BASH_VERSION\"; then\n  set -o posix\nfi\n\nshopt -s invalid_ || true\necho ok\nset -o invalid_ || true\necho should not get here\n",
+        );
+        assert_eq!(r65.stdout, "ok\n", "L65 stdout");
+        assert_ne!(r65.exit_code, 0, "L65 exit");
+
+        // Guard: without POSIX mode, the same `shift 3` is NOT fatal — the
+        // trailing `echo status=$?` still runs and the script exits 0 (mirrors
+        // posix-fatal.test.ts L34, already mapped, so the fatal behavior is
+        // truly gated on `set -o posix`).
+        let mut guard = shell();
+        let rg = guard.exec("set -- a b\nshift 3\necho status=$?\n");
+        assert!(
+            rg.stdout.contains("status=1"),
+            "guard stdout={:?}",
+            rg.stdout
+        );
+        assert_eq!(rg.exit_code, 0, "guard exit");
+    }
+
+    /// R22JB closes the remaining `read`/`declare -x` rows in
+    /// `packages/just-bash/src/interpreter/prototype-pollution.test.ts`
+    /// (L422, L732, L741): a JavaScript prototype keyword used as the target of
+    /// `declare -x` round-trips out to a child command's environment via
+    /// `printenv`, and `read`/`read -a` assign stdin into keyword-named scalar
+    /// and array variables. The Rust port has no shared `Object.prototype`, so
+    /// these names behave like ordinary identifiers; each row asserts the exact
+    /// stdout and exit 0, failing if the keyword is rejected or mishandled.
+    #[test]
+    fn r22jb_interpreter_prototype_pollution_read_and_export_rows_match_upstream() {
+        // L422 `declare -x prototype=exported; printenv prototype` exports the
+        // keyword-named variable so a child command observes it.
+        let mut l422 = Interpreter::new(PrintenvCommands);
+        let r422 = l422.exec("declare -x prototype=exported; printenv prototype");
+        assert_eq!(r422.stdout, "exported\n", "L422 stdout");
+        assert_eq!(r422.exit_code, 0, "L422 exit");
+
+        // L732 `read __proto__` assigns stdin into the keyword-named scalar.
+        let mut l732 = shell();
+        let r732 = l732.exec("echo 'input' | { read __proto__; echo $__proto__; }");
+        assert_eq!(r732.stdout, "input\n", "L732 stdout");
+        assert_eq!(r732.exit_code, 0, "L732 exit");
+
+        // L741 `read -a __proto__` splits stdin into the keyword-named array.
+        let mut l741 = shell();
+        let r741 = l741.exec("echo 'a b c' | { read -a __proto__; echo ${__proto__[@]}; }");
+        assert_eq!(r741.stdout, "a b c\n", "L741 stdout");
+        assert_eq!(r741.exit_code, 0, "L741 exit");
     }
 
     /// A faithful command dispatcher for the additional `tee-plugin.test.ts`
