@@ -16978,6 +16978,25 @@ struct JqOptions {
     exit_status: bool,
     join_output: bool,
     tab_indent: bool,
+    sort_keys: bool,
+}
+
+/// Recursively sort object keys for jq's `-S`/`--sort-keys` flag. Arrays are
+/// traversed but keep their element order; only object key ordering changes.
+fn sort_json_keys(value: &JsonValue) -> JsonValue {
+    match value {
+        JsonValue::Object(map) => {
+            let mut entries: Vec<(&String, &JsonValue)> = map.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            let mut sorted = JsonMap::new();
+            for (key, child) in entries {
+                sorted.insert(key.clone(), sort_json_keys(child));
+            }
+            JsonValue::Object(sorted)
+        }
+        JsonValue::Array(items) => JsonValue::Array(items.iter().map(sort_json_keys).collect()),
+        other => other.clone(),
+    }
 }
 
 fn command_jq(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
@@ -17005,6 +17024,11 @@ fn command_jq(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
         for value in selected {
             saw_value = true;
             last_value = value.clone();
+            let value = if options.sort_keys {
+                sort_json_keys(&value)
+            } else {
+                value
+            };
             stdout.push_str(&render_json_output(
                 &value,
                 StructuredOutput {
@@ -17047,7 +17071,7 @@ fn parse_jq_options(args: &[String]) -> Result<JqOptions, CommandResult> {
             "-c" => options.compact = true,
             "-n" => options.null_input = true,
             "-s" => options.slurp = true,
-            "-S" => {}
+            "-S" | "--sort-keys" => options.sort_keys = true,
             "-e" => options.exit_status = true,
             "-j" => options.join_output = true,
             _ if arg.starts_with("--") => {
@@ -17063,7 +17087,7 @@ fn parse_jq_options(args: &[String]) -> Result<JqOptions, CommandResult> {
                         'c' => options.compact = true,
                         'n' => options.null_input = true,
                         's' => options.slurp = true,
-                        'S' => {}
+                        'S' => options.sort_keys = true,
                         'e' => options.exit_status = true,
                         'j' => options.join_output = true,
                         other => {
@@ -18421,6 +18445,7 @@ fn eval_function(
         "type" => return Ok(Some(JsonValue::String(json_type(value).to_string()))),
         "length" => return Ok(Some(json_number(json_length(value) as f64))),
         "keys" => return Ok(Some(json_keys(value))),
+        "keys_unsorted" => return Ok(Some(json_keys_unsorted(value))),
         "first" => return Ok(Some(json_first(value))),
         "last" => return Ok(Some(json_last(value))),
         "reverse" => return Ok(Some(json_reverse(value))),
@@ -19002,6 +19027,21 @@ fn json_length(value: &JsonValue) -> usize {
 }
 
 fn json_keys(value: &JsonValue) -> JsonValue {
+    // jq's `keys` returns object keys in sorted order (use `keys_unsorted` for
+    // insertion order). Array "keys" are the index list, already ordered.
+    let keys = match value {
+        JsonValue::Object(map) => {
+            let mut keys = map.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            keys
+        }
+        JsonValue::Array(values) => (0..values.len()).map(|index| index.to_string()).collect(),
+        _ => Vec::new(),
+    };
+    JsonValue::Array(keys.into_iter().map(JsonValue::String).collect())
+}
+
+fn json_keys_unsorted(value: &JsonValue) -> JsonValue {
     let keys = match value {
         JsonValue::Object(map) => map.keys().cloned().collect::<Vec<_>>(),
         JsonValue::Array(values) => (0..values.len()).map(|index| index.to_string()).collect(),
@@ -19221,7 +19261,10 @@ fn json_delete_path(value: &JsonValue, path: &[JsonValue]) -> JsonValue {
             };
             let mut map = map.clone();
             if tail.is_empty() {
-                map.remove(key);
+                // shift_remove preserves the order of remaining keys (the default
+                // `remove` on the order-preserving map is a swap-remove that would
+                // reorder siblings, diverging from jq's del()).
+                map.shift_remove(key);
             } else if let Some(child) = map.get(key) {
                 let next = json_delete_path(child, tail);
                 map.insert(key.clone(), next);
@@ -34638,7 +34681,8 @@ mod tests {
     fn query_safe_delete(value: &mut JsonValue, key: &str) -> Result<(), &'static str> {
         let object = query_safe_object_mut(value)?;
         if is_safe_json_object_key(key) {
-            object.remove(key);
+            // shift_remove preserves remaining key order (see json_delete_path).
+            object.shift_remove(key);
         }
         Ok(())
     }
