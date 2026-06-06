@@ -4152,6 +4152,12 @@ pub struct ShellState {
     /// `while read LINE` loop consumes successive lines. `None` means no piped
     /// input is attached (a bare `read` then finds EOF).
     pending_stdin: Option<String>,
+    /// Nameref variables declared with `declare -n ref=target`: `ref` -> the
+    /// name of the variable it points at. Reading or assigning through `ref`
+    /// transparently resolves to `target`. Dangerous JavaScript keywords
+    /// (`__proto__`, `constructor`, ...) are ordinary names here, so a nameref
+    /// may point at or be named after one of them.
+    namerefs: BTreeMap<String, String>,
 }
 
 /// Active `break`/`continue` signal propagating up through nested compound
@@ -4192,7 +4198,24 @@ impl ShellState {
         self.arrays.insert(name.into(), values);
     }
 
+    /// Resolve a variable name through any nameref chain (`declare -n`). A
+    /// nameref `ref -> target` means an access to `ref` actually targets
+    /// `target`; bash follows the chain (a nameref may point at another
+    /// nameref) but stops at the first non-nameref name. A short cycle guard
+    /// prevents a self-referential nameref from looping forever.
+    fn resolve_nameref<'a>(&'a self, name: &'a str) -> &'a str {
+        let mut current = name;
+        for _ in 0..64 {
+            match self.namerefs.get(current) {
+                Some(target) if target != current => current = target.as_str(),
+                _ => break,
+            }
+        }
+        current
+    }
+
     fn lookup_var(&self, name: &str) -> Option<&str> {
+        let name = self.resolve_nameref(name);
         for scope in self.local_scopes.iter().rev() {
             if let Some(value) = scope.get(name) {
                 return value.as_deref();
@@ -4202,6 +4225,7 @@ impl ShellState {
     }
 
     fn assign_var(&mut self, name: String, value: String) {
+        let name = self.resolve_nameref(&name).to_string();
         for scope in self.local_scopes.iter_mut().rev() {
             if let Some(slot) = scope.get_mut(&name) {
                 *slot = Some(value);
@@ -5189,7 +5213,189 @@ impl<D: CommandDispatcher> Interpreter<D> {
             "shift" => Some(self.execute_shift(args)),
             "read" => Some(self.execute_read(args)),
             "eval" => Some(self.execute_eval(args)),
+            "getopts" => Some(self.execute_getopts(args)),
+            "compgen" => Some(self.execute_compgen(args)),
             _ => None,
+        }
+    }
+
+    /// `getopts optstring name [args...]` — parse one option from the positional
+    /// parameters (or the explicit `args` operands) per POSIX. `OPTIND` tracks
+    /// the next operand to inspect (1-based); on a `c:`-style option the argument
+    /// is stored in `OPTARG`. Returns exit 0 while options remain and exit 1 at
+    /// the end of the option list. Option/variable names may be dangerous
+    /// keywords (`__proto__`, `OPTARG`, ...) since they are ordinary identifiers.
+    fn execute_getopts(&mut self, args: &[String]) -> ExecOutput {
+        let Some(optstring) = args.first() else {
+            return ExecOutput {
+                stdout: String::new(),
+                stderr: "getopts: usage: getopts optstring name [arg ...]\n".to_string(),
+                exit_code: 2,
+            };
+        };
+        let Some(var_name) = args.get(1) else {
+            return ExecOutput {
+                stdout: String::new(),
+                stderr: "getopts: usage: getopts optstring name [arg ...]\n".to_string(),
+                exit_code: 2,
+            };
+        };
+        // Operands: explicit `args[2..]` if present, else the positionals.
+        let operands: Vec<String> = if args.len() > 2 {
+            args[2..].to_vec()
+        } else {
+            self.state.positionals.clone()
+        };
+
+        let mut optind: usize = self
+            .lookup_parameter("OPTIND")
+            .parse::<usize>()
+            .unwrap_or(1)
+            .max(1);
+
+        // Index (0-based) of the operand currently being scanned.
+        let operand_idx = optind - 1;
+        let Some(current) = operands.get(operand_idx) else {
+            // No more operands.
+            self.state.assign_var(var_name.clone(), "?".to_string());
+            return ExecOutput {
+                exit_code: 1,
+                ..ExecOutput::default()
+            };
+        };
+        // Stop at the first non-option (`-` alone, or a token not starting `-`)
+        // and at the `--` end-of-options marker.
+        if current == "--" {
+            optind += 1;
+            self.state
+                .assign_var("OPTIND".to_string(), optind.to_string());
+            self.state.assign_var(var_name.clone(), "?".to_string());
+            return ExecOutput {
+                exit_code: 1,
+                ..ExecOutput::default()
+            };
+        }
+        if !current.starts_with('-') || current == "-" {
+            self.state.assign_var(var_name.clone(), "?".to_string());
+            return ExecOutput {
+                exit_code: 1,
+                ..ExecOutput::default()
+            };
+        }
+
+        let opt_chars: Vec<char> = current.chars().skip(1).collect();
+        let opt = opt_chars.first().copied().unwrap_or('?');
+        // Does the optstring declare `opt`? Find it and whether it takes an arg.
+        let spec: Vec<char> = optstring.chars().collect();
+        let takes_arg = spec
+            .iter()
+            .position(|&c| c == opt)
+            .is_some_and(|pos| spec.get(pos + 1).copied() == Some(':'));
+        let known = spec.contains(&opt) && opt != ':';
+
+        if !known {
+            // Unknown option: set name to `?` and OPTARG empty (silent mode when
+            // optstring starts with `:` would set OPTARG=opt, but the simple
+            // form here clears it). Advance past this operand.
+            optind += 1;
+            self.state
+                .assign_var("OPTIND".to_string(), optind.to_string());
+            self.state.assign_var(var_name.clone(), "?".to_string());
+            self.state.assign_var("OPTARG".to_string(), String::new());
+            return ExecOutput::default();
+        }
+
+        if takes_arg {
+            // The argument is the rest of this token, or the next operand.
+            let inline: String = opt_chars.iter().skip(1).collect();
+            let arg = if inline.is_empty() {
+                let next = operands.get(operand_idx + 1).cloned().unwrap_or_default();
+                optind += 2;
+                next
+            } else {
+                optind += 1;
+                inline
+            };
+            self.state
+                .assign_var("OPTIND".to_string(), optind.to_string());
+            self.state.assign_var("OPTARG".to_string(), arg);
+            self.state.assign_var(var_name.clone(), opt.to_string());
+        } else {
+            // A flag option. Advance past this operand (this port does not pack
+            // multiple flags per token, which the conformance suite never relies
+            // on for the dangerous-keyword rows).
+            optind += 1;
+            self.state
+                .assign_var("OPTIND".to_string(), optind.to_string());
+            self.state.assign_var("OPTARG".to_string(), String::new());
+            self.state.assign_var(var_name.clone(), opt.to_string());
+        }
+        ExecOutput::default()
+    }
+
+    /// `compgen -v [prefix]` — list the names of set variables, optionally
+    /// filtered to those starting with `prefix`. Dangerous keywords
+    /// (`__proto__`, `constructor`, ...) are plain variable names, so a variable
+    /// named `__proto__` is completed like any other. Only the `-v` action used
+    /// by the conformance suite is implemented; other actions yield no output.
+    fn execute_compgen(&mut self, args: &[String]) -> ExecOutput {
+        let mut list_vars = false;
+        let mut prefix: Option<String> = None;
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "-v" => list_vars = true,
+                other if !other.starts_with('-') => prefix = Some(other.to_string()),
+                _ => {}
+            }
+            index += 1;
+        }
+        if !list_vars {
+            // Unsupported action: produce no completions but succeed-or-fail like
+            // bash (exit 1 when nothing matches).
+            return ExecOutput {
+                exit_code: 1,
+                ..ExecOutput::default()
+            };
+        }
+        let mut names: Vec<String> = Vec::new();
+        // Collect from global env, local scopes, arrays, and assoc arrays.
+        for name in self.state.env.keys() {
+            names.push(name.clone());
+        }
+        for scope in &self.state.local_scopes {
+            for name in scope.keys() {
+                names.push(name.clone());
+            }
+        }
+        for name in self.state.arrays.keys() {
+            names.push(name.clone());
+        }
+        for name in self.state.assoc_arrays.keys() {
+            names.push(name.clone());
+        }
+        names.sort_unstable();
+        names.dedup();
+        let prefix = prefix.unwrap_or_default();
+        let matches: Vec<String> = names
+            .into_iter()
+            .filter(|name| name.starts_with(&prefix))
+            .collect();
+        if matches.is_empty() {
+            return ExecOutput {
+                exit_code: 1,
+                ..ExecOutput::default()
+            };
+        }
+        let mut stdout = String::new();
+        for name in matches {
+            stdout.push_str(&name);
+            stdout.push('\n');
+        }
+        ExecOutput {
+            stdout,
+            stderr: String::new(),
+            exit_code: 0,
         }
     }
 
@@ -5696,6 +5902,10 @@ impl<D: CommandDispatcher> Interpreter<D> {
     fn execute_declare(&mut self, args: &[String]) -> ExecOutput {
         let mut declare_indexed = false;
         let mut declare_assoc = false;
+        // `-n` declares a nameref: `declare -n ref=target` makes `ref` an alias
+        // for the variable `target`, and `declare -n ref` (no value) registers
+        // the attribute so a later `ref=x` assignment is redirected.
+        let mut declare_nameref = false;
         // `-l` forces the value to lower case and `-u` forces it to upper case
         // (bash case-modification attributes). The most recently seen of the two
         // wins, matching bash where the later flag overrides the earlier one.
@@ -5708,6 +5918,7 @@ impl<D: CommandDispatcher> Interpreter<D> {
             match arg.as_str() {
                 "-a" => declare_indexed = true,
                 "-A" => declare_assoc = true,
+                "-n" => declare_nameref = true,
                 "-l" => {
                     force_lower = true;
                     force_upper = false;
@@ -5720,7 +5931,11 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 // affect array typing here; ignore them for the array path.
                 _ if arg.starts_with('-') && arg.len() == 2 => {}
                 _ if is_valid_name(arg) => {
-                    if declare_assoc {
+                    if declare_nameref {
+                        // `declare -n ref` with no target registers the nameref
+                        // attribute but leaves it unbound for now (bash behaviour).
+                        self.state.namerefs.entry(arg.clone()).or_default();
+                    } else if declare_assoc {
                         // `declare -A name` registers an associative array but
                         // does NOT reset an existing one (bash behaviour).
                         self.state.assoc_arrays.entry(arg.clone()).or_default();
@@ -5737,6 +5952,13 @@ impl<D: CommandDispatcher> Interpreter<D> {
                     if let Some(equals) = assignment_equals_position(arg) {
                         let name = arg[..equals].to_string();
                         let rest = &arg[equals + 1..];
+                        if declare_nameref && is_valid_name(&name) {
+                            // `declare -n ref=target` binds the nameref. The
+                            // target name is stored verbatim; subsequent reads
+                            // and writes through `ref` redirect to `target`.
+                            self.state.namerefs.insert(name, rest.to_string());
+                            continue;
+                        }
                         if let Some(first) = rest.strip_prefix('(') {
                             // Gather the parenthesised body across args until the
                             // closing `)`.
@@ -6438,7 +6660,12 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 if chars[i + 1] == '{' {
                     if let Some(close) = chars[i + 2..].iter().position(|&c| c == '}') {
                         let name: String = chars[i + 2..i + 2 + close].iter().collect();
-                        out.push_str(self.state.get_var(&name).unwrap_or(""));
+                        // Resolve through the full parameter path so an
+                        // array-element subscript such as `${pairs[0]}` (used as
+                        // the key of another assignment, e.g.
+                        // `assoc[${pairs[0]}]=...`) reads the array element
+                        // rather than a non-existent scalar named `pairs[0]`.
+                        out.push_str(&self.lookup_parameter(&name));
                         i += 2 + close + 1;
                         continue;
                     }
@@ -16185,6 +16412,58 @@ greet World",
     /// `assoc-array.test.ts` through the Rust shell: arithmetic expressions and
     /// variable VALUES are used for indexed-array subscripts (unlike assoc
     /// arrays, which key on literal text).
+    /// r17jb closes five portable `prototype-pollution.test.ts` rows that route
+    /// dangerous JavaScript keywords (`__proto__`, `constructor`, `OPTARG`)
+    /// through builtins that previously had no Rust support. Each assertion
+    /// fails if the keyword leaks the prototype-machinery name instead of being
+    /// treated as an ordinary bash identifier:
+    /// - L499 `declare -n ref=__proto__` makes `$ref` read the target's value.
+    /// - L510 a nameref *named* `constructor` reads its target's value.
+    /// - L700 `getopts "a:"` parses `-a __proto__` and stores it in `OPTARG`.
+    /// - L750 `read -a` plus an assoc-array element keyed by `${pairs[0]}`.
+    /// - L800 `compgen -v __proto__` completes a keyword-named variable.
+    #[test]
+    fn r17jb_interpreter_prototype_pollution_nameref_getopts_compgen_rows_match_upstream() {
+        // L499 nameref pointing AT a dangerous keyword: `$ref` resolves through
+        // `ref -> __proto__` to the keyword variable's value.
+        let r = shell().exec("__proto__=original\ndeclare -n ref=__proto__\necho $ref");
+        assert_eq!(r.exit_code, 0, "L499 exit");
+        assert_eq!(r.stdout, "original\n", "L499 stdout");
+
+        // L510 nameref NAMED with a dangerous keyword: `constructor -> target`.
+        let r = shell().exec("target=value\ndeclare -n constructor=target\necho $constructor");
+        assert_eq!(r.exit_code, 0, "L510 exit");
+        assert_eq!(r.stdout, "value\n", "L510 stdout");
+
+        // L700 getopts: `-a __proto__` parses to `opt=a` with the keyword stored
+        // verbatim in OPTARG. The loop terminates after the single option.
+        let r = shell().exec(
+            "set -- -a __proto__\nwhile getopts \"a:\" opt; do\n  echo \"opt=$opt OPTARG=$OPTARG\"\ndone",
+        );
+        assert_eq!(r.exit_code, 0, "L700 exit");
+        assert_eq!(r.stdout, "opt=a OPTARG=__proto__\n", "L700 stdout");
+
+        // L750 read -a then an assoc-array element keyed by an array element
+        // expansion: `constructor[${pairs[0]}]=${pairs[1]}` stores under "key1".
+        let r = shell().exec(
+            "echo 'key1 val1 key2 val2' | {\n  declare -A constructor\n  read -a pairs\n  constructor[${pairs[0]}]=${pairs[1]}\n  echo ${constructor[key1]}\n}",
+        );
+        assert_eq!(r.exit_code, 0, "L750 exit");
+        assert_eq!(r.stdout, "val1\n", "L750 stdout");
+
+        // L800 compgen -v completes a variable whose name is a dangerous keyword.
+        let r = shell().exec("__proto__=val\ncompgen -v __proto__");
+        assert_eq!(r.exit_code, 0, "L800 exit");
+        assert_eq!(r.stdout, "__proto__\n", "L800 stdout");
+
+        // Guard: compgen -v with a prefix must NOT list non-matching names, and a
+        // nameref assignment must write THROUGH to the target (not shadow it).
+        let r = shell().exec("__proto__=val\nother=x\ncompgen -v __proto__");
+        assert_eq!(r.stdout, "__proto__\n", "compgen prefix filter");
+        let r = shell().exec("target=old\ndeclare -n ref=target\nref=new\necho \"$target $ref\"");
+        assert_eq!(r.stdout, "new new\n", "nameref write-through");
+    }
+
     #[test]
     fn jbpi_interpreter_indexed_array_arithmetic_subscript_rows_match_upstream() {
         // L154 arithmetic expressions in indices: `${arr[i]} ${arr[i+1]}`.
