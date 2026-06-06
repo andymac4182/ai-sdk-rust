@@ -162,6 +162,10 @@ pub struct JustBashExecOptions {
     pub cwd: Option<String>,
     /// Standard input passed to the first command or pipeline.
     pub stdin: Option<String>,
+    /// When true, [`Self::stdin`] holds a latin1 (char-per-byte) carrier whose
+    /// raw bytes must be forwarded verbatim to byte consumers instead of being
+    /// re-encoded as UTF-8. Mirrors upstream's `stdinKind: 'bytes'`.
+    pub stdin_is_bytes: bool,
     /// Literal argv entries appended to the first command.
     pub args: Vec<String>,
     /// Optional per-exec timeout in milliseconds.
@@ -203,6 +207,17 @@ impl JustBashExecOptions {
     /// Sets standard input for this exec.
     pub fn with_stdin(mut self, stdin: impl Into<String>) -> Self {
         self.stdin = Some(stdin.into());
+        self
+    }
+
+    /// Sets raw byte standard input for this exec, mirroring upstream's
+    /// `stdinKind: 'bytes'`. The bytes are carried verbatim as a latin1
+    /// (char-per-byte) string and forwarded to byte consumers without UTF-8
+    /// re-encoding, so a downstream `wc -c` reports the exact byte count.
+    pub fn with_stdin_bytes(mut self, bytes: impl Into<Vec<u8>>) -> Self {
+        let bytes = bytes.into();
+        self.stdin = Some(bytes.iter().map(|byte| char::from(*byte)).collect());
+        self.stdin_is_bytes = true;
         self
     }
 
@@ -1056,6 +1071,7 @@ impl JustBashSession {
             previous_cwd: self.inner.base_cwd.clone(),
             functions: BTreeMap::new(),
             stdin: options.stdin.unwrap_or_default(),
+            stdin_bytes: options.stdin_is_bytes,
             extra_args: options.args,
             extra_args_consumed: false,
             started_at: Instant::now(),
@@ -1219,6 +1235,12 @@ struct ExecState<'a> {
     previous_cwd: String,
     functions: BTreeMap<String, String>,
     stdin: String,
+    /// True when [`Self::stdin`] is a latin1 (char-per-byte) carrier of raw
+    /// bytes rather than UTF-8 text — set when the upstream pipeline stage
+    /// emitted a byte-clean `stdout_bytes` buffer (or the exec was given byte
+    /// stdin via `stdinKind: 'bytes'`). Lets byte-passthrough commands forward
+    /// the exact bytes instead of UTF-8 re-encoding the carrier.
+    stdin_bytes: bool,
     extra_args: Vec<String>,
     extra_args_consumed: bool,
     started_at: Instant,
@@ -1388,17 +1410,25 @@ fn execute_control_script(state: &mut ExecState<'_>, script: &str) -> CommandRes
 
 fn execute_pipeline(state: &mut ExecState<'_>, command: &str) -> CommandResult {
     let mut stdin = state.stdin.clone();
+    // Track whether the current pipe-segment stdin is a raw byte buffer. The
+    // first segment inherits the exec-level flag (`stdinKind: 'bytes'`); each
+    // later segment is byte-clean iff the previous stage emitted `stdout_bytes`.
+    let mut stdin_is_bytes = state.stdin_bytes;
+    let saved_stdin_bytes = state.stdin_bytes;
     let mut final_result = CommandResult::default();
     let mut stderr = String::new();
     for part in split_pipeline(command) {
+        state.stdin_bytes = stdin_is_bytes;
         let result = execute_simple_command(state, part.trim(), stdin);
         stderr.push_str(&result.stderr);
         stdin = result.stdout.clone();
+        stdin_is_bytes = result.stdout_bytes.is_some();
         final_result = result;
         if final_result.exit_requested || final_result.return_requested {
             break;
         }
     }
+    state.stdin_bytes = saved_stdin_bytes;
     final_result.stderr = stderr;
     final_result
 }
@@ -2485,7 +2515,19 @@ fn command_cat(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
         } else {
             stdin.to_string()
         };
-        return stdout_result(stdout);
+        let mut result = stdout_result(stdout);
+        // `cat` with no FILE argument copies stdin to stdout byte-for-byte. When
+        // the upstream stage marked the stdin as a raw byte buffer (a non-UTF-8
+        // file forwarded through earlier pipe stages), carry those exact bytes
+        // forward via `stdout_bytes` so a chained `cat | cat > file` redirection
+        // writes them verbatim instead of UTF-8 re-encoding the latin1 carrier.
+        // Plain text stdin carries no byte view and keeps the UTF-8 write path.
+        if !number_lines && state.stdin_bytes {
+            if let Ok(bytes) = content_to_bytes(stdin.to_string(), BufferEncoding::Latin1) {
+                result.stdout_bytes = Some(bytes);
+            }
+        }
+        return result;
     }
     let fs = match state.session.inner.fs.lock() {
         Ok(fs) => fs,
@@ -3031,6 +3073,14 @@ fn command_wc(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
             if let Some(Some(raw)) = raw_byte_counts.get(index) {
                 counts.bytes = *raw;
             }
+        } else if show_bytes && paths.is_empty() && state.stdin_bytes {
+            // `wc -c` over byte stdin reports the raw on-wire byte count. Byte
+            // stdin (`stdinKind: 'bytes'`, or bytes forwarded from an upstream
+            // byte-clean stage) is carried as a latin1 (char-per-byte) buffer, so
+            // each codepoint <= 0xFF is exactly one byte — never the wider UTF-8
+            // length a second encode of the high bytes would produce. Text stdin
+            // keeps its UTF-8 byte length via `TextCounts::from_text`.
+            counts.bytes = carrier_byte_length(&input.text);
         }
         total.add(counts);
         stdout.push_str(&format_wc_counts(
@@ -3956,6 +4006,20 @@ struct TextCounts {
     words: usize,
     bytes: usize,
     chars: usize,
+}
+
+/// Computes the on-wire byte length of a pipeline carrier string. The internal
+/// pipeline carries bytes as a latin1 (char-per-byte) string for byte
+/// transparency: when every codepoint fits in a single byte (<= 0xFF) the
+/// carrier is a raw byte buffer and its byte length is the codepoint count.
+/// When any codepoint exceeds 0xFF the carrier is already proper Unicode text
+/// (e.g. multibyte CJK) and its byte length is the UTF-8 encoded length.
+fn carrier_byte_length(text: &str) -> usize {
+    if text.chars().all(|character| (character as u32) <= 0xff) {
+        text.chars().count()
+    } else {
+        text.len()
+    }
 }
 
 impl TextCounts {
@@ -35309,6 +35373,38 @@ mod tests {
         assert_eq!(
             herestring
                 .exec("wc -c <<< \"한\"", JustBashExecOptions::new())
+                .stdout
+                .trim(),
+            "4"
+        );
+
+        // L97: a non-UTF-8 binary file round-trips through `cat | cat | cat >`
+        // verbatim. The 4 raw bytes 0x80 0xff 0x00 0x90 (not valid UTF-8) must
+        // survive every pipe stage and the final redirect with no re-encoding.
+        let binary_round_trip = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_binary_file("/binary.bin", vec![0x80, 0xff, 0x00, 0x90]),
+        );
+        binary_round_trip.exec(
+            "cat /binary.bin | cat | cat > /out.bin",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(
+            binary_round_trip.read_file_buffer("/out.bin").unwrap(),
+            vec![0x80, 0xff, 0x00, 0x90]
+        );
+
+        // L200: byte stdin (`stdinKind: 'bytes'`) is forwarded verbatim. The 4
+        // raw bytes 0x00 0x80 0xff 0x90 (not valid UTF-8) are carried as a
+        // latin1 byte-string and reach `wc -c` as exactly 4 bytes — never the 7
+        // a second UTF-8 round-trip of the three high bytes would produce.
+        let byte_stdin = JustBashSession::new();
+        assert_eq!(
+            byte_stdin
+                .exec(
+                    "wc -c",
+                    JustBashExecOptions::new().with_stdin_bytes(vec![0x00, 0x80, 0xff, 0x90])
+                )
                 .stdout
                 .trim(),
             "4"
