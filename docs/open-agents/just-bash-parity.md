@@ -19,11 +19,11 @@ Rows are intentionally fail-closed: no row is verified until a sibling implement
 | Non-test TS/TSX source files | 423 |
 | Test files | 485 |
 | Test cases | 9936 |
-| Portable pending cases | 19 |
-| Portable verified cases | 8718 |
+| Portable pending cases | 17 |
+| Portable verified cases | 8720 |
 | JS-only documented cases | 1199 |
 | Type-system impossible cases | 0 |
-| Strict gate gaps | 19 |
+| Strict gate gaps | 17 |
 | Inventory check command | node scripts/just-bash-test-inventory.mjs --check |
 | Strict gate command | node scripts/just-bash-test-inventory.mjs --strict |
 | Conformance plan | docs/open-agents/just-bash-conformance.md |
@@ -327,7 +327,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | spec:jq | 3 | 0 | 0 | 3 | 0 |
 | packages/just-bash | spec:sed | 3 | 0 | 0 | 3 | 0 |
 | packages/just-bash | syntax | 485 | 0 | 484 | 1 | 0 |
-| packages/just-bash | transform | 369 | 6 | 363 | 0 | 0 |
+| packages/just-bash | transform | 369 | 4 | 365 | 0 | 0 |
 
 ## Strict Gap Summary
 
@@ -338,7 +338,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | pending:just-bash-command-sed | portable-pending | 2 |
 | pending:just-bash-command-timeout | portable-pending | 1 |
 | pending:just-bash-command-yq | portable-pending | 2 |
-| pending:just-bash-core | portable-pending | 10 |
+| pending:just-bash-core | portable-pending | 8 |
 | pending:just-bash-fs | portable-pending | 1 |
 | pending:just-bash-parser-interpreter | portable-pending | 1 |
 
@@ -828,7 +828,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | syntax | packages/just-bash/src/syntax/subshell-args.test.ts | 21 | 0 | 21 | 0 | 0 | crates/just-bash::parser-interpreter |
 | packages/just-bash | syntax | packages/just-bash/src/syntax/variables.test.ts | 43 | 0 | 43 | 0 | 0 | crates/just-bash::parser-interpreter |
 | packages/just-bash | transform | packages/just-bash/src/transform/plugins/command-collector.test.ts | 8 | 0 | 8 | 0 | 0 | crates/just-bash::transform::command-collector |
-| packages/just-bash | transform | packages/just-bash/src/transform/plugins/tee-plugin.test.ts | 98 | 5 | 93 | 0 | 0 | crates/just-bash::runtime; crates/just-bash::shell; crates/just-bash::transform::tee; pending:just-bash-core |
+| packages/just-bash | transform | packages/just-bash/src/transform/plugins/tee-plugin.test.ts | 98 | 3 | 95 | 0 | 0 | crates/just-bash::runtime; crates/just-bash::shell; crates/just-bash::transform::tee; pending:just-bash-core |
 | packages/just-bash | transform | packages/just-bash/src/transform/serialize.test.ts | 236 | 1 | 235 | 0 | 0 | crates/just-bash::shell; crates/just-bash::transform::serialize; pending:just-bash-core |
 | packages/just-bash | transform | packages/just-bash/src/transform/transform.test.ts | 27 | 0 | 27 | 0 | 0 | crates/just-bash::transform::command-collector; crates/just-bash::transform::pipeline; crates/just-bash::transform::tee |
 
@@ -10887,9 +10887,9 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | transform | packages/just-bash/src/transform/plugins/tee-plugin.test.ts | 457 | TeePlugin exec | function with local variables and exit code | it | portable-verified | crates/just-bash::shell | just_bash_core_tee_semantics_control_flow_and_command_rows_match_plain_exec | just-bash-core verifies the remaining TeePlugin semantics-preservation rows that exercise interpreter control flow composed with faithful command behavior through the real Interpreter: nested command substitution feeding wc -l, here-string piped into tr (upper-casing), a function with a local variable plus the [ test builtin, brace expansion {a,b,c}{1,2} piped through tr+sort, a for loop driving printf %02d/%s, a group command piped into sort -r, and \|& forwarding stdout+stderr (ls error text and a plain echo) into the next command. The Rust port has no tee transform, so equivalence means the interpreter emits the exact bash-correct stdout/stderr/exit code; each assertion fails if that control-flow or command semantics regresses. |
 | packages/just-bash | transform | packages/just-bash/src/transform/plugins/tee-plugin.test.ts | 463 | TeePlugin exec | nested subshells with variable isolation | it | portable-verified | crates/just-bash::shell | just_bash_transform_plugins_tee_semantics_match_upstream | just-bash-transform-plugins verifies that the Rust interpreter produces the exact stdout/stderr/exit code the TeePlugin exec/semantics-preservation rows assert for plain runs: simple success/failure, pipelines, &&/\|\|/; chains, $? propagation, subshell/group output and exit-code isolation, for/if/elif/case control flow, arithmetic conditionals, and negated pipelines. |
 | packages/just-bash | transform | packages/just-bash/src/transform/plugins/tee-plugin.test.ts | 467 | TeePlugin exec | case statement with fallthrough patterns | it | portable-verified | crates/just-bash::shell | just_bash_transform_plugins_tee_semantics_match_upstream | just-bash-transform-plugins verifies that the Rust interpreter produces the exact stdout/stderr/exit code the TeePlugin exec/semantics-preservation rows assert for plain runs: simple success/failure, pipelines, &&/\|\|/; chains, $? propagation, subshell/group output and exit-code isolation, for/if/elif/case control flow, arithmetic conditionals, and negated pipelines. |
-| packages/just-bash | transform | packages/just-bash/src/transform/plugins/tee-plugin.test.ts | 473 | TeePlugin exec | arrays: declare, append, iterate | it | portable-pending | pending:just-bash-core | pending:just-bash-core | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
+| packages/just-bash | transform | packages/just-bash/src/transform/plugins/tee-plugin.test.ts | 473 | TeePlugin exec | arrays: declare, append, iterate | it | portable-verified | crates/just-bash::shell | just_bash_transform_plugins_tee_semantics_match_upstream | just-bash-core verifies this TeePlugin semantics-preservation row through the real Interpreter: `arr=(one two three); arr+=(four)` builds and appends an indexed array, and `for x in "${arr[@]}"` iterates each element (quoted `[@]` keeps elements as separate words), printing `one`/`two`/`three`/`four` one per line. The Rust port has no tee transform, so equivalence means the interpreter emits the exact bash-correct stdout/stderr/exit code; the assertion fails if array word-splitting regresses. |
 | packages/just-bash | transform | packages/just-bash/src/transform/plugins/tee-plugin.test.ts | 479 | TeePlugin exec | associative array lookup | it | portable-verified | crates/just-bash::shell | just_bash_core_tee_semantics_control_flow_and_command_rows_match_plain_exec | just-bash-core verifies this TeePlugin semantics-preservation row through the real Interpreter: `declare -A m` plus `m[a]=1; m[b]=2` indexed assignments and the `${m[a]} ${m[b]}` lookup print `1 2`. The Rust port has no tee transform, so equivalence means the interpreter emits the exact bash-correct stdout/stderr/exit code; the assertion fails if associative-array declaration/assignment/lookup regresses. |
-| packages/just-bash | transform | packages/just-bash/src/transform/plugins/tee-plugin.test.ts | 485 | TeePlugin exec | parameter expansion operators | it | portable-pending | pending:just-bash-core | pending:just-bash-core | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
+| packages/just-bash | transform | packages/just-bash/src/transform/plugins/tee-plugin.test.ts | 485 | TeePlugin exec | parameter expansion operators | it | portable-verified | crates/just-bash::shell | just_bash_transform_plugins_tee_semantics_match_upstream | just-bash-core verifies this TeePlugin semantics-preservation row through the real Interpreter: `${X^^}` uppercases all, `${X%% *}` strips the longest trailing ` *` suffix, `${X#* }` strips the shortest leading `* ` prefix, and `${#X}` measures length, printing `HELLO WORLD`/`hello`/`world`/`11`. The Rust port has no tee transform, so equivalence means the interpreter emits the exact bash-correct stdout/stderr/exit code; the assertion fails if the prefix/suffix-removal parameter operators regress. |
 | packages/just-bash | transform | packages/just-bash/src/transform/plugins/tee-plugin.test.ts | 491 | TeePlugin exec | multi-line script: build and query | it | portable-pending | pending:just-bash-core | pending:just-bash-core | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
 | packages/just-bash | transform | packages/just-bash/src/transform/plugins/tee-plugin.test.ts | 503 | TeePlugin exec | pipeline exit code propagation through $? | it | portable-verified | crates/just-bash::shell | just_bash_transform_plugins_tee_semantics_match_upstream | just-bash-transform-plugins verifies that the Rust interpreter produces the exact stdout/stderr/exit code the TeePlugin exec/semantics-preservation rows assert for plain runs: simple success/failure, pipelines, &&/\|\|/; chains, $? propagation, subshell/group output and exit-code isolation, for/if/elif/case control flow, arithmetic conditionals, and negated pipelines. |
 | packages/just-bash | transform | packages/just-bash/src/transform/plugins/tee-plugin.test.ts | 509 | TeePlugin exec | heredoc into pipeline | it | portable-verified | crates/just-bash::shell | just_bash_core_serialize_and_tee_execution_equivalence_rows | just-bash-core verifies the TeePlugin assertSameSemantics rows the real Rust interpreter reproduces with deterministic command fakes: function definition piped to cat, heredoc piped to sort, deeply nested command substitution, quoted-vs-unquoted word splitting, and two sequential here-docs. Each runs the original, serializes the parsed AST, re-executes the serialized form, and asserts both runs match the upstream-correct bytes/exit code. |
