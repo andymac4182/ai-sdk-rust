@@ -12923,12 +12923,12 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
 
         // edge cases and combinations (333-382)
         // Only the exact dangerous keys are filtered; differently-cased keys are
-        // kept (rendered in sorted order by this port's JSON model).
+        // kept in insertion order, matching jq's order-preserving object model.
         assert_eq!(
             env.exec("echo '{}' | jq -c '{(\"__Proto__\"): 1, (\"__PROTO__\"): 2}'")
                 .stdout
                 .trim(),
-            "{\"__PROTO__\":2,\"__Proto__\":1}"
+            "{\"__Proto__\":1,\"__PROTO__\":2}"
         );
         assert_eq!(
             env.exec("echo '{}' | jq -c '{a: 1, b: 2, c: 3} | .d = 4 | del(.b)'")
@@ -13016,11 +13016,11 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
             "\"caught\"\n"
         );
         assert_eq!(env.exec("echo '5' | jq '. as $x | $x * $x'").stdout, "25\n");
-        // Object keys render in sorted order in this port's JSON model.
+        // Constructed object keys keep insertion order, matching jq.
         assert_eq!(
             env.exec("echo '3' | jq -c '. as $n | {value: $n, doubled: ($n * 2)}'")
                 .stdout,
-            "{\"doubled\":6,\"value\":3}\n"
+            "{\"value\":3,\"doubled\":6}\n"
         );
     }
 
@@ -13799,7 +13799,7 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         );
         assert_eq!(
             env.exec("xan to json /people.csv").stdout,
-            "[\n  {\n    \"age\": 30,\n    \"name\": \"alice\"\n  },\n  {\n    \"age\": 25,\n    \"name\": \"bob\"\n  }\n]\n"
+            "[\n  {\n    \"name\": \"alice\",\n    \"age\": 30\n  },\n  {\n    \"name\": \"bob\",\n    \"age\": 25\n  }\n]\n"
         );
         assert_eq!(
             env.exec("xan to").stderr,
@@ -17201,9 +17201,9 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         //   :149 (read XML), :160 (XML attributes), :174 (output XML),
         //   :492 (JSON -> CSV), :699 (custom XML attribute prefix).
         // packages/just-bash/src/commands/yq/yq.fixtures.test.ts
-        //   :454 (CSV -> JSON), :475 (YAML -> INI), :485 (INI -> JSON),
-        //   :506 (YAML -> TOML), :729 (average age), :747 (group_by),
-        //   :757 (object construction from map).
+        //   :454 (CSV -> JSON), :465 (JSON -> CSV), :475 (YAML -> INI),
+        //   :485 (INI -> JSON), :506 (YAML -> TOML), :729 (average age),
+        //   :747 (group_by), :757 (object construction from map).
         let env = Bash::with_options(BashOptions {
             files: BTreeMap::from([
                 (
@@ -17265,6 +17265,17 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
                     )
                     .to_string(),
                 ),
+                (
+                    "/fixtures/json/users.json".to_string(),
+                    concat!(
+                        "{\n  \"users\": [\n",
+                        "    { \"name\": \"alice\", \"age\": 30, \"email\": \"alice@example.com\", \"active\": true },\n",
+                        "    { \"name\": \"bob\", \"age\": 25, \"email\": \"bob@example.com\", \"active\": false },\n",
+                        "    { \"name\": \"charlie\", \"age\": 35, \"email\": \"charlie@example.com\", \"active\": true }\n",
+                        "  ]\n}\n",
+                    )
+                    .to_string(),
+                ),
             ]),
             ..BashOptions::default()
         });
@@ -17293,6 +17304,12 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         assert!(json_csv.stdout.contains("name,score"));
         assert!(json_csv.stdout.contains("alice,95"));
         assert!(json_csv.stdout.contains("bob,87"));
+
+        // yq.fixtures.test.ts :465 should convert JSON to CSV (project .users, -o csv)
+        let fixtures_json_csv = env.exec("yq -p json '.users' /fixtures/json/users.json -o csv");
+        assert_eq!(fixtures_json_csv.exit_code, 0);
+        assert!(fixtures_json_csv.stdout.contains("name,age,email,active"));
+        assert!(fixtures_json_csv.stdout.contains("alice,30"));
 
         // yq.test.ts :699 should use custom attribute prefix
         let xml_prefix = env
@@ -17505,6 +17522,13 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         );
         let tsv_delim = env.exec("yq -p csv --csv-delimiter='\\t' '.[0].name' /data.tsv");
         assert_eq!(tsv_delim.stdout, "alice\n");
+
+        // yq.test.ts :474 should output as CSV (YAML array of objects -> CSV)
+        let yaml_csv = env.exec("yq -o csv '.' /rows.yaml");
+        assert_eq!(yaml_csv.exit_code, 0);
+        assert!(yaml_csv.stdout.contains("name,age"));
+        assert!(yaml_csv.stdout.contains("alice,30"));
+        assert!(yaml_csv.stdout.contains("bob,25"));
 
         // --- --no-csv-header (:686) ---
         let no_header = env.exec("yq -p csv --no-csv-header '.[0][0]' /headerless.csv");
