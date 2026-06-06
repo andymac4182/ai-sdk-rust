@@ -824,6 +824,22 @@ mod tests {
         let r = Bash::new().exec("echo hello | grep nomatch");
         assert_eq!(r.exit_code, 1, "L721 exit");
         assert_eq!(r.stdout, "", "L721 stdout");
+
+        // tee-plugin.test.ts:523 process substitution style: diff two pipelines
+        // via temp files. `echo -e` writes the multi-line bodies to /tmp, then
+        // `diff` reports the differing lines in the portable unified format
+        // (default `-u`) and `echo exit:$?` surfaces diff's exit status (1 when
+        // the files differ). The TeePlugin wrapper never perturbs this output, so
+        // the plain `Bash::exec` byte stream is the parity contract.
+        let r = Bash::new().exec(
+            "echo -e '1\\n2\\n3' > /tmp/a.txt\necho -e '1\\n3\\n4' > /tmp/b.txt\ndiff /tmp/a.txt /tmp/b.txt; echo exit:$?",
+        );
+        assert_eq!(
+            r.stdout, "--- /tmp/a.txt\n+++ /tmp/b.txt\n 1\n-2\n+3\n-3\n+4\nexit:1\n",
+            "L523 stdout"
+        );
+        assert_eq!(r.stderr, "", "L523 stderr");
+        assert_eq!(r.exit_code, 0, "L523 exit");
     }
 
     const SHERLOCK: &str = "For the Doctor Watsons of this world, as opposed to the Sherlock\n\
