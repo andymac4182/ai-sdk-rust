@@ -40838,10 +40838,7 @@ mod tests {
             ("/dir/b.txt", "line1\nline2\nline3\n"),
         ];
         let direct = xan_run_with_files("wc -l /dir/a.txt /dir/b.txt", files);
-        assert_eq!(
-            direct.stdout,
-            "  2 /dir/a.txt\n  3 /dir/b.txt\n  5 total\n"
-        );
+        assert_eq!(direct.stdout, "  2 /dir/a.txt\n  3 /dir/b.txt\n  5 total\n");
         assert_eq!(direct.exit_code, 0);
 
         // The upstream batch-mode case: find passes both files to a single `wc`.
