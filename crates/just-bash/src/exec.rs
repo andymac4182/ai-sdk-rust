@@ -32223,11 +32223,59 @@ fn reverse_lines(input: &str) -> String {
     }
 }
 
+/// Mirrors JavaScript's `Number.parseInt(value, 10)`: skips leading
+/// whitespace, accepts an optional sign, then consumes the leading run of
+/// decimal digits (so `"3abc"` -> `3`). Returns `None` when no digits are
+/// found (JS `NaN`). Upstream `strings` uses this for `-n MIN`, then rejects
+/// values that are `NaN` or `< 1`.
+fn js_parse_int_base10(value: &str) -> Option<i64> {
+    let trimmed = value.trim_start();
+    let mut chars = trimmed.chars().peekable();
+    let mut digits = String::new();
+    match chars.peek() {
+        Some('+') => {
+            chars.next();
+        }
+        Some('-') => {
+            digits.push('-');
+            chars.next();
+        }
+        _ => {}
+    }
+    let mut has_digit = false;
+    while let Some(&ch) = chars.peek() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+            has_digit = true;
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    if !has_digit {
+        return None;
+    }
+    digits.parse::<i64>().ok()
+}
+
+/// Validates a `-n MIN` argument exactly like upstream: parse via JS
+/// `parseInt`, reject `NaN`/`< 1` with the original (raw) token quoted in the
+/// error message.
+fn strings_parse_min_len(raw: &str) -> Result<usize, CommandResult> {
+    match js_parse_int_base10(raw) {
+        Some(min) if min >= 1 => Ok(min as usize),
+        _ => Err(stderr_result(
+            1,
+            format!("strings: invalid minimum string length: '{raw}'\n"),
+        )),
+    }
+}
+
+const STRINGS_HELP: &str = "strings - print the sequences of printable characters in files\n\nUsage: strings [OPTION]... [FILE]...\n\nDescription:\n  For each FILE, print the printable character sequences that are at least MIN characters long. If no FILE is specified, standard input is read.\n\nOptions:\n  -n MIN       Print sequences of at least MIN characters (default: 4)\n  -t FORMAT    Print offset before each string (o=octal, x=hex, d=decimal)\n  -a           Scan the entire file (default behavior)\n  -e ENCODING  Select character encoding (s=7-bit, S=8-bit)\n\nExamples:\n  strings file.bin          # Extract strings (min 4 chars)\n  strings -n 8 file.bin     # Extract strings (min 8 chars)\n  strings -t x file.bin     # Show hex offset\n  echo 'hello' | strings    # Read from stdin\n";
+
 fn command_strings(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
     if args.iter().any(|arg| arg == "--help") {
-        return stdout_result(
-            "Usage: strings [OPTION]... [FILE]...\nPrint printable character sequences.\n",
-        );
+        return stdout_result(STRINGS_HELP);
     }
     let mut min_len = 4usize;
     let mut offset_format = None;
@@ -32246,13 +32294,10 @@ fn command_strings(state: &ExecState<'_>, args: &[String], stdin: &str) -> Comma
                 let Some(value) = args.get(index + 1) else {
                     return stderr_result(1, "strings: option requires an argument -- 'n'\n");
                 };
-                let Ok(value) = value.parse::<usize>() else {
-                    return stderr_result(1, "strings: invalid minimum string length\n");
+                min_len = match strings_parse_min_len(value) {
+                    Ok(min) => min,
+                    Err(result) => return result,
                 };
-                if value == 0 {
-                    return stderr_result(1, "strings: invalid minimum string length\n");
-                }
-                min_len = value;
                 index += 1;
             }
             "-t" => {
@@ -32260,7 +32305,7 @@ fn command_strings(state: &ExecState<'_>, args: &[String], stdin: &str) -> Comma
                     return stderr_result(1, "strings: option requires an argument -- 't'\n");
                 };
                 if !matches!(value.as_str(), "d" | "x" | "o") {
-                    return stderr_result(1, "strings: invalid radix\n");
+                    return stderr_result(1, format!("strings: invalid radix: '{value}'\n"));
                 }
                 offset_format = value.chars().next();
                 index += 1;
@@ -32270,35 +32315,38 @@ fn command_strings(state: &ExecState<'_>, args: &[String], stdin: &str) -> Comma
                     return stderr_result(1, "strings: option requires an argument -- 'e'\n");
                 };
                 if !matches!(value.as_str(), "s" | "S") {
-                    return stderr_result(1, "strings: invalid encoding\n");
+                    return stderr_result(1, format!("strings: invalid encoding: '{value}'\n"));
                 }
                 index += 1;
             }
             "-" => paths.push(arg.clone()),
             _ if arg.starts_with("-n") && arg.len() > 2 => {
-                let Ok(value) = arg[2..].parse::<usize>() else {
-                    return stderr_result(1, "strings: invalid minimum string length\n");
+                min_len = match strings_parse_min_len(&arg[2..]) {
+                    Ok(min) => min,
+                    Err(result) => return result,
                 };
-                if value == 0 {
-                    return stderr_result(1, "strings: invalid minimum string length\n");
-                }
-                min_len = value;
             }
-            _ if arg.starts_with("-t") && arg.len() > 2 => {
+            _ if arg.starts_with("-t") && arg.len() == 3 => {
                 let value = &arg[2..];
                 if !matches!(value, "d" | "x" | "o") {
-                    return stderr_result(1, "strings: invalid radix\n");
+                    return stderr_result(1, format!("strings: invalid radix: '{value}'\n"));
                 }
                 offset_format = value.chars().next();
             }
-            _ if arg.starts_with('-') && arg[1..].chars().all(|ch| ch.is_ascii_digit()) => {
-                let Ok(value) = arg[1..].parse::<usize>() else {
-                    return stderr_result(1, "strings: invalid minimum string length\n");
-                };
-                if value == 0 {
-                    return stderr_result(1, "strings: invalid minimum string length\n");
+            _ if arg.starts_with("-e") && arg.len() == 3 => {
+                let value = &arg[2..];
+                if !matches!(value, "s" | "S") {
+                    return stderr_result(1, format!("strings: invalid encoding: '{value}'\n"));
                 }
-                min_len = value;
+            }
+            _ if arg.starts_with('-')
+                && arg.len() > 1
+                && arg[1..].chars().all(|ch| ch.is_ascii_digit()) =>
+            {
+                min_len = match strings_parse_min_len(&arg[1..]) {
+                    Ok(min) => min,
+                    Err(result) => return result,
+                };
             }
             _ if arg.starts_with("--") => {
                 return stderr_result(1, format!("strings: unrecognized option '{}'\n", arg));
@@ -32346,11 +32394,13 @@ fn flush_string(
     if current.len() < min_len {
         return;
     }
+    // Upstream pads the offset to 7 columns with leading spaces
+    // (`offset.toString(radix).padStart(7, " ")`) before a trailing space.
     if let Some(format) = offset_format {
         match format {
-            'd' => output.push_str(&format!("{start} ")),
-            'x' => output.push_str(&format!("{start:x} ")),
-            'o' => output.push_str(&format!("{start:o} ")),
+            'd' => output.push_str(&format!("{start:>7} ")),
+            'x' => output.push_str(&format!("{start:>7x} ")),
+            'o' => output.push_str(&format!("{start:>7o} ")),
             _ => {}
         }
     }
@@ -40393,6 +40443,148 @@ mod tests {
         let r = strings_run_binary("strings /binary.bin", "/binary.bin", &bytes);
         assert_eq!(r.stdout, "test\n");
         assert_eq!(r.exit_code, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // strings: exact-match behavioral parity with upstream strings.ts.
+    // These pin the offset padding, error-message wording (which quotes the
+    // raw token), the `parseInt`-style `-n` handling, the combined `-e`/`-t`
+    // forms, and the full `--help` text — all asserted exactly, not via
+    // `.toContain`, so they cannot silently regress.
+    // -----------------------------------------------------------------------
+
+    // strings.test.ts:100 "-t d" pads the offset to 7 columns:
+    // `formatOffset(8,"d")` -> `"      8 "`.
+    #[test]
+    fn strings_offset_decimal_is_padded_to_7_columns() {
+        let r = jb_session().exec(
+            "printf 'hello\\x00\\x00\\x00world' | strings -t d",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "      0 hello\n      8 world\n");
+    }
+
+    // strings.test.ts:110 "-t x": offset 16 renders as hex `10`, padded.
+    #[test]
+    fn strings_offset_hex_is_padded_to_7_columns() {
+        let r = jb_session().exec(
+            "printf 'hello\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00world' | strings -t x",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "      0 hello\n     10 world\n");
+    }
+
+    // strings.test.ts:121 "-t o": offset 8 renders as octal `10`, padded.
+    #[test]
+    fn strings_offset_octal_is_padded_to_7_columns() {
+        let r = jb_session().exec(
+            "printf 'hello\\x00\\x00\\x00world' | strings -t o",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "      0 hello\n     10 world\n");
+    }
+
+    // strings.test.ts:131 combined `-td` form.
+    #[test]
+    fn strings_offset_combined_td_form_is_padded() {
+        let r = jb_session().exec(
+            "printf 'hello\\x00\\x00\\x00world' | strings -td",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "      0 hello\n      8 world\n");
+    }
+
+    // strings.test.ts:77 invalid `-n` value quotes the raw token.
+    #[test]
+    fn strings_invalid_min_length_quotes_raw_token() {
+        let r = jb_session().exec("echo 'test' | strings -n abc", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(r.stderr, "strings: invalid minimum string length: 'abc'\n");
+    }
+
+    // strings.test.ts:84 zero minimum length quotes the raw token.
+    #[test]
+    fn strings_zero_min_length_quotes_raw_token() {
+        let r = jb_session().exec("echo 'test' | strings -n 0", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(r.stderr, "strings: invalid minimum string length: '0'\n");
+    }
+
+    // strings.test.ts:91 zero min length via `-N` shorthand quotes the token.
+    #[test]
+    fn strings_zero_min_length_shorthand_quotes_raw_token() {
+        let r = jb_session().exec("echo 'test' | strings -0", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(r.stderr, "strings: invalid minimum string length: '0'\n");
+    }
+
+    // `Number.parseInt` semantics: `-n 3abc` parses to 3 (not an error).
+    #[test]
+    fn strings_min_length_parses_leading_digits() {
+        let r = jb_session().exec(
+            "printf 'ab\\x00cde\\x00fghi' | strings -n 3abc",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "cde\nfghi\n");
+    }
+
+    // strings.test.ts:140 invalid radix quotes the raw format token.
+    #[test]
+    fn strings_invalid_radix_quotes_raw_token() {
+        let r = jb_session().exec("echo 'test' | strings -t z", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(r.stderr, "strings: invalid radix: 'z'\n");
+    }
+
+    // strings.test.ts:163 invalid encoding quotes the raw encoding token.
+    #[test]
+    fn strings_invalid_encoding_quotes_raw_token() {
+        let r = jb_session().exec("echo 'test' | strings -e b", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(r.stderr, "strings: invalid encoding: 'b'\n");
+    }
+
+    // strings.test.ts:148/156 combined `-es`/`-eS` encoding forms are accepted.
+    #[test]
+    fn strings_combined_encoding_form_is_accepted() {
+        let r = jb_session().exec("echo 'hello' | strings -eS", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "hello\n");
+    }
+
+    // strings.test.ts:251 `--help` renders the full help block exactly.
+    #[test]
+    fn strings_help_matches_upstream_text() {
+        let r = jb_session().exec("strings --help", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(
+            r.stdout,
+            concat!(
+                "strings - print the sequences of printable characters in files\n",
+                "\n",
+                "Usage: strings [OPTION]... [FILE]...\n",
+                "\n",
+                "Description:\n",
+                "  For each FILE, print the printable character sequences that are at least MIN characters long. If no FILE is specified, standard input is read.\n",
+                "\n",
+                "Options:\n",
+                "  -n MIN       Print sequences of at least MIN characters (default: 4)\n",
+                "  -t FORMAT    Print offset before each string (o=octal, x=hex, d=decimal)\n",
+                "  -a           Scan the entire file (default behavior)\n",
+                "  -e ENCODING  Select character encoding (s=7-bit, S=8-bit)\n",
+                "\n",
+                "Examples:\n",
+                "  strings file.bin          # Extract strings (min 4 chars)\n",
+                "  strings -n 8 file.bin     # Extract strings (min 8 chars)\n",
+                "  strings -t x file.bin     # Show hex offset\n",
+                "  echo 'hello' | strings    # Read from stdin\n",
+            )
+        );
     }
 
     // -----------------------------------------------------------------------
