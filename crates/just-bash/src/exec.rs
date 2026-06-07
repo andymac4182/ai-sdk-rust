@@ -1011,6 +1011,22 @@ impl JustBashSession {
         }
         fs.mkdir("/proc/self/fd", MkdirOptions { recursive: true })
             .expect("default Just Bash /proc directory is valid");
+        // Mirror upstream `initProcFiles`: seed virtual process info so a bare
+        // `cat /proc/...` returns the same sandboxed values as the TypeScript
+        // implementation and never exposes real host process information.
+        for (path, content) in [
+            ("/proc/version", format!("{PROC_KERNEL_VERSION}\n")),
+            ("/proc/self/exe", "/bin/bash".to_string()),
+            ("/proc/self/cmdline", "bash\0".to_string()),
+            ("/proc/self/comm", "bash\n".to_string()),
+            ("/proc/self/status", format_proc_status(1, 0, 1000, 1000)),
+            ("/proc/self/fd/0", "/dev/stdin".to_string()),
+            ("/proc/self/fd/1", "/dev/stdout".to_string()),
+            ("/proc/self/fd/2", "/dev/stderr".to_string()),
+        ] {
+            fs.write_file(path, content.as_str())
+                .expect("default Just Bash /proc file path is valid");
+        }
         let layout_dirs: Vec<&str> = if options.create_default_layout {
             vec!["/tmp", "/home", "/home/user", &cwd]
         } else if cwd == "/" {
@@ -19256,6 +19272,19 @@ fn eval_structured_expr(
             Ok(Vec::new())
         };
     }
+    // `paths` / `leaf_paths` walk the value tree and emit one path array per
+    // node (each path is a list of object keys / array indices). Mirrors
+    // upstream query-engine `path-builtins.ts`; emitting a stream of values.
+    if expr == "paths" {
+        let mut paths = Vec::new();
+        jq_collect_paths(value, &mut Vec::new(), false, &mut paths);
+        return Ok(paths);
+    }
+    if expr == "leaf_paths" {
+        let mut paths = Vec::new();
+        jq_collect_paths(value, &mut Vec::new(), true, &mut paths);
+        return Ok(paths);
+    }
     if let Some(result) = eval_function(value, root, expr, env)? {
         return Ok(vec![result]);
     }
@@ -20233,6 +20262,46 @@ fn json_length(value: &JsonValue) -> usize {
         JsonValue::String(value) => value.chars().count(),
         JsonValue::Null => 0,
         _ => 1,
+    }
+}
+
+/// Walk `value`, collecting jq path arrays. When `leaf_only` is false this
+/// mirrors jq's `paths` (every interior and leaf path, depth-first); when true
+/// it mirrors `leaf_paths` (only scalar/null leaves). Each emitted path is a
+/// JSON array whose elements are object keys (strings) or array indices
+/// (numbers). Mirrors upstream query-engine `path-builtins.ts`.
+fn jq_collect_paths(
+    value: &JsonValue,
+    path: &mut Vec<JsonValue>,
+    leaf_only: bool,
+    out: &mut Vec<JsonValue>,
+) {
+    match value {
+        JsonValue::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                path.push(json_number(index as f64));
+                if !leaf_only {
+                    out.push(JsonValue::Array(path.clone()));
+                }
+                jq_collect_paths(item, path, leaf_only, out);
+                path.pop();
+            }
+        }
+        JsonValue::Object(map) => {
+            for (key, item) in map {
+                path.push(JsonValue::String(key.clone()));
+                if !leaf_only {
+                    out.push(JsonValue::Array(path.clone()));
+                }
+                jq_collect_paths(item, path, leaf_only, out);
+                path.pop();
+            }
+        }
+        _ => {
+            if leaf_only {
+                out.push(JsonValue::Array(path.clone()));
+            }
+        }
     }
 }
 
@@ -36293,6 +36362,24 @@ fn command_basename(command: &str) -> &str {
         .unwrap_or(command)
 }
 
+/// Simulated kernel version for `/proc/version`. Mirrors upstream
+/// `shell-metadata.ts` `KERNEL_VERSION`.
+const PROC_KERNEL_VERSION: &str = "Linux version 5.15.0-generic (just-bash) #1 SMP PREEMPT";
+
+/// Format `/proc/self/status` content using virtual process info. Mirrors
+/// upstream `shell-metadata.ts` `formatProcStatus`; never exposes real host
+/// process information.
+fn format_proc_status(pid: u32, ppid: u32, uid: u32, gid: u32) -> String {
+    format!(
+        "Name:\tbash\n\
+State:\tR (running)\n\
+Pid:\t{pid}\n\
+PPid:\t{ppid}\n\
+Uid:\t{uid}\t{uid}\t{uid}\t{uid}\n\
+Gid:\t{gid}\t{gid}\t{gid}\t{gid}\n"
+    )
+}
+
 fn default_env(cwd: &str) -> BTreeMap<String, String> {
     BTreeMap::from([
         ("HOME".to_string(), "/home/user".to_string()),
@@ -45052,5 +45139,75 @@ mod grep_spec_regex_parity_tests {
         // Valid POSIX classes still match.
         assert_case("grep -E 'a[[:alpha:]]'", "az\n", "az\n", 0);
         assert_case("grep -E '[[:digit:]]'", "x9y\n", "x9y\n", 0);
+    }
+}
+
+#[cfg(test)]
+mod security_command_output_parity_tests {
+    //! Behavioral-parity regression tests for the upstream `security/*` suite.
+    //!
+    //! These assert the command-output cases that previously diverged from the
+    //! TypeScript implementation:
+    //! - `cat /proc/self/status` (and the rest of the virtual `/proc` files)
+    //!   must return sandboxed process info, never the real host values.
+    //! - `jq` must support the `paths` / `leaf_paths` builtins.
+    use crate::Bash;
+
+    // sandbox/information-disclosure.test.ts + sandbox/sandbox-escape.test.ts:
+    // `/proc/self/status` must expose virtual PIDs/UIDs, never host values.
+    #[test]
+    fn proc_self_status_uses_virtual_process_info() {
+        let result = Bash::new().exec("cat /proc/self/status");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stderr, "");
+        assert!(result.stdout.contains("Pid:\t1"), "{:?}", result.stdout);
+        assert!(result.stdout.contains("PPid:\t0"), "{:?}", result.stdout);
+        assert!(result.stdout.contains("Uid:\t1000"), "{:?}", result.stdout);
+        assert!(result.stdout.contains("Gid:\t1000"), "{:?}", result.stdout);
+        // Never leak a real host PID like `Pid:\t<large number>`.
+        assert!(result.stdout.contains("Name:\tbash"), "{:?}", result.stdout);
+    }
+
+    // The remaining virtual `/proc` files mirror upstream `initProcFiles`.
+    #[test]
+    fn proc_virtual_files_are_seeded() {
+        let bash = Bash::new();
+        assert_eq!(
+            bash.exec("cat /proc/version").stdout,
+            "Linux version 5.15.0-generic (just-bash) #1 SMP PREEMPT\n"
+        );
+        assert_eq!(bash.exec("cat /proc/self/exe").stdout, "/bin/bash");
+        assert_eq!(bash.exec("cat /proc/self/comm").stdout, "bash\n");
+        assert_eq!(bash.exec("cat /proc/self/fd/0").stdout, "/dev/stdin");
+        assert_eq!(bash.exec("cat /proc/self/fd/1").stdout, "/dev/stdout");
+        assert_eq!(bash.exec("cat /proc/self/fd/2").stdout, "/dev/stderr");
+    }
+
+    // prototype-pollution/prototype-pollution-syntax-features.test.ts:
+    // `jq '[paths]'` must enumerate every path in the value.
+    #[test]
+    fn jq_paths_enumerates_object_paths() {
+        let result = Bash::new().exec("echo '{\"a\":1,\"b\":2}' | jq '[paths]'");
+        assert_eq!(result.exit_code, 0, "{:?}", result.stderr);
+        assert!(result.stdout.contains("\"a\""), "{:?}", result.stdout);
+        assert!(result.stdout.contains("\"b\""), "{:?}", result.stdout);
+    }
+
+    #[test]
+    fn jq_paths_walks_nested_arrays_and_objects() {
+        // Depth-first, every interior and leaf path, mirroring jq's `paths`.
+        let result = Bash::new().exec("echo '{\"a\":[1,{\"b\":2}]}' | jq -c '[paths]'");
+        assert_eq!(result.exit_code, 0, "{:?}", result.stderr);
+        assert_eq!(
+            result.stdout,
+            "[[\"a\"],[\"a\",0],[\"a\",1],[\"a\",1,\"b\"]]\n"
+        );
+    }
+
+    #[test]
+    fn jq_leaf_paths_emits_only_scalar_paths() {
+        let result = Bash::new().exec("echo '{\"a\":[1,{\"b\":2}]}' | jq -c '[leaf_paths]'");
+        assert_eq!(result.exit_code, 0, "{:?}", result.stderr);
+        assert_eq!(result.stdout, "[[\"a\",0],[\"a\",1,\"b\"]]\n");
     }
 }
