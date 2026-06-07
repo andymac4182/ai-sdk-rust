@@ -29813,57 +29813,118 @@ fn command_fold(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandR
     let mut spaces = false;
     let mut paths = Vec::new();
     let mut index = 0;
+    // Parse a width string the way upstream does: JS parseInt(value, 10),
+    // which accepts a leading numeric prefix (e.g. "5abc" -> 5) and rejects
+    // values < 1. The error text echoes the *original* (unparsed) token.
+    fn parse_fold_width(value: &str) -> Option<usize> {
+        let digits: String = value
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        digits
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n >= 1)
+            .map(|n| n as usize)
+    }
     while let Some(arg) = args.get(index) {
-        match arg.as_str() {
-            "-s" => spaces = true,
-            "-w" => {
-                let Some(value) = args.get(index + 1) else {
-                    return stderr_result(1, "fold: option requires an argument -- 'w'\n");
-                };
-                width = match value.parse::<usize>().ok().filter(|value| *value > 0) {
-                    Some(value) => value,
-                    None => return stderr_result(1, "fold: invalid number of columns\n"),
-                };
-                index += 1;
+        let arg_str = arg.as_str();
+        // -[sb]+w<digits>  (combined flags with width attached, e.g. -sw10, -bw5)
+        let combined_attached = arg_str.strip_prefix('-').and_then(|rest| {
+            let flags_end = rest.find('w')?;
+            let (flags, after) = (&rest[..flags_end], &rest[flags_end + 1..]);
+            if !flags.is_empty()
+                && flags.chars().all(|c| c == 's' || c == 'b')
+                && !after.is_empty()
+                && after.chars().all(|c| c.is_ascii_digit())
+            {
+                Some((flags.to_string(), after.to_string()))
+            } else {
+                None
             }
-            "-sw" | "-ws" => {
+        });
+        // -[sb]+w  (combined flags, width is the next argument, e.g. -sw 10)
+        let combined_next = arg_str.strip_prefix('-').and_then(|rest| {
+            rest.strip_suffix('w')
+                .filter(|flags| !flags.is_empty() && flags.chars().all(|c| c == 's' || c == 'b'))
+        });
+
+        if arg_str == "-s" {
+            spaces = true;
+        } else if arg_str == "-b" {
+            // byte counting; ASCII-equivalent here, no behavioral change
+        } else if arg_str == "-w" {
+            let Some(value) = args.get(index + 1) else {
+                return stderr_result(1, "fold: option requires an argument -- 'w'\n");
+            };
+            width = match parse_fold_width(value) {
+                Some(value) => value,
+                None => {
+                    return stderr_result(
+                        1,
+                        format!("fold: invalid number of columns: '{value}'\n"),
+                    );
+                }
+            };
+            index += 1;
+        } else if let Some(rest) = arg_str.strip_prefix("-w").filter(|r| !r.is_empty()) {
+            width = match parse_fold_width(rest) {
+                Some(value) => value,
+                None => {
+                    return stderr_result(
+                        1,
+                        format!("fold: invalid number of columns: '{rest}'\n"),
+                    );
+                }
+            };
+        } else if let Some((flags, widthstr)) = combined_attached {
+            if flags.contains('s') {
                 spaces = true;
-                let Some(value) = args.get(index + 1) else {
-                    return stderr_result(1, "fold: option requires an argument -- 'w'\n");
-                };
-                width = match value.parse::<usize>().ok().filter(|value| *value > 0) {
-                    Some(value) => value,
-                    None => return stderr_result(1, "fold: invalid number of columns\n"),
-                };
-                index += 1;
             }
-            _ if arg.starts_with("-w") && arg.len() > 2 => {
-                width = match arg[2..].parse::<usize>().ok().filter(|value| *value > 0) {
-                    Some(value) => value,
-                    None => return stderr_result(1, "fold: invalid number of columns\n"),
-                };
-            }
-            _ if arg.starts_with("-sw") && arg.len() > 3 => {
+            width = match parse_fold_width(&widthstr) {
+                Some(value) => value,
+                None => {
+                    return stderr_result(
+                        1,
+                        format!("fold: invalid number of columns: '{widthstr}'\n"),
+                    );
+                }
+            };
+        } else if let Some(flags) = combined_next {
+            if flags.contains('s') {
                 spaces = true;
-                width = match arg[3..].parse::<usize>().ok().filter(|value| *value > 0) {
-                    Some(value) => value,
-                    None => return stderr_result(1, "fold: invalid number of columns\n"),
-                };
             }
-            _ if arg.starts_with("--") => {
-                return stderr_result(1, format!("fold: unrecognized option '{}'\n", arg));
-            }
-            _ if arg.starts_with('-') && arg != "-" => {
-                for flag in arg[1..].chars() {
-                    match flag {
-                        's' | 'b' => spaces = spaces || flag == 's',
-                        _ => {
-                            return stderr_result(1, format!("fold: invalid option -- '{flag}'\n"));
-                        }
+            let Some(value) = args.get(index + 1) else {
+                return stderr_result(1, "fold: option requires an argument -- 'w'\n");
+            };
+            width = match parse_fold_width(value) {
+                Some(value) => value,
+                None => {
+                    return stderr_result(
+                        1,
+                        format!("fold: invalid number of columns: '{value}'\n"),
+                    );
+                }
+            };
+            index += 1;
+        } else if arg_str == "--" {
+            paths.extend(args[index + 1..].iter().cloned());
+            break;
+        } else if arg_str.starts_with("--") {
+            return stderr_result(1, format!("fold: unrecognized option '{arg_str}'\n"));
+        } else if arg_str.starts_with('-') && arg_str != "-" {
+            for flag in arg_str[1..].chars() {
+                match flag {
+                    's' => spaces = true,
+                    'b' => {}
+                    _ => {
+                        return stderr_result(1, format!("fold: invalid option -- '{flag}'\n"));
                     }
                 }
             }
-            _ => paths.push(arg.clone()),
+        } else {
+            paths.push(arg.clone());
         }
         index += 1;
     }
@@ -29874,32 +29935,87 @@ fn command_fold(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandR
     stdout_result(fold_text(&input, width, spaces))
 }
 
+/// Faithful port of upstream `processContent` (fold/fold.ts): split into
+/// lines, fold each, then re-join, preserving a single trailing newline.
 fn fold_text(input: &str, width: usize, spaces: bool) -> String {
-    let mut output = String::new();
-    for line in input.split_inclusive('\n') {
-        let had_newline = line.ends_with('\n');
-        let mut rest = line.strip_suffix('\n').unwrap_or(line).to_string();
-        while display_width(&rest) > width {
-            let split = if spaces {
-                rest.char_indices()
-                    .take_while(|(index, _)| display_width(&rest[..*index]) <= width)
-                    .filter(|(_, ch)| *ch == ' ')
-                    .map(|(index, ch)| index + ch.len_utf8())
-                    .last()
-                    .unwrap_or_else(|| display_width_boundary(&rest, width))
-            } else {
-                display_width_boundary(&rest, width)
-            };
-            output.push_str(&rest[..split]);
-            output.push('\n');
-            rest = rest[split..].to_string();
-        }
-        output.push_str(&rest);
-        if had_newline {
-            output.push('\n');
-        }
+    if input.is_empty() {
+        return String::new();
+    }
+    let mut lines: Vec<&str> = input.split('\n').collect();
+    let has_trailing_newline =
+        input.ends_with('\n') && lines.last().map(|l| l.is_empty()).unwrap_or(false);
+    if has_trailing_newline {
+        lines.pop();
+    }
+    let folded: Vec<String> = lines
+        .iter()
+        .map(|line| fold_line(line, width, spaces))
+        .collect();
+    let mut output = folded.join("\n");
+    if has_trailing_newline {
+        output.push('\n');
     }
     output
+}
+
+/// Faithful port of upstream `foldLine`. Wraps a single logical line to at most
+/// `width` display columns (tabs expand to the next 8-column stop). With
+/// `break_at_spaces`, prefers breaking after the last space that fit; the char
+/// that triggered the overflow is carried onto the next line.
+fn fold_line(line: &str, width: usize, break_at_spaces: bool) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    if chars.is_empty() {
+        return String::new();
+    }
+    let width = width as i64;
+    let mut result: Vec<String> = Vec::new();
+    let mut current_line: Vec<char> = Vec::new();
+    let mut current_column: i64 = 0;
+    // -1 means "no space seen on the current line yet".
+    let mut last_space_index: i64 = -1;
+    let mut last_space_column: i64 = 0;
+
+    for &ch in &chars {
+        let char_width: i64 = if ch == '\t' {
+            8 - (current_column % 8)
+        } else if ch == '\u{8}' {
+            // backspace moves back one column
+            -1
+        } else {
+            1
+        };
+
+        if current_column + char_width > width && !current_line.is_empty() {
+            if break_at_spaces && last_space_index >= 0 {
+                let idx = last_space_index as usize;
+                result.push(current_line[..=idx].iter().collect());
+                let mut new_line: Vec<char> = current_line[idx + 1..].to_vec();
+                new_line.push(ch);
+                current_line = new_line;
+                current_column = current_column - last_space_column - 1 + char_width;
+                last_space_index = -1;
+                last_space_column = 0;
+            } else {
+                result.push(current_line.iter().collect());
+                current_line = vec![ch];
+                current_column = char_width;
+                last_space_index = -1;
+                last_space_column = 0;
+            }
+        } else {
+            current_line.push(ch);
+            current_column += char_width;
+            if ch == ' ' || ch == '\t' {
+                last_space_index = current_line.len() as i64 - 1;
+                last_space_column = current_column - char_width;
+            }
+        }
+    }
+
+    if !current_line.is_empty() {
+        result.push(current_line.iter().collect());
+    }
+    result.join("\n")
 }
 
 fn display_width(input: &str) -> usize {
@@ -29908,20 +30024,6 @@ fn display_width(input: &str) -> usize {
         col += if ch == '\t' { 8 - (col % 8) } else { 1 };
     }
     col
-}
-
-fn display_width_boundary(input: &str, width: usize) -> usize {
-    let mut col = 0usize;
-    let mut last = 0usize;
-    for (index, ch) in input.char_indices() {
-        let next = col + if ch == '\t' { 8 - (col % 8) } else { 1 };
-        if next > width {
-            return last.max(index);
-        }
-        col = next;
-        last = index + ch.len_utf8();
-    }
-    input.len()
 }
 
 fn command_nl(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
@@ -43527,6 +43629,85 @@ mod fold_parity_tests {
         let r = bash.exec("cat /in.txt | fold -w 2", JustBashExecOptions::new());
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "한글\nca\nfé\n");
+    }
+
+    // --- The remaining upstream fold.test.ts cases, asserted with the exact
+    // expected output/stderr (previously only loosely covered via .contains). ---
+
+    #[test]
+    fn invalid_width_error_echoes_value() {
+        // Upstream emits "invalid number of columns: '<value>'".
+        let r = exec("echo 'x' | fold -w abc");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(r.stderr, "fold: invalid number of columns: 'abc'\n");
+        let r = exec("echo 'x' | fold -w 0");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(r.stderr, "fold: invalid number of columns: '0'\n");
+    }
+
+    #[test]
+    fn unknown_flags_exact_messages() {
+        let r = exec("echo 'x' | fold -x");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(r.stderr, "fold: invalid option -- 'x'\n");
+        let r = exec("echo 'x' | fold --unknown");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(r.stderr, "fold: unrecognized option '--unknown'\n");
+    }
+
+    #[test]
+    fn s_flag_no_spaces_breaks_at_width() {
+        let r = exec("echo 'abcdefghij' | fold -sw 5");
+        assert_eq!(r.stdout, "abcde\nfghij\n");
+    }
+
+    #[test]
+    fn s_flag_space_at_exact_boundary() {
+        let r = exec("echo 'abcd efgh' | fold -sw 5");
+        assert_eq!(r.stdout, "abcd \nefgh\n");
+    }
+
+    #[test]
+    fn multiple_lines_each_folded() {
+        let r = exec("printf '12345678901234567890\\nabcdefghij\\n' | fold -w 10");
+        assert_eq!(r.stdout, "1234567890\n1234567890\nabcdefghij\n");
+    }
+
+    #[test]
+    fn combined_width_attached_flags() {
+        // -sw10 -> break-at-spaces + width 10
+        let r = exec("echo 'hello world foo bar' | fold -sw10");
+        assert_eq!(r.stdout, "hello \nworld foo \nbar\n");
+        // -bw5 -> byte-count (ASCII) + width 5, no -s
+        let r = exec("echo 'hello world' | fold -bw5");
+        assert_eq!(r.stdout, "hello\n worl\nd\n");
+    }
+
+    #[test]
+    fn s_flag_carries_overflow_char_to_next_line() {
+        // These exercise upstream foldLine's exact space-break carry semantics:
+        // when a break happens at the last space, the overflow char that
+        // triggered it is carried onto the following line.
+        assert_eq!(
+            exec("echo 'a bb cccccc' | fold -sw 4").stdout,
+            "a \nbb c\ncccc\nc\n"
+        );
+        assert_eq!(
+            exec("echo 'aa bbbbbb c' | fold -sw 3").stdout,
+            "aa \nbbb\nbbb\n c\n"
+        );
+        assert_eq!(
+            exec("echo 'a b c d e f g' | fold -sw 3").stdout,
+            "a \nb c\n d \ne \nf g\n"
+        );
+        assert_eq!(
+            exec("echo 'hello   world' | fold -sw 7").stdout,
+            "hello  \n world\n"
+        );
+        assert_eq!(
+            exec("echo 'foo barbaz qux' | fold -sw 5").stdout,
+            "foo \nbarba\nz qux\n"
+        );
     }
 }
 
