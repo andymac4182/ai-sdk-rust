@@ -12870,14 +12870,9 @@ fn parse_awk_actions(body: &str) -> Result<Vec<AwkAction>, String> {
             index += consumed;
             continue;
         }
-        if let Some((variable, array, body_source)) = parse_awk_for_in_statement(statement)? {
-            let body = parse_awk_nested_actions(&body_source)?;
-            actions.push(AwkAction::ForIn {
-                variable,
-                array,
-                body,
-            });
-            index += 1;
+        if let Some((action, consumed)) = parse_awk_for_in_chain(&statements, index)? {
+            actions.push(action);
+            index += consumed;
             continue;
         }
         if let Some((action, consumed)) = parse_awk_for_statement(&statements, index)? {
@@ -13068,7 +13063,12 @@ fn parse_awk_if_statement(statement: &str) -> Result<Option<(AwkExpr, String)>, 
     Ok(Some((condition, then_source.to_string())))
 }
 
-fn parse_awk_for_in_statement(statement: &str) -> Result<Option<(String, String, String)>, String> {
+/// Parses a `for (k in array)` header and returns the loop variable, array
+/// name, and the inline body text following the closing `)` (which may be
+/// empty when the body lives on the next statement). Reports `Ok(None)` when
+/// `statement` is not a for-in header (e.g. a C-style `for (init; cond; step)`,
+/// which has top-level `;`).
+fn parse_awk_for_in_header(statement: &str) -> Result<Option<(String, String, String)>, String> {
     let Some(rest) = strip_awk_keyword(statement, "for") else {
         return Ok(None);
     };
@@ -13093,14 +13093,33 @@ fn parse_awk_for_in_statement(statement: &str) -> Result<Option<(String, String,
     if !is_awk_identifier(variable) || !is_awk_identifier(array) {
         return Err("unsupported program".to_string());
     }
-    let body_source = rest[header_end + 1..].trim();
-    if body_source.is_empty() {
-        return Err("unsupported program".to_string());
-    }
     Ok(Some((
         variable.to_string(),
         array.to_string(),
-        body_source.to_string(),
+        rest[header_end + 1..].to_string(),
+    )))
+}
+
+/// Parses a `for (k in array) body` loop starting at `start`, threading a
+/// following-statement body when the header is braceless and bodyless (mirrors
+/// [`parse_awk_for_statement`]). Returns the action and the number of statements
+/// consumed (>= 1).
+fn parse_awk_for_in_chain(
+    statements: &[String],
+    start: usize,
+) -> Result<Option<(AwkAction, usize)>, String> {
+    let Some((variable, array, inline_body)) = parse_awk_for_in_header(statements[start].trim())?
+    else {
+        return Ok(None);
+    };
+    let (body, extra) = parse_awk_loop_body(statements, start, &inline_body)?;
+    Ok(Some((
+        AwkAction::ForIn {
+            variable,
+            array,
+            body,
+        },
+        1 + extra,
     )))
 }
 
@@ -13136,15 +13155,33 @@ fn parse_awk_loop_body(
     let Some(body) = statements.get(body_index) else {
         return Err("unsupported program".to_string());
     };
-    if parse_awk_if_statement(body.trim())?.is_some() {
+    let body = body.trim();
+    // A bodyless loop header takes the following statement as its body. That
+    // statement may itself be a compound construct (`if`, a nested loop) whose
+    // own body lives in *subsequent* statements, so dispatch through the same
+    // statement-list parsers that the top level uses and report how many extra
+    // statements were consumed beyond this loop's header.
+    if parse_awk_if_statement(body)?.is_some() {
         let (action, consumed) = parse_awk_if_chain(statements, body_index)?;
+        return Ok((vec![action], consumed));
+    }
+    if let Some((action, consumed)) = parse_awk_do_while_statement(statements, body_index)? {
+        return Ok((vec![action], consumed));
+    }
+    if let Some((action, consumed)) = parse_awk_for_in_chain(statements, body_index)? {
+        return Ok((vec![action], consumed));
+    }
+    if let Some((action, consumed)) = parse_awk_for_statement(statements, body_index)? {
+        return Ok((vec![action], consumed));
+    }
+    if let Some((action, consumed)) = parse_awk_while_statement(statements, body_index)? {
         return Ok((vec![action], consumed));
     }
     Ok((parse_awk_nested_actions(body)?, 1))
 }
 
 /// Parses a C-style `for (init; cond; update) body` loop starting at `start`.
-/// The for-in form is handled earlier by [`parse_awk_for_in_statement`]; this
+/// The for-in form is handled earlier by [`parse_awk_for_in_chain`]; this
 /// only matches headers whose parenthesized part contains top-level `;`.
 fn parse_awk_for_statement(
     statements: &[String],
@@ -42089,6 +42126,66 @@ mod tests {
             }
         }
         assert!(fails.is_empty(), "DIVERGENCES:\n{}", fails.join("\n"));
+    }
+}
+
+#[cfg(test)]
+mod awk_parity_tests {
+    //! Behavioral parity for `commands/awk`, mirroring upstream
+    //! packages/just-bash/src/commands/awk/*. Each assertion ports an exact
+    //! input->expected case from the upstream Vitest suites.
+    use crate::runtime::Bash;
+
+    // awk.expressions.test.ts — "should handle nested for loops".
+    //
+    // A multiline awk program where an outer braceless `for` header takes a
+    // *nested* braceless `for` as its body, whose own body is the following
+    // statement. The body of a bodyless loop header may itself be a compound
+    // construct (another loop or an `if`) whose body lives in subsequent
+    // statements, so the loop-body parser must thread those continuation
+    // statements rather than treating the next statement as a self-contained
+    // body. This previously produced `awk: unsupported program`.
+    #[test]
+    fn nested_braceless_for_loops_multiline() {
+        let program = "echo \"\" | awk 'BEGIN {\n          for (i=1; i<=3; i++)\n            for (j=1; j<=3; j++)\n              printf \"%d\", i*j\n          print \"\"\n        }'";
+        let result = Bash::new().exec(program);
+        assert_eq!(result.stdout, "123246369\n");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stderr, "");
+    }
+
+    // Single-line nested braceless `for` loops already worked; lock them so the
+    // multiline fix does not regress the inline form.
+    #[test]
+    fn nested_braceless_for_loops_inline() {
+        let result = Bash::new()
+            .exec("awk 'BEGIN { for(i=1;i<=2;i++) for(j=1;j<=2;j++) printf \"%d\", i*j }'");
+        assert_eq!(result.stdout, "1224");
+        assert_eq!(result.exit_code, 0);
+    }
+
+    // A braceless outer `for` whose body is a braceless `while` on the next
+    // statement, whose body is the statement after that. Exercises the
+    // while-continuation path of the loop-body parser: `j` is bumped to the
+    // current `i` on each outer iteration, ending at 2.
+    #[test]
+    fn braceless_for_with_braceless_while_body() {
+        let program =
+            "awk 'BEGIN {\n  for (i=1; i<=2; i++)\n    while (j < i)\n      j++\n  print j\n}'";
+        let result = Bash::new().exec(program);
+        assert_eq!(result.stdout, "2\n");
+        assert_eq!(result.exit_code, 0);
+    }
+
+    // A braceless outer `for` whose body is a braceless `for (k in arr)` on the
+    // next statement, whose own body follows. Exercises the for-in continuation
+    // path; previously reported `awk: unsupported program`.
+    #[test]
+    fn braceless_for_with_braceless_for_in_body() {
+        let program = "awk 'BEGIN {\n  a[1]=10; a[2]=20\n  for (i=1; i<=2; i++)\n    for (k in a)\n      s = s + a[k]\n  print s\n}'";
+        let result = Bash::new().exec(program);
+        assert_eq!(result.stdout, "60\n");
+        assert_eq!(result.exit_code, 0);
     }
 }
 
