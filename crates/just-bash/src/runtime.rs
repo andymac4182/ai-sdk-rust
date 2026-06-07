@@ -9533,7 +9533,8 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         );
         assert_eq!(env.exec("tail -n 1 /first-third.txt").stdout, "third\n");
 
-        assert!(env.exec("wc /wc.txt").stdout.contains("2 4 20 /wc.txt"));
+        // Upstream wc right-justifies columns to the widest count (here bytes=20 -> width 2).
+        assert!(env.exec("wc /wc.txt").stdout.contains(" 2  4 20 /wc.txt"));
         assert_eq!(env.exec("wc -l /short.txt").stdout.trim(), "5 /short.txt");
         assert_eq!(env.exec("wc -w /words.txt").stdout.trim(), "3 /words.txt");
         assert_eq!(env.exec("wc -c /hello.txt").stdout.trim(), "6 /hello.txt");
@@ -16360,8 +16361,9 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
             "export function run() {\n"
         );
         assert_eq!(
+            // Upstream wc right-justifies columns to the widest count (bytes=25 -> width 2).
             env.exec("wc /workspace/src/lib.ts").stdout,
-            "1 5 25 /workspace/src/lib.ts\n"
+            " 1  5 25 /workspace/src/lib.ts\n"
         );
     }
 
