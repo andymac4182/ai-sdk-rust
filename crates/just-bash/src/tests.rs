@@ -2257,3 +2257,127 @@ fn chmod_command_matches_upstream_behavior() {
         r.stdout
     );
 }
+
+#[test]
+fn upstream_comm_command_parity_cases() {
+    // Mirrors commands/comm/comm.test.ts and comm.utf8-stdin.test.ts.
+    let make = || {
+        let env = Bash::new();
+        env.exec("echo -e 'a\\nb\\nc' > /tmp/file1");
+        env.exec("echo -e 'b\\nc\\nd' > /tmp/file2");
+        env
+    };
+
+    // default: all three columns
+    let env = make();
+    let r = env.exec("comm /tmp/file1 /tmp/file2");
+    assert_eq!(r.stdout, "a\n\t\tb\n\t\tc\n\td\n");
+    assert_eq!(r.exit_code, 0);
+
+    // -1 suppress column 1
+    let env = make();
+    let r = env.exec("comm -1 /tmp/file1 /tmp/file2");
+    assert_eq!(r.stdout, "\tb\n\tc\nd\n");
+    assert_eq!(r.exit_code, 0);
+
+    // -2 suppress column 2
+    let env = make();
+    let r = env.exec("comm -2 /tmp/file1 /tmp/file2");
+    assert_eq!(r.stdout, "a\n\tb\n\tc\n");
+    assert_eq!(r.exit_code, 0);
+
+    // -3 suppress column 3
+    let env = make();
+    let r = env.exec("comm -3 /tmp/file1 /tmp/file2");
+    assert_eq!(r.stdout, "a\n\td\n");
+    assert_eq!(r.exit_code, 0);
+
+    // -23 only lines unique to file1
+    let env = make();
+    let r = env.exec("comm -23 /tmp/file1 /tmp/file2");
+    assert_eq!(r.stdout, "a\n");
+    assert_eq!(r.exit_code, 0);
+
+    // -13 only lines unique to file2
+    let env = make();
+    let r = env.exec("comm -13 /tmp/file1 /tmp/file2");
+    assert_eq!(r.stdout, "d\n");
+    assert_eq!(r.exit_code, 0);
+
+    // -12 only common lines
+    let env = make();
+    let r = env.exec("comm -12 /tmp/file1 /tmp/file2");
+    assert_eq!(r.stdout, "b\nc\n");
+    assert_eq!(r.exit_code, 0);
+
+    // empty files
+    let env = Bash::new();
+    env.exec("touch /tmp/empty1 /tmp/empty2");
+    let r = env.exec("comm /tmp/empty1 /tmp/empty2");
+    assert_eq!(r.stdout, "");
+    assert_eq!(r.exit_code, 0);
+
+    // identical files
+    let env = Bash::new();
+    env.exec("echo -e 'a\\nb\\nc' > /tmp/same1");
+    env.exec("echo -e 'a\\nb\\nc' > /tmp/same2");
+    let r = env.exec("comm /tmp/same1 /tmp/same2");
+    assert_eq!(r.stdout, "\t\ta\n\t\tb\n\t\tc\n");
+    assert_eq!(r.exit_code, 0);
+
+    // completely different files
+    let env = Bash::new();
+    env.exec("echo -e 'a\\nb' > /tmp/diff1");
+    env.exec("echo -e 'c\\nd' > /tmp/diff2");
+    let r = env.exec("comm /tmp/diff1 /tmp/diff2");
+    assert_eq!(r.stdout, "a\nb\n\tc\n\td\n");
+    assert_eq!(r.exit_code, 0);
+
+    // stdin with -
+    let env = Bash::new();
+    env.exec("echo -e 'a\\nb\\nc' > /tmp/file");
+    let r = env.exec("echo -e 'b\\nc\\nd' | comm /tmp/file -");
+    assert_eq!(r.stdout, "a\n\t\tb\n\t\tc\n\td\n");
+    assert_eq!(r.exit_code, 0);
+
+    // missing operand (no files)
+    let env = Bash::new();
+    let r = env.exec("comm");
+    assert!(r.stderr.contains("missing operand"));
+    assert_eq!(r.exit_code, 1);
+
+    // only one file
+    let env = Bash::new();
+    env.exec("touch /tmp/only");
+    let r = env.exec("comm /tmp/only");
+    assert!(r.stderr.contains("missing operand"));
+    assert_eq!(r.exit_code, 1);
+
+    // file doesn't exist
+    let env = Bash::new();
+    env.exec("touch /tmp/exists");
+    let r = env.exec("comm /tmp/exists /tmp/noexist");
+    assert!(r.stderr.contains("No such file or directory"));
+    assert_eq!(r.exit_code, 1);
+
+    // --help
+    let env = Bash::new();
+    let r = env.exec("comm --help");
+    assert!(r.stdout.contains("comm"));
+    assert!(r.stdout.contains("compare"));
+    assert_eq!(r.exit_code, 0);
+
+    // UTF-8 multibyte lines from stdin
+    let env = Bash::with_options(BashOptions {
+        files: BTreeMap::from([
+            ("/a.txt".to_string(), "café\n한글\n".to_string()),
+            ("/b.txt".to_string(), "café\n漢字\n".to_string()),
+        ]),
+        ..BashOptions::default()
+    });
+    let r = env.exec("cat /a.txt | comm - /b.txt");
+    assert_eq!(r.exit_code, 0);
+    assert!(r.stdout.contains("café"));
+    assert!(r.stdout.contains("한글"));
+    assert!(r.stdout.contains("漢字"));
+}
