@@ -10899,22 +10899,16 @@ fn run_sed_program_collecting(
                     pc += 1;
                 }
                 SedOp::Change(text) => {
-                    // `c` deletes the pattern space; for a range it prints the text
-                    // once at the end of the range. For simplicity (and matching the
-                    // corpus) print the text for the matched line and suppress the
-                    // line, but for a contiguous range only at the last matched line.
+                    // `c` deletes the pattern space and outputs the change text in
+                    // its place. The upstream just-bash port (executor.ts
+                    // `case "change"` + sed.ts `state.changedText`) emits the text
+                    // for *every* matched line, including each line of an address
+                    // range (so `2,3c repl` prints `repl` twice), rather than the
+                    // GNU "once at end of range" behavior. Match the port exactly.
                     deleted = true;
                     auto_print = false;
-                    let at_range_end = sed_change_emits_now(
-                        instr.address.as_ref(),
-                        line_no,
-                        total,
-                        &range_state[pc],
-                    );
-                    if at_range_end {
-                        output.push_str(text);
-                        output.push('\n');
-                    }
+                    output.push_str(text);
+                    output.push('\n');
                     break 'prog;
                 }
                 SedOp::WriteFile(path) => {
@@ -11843,22 +11837,6 @@ fn sed_find_label(program: &[SedInstruction], label: &str) -> Option<usize> {
     program
         .iter()
         .position(|instr| matches!(&instr.op, SedOp::Label(name) if name == label))
-}
-
-/// True when a `c` (change) command on `line_no` should emit its text now. For a
-/// single-line match, always. For a numeric range, only on the final line.
-fn sed_change_emits_now(
-    address: Option<&SedAddress>,
-    line_no: usize,
-    total: usize,
-    _state: &RangeStatus,
-) -> bool {
-    match address {
-        Some(SedAddress::Range(_, end)) => line_no >= *end,
-        Some(SedAddress::RangeToLast(_)) => line_no == total,
-        Some(SedAddress::PatternRange { .. }) => *_state == RangeStatus::Inactive,
-        _ => true,
-    }
 }
 
 /// Format a line for the `l` command: escape control characters, render tabs as
