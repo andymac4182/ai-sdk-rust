@@ -31187,7 +31187,7 @@ fn wrap_string(input: &str, width: usize) -> String {
 
 fn command_diff(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
     if args.iter().any(|arg| arg == "--help") {
-        return stdout_result("Usage: diff [OPTION]... FILES\nCompare files line by line.\n");
+        return stdout_result(diff_help_text());
     }
     let mut brief = false;
     let mut report_identical = false;
@@ -31276,39 +31276,419 @@ fn read_diff_input(state: &ExecState<'_>, path: &str, stdin: &str) -> Result<Str
         .map_err(|_| format!("diff: {path}: No such file or directory\n"))
 }
 
-fn format_unified_diff(left_path: &str, right_path: &str, left: &str, right: &str) -> String {
-    let mut output = format!("--- {left_path}\n+++ {right_path}\n");
-    let left_lines = left.split_inclusive('\n').collect::<Vec<_>>();
-    let right_lines = right.split_inclusive('\n').collect::<Vec<_>>();
-    let max = left_lines.len().max(right_lines.len());
-    for index in 0..max {
-        match (left_lines.get(index), right_lines.get(index)) {
-            (Some(left), Some(right)) if left == right => {
-                output.push(' ');
-                output.push_str(left.trim_end_matches('\n'));
-                output.push('\n');
-            }
-            (Some(left), Some(right)) => {
-                output.push('-');
-                output.push_str(left.trim_end_matches('\n'));
-                output.push('\n');
-                output.push('+');
-                output.push_str(right.trim_end_matches('\n'));
-                output.push('\n');
-            }
-            (Some(left), None) => {
-                output.push('-');
-                output.push_str(left.trim_end_matches('\n'));
-                output.push('\n');
-            }
-            (None, Some(right)) => {
-                output.push('+');
-                output.push_str(right.trim_end_matches('\n'));
-                output.push('\n');
-            }
-            (None, None) => {}
+fn diff_help_text() -> String {
+    // Mirrors the upstream `showHelp(diffHelp)` rendering in
+    // packages/just-bash/src/commands/diff/diff.ts + commands/help.ts.
+    let mut out = String::from("diff - compare files line by line\n\n");
+    out.push_str("Usage: diff [OPTION]... FILE1 FILE2\n");
+    out.push_str("\nOptions:\n");
+    for opt in [
+        "-u, --unified     output unified diff format (default)",
+        "-q, --brief       report only whether files differ",
+        "-s, --report-identical-files  report when files are the same",
+        "-i, --ignore-case  ignore case differences",
+        "    --help        display this help and exit",
+    ] {
+        out.push_str("  ");
+        out.push_str(opt);
+        out.push('\n');
+    }
+    out
+}
+
+/// A single component of a line-level diff: a run of `count` lines that are
+/// either common (`added == removed == false`), added, or removed. Mirrors the
+/// `Change` objects produced by the `diff` npm package's Myers implementation.
+struct DiffComponent {
+    count: usize,
+    added: bool,
+    removed: bool,
+}
+
+/// Tokenize text into lines that retain their trailing newline, matching the
+/// `diff` package's line tokenizer (`tokenize` in diff/line.js). A trailing
+/// newline does NOT produce a final empty token; a missing trailing newline
+/// leaves the last line without a `\n`.
+fn diff_tokenize_lines(value: &str) -> Vec<String> {
+    if value.is_empty() {
+        return Vec::new();
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in value.chars() {
+        current.push(ch);
+        if ch == '\n' {
+            lines.push(std::mem::take(&mut current));
         }
     }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// Faithful port of the `diff` package's Myers diff (diff/base.js) restricted to
+/// what `createTwoFilesPatch` needs: produces an ordered list of components over
+/// pre-tokenized line arrays. The path/tie-break order matches upstream so that
+/// the resulting hunks are byte-identical.
+fn diff_lines_components(old_tokens: &[String], new_tokens: &[String]) -> Vec<DiffComponent> {
+    #[derive(Clone)]
+    struct Component {
+        count: usize,
+        added: bool,
+        removed: bool,
+        prev: Option<usize>,
+    }
+    // Arena of components forming reverse-linked lists; paths reference indices.
+    let mut arena: Vec<Component> = Vec::new();
+    #[derive(Clone)]
+    struct PathNode {
+        old_pos: isize,
+        last: Option<usize>,
+    }
+
+    let new_len = new_tokens.len() as isize;
+    let old_len = old_tokens.len() as isize;
+
+    let equals = |a: &str, b: &str| a == b;
+
+    // extract_common advances along the diagonal over equal tokens.
+    let extract_common =
+        |path: &mut PathNode, diagonal: isize, arena: &mut Vec<Component>| -> isize {
+            let mut old_pos = path.old_pos;
+            let mut new_pos = old_pos - diagonal;
+            let mut common = 0usize;
+            while new_pos + 1 < new_len
+                && old_pos + 1 < old_len
+                && equals(
+                    &old_tokens[(old_pos + 1) as usize],
+                    &new_tokens[(new_pos + 1) as usize],
+                )
+            {
+                new_pos += 1;
+                old_pos += 1;
+                common += 1;
+            }
+            if common > 0 {
+                arena.push(Component {
+                    count: common,
+                    added: false,
+                    removed: false,
+                    prev: path.last,
+                });
+                path.last = Some(arena.len() - 1);
+            }
+            path.old_pos = old_pos;
+            new_pos
+        };
+
+    // add_to_path extends a path by one add or remove, merging with a matching
+    // trailing component when possible.
+    let add_to_path = |path: &PathNode,
+                       added: bool,
+                       removed: bool,
+                       old_pos_inc: isize,
+                       arena: &mut Vec<Component>|
+     -> PathNode {
+        let merge = match path.last {
+            Some(idx) => arena[idx].added == added && arena[idx].removed == removed,
+            None => false,
+        };
+        let new_last = if merge {
+            let idx = path.last.unwrap();
+            let prev = arena[idx].prev;
+            arena.push(Component {
+                count: arena[idx].count + 1,
+                added,
+                removed,
+                prev,
+            });
+            arena.len() - 1
+        } else {
+            arena.push(Component {
+                count: 1,
+                added,
+                removed,
+                prev: path.last,
+            });
+            arena.len() - 1
+        };
+        PathNode {
+            old_pos: path.old_pos + old_pos_inc,
+            last: Some(new_last),
+        }
+    };
+
+    // best_path indexed by diagonal, offset so that diagonal -editLength maps to
+    // a valid slot. We use a HashMap keyed by diagonal for clarity.
+    let mut best_path: std::collections::HashMap<isize, PathNode> =
+        std::collections::HashMap::new();
+    best_path.insert(
+        0,
+        PathNode {
+            old_pos: -1,
+            last: None,
+        },
+    );
+
+    let build_values = |last: Option<usize>, arena: &[Component]| -> Vec<DiffComponent> {
+        let mut comps: Vec<DiffComponent> = Vec::new();
+        let mut cur = last;
+        while let Some(idx) = cur {
+            comps.push(DiffComponent {
+                count: arena[idx].count,
+                added: arena[idx].added,
+                removed: arena[idx].removed,
+            });
+            cur = arena[idx].prev;
+        }
+        comps.reverse();
+        comps
+    };
+
+    // Seed editLength = 0.
+    {
+        let mut seed = best_path.remove(&0).unwrap();
+        let new_pos = extract_common(&mut seed, 0, &mut arena);
+        if seed.old_pos + 1 >= old_len && new_pos + 1 >= new_len {
+            return build_values(seed.last, &arena);
+        }
+        best_path.insert(0, seed);
+    }
+
+    let max_edit_length = new_len + old_len;
+    let mut min_diag = isize::MIN;
+    let mut max_diag = isize::MAX;
+    let mut edit_length: isize = 1;
+
+    while edit_length <= max_edit_length {
+        let lo = min_diag.max(-edit_length);
+        let hi = max_diag.min(edit_length);
+        let mut diagonal = lo;
+        while diagonal <= hi {
+            let remove_path = best_path.remove(&(diagonal - 1));
+            let add_path = best_path.get(&(diagonal + 1)).cloned();
+
+            let can_add = match &add_path {
+                Some(ap) => {
+                    let add_new_pos = ap.old_pos - diagonal;
+                    add_new_pos >= 0 && add_new_pos < new_len
+                }
+                None => false,
+            };
+            let can_remove = match &remove_path {
+                Some(rp) => rp.old_pos + 1 < old_len,
+                None => false,
+            };
+
+            if !can_add && !can_remove {
+                best_path.remove(&diagonal);
+                diagonal += 2;
+                continue;
+            }
+
+            let prefer_add = !can_remove
+                || (can_add
+                    && remove_path.as_ref().unwrap().old_pos < add_path.as_ref().unwrap().old_pos);
+
+            let mut base_path = if prefer_add {
+                add_to_path(add_path.as_ref().unwrap(), true, false, 0, &mut arena)
+            } else {
+                add_to_path(remove_path.as_ref().unwrap(), false, true, 1, &mut arena)
+            };
+
+            let new_pos = extract_common(&mut base_path, diagonal, &mut arena);
+
+            if base_path.old_pos + 1 >= old_len && new_pos + 1 >= new_len {
+                return build_values(base_path.last, &arena);
+            }
+
+            let old_at_edge = base_path.old_pos + 1 >= old_len;
+            let new_at_edge = new_pos + 1 >= new_len;
+            best_path.insert(diagonal, base_path);
+            if old_at_edge {
+                max_diag = max_diag.min(diagonal - 1);
+            }
+            if new_at_edge {
+                min_diag = min_diag.max(diagonal + 1);
+            }
+
+            diagonal += 2;
+        }
+        edit_length += 1;
+    }
+    // Unreachable for finite inputs; return empty diff as a safe fallback.
+    Vec::new()
+}
+
+/// Build the unified-diff hunks (with context=3) from the line-level diff
+/// components, faithfully mirroring `structuredPatch` in diff/patch/create.js.
+struct DiffHunk {
+    old_start: isize,
+    old_lines: isize,
+    new_start: isize,
+    new_lines: isize,
+    lines: Vec<String>,
+}
+
+fn build_diff_hunks(
+    old_tokens: &[String],
+    new_tokens: &[String],
+    components: &[DiffComponent],
+    context: isize,
+) -> Vec<DiffHunk> {
+    // Materialize each component's lines (with trailing newlines) by walking the
+    // token arrays in order, mirroring buildValues' value assignment.
+    struct Entry {
+        added: bool,
+        removed: bool,
+        lines: Vec<String>,
+    }
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut new_idx = 0usize;
+    let mut old_idx = 0usize;
+    for comp in components {
+        let lines: Vec<String> = if comp.removed {
+            let slice = old_tokens[old_idx..old_idx + comp.count].to_vec();
+            old_idx += comp.count;
+            slice
+        } else {
+            let slice = new_tokens[new_idx..new_idx + comp.count].to_vec();
+            new_idx += comp.count;
+            if !comp.added {
+                old_idx += comp.count;
+            }
+            slice
+        };
+        entries.push(Entry {
+            added: comp.added,
+            removed: comp.removed,
+            lines,
+        });
+    }
+    // Append an empty value to make cleanup easier (matches the JS `push`).
+    entries.push(Entry {
+        added: false,
+        removed: false,
+        lines: Vec::new(),
+    });
+
+    let context_lines =
+        |lines: &[String]| -> Vec<String> { lines.iter().map(|l| format!(" {l}")).collect() };
+
+    let mut hunks: Vec<DiffHunk> = Vec::new();
+    let mut old_range_start: isize = 0;
+    let mut new_range_start: isize = 0;
+    let mut cur_range: Vec<String> = Vec::new();
+    let mut old_line: isize = 1;
+    let mut new_line: isize = 1;
+
+    let total = entries.len() as isize;
+    for i in 0..entries.len() {
+        let current = &entries[i];
+        let lines = &current.lines;
+        if current.added || current.removed {
+            if old_range_start == 0 {
+                old_range_start = old_line;
+                new_range_start = new_line;
+                if i > 0 {
+                    let prev_lines = &entries[i - 1].lines;
+                    cur_range = if context > 0 {
+                        let take = (context as usize).min(prev_lines.len());
+                        let start = prev_lines.len() - take;
+                        context_lines(&prev_lines[start..])
+                    } else {
+                        Vec::new()
+                    };
+                    old_range_start -= cur_range.len() as isize;
+                    new_range_start -= cur_range.len() as isize;
+                }
+            }
+            for line in lines {
+                cur_range.push(format!("{}{}", if current.added { '+' } else { '-' }, line));
+            }
+            if current.added {
+                new_line += lines.len() as isize;
+            } else {
+                old_line += lines.len() as isize;
+            }
+        } else {
+            if old_range_start != 0 {
+                if (lines.len() as isize) <= context * 2 && (i as isize) < total - 2 {
+                    for line in context_lines(lines) {
+                        cur_range.push(line);
+                    }
+                } else {
+                    let context_size = (lines.len() as isize).min(context);
+                    for line in context_lines(&lines[..context_size as usize]) {
+                        cur_range.push(line);
+                    }
+                    let hunk = DiffHunk {
+                        old_start: old_range_start,
+                        old_lines: old_line - old_range_start + context_size,
+                        new_start: new_range_start,
+                        new_lines: new_line - new_range_start + context_size,
+                        lines: std::mem::take(&mut cur_range),
+                    };
+                    hunks.push(hunk);
+                    old_range_start = 0;
+                    new_range_start = 0;
+                }
+            }
+            old_line += lines.len() as isize;
+            new_line += lines.len() as isize;
+        }
+    }
+
+    // Step 2: trim the trailing `\n` from each hunk line, inserting
+    // "\ No newline at end of file" markers where a line lacked one.
+    for hunk in &mut hunks {
+        let mut i = 0;
+        while i < hunk.lines.len() {
+            if hunk.lines[i].ends_with('\n') {
+                hunk.lines[i].pop();
+            } else {
+                hunk.lines
+                    .insert(i + 1, "\\ No newline at end of file".to_string());
+                i += 1;
+            }
+            i += 1;
+        }
+    }
+    hunks
+}
+
+fn format_unified_diff(left_path: &str, right_path: &str, left: &str, right: &str) -> String {
+    let old_tokens = diff_tokenize_lines(left);
+    let new_tokens = diff_tokenize_lines(right);
+    let components = diff_lines_components(&old_tokens, &new_tokens);
+    let mut hunks = build_diff_hunks(&old_tokens, &new_tokens, &components, 3);
+
+    // formatPatch (diff/patch/create.js) with default INCLUDE_HEADERS-ish
+    // behavior used by createTwoFilesPatch: underline + file headers, tab
+    // separator with empty old/new headers.
+    let mut ret: Vec<String> = Vec::new();
+    ret.push("===================================================================".to_string());
+    ret.push(format!("--- {left_path}\t"));
+    ret.push(format!("+++ {right_path}\t"));
+    for hunk in &mut hunks {
+        // Unified Diff Format quirk: a zero-length side has its start decremented.
+        if hunk.old_lines == 0 {
+            hunk.old_start -= 1;
+        }
+        if hunk.new_lines == 0 {
+            hunk.new_start -= 1;
+        }
+        ret.push(format!(
+            "@@ -{},{} +{},{} @@",
+            hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
+        ));
+        for line in &hunk.lines {
+            ret.push(line.clone());
+        }
+    }
+    let mut output = ret.join("\n");
+    output.push('\n');
     output
 }
 
@@ -37304,6 +37684,161 @@ mod tests {
         );
         let result = bash.exec("cat /a.bin | diff - /b.bin", JustBashExecOptions::new());
         assert_eq!(result.exit_code, 1);
+    }
+
+    #[test]
+    fn diff_unified_output_matches_upstream_createtwofilespatch() {
+        // Exact-byte parity with the `diff` npm package's createTwoFilesPatch
+        // (context 3), as used by packages/just-bash/src/commands/diff/diff.ts.
+        // Reference outputs captured from the upstream library directly.
+        fn run(a: &str, b: &str) -> JustBashExecResult {
+            let bash = JustBashSession::with_options(
+                JustBashSessionOptions::new()
+                    .with_file("/a.txt", a)
+                    .with_file("/b.txt", b)
+                    .with_cwd("/"),
+            );
+            bash.exec("diff /a.txt /b.txt", JustBashExecOptions::new())
+        }
+
+        // Single changed line -> single 1,1 hunk.
+        let r = run("hello\n", "world\n");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(
+            r.stdout,
+            "===================================================================\n\
+             --- /a.txt\t\n+++ /b.txt\t\n@@ -1,1 +1,1 @@\n-hello\n+world\n"
+        );
+
+        // Context around a change in the middle (the @@ header case).
+        let r = run("1\n2\n3\n4\n5\n", "1\n2\nX\n4\n5\n");
+        assert_eq!(
+            r.stdout,
+            "===================================================================\n\
+             --- /a.txt\t\n+++ /b.txt\t\n@@ -1,5 +1,5 @@\n 1\n 2\n-3\n+X\n 4\n 5\n"
+        );
+        assert!(r.stdout.contains("@@"));
+
+        // Pure addition.
+        let r = run("line1\n", "line1\nline2\n");
+        assert_eq!(
+            r.stdout,
+            "===================================================================\n\
+             --- /a.txt\t\n+++ /b.txt\t\n@@ -1,1 +1,2 @@\n line1\n+line2\n"
+        );
+
+        // Pure removal.
+        let r = run("line1\nline2\n", "line1\n");
+        assert_eq!(
+            r.stdout,
+            "===================================================================\n\
+             --- /a.txt\t\n+++ /b.txt\t\n@@ -1,2 +1,1 @@\n line1\n-line2\n"
+        );
+
+        // Replacement keeping surrounding context.
+        let r = run("line1\nline2\nline3\n", "line1\nmodified\nline3\n");
+        assert_eq!(
+            r.stdout,
+            "===================================================================\n\
+             --- /a.txt\t\n+++ /b.txt\t\n@@ -1,3 +1,3 @@\n line1\n-line2\n+modified\n line3\n"
+        );
+
+        // Missing trailing newline on both sides -> "No newline" markers.
+        let r = run("hello", "world");
+        assert_eq!(
+            r.stdout,
+            "===================================================================\n\
+             --- /a.txt\t\n+++ /b.txt\t\n@@ -1,1 +1,1 @@\n-hello\n\\ No newline at end of file\n\
+             +world\n\\ No newline at end of file\n"
+        );
+
+        // Two separate hunks far apart.
+        let r = run(
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n",
+            "X\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nZ\n",
+        );
+        assert_eq!(
+            r.stdout,
+            "===================================================================\n\
+             --- /a.txt\t\n+++ /b.txt\t\n\
+             @@ -1,4 +1,4 @@\n-a\n+X\n b\n c\n d\n\
+             @@ -9,4 +9,4 @@\n i\n j\n k\n-l\n+Z\n"
+        );
+    }
+
+    #[test]
+    fn diff_empty_vs_nonempty_uses_zero_length_hunk() {
+        // Mirrors diff.test.ts "empty files" -> "empty vs non-empty": the old
+        // side is zero-length so its start is decremented to 0 (the unified-diff
+        // zero-length quirk in formatPatch).
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/empty.txt", "")
+                .with_file("/content.txt", "has content\n")
+                .with_cwd("/"),
+        );
+        let r = bash.exec("diff /empty.txt /content.txt", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(
+            r.stdout,
+            "===================================================================\n\
+             --- /empty.txt\t\n+++ /content.txt\t\n@@ -0,0 +1,1 @@\n+has content\n"
+        );
+        assert!(r.stdout.contains("+has content"));
+    }
+
+    #[test]
+    fn diff_stdin_and_utf8_unified_output() {
+        // diff.test.ts stdin cases + diff.utf8-stdin.test.ts: the dash file name
+        // is preserved and multibyte lines survive intact.
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/b.txt", "from file\n")
+                .with_cwd("/"),
+        );
+        let r = bash.exec(
+            "echo \"from stdin\" | diff - /b.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(
+            r.stdout,
+            "===================================================================\n\
+             --- -\t\n+++ /b.txt\t\n@@ -1,1 +1,1 @@\n-from stdin\n+from file\n"
+        );
+
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/a.txt", "한글\nshared\n")
+                .with_file("/b.txt", "different\nshared\n")
+                .with_cwd("/"),
+        );
+        let r = bash.exec("cat /a.txt | diff - /b.txt", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(
+            r.stdout,
+            "===================================================================\n\
+             --- -\t\n+++ /b.txt\t\n@@ -1,2 +1,2 @@\n-한글\n+different\n shared\n"
+        );
+        assert!(r.stdout.contains("한글"));
+        assert!(r.stdout.contains("different"));
+    }
+
+    #[test]
+    fn diff_help_reports_lowercase_compare() {
+        // diff.test.ts "help": stdout must contain both "diff" and lowercase
+        // "compare" (the summary line), matching showHelp(diffHelp).
+        let bash = JustBashSession::with_options(JustBashSessionOptions::new().with_cwd("/"));
+        let r = bash.exec("diff --help", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.contains("diff"));
+        assert!(r.stdout.contains("compare"));
+        assert!(
+            r.stdout
+                .starts_with("diff - compare files line by line\n\n"),
+            "help: {:?}",
+            r.stdout
+        );
     }
 
     #[test]
