@@ -884,7 +884,9 @@ mod tests {
             "echo -e '1\\n2\\n3' > /tmp/a.txt\necho -e '1\\n3\\n4' > /tmp/b.txt\ndiff /tmp/a.txt /tmp/b.txt; echo exit:$?",
         );
         assert_eq!(
-            r.stdout, "--- /tmp/a.txt\n+++ /tmp/b.txt\n 1\n-2\n+3\n-3\n+4\nexit:1\n",
+            r.stdout,
+            "===================================================================\n\
+             --- /tmp/a.txt\t\n+++ /tmp/b.txt\t\n@@ -1,3 +1,3 @@\n 1\n-2\n 3\n+4\nexit:1\n",
             "L523 stdout"
         );
         assert_eq!(r.stderr, "", "L523 stderr");
