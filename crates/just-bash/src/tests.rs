@@ -2168,3 +2168,92 @@ fn r20_tee_and_pipe_redirection_rows_match_upstream() {
         missing.stderr
     );
 }
+
+fn chmod_bash_with_files(files: &[(&str, &str)]) -> Bash {
+    Bash::with_options(BashOptions {
+        files: files
+            .iter()
+            .map(|(p, c)| ((*p).to_string(), (*c).to_string()))
+            .collect::<BTreeMap<_, _>>(),
+        ..BashOptions::default()
+    })
+}
+
+#[test]
+fn chmod_command_matches_upstream_behavior() {
+    // octal mode 755
+    let env = chmod_bash_with_files(&[("/test.txt", "hello")]);
+    assert_eq!(env.exec("chmod 755 /test.txt").exit_code, 0);
+    assert_eq!(env.exec("stat -c %a /test.txt").stdout.trim(), "755");
+
+    // octal mode 444 (read-only)
+    let env = chmod_bash_with_files(&[("/test.txt", "hello")]);
+    env.exec("chmod 444 /test.txt");
+    assert_eq!(env.exec("stat -c %a /test.txt").stdout.trim(), "444");
+
+    // symbolic u+x on default 644 -> 744
+    let env = chmod_bash_with_files(&[("/script.sh", "#!/bin/bash")]);
+    env.exec("chmod u+x /script.sh");
+    assert_eq!(env.exec("stat -c %a /script.sh").stdout.trim(), "744");
+
+    // symbolic a+x -> 755
+    let env = chmod_bash_with_files(&[("/script.sh", "#!/bin/bash")]);
+    env.exec("chmod a+x /script.sh");
+    assert_eq!(env.exec("stat -c %a /script.sh").stdout.trim(), "755");
+
+    // symbolic g-w from 664 -> 644
+    let env = chmod_bash_with_files(&[("/test.txt", "hello")]);
+    env.exec("chmod 664 /test.txt");
+    env.exec("chmod g-w /test.txt");
+    assert_eq!(env.exec("stat -c %a /test.txt").stdout.trim(), "644");
+
+    // symbolic u=rwx -> 744
+    let env = chmod_bash_with_files(&[("/test.txt", "hello")]);
+    env.exec("chmod u=rwx /test.txt");
+    assert_eq!(env.exec("stat -c %a /test.txt").stdout.trim(), "744");
+
+    // multiple files 600
+    let env = chmod_bash_with_files(&[("/a.txt", "a"), ("/b.txt", "b")]);
+    assert_eq!(env.exec("chmod 600 /a.txt /b.txt").exit_code, 0);
+    assert_eq!(env.exec("stat -c %a /a.txt").stdout.trim(), "600");
+    assert_eq!(env.exec("stat -c %a /b.txt").stdout.trim(), "600");
+
+    // recursive -R 755
+    let env = chmod_bash_with_files(&[("/dir/a.txt", "a"), ("/dir/sub/b.txt", "b")]);
+    assert_eq!(env.exec("chmod -R 755 /dir").exit_code, 0);
+    assert_eq!(env.exec("stat -c %a /dir/a.txt").stdout.trim(), "755");
+    assert_eq!(env.exec("stat -c %a /dir/sub/b.txt").stdout.trim(), "755");
+
+    // missing operand
+    let env = chmod_bash_with_files(&[]);
+    let r = env.exec("chmod");
+    assert_eq!(r.exit_code, 1);
+    assert!(
+        r.stderr.contains("missing operand"),
+        "stderr: {:?}",
+        r.stderr
+    );
+
+    // missing file
+    let env = chmod_bash_with_files(&[]);
+    let r = env.exec("chmod 755 /nonexistent");
+    assert_eq!(r.exit_code, 1);
+    assert!(r.stderr.contains("No such file"), "stderr: {:?}", r.stderr);
+
+    // invalid mode
+    let env = chmod_bash_with_files(&[("/test.txt", "hello")]);
+    let r = env.exec("chmod xyz /test.txt");
+    assert_eq!(r.exit_code, 1);
+    assert!(r.stderr.contains("invalid mode"), "stderr: {:?}", r.stderr);
+
+    // --help
+    let env = chmod_bash_with_files(&[]);
+    let r = env.exec("chmod --help");
+    assert_eq!(r.exit_code, 0);
+    assert!(r.stdout.contains("chmod"), "stdout: {:?}", r.stdout);
+    assert!(
+        r.stdout.contains("change file mode"),
+        "stdout: {:?}",
+        r.stdout
+    );
+}
