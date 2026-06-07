@@ -28001,29 +28001,61 @@ fn decode_sql_blob(hex: &str) -> Option<String> {
 }
 
 fn command_comm(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    // Mirrors commands/comm/comm.ts: --help is matched by an exact `--help`
+    // arg (hasHelpFlag) and renders the standard showHelp() layout.
     if args.iter().any(|arg| arg == "--help") {
-        return stdout_result(
-            "Usage: comm [OPTION]... FILE1 FILE2\nCompare two sorted files line by line.\n",
-        );
+        return stdout_result(concat!(
+            "comm - compare two sorted files line by line\n",
+            "\n",
+            "Usage: comm [OPTION]... FILE1 FILE2\n",
+            "\n",
+            "Options:\n",
+            "  -1             suppress column 1 (lines unique to FILE1)\n",
+            "  -2             suppress column 2 (lines unique to FILE2)\n",
+            "  -3             suppress column 3 (lines that appear in both files)\n",
+            "      --help     display this help and exit\n",
+        ));
     }
+    // Upstream only recognizes the specific combined-suppress spellings below;
+    // any other `-...` token (including unknown long options) is rejected via
+    // unknownOption() rather than being parsed character-by-character.
     let mut show = [true, true, true];
     let mut paths = Vec::new();
     for arg in args {
-        if arg.starts_with('-') && arg != "-" {
-            for flag in arg[1..].chars() {
-                match flag {
-                    '1' => show[0] = false,
-                    '2' => show[1] = false,
-                    '3' => show[2] = false,
-                    _ => return stderr_result(1, format!("comm: invalid option -- '{flag}'\n")),
-                }
+        match arg.as_str() {
+            "-1" => show[0] = false,
+            "-2" => show[1] = false,
+            "-3" => show[2] = false,
+            "-12" | "-21" => {
+                show[0] = false;
+                show[1] = false;
             }
-        } else {
-            paths.push(arg.clone());
+            "-13" | "-31" => {
+                show[0] = false;
+                show[2] = false;
+            }
+            "-23" | "-32" => {
+                show[1] = false;
+                show[2] = false;
+            }
+            "-123" | "-132" | "-213" | "-231" | "-312" | "-321" => {
+                show[0] = false;
+                show[1] = false;
+                show[2] = false;
+            }
+            other if other.starts_with('-') && other != "-" => {
+                return comm_unknown_option(other);
+            }
+            other => paths.push(other.to_string()),
         }
     }
-    if paths.len() < 2 {
-        return stderr_result(1, "comm: missing operand\n");
+    // Upstream requires EXACTLY two operands; zero, one, or three-plus all map
+    // to the same "missing operand" error.
+    if paths.len() != 2 {
+        return stderr_result(
+            1,
+            "comm: missing operand\nTry 'comm --help' for more information.\n",
+        );
     }
     let left = match read_text_source(state, &paths[0], stdin, "comm") {
         Ok(text) => text,
@@ -28033,8 +28065,8 @@ fn command_comm(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandR
         Ok(text) => text,
         Err(result) => return result,
     };
-    let left = text_lines(&left);
-    let right = text_lines(&right);
+    let left = comm_lines(&left);
+    let right = comm_lines(&right);
     let mut i = 0;
     let mut j = 0;
     let mut stdout = String::new();
@@ -28698,6 +28730,29 @@ fn split_suffix(mut index: usize, length: usize, numeric: bool) -> String {
 fn comm_prefix(column: usize, show: [bool; 3]) -> String {
     let tabs = (0..column).filter(|index| show[*index]).count();
     "\t".repeat(tabs)
+}
+
+// Splits file contents into comm's line list. Mirrors comm.ts: split on "\n"
+// then drop only a SINGLE trailing empty element (from a trailing newline).
+// Interior blank lines are preserved so they participate in the merge.
+fn comm_lines(input: &str) -> Vec<String> {
+    let mut lines: Vec<String> = input.split('\n').map(ToString::to_string).collect();
+    if lines.last().map(String::as_str) == Some("") {
+        lines.pop();
+    }
+    lines
+}
+
+// Mirrors help.ts unknownOption(): long options ("--xxx") use the
+// "unrecognized option" wording, short options use "invalid option -- 'x'".
+fn comm_unknown_option(option: &str) -> CommandResult {
+    let message = if option.starts_with("--") {
+        format!("comm: unrecognized option '{option}'\n")
+    } else {
+        let stripped = option.strip_prefix('-').unwrap_or(option);
+        format!("comm: invalid option -- '{stripped}'\n")
+    };
+    stderr_result(1, message)
 }
 
 fn command_paste(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
@@ -41645,5 +41700,220 @@ mod tests {
             }
         }
         assert!(fails.is_empty(), "DIVERGENCES:\n{}", fails.join("\n"));
+    }
+}
+
+#[cfg(test)]
+mod comm_parity_tests {
+    use crate::runtime::Bash;
+
+    // Behavioral parity (commands/comm): regression locks against the
+    // vercel-labs/just-bash upstream comm.test.ts and comm.utf8-stdin.test.ts.
+    fn run(cmd: &str) -> crate::JustBashExecResult {
+        Bash::new().exec(cmd)
+    }
+
+    fn setup_ab() -> Bash {
+        let env = Bash::new();
+        env.exec("echo -e 'a\\nb\\nc' > /tmp/file1");
+        env.exec("echo -e 'b\\nc\\nd' > /tmp/file2");
+        env
+    }
+
+    #[test]
+    fn shows_all_three_columns_by_default() {
+        let env = setup_ab();
+        let r = env.exec("comm /tmp/file1 /tmp/file2");
+        assert_eq!(r.stdout, "a\n\t\tb\n\t\tc\n\td\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn suppress_column_1() {
+        let env = setup_ab();
+        let r = env.exec("comm -1 /tmp/file1 /tmp/file2");
+        assert_eq!(r.stdout, "\tb\n\tc\nd\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn suppress_column_2() {
+        let env = setup_ab();
+        let r = env.exec("comm -2 /tmp/file1 /tmp/file2");
+        assert_eq!(r.stdout, "a\n\tb\n\tc\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn suppress_column_3() {
+        let env = setup_ab();
+        let r = env.exec("comm -3 /tmp/file1 /tmp/file2");
+        assert_eq!(r.stdout, "a\n\td\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn only_unique_to_file1_with_23() {
+        let env = setup_ab();
+        let r = env.exec("comm -23 /tmp/file1 /tmp/file2");
+        assert_eq!(r.stdout, "a\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn only_unique_to_file2_with_13() {
+        let env = setup_ab();
+        let r = env.exec("comm -13 /tmp/file1 /tmp/file2");
+        assert_eq!(r.stdout, "d\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn only_common_lines_with_12() {
+        let env = setup_ab();
+        let r = env.exec("comm -12 /tmp/file1 /tmp/file2");
+        assert_eq!(r.stdout, "b\nc\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn handles_empty_files() {
+        let env = Bash::new();
+        env.exec("touch /tmp/empty1 /tmp/empty2");
+        let r = env.exec("comm /tmp/empty1 /tmp/empty2");
+        assert_eq!(r.stdout, "");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn handles_identical_files() {
+        let env = Bash::new();
+        env.exec("echo -e 'a\\nb\\nc' > /tmp/same1");
+        env.exec("echo -e 'a\\nb\\nc' > /tmp/same2");
+        let r = env.exec("comm /tmp/same1 /tmp/same2");
+        assert_eq!(r.stdout, "\t\ta\n\t\tb\n\t\tc\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn handles_completely_different_files() {
+        let env = Bash::new();
+        env.exec("echo -e 'a\\nb' > /tmp/diff1");
+        env.exec("echo -e 'c\\nd' > /tmp/diff2");
+        let r = env.exec("comm /tmp/diff1 /tmp/diff2");
+        assert_eq!(r.stdout, "a\nb\n\tc\n\td\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn handles_stdin_with_dash() {
+        let env = Bash::new();
+        env.exec("echo -e 'a\\nb\\nc' > /tmp/file");
+        let r = env.exec("echo -e 'b\\nc\\nd' | comm /tmp/file -");
+        assert_eq!(r.stdout, "a\n\t\tb\n\t\tc\n\td\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn errors_with_missing_operand() {
+        let r = run("comm");
+        assert_eq!(
+            r.stderr,
+            "comm: missing operand\nTry 'comm --help' for more information.\n"
+        );
+        assert!(r.stderr.contains("missing operand"));
+        assert_eq!(r.exit_code, 1);
+    }
+
+    #[test]
+    fn errors_with_only_one_file() {
+        let env = Bash::new();
+        env.exec("touch /tmp/only");
+        let r = env.exec("comm /tmp/only");
+        assert_eq!(
+            r.stderr,
+            "comm: missing operand\nTry 'comm --help' for more information.\n"
+        );
+        assert_eq!(r.exit_code, 1);
+    }
+
+    #[test]
+    fn errors_with_more_than_two_files() {
+        // Upstream requires exactly two operands; a third triggers missing operand.
+        let env = Bash::new();
+        env.exec("touch /tmp/a /tmp/b /tmp/c");
+        let r = env.exec("comm /tmp/a /tmp/b /tmp/c");
+        assert_eq!(
+            r.stderr,
+            "comm: missing operand\nTry 'comm --help' for more information.\n"
+        );
+        assert_eq!(r.exit_code, 1);
+    }
+
+    #[test]
+    fn errors_if_file_doesnt_exist() {
+        let env = Bash::new();
+        env.exec("touch /tmp/exists");
+        let r = env.exec("comm /tmp/exists /tmp/noexist");
+        assert!(r.stderr.contains("No such file or directory"));
+        assert_eq!(r.exit_code, 1);
+    }
+
+    #[test]
+    fn unknown_short_option() {
+        let env = Bash::new();
+        env.exec("touch /tmp/a /tmp/b");
+        let r = env.exec("comm -4 /tmp/a /tmp/b");
+        assert_eq!(r.stderr, "comm: invalid option -- '4'\n");
+        assert_eq!(r.exit_code, 1);
+    }
+
+    #[test]
+    fn unknown_long_option() {
+        let env = Bash::new();
+        env.exec("touch /tmp/a /tmp/b");
+        let r = env.exec("comm --bogus /tmp/a /tmp/b");
+        assert_eq!(r.stderr, "comm: unrecognized option '--bogus'\n");
+        assert_eq!(r.exit_code, 1);
+    }
+
+    #[test]
+    fn preserves_interior_blank_lines() {
+        // Upstream only strips a single trailing newline; interior blanks
+        // participate in the merge as ordinary (empty) lines.
+        let env = Bash::new();
+        env.exec("printf 'a\\n\\nb\\n' > /tmp/bl1");
+        env.exec("printf 'a\\nb\\n' > /tmp/bl2");
+        let r = env.exec("comm /tmp/bl1 /tmp/bl2");
+        assert_eq!(r.stdout, "\t\ta\n\n\t\tb\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn help_contains_comm_and_compare() {
+        let r = run("comm --help");
+        assert!(r.stdout.contains("comm"));
+        assert!(r.stdout.contains("compare"));
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn utf8_stdin_compares_multibyte_lines() {
+        // Upstream comm.utf8-stdin.test.ts: cat /a.txt | comm - /b.txt with
+        // multibyte content; only membership is asserted, not column order.
+        let env = Bash::with_options(crate::runtime::BashOptions {
+            files: {
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("/a.txt".to_string(), "café\n한글\n".to_string());
+                m.insert("/b.txt".to_string(), "café\n漢字\n".to_string());
+                m
+            },
+            ..Default::default()
+        });
+        let r = env.exec("cat /a.txt | comm - /b.txt");
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.contains("café"));
+        assert!(r.stdout.contains("한글"));
+        assert!(r.stdout.contains("漢字"));
     }
 }
