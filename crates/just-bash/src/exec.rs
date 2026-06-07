@@ -7513,7 +7513,7 @@ fn normalize_markdown_output(input: &str) -> String {
     }
 }
 
-fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+fn command_rg(state: &mut ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
     let request = match parse_rg_args(args) {
         Ok(RgParseResult::Help) => {
             return stdout_result(
@@ -7570,19 +7570,29 @@ fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
     if request.options.multiline {
         let multiline = match rg_build_multiline_regexes(&patterns, ignore_case, &request.options) {
             Ok(regexes) => regexes,
-            Err(error) => return stderr_result(2, format!("rg: {error}\n")),
+            // ripgrep (and the upstream JS port) collapse any regex-construction
+            // failure into a single `rg: invalid regex: <patterns>` message
+            // rather than surfacing the engine's verbose parse diagnostics.
+            Err(_) => {
+                return stderr_result(2, format!("rg: invalid regex: {}\n", patterns.join(", ")));
+            }
         };
         let inputs = if request.roots.is_empty() && !stdin.is_empty() {
             vec![RgInput {
                 label: "<stdin>".to_string(),
                 text: stdin.to_string(),
                 explicit_file: false,
+                source_path: None,
             }]
         } else {
             match rg_inputs(state, &request) {
                 Ok(inputs) => inputs,
                 Err(error) => return stderr_result(2, format!("rg: {error}\n")),
             }
+        };
+        let inputs = match rg_apply_preprocessor(state, &request, inputs) {
+            Ok(inputs) => inputs,
+            Err(result) => return result,
         };
         return rg_render_multiline(&request, &multiline, &inputs);
     }
@@ -7601,7 +7611,11 @@ fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(matchers) => matchers,
-        Err(error) => return stderr_result(2, format!("rg: {error}\n")),
+        // Match upstream: any regex-build error becomes a single
+        // `rg: invalid regex: <patterns>` line, not the engine diagnostic.
+        Err(_) => {
+            return stderr_result(2, format!("rg: invalid regex: {}\n", patterns.join(", ")));
+        }
     };
 
     let inputs = if request.roots.is_empty() && !stdin.is_empty() {
@@ -7609,6 +7623,7 @@ fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
             label: "<stdin>".to_string(),
             text: stdin.to_string(),
             explicit_file: false,
+            source_path: None,
         }]
     } else {
         match rg_inputs(state, &request) {
@@ -7617,11 +7632,70 @@ fn command_rg(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
         }
     };
 
+    let inputs = match rg_apply_preprocessor(state, &request, inputs) {
+        Ok(inputs) => inputs,
+        Err(result) => return result,
+    };
+
     if request.options.json {
         return rg_render_json(&request, &matchers, &inputs);
     }
 
     rg_render_search(&request, &matchers, &inputs)
+}
+
+/// Applies a `--pre` preprocessor to each filesystem-sourced input whose
+/// basename matches the configured `--pre-glob` patterns (or all files when no
+/// `--pre-glob` is given). The preprocessor command is run as `<pre> <path>`;
+/// its stdout replaces the file content for searching. This mirrors
+/// rg-search.ts `readFileContent`: a non-zero exit or empty stdout leaves the
+/// original content untouched, and the replacement is re-checked for binary
+/// content (a NUL byte in the first 8192 chars filters the file unless `-a`).
+fn rg_apply_preprocessor(
+    state: &mut ExecState<'_>,
+    request: &RgRequest,
+    inputs: Vec<RgInput>,
+) -> Result<Vec<RgInput>, CommandResult> {
+    let Some(preprocessor) = request.options.preprocessor.clone() else {
+        return Ok(inputs);
+    };
+    let mut out = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let Some(path) = input.source_path.clone() else {
+            out.push(input);
+            continue;
+        };
+        let basename = path.rsplit('/').next().unwrap_or(&path);
+        if !rg_matches_pre_glob(basename, &request.options.preprocessor_globs) {
+            out.push(input);
+            continue;
+        }
+        let command = format!("{preprocessor} {}", shell_quote(&path));
+        let result = execute_pipeline(state, &command);
+        if result.exit_code == 0 && !result.stdout.is_empty() {
+            // Binary-detection on the preprocessed output, mirroring upstream.
+            if !request.options.text && result.stdout.chars().take(8192).any(|c| c == '\0') {
+                continue;
+            }
+            out.push(RgInput {
+                text: result.stdout,
+                ..input
+            });
+        } else {
+            // Preprocessing failed/empty: fall back to the raw file content.
+            out.push(input);
+        }
+    }
+    Ok(out)
+}
+
+/// Returns true when `filename` should be preprocessed: an empty glob list
+/// preprocesses every file, otherwise the basename must match a glob.
+fn rg_matches_pre_glob(filename: &str, globs: &[String]) -> bool {
+    if globs.is_empty() {
+        return true;
+    }
+    globs.iter().any(|glob| rg_glob_match(glob, filename))
 }
 
 #[derive(Clone, Debug)]
@@ -7682,6 +7756,12 @@ struct RgOptions {
     explicit_context: Option<usize>,
     multiline: bool,
     multiline_dotall: bool,
+    /// `--pre COMMAND`: preprocessor command run on each candidate file; its
+    /// stdout is searched in place of the raw file content.
+    preprocessor: Option<String>,
+    /// `--pre-glob GLOB`: restrict preprocessing to files whose basename
+    /// matches one of these globs (empty = preprocess every file).
+    preprocessor_globs: Vec<String>,
 }
 
 impl Default for RgOptions {
@@ -7735,6 +7815,8 @@ impl Default for RgOptions {
             explicit_context: None,
             multiline: false,
             multiline_dotall: false,
+            preprocessor: None,
+            preprocessor_globs: Vec::new(),
         }
     }
 }
@@ -7896,6 +7978,12 @@ fn parse_rg_option(
             options
                 .ignore_files
                 .push(rg_option_value(args, index, "--ignore-file")?)
+        }
+        "--pre" => options.preprocessor = Some(rg_option_value(args, index, "--pre")?),
+        "--pre-glob" => {
+            options
+                .preprocessor_globs
+                .push(rg_option_value(args, index, "--pre-glob")?)
         }
         "--pcre2" => {
             return Err(stderr_result(
@@ -8259,6 +8347,9 @@ struct RgInput {
     label: String,
     text: String,
     explicit_file: bool,
+    /// Absolute path of the source file, when the input came from the
+    /// filesystem (not stdin). Used by `--pre` to re-run a preprocessor.
+    source_path: Option<String>,
 }
 
 fn rg_load_pattern_files(
@@ -8569,13 +8660,22 @@ fn rg_push_input(
     // Upstream rg samples only the first 8192 chars when detecting binary
     // files (rg-search.ts: `content.slice(0, 8192)`), so a NUL byte that
     // appears after the sample window does not mark the file as binary.
-    if !request.options.text && text.chars().take(8192).any(|c| c == '\0') {
+    // When a `--pre` preprocessor will run on this file, defer binary detection
+    // to the preprocessed output (rg-search.ts runs the preprocessor before the
+    // binary sample), so the raw bytes are not used to filter it out here.
+    let will_preprocess = request.options.preprocessor.is_some()
+        && rg_matches_pre_glob(
+            candidate.path.rsplit('/').next().unwrap_or(candidate.path),
+            &request.options.preprocessor_globs,
+        );
+    if !will_preprocess && !request.options.text && text.chars().take(8192).any(|c| c == '\0') {
         return;
     }
     inputs.push(RgInput {
         label,
         text,
         explicit_file: candidate.explicit_file,
+        source_path: Some(candidate.path.to_string()),
     });
 }
 
