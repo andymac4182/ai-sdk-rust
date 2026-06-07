@@ -3088,9 +3088,11 @@ fn command_wc(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
     } else {
         Vec::new()
     };
-    let mut stdout = String::new();
     let multiple_files = paths.len() > 1;
+    // First pass: compute each input's counts (with the byte adjustments) and the
+    // running total. Width is derived from these before any line is formatted.
     let mut total = TextCounts::default();
+    let mut per_file: Vec<(TextCounts, Option<String>)> = Vec::with_capacity(inputs.len());
     for (index, input) in inputs.iter().enumerate() {
         let mut counts = TextCounts::from_text(&input.text);
         if show_bytes && !paths.is_empty() {
@@ -3107,13 +3109,47 @@ fn command_wc(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
             counts.bytes = carrier_byte_length(&input.text);
         }
         total.add(counts);
+        let label = (!input.label.is_empty()).then(|| input.label.clone());
+        per_file.push((counts, label));
+    }
+
+    // Column width: upstream wc.ts uses a minimum of 3 for multiple files,
+    // widened to the digit count of the (multi-file) totals or (single-file) the
+    // file's own max, across the shown columns. Single file / stdin: no minimum.
+    // (commands/wc/wc.ts: `let maxWidth = files.length > 1 ? 3 : 0;` then
+    //  `maxWidth = Math.max(maxWidth, String(maxX).length)` per shown column.)
+    let basis = |get: &dyn Fn(&TextCounts) -> usize| -> usize {
+        if multiple_files {
+            get(&total)
+        } else {
+            per_file.iter().map(|(c, _)| get(c)).max().unwrap_or(0)
+        }
+    };
+    let mut max_width = if multiple_files { 3 } else { 0 };
+    if show_lines {
+        max_width = max_width.max(basis(&|c| c.lines).to_string().len());
+    }
+    if show_words {
+        max_width = max_width.max(basis(&|c| c.words).to_string().len());
+    }
+    if show_bytes {
+        max_width = max_width.max(basis(&|c| c.bytes).to_string().len());
+    }
+    if show_chars {
+        max_width = max_width.max(basis(&|c| c.chars).to_string().len());
+    }
+
+    // Second pass: format each line right-justified to the computed width.
+    let mut stdout = String::new();
+    for (counts, label) in &per_file {
         stdout.push_str(&format_wc_counts(
-            counts,
+            *counts,
             show_lines,
             show_words,
             show_bytes,
             show_chars,
-            (!input.label.is_empty()).then_some(input.label.as_str()),
+            label.as_deref(),
+            max_width,
         ));
     }
     if multiple_files {
@@ -3124,6 +3160,7 @@ fn command_wc(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRes
             show_bytes,
             show_chars,
             Some("total"),
+            max_width,
         ));
     }
     stdout_result(stdout)
@@ -4071,19 +4108,23 @@ fn format_wc_counts(
     show_bytes: bool,
     show_chars: bool,
     label: Option<&str>,
+    min_width: usize,
 ) -> String {
+    // Each shown column is right-justified to `min_width` (upstream
+    // `String(count).padStart(maxWidth)`); min_width == 0 means no padding.
+    let pad = |value: usize| format!("{value:>min_width$}");
     let mut parts = Vec::new();
     if show_lines {
-        parts.push(counts.lines.to_string());
+        parts.push(pad(counts.lines));
     }
     if show_words {
-        parts.push(counts.words.to_string());
+        parts.push(pad(counts.words));
     }
     if show_bytes {
-        parts.push(counts.bytes.to_string());
+        parts.push(pad(counts.bytes));
     }
     if show_chars {
-        parts.push(counts.chars.to_string());
+        parts.push(pad(counts.chars));
     }
     let mut output = parts.join(" ");
     if let Some(label) = label {
@@ -40698,5 +40739,32 @@ mod tests {
         let batch = xan_run_with_files("find /dir -type f -exec ls {} +", files);
         assert_eq!(batch.stdout, "/dir/file1.txt\n\n/dir/file2.txt\n");
         assert_eq!(batch.exit_code, 0);
+    }
+
+    // Behavioral parity: upstream vercel-labs/just-bash `wc` (commands/wc/wc.ts)
+    // right-justifies counts to a minimum width of 3 when there are multiple file
+    // operands (widened to the digit count of the totals). Exercised upstream by
+    // find.actions.test.ts "should work with wc -l to count all lines at once".
+    #[test]
+    fn wc_multiple_files_pad_counts_to_min_width_three() {
+        let files = &[
+            ("/dir/a.txt", "line1\nline2\n"),
+            ("/dir/b.txt", "line1\nline2\nline3\n"),
+        ];
+        let direct = xan_run_with_files("wc -l /dir/a.txt /dir/b.txt", files);
+        assert_eq!(
+            direct.stdout,
+            "  2 /dir/a.txt\n  3 /dir/b.txt\n  5 total\n"
+        );
+        assert_eq!(direct.exit_code, 0);
+
+        // The upstream batch-mode case: find passes both files to a single `wc`.
+        let batch = xan_run_with_files("find /dir -type f -name \"*.txt\" -exec wc -l {} +", files);
+        assert_eq!(batch.stdout, "  2 /dir/a.txt\n  3 /dir/b.txt\n  5 total\n");
+        assert_eq!(batch.exit_code, 0);
+
+        // Single file keeps no minimum-width padding (upstream maxWidth = 0).
+        let single = xan_run_with_files("wc -l /dir/a.txt", files);
+        assert_eq!(single.stdout, "2 /dir/a.txt\n");
     }
 }
