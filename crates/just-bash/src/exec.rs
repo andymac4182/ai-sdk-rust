@@ -4587,9 +4587,14 @@ fn unknown_option_result(cmd: &str, option: &str) -> CommandResult {
 
 fn command_chmod(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
     if args.iter().any(|arg| arg == "--help") {
-        return stdout_result(
-            "Usage: chmod [OPTION]... MODE FILE...\nChange file mode bits.\n  -R, --recursive\n",
-        );
+        return stdout_result(concat!(
+            "chmod - change file mode bits\n\n",
+            "Usage: chmod [OPTIONS] MODE FILE...\n\n",
+            "Options:\n",
+            "  -R      change files recursively\n",
+            "  -v      output a diagnostic for every file processed\n",
+            "      --help display this help and exit\n",
+        ));
     }
     let mut recursive = false;
     let mut values = Vec::new();
