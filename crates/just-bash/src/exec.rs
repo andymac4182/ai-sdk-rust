@@ -17278,24 +17278,110 @@ fn escape_permissive_control_chars(input: &str) -> String {
     output
 }
 
+/// Parse a JSON stream (concatenated JSON values), mirroring upstream
+/// `parseJsonStream` (commands/jq/jq.ts). The hand-rolled tokenizer locates each
+/// top-level value by scanning, then parses the located slice with serde_json
+/// (after permissive control-char escaping). Error messages match upstream so
+/// `jq` reports `Invalid JSON at position N: unexpected '...'` and
+/// `Unexpected end of JSON input ...` rather than serde's internal phrasing.
 fn parse_json_stream(input: &str) -> Result<Vec<JsonValue>, String> {
-    let escaped = escape_permissive_control_chars(input);
-    let input = escaped.as_str();
+    let chars: Vec<char> = input.chars().collect();
+    let len = chars.len();
     let mut values = Vec::new();
-    let mut rest = input.trim_start();
-    while !rest.is_empty() {
-        let mut stream = serde_json::Deserializer::from_str(rest).into_iter::<JsonValue>();
-        let Some(next) = stream.next() else {
-            break;
-        };
-        let value = next.map_err(|error| format!("{error}"))?;
-        let offset = stream.byte_offset();
-        if offset == 0 {
-            return Err("invalid JSON stream".to_string());
+    let mut pos = 0usize;
+
+    let parse_slice = |start: usize, end: usize| -> Result<JsonValue, String> {
+        let slice: String = chars[start..end].iter().collect();
+        let sanitized = escape_permissive_control_chars(&slice);
+        serde_json::from_str::<JsonValue>(&sanitized).map_err(|error| format!("{error}"))
+    };
+
+    while pos < len {
+        // Skip whitespace.
+        while pos < len && chars[pos].is_whitespace() {
+            pos += 1;
         }
-        values.push(value);
-        rest = rest[offset..].trim_start();
+        if pos >= len {
+            break;
+        }
+
+        let start_pos = pos;
+        let ch = chars[pos];
+
+        if ch == '{' || ch == '[' {
+            let open_bracket = ch;
+            let close_bracket = if ch == '{' { '}' } else { ']' };
+            let mut depth = 1i32;
+            let mut in_string = false;
+            let mut is_escaped = false;
+            pos += 1;
+            while pos < len && depth > 0 {
+                let c = chars[pos];
+                if is_escaped {
+                    is_escaped = false;
+                } else if c == '\\' {
+                    is_escaped = true;
+                } else if c == '"' {
+                    in_string = !in_string;
+                } else if !in_string {
+                    if c == open_bracket {
+                        depth += 1;
+                    } else if c == close_bracket {
+                        depth -= 1;
+                    }
+                }
+                pos += 1;
+            }
+            if depth != 0 {
+                return Err(format!(
+                    "Unexpected end of JSON input at position {pos} (unclosed {open_bracket})"
+                ));
+            }
+            values.push(parse_slice(start_pos, pos)?);
+        } else if ch == '"' {
+            let mut is_escaped = false;
+            pos += 1;
+            while pos < len {
+                let c = chars[pos];
+                if is_escaped {
+                    is_escaped = false;
+                } else if c == '\\' {
+                    is_escaped = true;
+                } else if c == '"' {
+                    pos += 1;
+                    break;
+                }
+                pos += 1;
+            }
+            values.push(parse_slice(start_pos, pos)?);
+        } else if ch == '-' || ch.is_ascii_digit() {
+            while pos < len {
+                let c = chars[pos];
+                if c.is_ascii_digit() || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-' {
+                    pos += 1;
+                } else {
+                    break;
+                }
+            }
+            values.push(parse_slice(start_pos, pos)?);
+        } else if chars[pos..len.min(pos + 4)].iter().collect::<String>() == "true" {
+            values.push(JsonValue::Bool(true));
+            pos += 4;
+        } else if chars[pos..len.min(pos + 5)].iter().collect::<String>() == "false" {
+            values.push(JsonValue::Bool(false));
+            pos += 5;
+        } else if chars[pos..len.min(pos + 4)].iter().collect::<String>() == "null" {
+            values.push(JsonValue::Null);
+            pos += 4;
+        } else {
+            let context: String = chars[pos..len.min(pos + 10)].iter().collect();
+            let token = context.split_whitespace().next().unwrap_or("");
+            return Err(format!(
+                "Invalid JSON at position {start_pos}: unexpected '{token}'"
+            ));
+        }
     }
+
     Ok(values)
 }
 
