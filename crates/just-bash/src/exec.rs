@@ -38650,6 +38650,136 @@ mod tests {
     }
 
     #[test]
+    fn diff_flag_modes_and_errors_match_upstream() {
+        // Exhaustive coverage of diff.test.ts groups that previously lacked
+        // exact-output regression tests: identical files, brief mode, report
+        // identical (-s / --report-identical-files), ignore-case (-i), both
+        // empty files, and the error-handling group (missing operands, missing
+        // files, unknown long/short options). Outputs mirror the upstream
+        // diff.ts return values verbatim.
+
+        fn run(files: &[(&str, &str)], cmd: &str) -> JustBashExecResult {
+            let mut opts = JustBashSessionOptions::new().with_cwd("/");
+            for (path, content) in files {
+                opts = opts.with_file(*path, *content);
+            }
+            let bash = JustBashSession::with_options(opts);
+            bash.exec(cmd, JustBashExecOptions::new())
+        }
+
+        // basic comparison: identical files -> exit 0, empty stdout/stderr.
+        let r = run(
+            &[
+                ("/a.txt", "line1\nline2\nline3\n"),
+                ("/b.txt", "line1\nline2\nline3\n"),
+            ],
+            "diff /a.txt /b.txt",
+        );
+        assert_eq!(r.stdout, "");
+        assert_eq!(r.stderr, "");
+        assert_eq!(r.exit_code, 0);
+
+        // basic comparison: different files -> exit 1.
+        let r = run(
+            &[("/a.txt", "line1\n"), ("/b.txt", "line2\n")],
+            "diff /a.txt /b.txt",
+        );
+        assert_eq!(r.exit_code, 1);
+
+        // brief (-q): differing files report the canonical "differ" line.
+        let r = run(
+            &[("/a.txt", "aaa\n"), ("/b.txt", "bbb\n")],
+            "diff -q /a.txt /b.txt",
+        );
+        assert_eq!(r.stdout, "Files /a.txt and /b.txt differ\n");
+        assert_eq!(r.stderr, "");
+        assert_eq!(r.exit_code, 1);
+
+        // brief (-q): identical files emit nothing, exit 0.
+        let r = run(
+            &[("/a.txt", "same\n"), ("/b.txt", "same\n")],
+            "diff -q /a.txt /b.txt",
+        );
+        assert_eq!(r.stdout, "");
+        assert_eq!(r.exit_code, 0);
+
+        // brief (--brief long form).
+        let r = run(
+            &[("/a.txt", "aaa\n"), ("/b.txt", "bbb\n")],
+            "diff --brief /a.txt /b.txt",
+        );
+        assert_eq!(r.stdout, "Files /a.txt and /b.txt differ\n");
+        assert_eq!(r.exit_code, 1);
+
+        // report identical (-s).
+        let r = run(
+            &[("/a.txt", "same\n"), ("/b.txt", "same\n")],
+            "diff -s /a.txt /b.txt",
+        );
+        assert_eq!(r.stdout, "Files /a.txt and /b.txt are identical\n");
+        assert_eq!(r.exit_code, 0);
+
+        // report identical (--report-identical-files long form).
+        let r = run(
+            &[("/a.txt", "same\n"), ("/b.txt", "same\n")],
+            "diff --report-identical-files /a.txt /b.txt",
+        );
+        assert_eq!(r.stdout, "Files /a.txt and /b.txt are identical\n");
+        assert_eq!(r.exit_code, 0);
+
+        // ignore-case (-i): case-only differences treated as identical.
+        let r = run(
+            &[("/a.txt", "Hello World\n"), ("/b.txt", "hello world\n")],
+            "diff -i /a.txt /b.txt",
+        );
+        assert_eq!(r.stdout, "");
+        assert_eq!(r.exit_code, 0);
+
+        // ignore-case absent: case differences still diff.
+        let r = run(
+            &[("/a.txt", "Hello\n"), ("/b.txt", "hello\n")],
+            "diff /a.txt /b.txt",
+        );
+        assert_eq!(r.exit_code, 1);
+
+        // empty files: both empty -> identical, exit 0.
+        let r = run(&[("/a.txt", ""), ("/b.txt", "")], "diff /a.txt /b.txt");
+        assert_eq!(r.stdout, "");
+        assert_eq!(r.exit_code, 0);
+
+        // error handling: missing first file -> exit 2, stderr message.
+        let r = run(
+            &[("/exists.txt", "content\n")],
+            "diff /missing.txt /exists.txt",
+        );
+        assert_eq!(r.stderr, "diff: /missing.txt: No such file or directory\n");
+        assert_eq!(r.exit_code, 2);
+
+        // error handling: missing second file -> exit 2, stderr names f2.
+        let r = run(
+            &[("/exists.txt", "content\n")],
+            "diff /exists.txt /missing.txt",
+        );
+        assert_eq!(r.stderr, "diff: /missing.txt: No such file or directory\n");
+        assert_eq!(r.exit_code, 2);
+
+        // error handling: missing operand (only one file) -> exit 2.
+        let r = run(&[], "diff /a.txt");
+        assert!(r.stderr.contains("missing operand"));
+        assert_eq!(r.exit_code, 2);
+
+        // error handling: unknown long option -> "unrecognized option", exit 1.
+        let r = run(&[], "diff --unknown /a.txt /b.txt");
+        assert!(r.stderr.contains("unrecognized option"));
+        assert_eq!(r.exit_code, 1);
+
+        // error handling: unknown short option -> "invalid option", exit 1.
+        let r = run(&[], "diff -z /a.txt /b.txt");
+        assert!(r.stderr.contains("invalid option"));
+        assert_eq!(r.exit_code, 1);
+    }
+
+    #[test]
     fn tee_command_rows_match_upstream() {
         // Mirrors commands/tee/tee.test.ts plus the error-path behavior of
         // upstream tee.ts: failures never abort the command, stdin still passes
