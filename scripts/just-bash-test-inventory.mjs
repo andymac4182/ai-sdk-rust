@@ -4315,6 +4315,15 @@ const jbc36CaseGroups = [
       'JBC-36 classifies these cross-FS rows as host real-root and OS symlink adapter security scenarios. Virtual mount boundaries and symlink policy are covered by Rust filesystem tests separately.',
   },
   {
+    file: 'packages/just-bash/src/fs/cross-fs-security.test.ts',
+    lines: [398],
+    status: 'portable-verified',
+    owner: 'crates/just-bash::path::readlink-target-sanitizer',
+    rustTest: 'jbc45_readlink_target_sanitizer_handles_relative_escape',
+    notes:
+      'R19JB ports the host-backed `readlink` sanitiser contract: a relative symlink target that resolves OUT of the sandbox root is reduced to the raw target basename (no `..`, no real outside-root path leak), while a within-root relative target presents as the virtual path relative to the link directory. The pure `sanitize_readlink_target` mirrors `ReadWriteFs.readlink` and the named Rust test fails if the basename reduction regresses.',
+  },
+  {
     file: 'packages/just-bash/src/fs/in-memory-fs/in-memory-fs.test.ts',
     lines: jbc36InMemoryLazyJsOnlyLines,
     status: 'js-only-documented',

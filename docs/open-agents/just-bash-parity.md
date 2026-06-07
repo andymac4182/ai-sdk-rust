@@ -19,11 +19,11 @@ Rows are intentionally fail-closed: no row is verified until a sibling implement
 | Non-test TS/TSX source files | 423 |
 | Test files | 485 |
 | Test cases | 9936 |
-| Portable pending cases | 4 |
-| Portable verified cases | 8733 |
+| Portable pending cases | 3 |
+| Portable verified cases | 8734 |
 | JS-only documented cases | 1199 |
 | Type-system impossible cases | 0 |
-| Strict gate gaps | 4 |
+| Strict gate gaps | 3 |
 | Inventory check command | node scripts/just-bash-test-inventory.mjs --check |
 | Strict gate command | node scripts/just-bash-test-inventory.mjs --strict |
 | Conformance plan | docs/open-agents/just-bash-conformance.md |
@@ -295,7 +295,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | command:yq | 215 | 0 | 213 | 2 | 0 |
 | packages/just-bash | comparison-tests | 530 | 0 | 530 | 0 | 0 |
 | packages/just-bash | core | 213 | 0 | 191 | 22 | 0 |
-| packages/just-bash | fs:core | 263 | 1 | 248 | 14 | 0 |
+| packages/just-bash | fs:core | 263 | 0 | 249 | 14 | 0 |
 | packages/just-bash | fs:in-memory-fs | 86 | 0 | 72 | 14 | 0 |
 | packages/just-bash | fs:mountable-fs | 85 | 0 | 76 | 9 | 0 |
 | packages/just-bash | fs:overlay-fs | 282 | 0 | 152 | 130 | 0 |
@@ -335,7 +335,6 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | --- | --- | --- |
 | pending:just-bash-command-base64 | portable-pending | 1 |
 | pending:just-bash-command-timeout | portable-pending | 1 |
-| pending:just-bash-fs | portable-pending | 1 |
 | pending:just-bash-parser-interpreter | portable-pending | 1 |
 
 ## Test File Inventory
@@ -689,7 +688,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | core | packages/just-bash/src/encoding-pipeline.test.ts | 22 | 0 | 21 | 1 | 0 | crates/just-bash::exec; crates/just-bash::exec::jbc36-encoding-pipeline; crates/just-bash::exec::jbc45-encoding-pipeline; crates/just-bash::shell; js-only:just-bash-encoding-helper-package-exports |
 | packages/just-bash | core | packages/just-bash/src/encoding.fs-fallback.test.ts | 2 | 0 | 2 | 0 | 0 | crates/just-bash::file_reader |
 | packages/just-bash | fs:core | packages/just-bash/src/fs/cross-fs-no-symlinks.test.ts | 70 | 0 | 70 | 0 | 0 | crates/just-bash::fs::symlink-policy |
-| packages/just-bash | fs:core | packages/just-bash/src/fs/cross-fs-security.test.ts | 118 | 1 | 109 | 8 | 0 | crates/just-bash::fs::path-security; js-only:just-bash-cross-fs-host-adapter-security; pending:just-bash-fs |
+| packages/just-bash | fs:core | packages/just-bash/src/fs/cross-fs-security.test.ts | 118 | 0 | 110 | 8 | 0 | crates/just-bash::fs::path-security; crates/just-bash::path::readlink-target-sanitizer; js-only:just-bash-cross-fs-host-adapter-security |
 | packages/just-bash | fs:in-memory-fs | packages/just-bash/src/fs/in-memory-fs/in-memory-fs.security.test.ts | 46 | 0 | 46 | 0 | 0 | crates/just-bash::fs; crates/just-bash::fs::jbc45-in-memory-leftovers |
 | packages/just-bash | fs:in-memory-fs | packages/just-bash/src/fs/in-memory-fs/in-memory-fs.test.ts | 40 | 0 | 26 | 14 | 0 | crates/just-bash::encoding; crates/just-bash::fs; js-only:just-bash-in-memory-lazy-provider-callbacks |
 | packages/just-bash | fs:core | packages/just-bash/src/fs/interface.contract.test.ts | 6 | 0 | 6 | 0 | 0 | crates/just-bash::fs; crates/just-bash::path |
@@ -7402,7 +7401,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | fs:core | packages/just-bash/src/fs/cross-fs-security.test.ts | 364 | lstat vs stat on escape symlinks | throws for directory | it | portable-verified | crates/just-bash::fs::path-security | jbc26_virtual_fs_path_security_encoding_and_error_shape_rows_are_sanitized; jbc26_symlink_policy_mount_routing_and_overlay_precedence_rows_are_virtual | JBC-26 verifies portable null-byte, traversal clamp, special path, symlink-loop, no-host-mutation, error-shape, read-only, overlay, and virtual mount safety rows. Real host permission and OS-symlink rows remain pending. |
 | packages/just-bash | fs:core | packages/just-bash/src/fs/cross-fs-security.test.ts | 373 | readlink on non-symlink | does not expose real path for absolute outside symlink | it | portable-verified | crates/just-bash::fs::path-security | jbc26_virtual_fs_path_security_encoding_and_error_shape_rows_are_sanitized; jbc26_symlink_policy_mount_routing_and_overlay_precedence_rows_are_virtual | JBC-26 verifies portable null-byte, traversal clamp, special path, symlink-loop, no-host-mutation, error-shape, read-only, overlay, and virtual mount safety rows. Real host permission and OS-symlink rows remain pending. |
 | packages/just-bash | fs:core | packages/just-bash/src/fs/cross-fs-security.test.ts | 387 | readlink on non-symlink | returns relative target as-is for within-root links (no leak) | it | portable-verified | crates/just-bash::fs::path-security | jbc26_virtual_fs_path_security_encoding_and_error_shape_rows_are_sanitized; jbc26_symlink_policy_mount_routing_and_overlay_precedence_rows_are_virtual | JBC-26 verifies portable null-byte, traversal clamp, special path, symlink-loop, no-host-mutation, error-shape, read-only, overlay, and virtual mount safety rows. Real host permission and OS-symlink rows remain pending. |
-| packages/just-bash | fs:core | packages/just-bash/src/fs/cross-fs-security.test.ts | 398 | readlink on non-symlink | sanitises relative target that escapes root to basename only | it | portable-pending | pending:just-bash-fs | pending:just-bash-fs | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
+| packages/just-bash | fs:core | packages/just-bash/src/fs/cross-fs-security.test.ts | 398 | readlink on non-symlink | sanitises relative target that escapes root to basename only | it | portable-verified | crates/just-bash::path::readlink-target-sanitizer | jbc45_readlink_target_sanitizer_handles_relative_escape | R19JB ports the host-backed `readlink` sanitiser contract: a relative symlink target that resolves OUT of the sandbox root is reduced to the raw target basename (no `..`, no real outside-root path leak), while a within-root relative target presents as the virtual path relative to the link directory. The pure `sanitize_readlink_target` mirrors `ReadWriteFs.readlink` and the named Rust test fails if the basename reduction regresses. |
 | packages/just-bash | fs:core | packages/just-bash/src/fs/cross-fs-security.test.ts | 421 | readlink path sanitisation | resolves internal file to virtual path | it | portable-verified | crates/just-bash::fs::path-security | jbc26_virtual_fs_path_security_encoding_and_error_shape_rows_are_sanitized; jbc26_symlink_policy_mount_routing_and_overlay_precedence_rows_are_virtual | JBC-26 verifies portable null-byte, traversal clamp, special path, symlink-loop, no-host-mutation, error-shape, read-only, overlay, and virtual mount safety rows. Real host permission and OS-symlink rows remain pending. |
 | packages/just-bash | fs:core | packages/just-bash/src/fs/cross-fs-security.test.ts | 427 | readlink path sanitisation | throws for non-existent file | it | portable-verified | crates/just-bash::fs::path-security | jbc26_virtual_fs_path_security_encoding_and_error_shape_rows_are_sanitized; jbc26_symlink_policy_mount_routing_and_overlay_precedence_rows_are_virtual | JBC-26 verifies portable null-byte, traversal clamp, special path, symlink-loop, no-host-mutation, error-shape, read-only, overlay, and virtual mount safety rows. Real host permission and OS-symlink rows remain pending. |
 | packages/just-bash | fs:core | packages/just-bash/src/fs/cross-fs-security.test.ts | 431 | readlink path sanitisation | realpath for escape symlink does not expose real outside path | it | portable-verified | crates/just-bash::fs::path-security | jbc26_virtual_fs_path_security_encoding_and_error_shape_rows_are_sanitized; jbc26_symlink_policy_mount_routing_and_overlay_precedence_rows_are_virtual | JBC-26 verifies portable null-byte, traversal clamp, special path, symlink-loop, no-host-mutation, error-shape, read-only, overlay, and virtual mount safety rows. Real host permission and OS-symlink rows remain pending. |

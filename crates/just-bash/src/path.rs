@@ -78,6 +78,97 @@ pub fn sanitize_symlink_target(raw_target: &str, canonical_root: &str) -> Saniti
     }
 }
 
+/// Sanitize the raw target of a symlink as returned by a host-backed
+/// `readlink`, matching upstream `ReadWriteFs.readlink`
+/// (`packages/just-bash/src/fs/read-write-fs/read-write-fs.ts`).
+///
+/// A raw target — absolute or relative — is resolved against the link's host
+/// directory and compared with the sandbox `canonical_root`:
+/// - When the resolved target stays within the root, the virtual path relative
+///   to the link's virtual directory is returned (so a within-root relative link
+///   round-trips, e.g. `hello.txt` stays `hello.txt`).
+/// - When the resolved target escapes the root (e.g. a relative
+///   `../../outside/secret.txt` or an absolute `/etc/passwd`), only the
+///   `basename` of the raw target is returned, so no `..` traversal component
+///   or real outside-root path structure leaks (upstream
+///   `cross-fs-security.test.ts:398`).
+///
+/// Arguments are virtual/host paths: `link_virtual_path` is the symlink's
+/// location inside the sandbox (e.g. `/rl-rel-escape`), `link_host_dir` is the
+/// host directory the link lives in (e.g. the sandbox temp dir), `raw_target`
+/// is the unresolved OS target, and `canonical_root` is the canonicalized
+/// sandbox root.
+pub fn sanitize_readlink_target(
+    link_virtual_path: &str,
+    link_host_dir: &str,
+    raw_target: &str,
+    canonical_root: &str,
+) -> String {
+    // Resolve the raw target to an absolute host path: absolute targets are used
+    // verbatim, relative ones are joined onto the link's host directory.
+    let resolved_host = if is_absolute_path(raw_target) {
+        normalize_absolute_display_path(raw_target)
+    } else {
+        normalize_path(&join_path(
+            &link_host_dir.replace('\\', "/"),
+            &raw_target.replace('\\', "/"),
+        ))
+    };
+
+    if is_path_within_root(&resolved_host, canonical_root) {
+        // Within root: present the target as a virtual path relative to the
+        // link's virtual directory.
+        let virtual_target = resolved_host
+            .strip_prefix(canonical_root)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("/")
+            .replace('\\', "/");
+        let virtual_target = if virtual_target.starts_with('/') {
+            virtual_target
+        } else {
+            format!("/{virtual_target}")
+        };
+        let link_dir = dirname(&normalize_path(link_virtual_path));
+        return relative_virtual_path(&link_dir, &virtual_target);
+    }
+
+    // Outside root: collapse to the raw target's basename so neither `..`
+    // traversal nor the real outside path structure leaks.
+    basename(raw_target)
+}
+
+/// Compute the path of `target` relative to `base`, where both are absolute
+/// virtual paths (e.g. base `/` and target `/hello.txt` -> `hello.txt`). This is
+/// a minimal port of the `path.relative(linkDir, virtualTarget)` call in the
+/// host-backed `readlink`, sufficient for the within-root presentation cases.
+fn relative_virtual_path(base: &str, target: &str) -> String {
+    if base == "/" {
+        return target.strip_prefix('/').unwrap_or(target).to_string();
+    }
+    if let Some(rest) = target.strip_prefix(&format!("{base}/")) {
+        return rest.to_string();
+    }
+    let base_parts: Vec<&str> = base.split('/').filter(|p| !p.is_empty()).collect();
+    let target_parts: Vec<&str> = target.split('/').filter(|p| !p.is_empty()).collect();
+    let common = base_parts
+        .iter()
+        .zip(target_parts.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut segments: Vec<String> = Vec::new();
+    for _ in common..base_parts.len() {
+        segments.push("..".to_string());
+    }
+    for part in &target_parts[common..] {
+        segments.push((*part).to_string());
+    }
+    if segments.is_empty() {
+        ".".to_string()
+    } else {
+        segments.join("/")
+    }
+}
+
 /// Returns a normalized path resolved relative to `base`.
 pub fn resolve_path(base: &str, path: &str) -> String {
     if path.starts_with('/') {
