@@ -338,6 +338,12 @@ pub enum ParameterOperation {
     /// `${!var}` indirect expansion: the value of `var` names the parameter to
     /// expand.
     Indirect,
+    /// `${!arr[@]}` / `${!arr[*]}` key/index listing: enumerates the keys of an
+    /// associative array (insertion order) or the indices of an indexed array.
+    /// `star` is true for the `[*]` form, which joins on a space when quoted.
+    Indices {
+        star: bool,
+    },
     /// `${var@Q}` quote-for-reuse and `${var@A}` assignment-form transforms.
     Transform {
         op: char,
@@ -1957,8 +1963,23 @@ fn parse_parameter_expansion(content: &str) -> ParameterExpansion {
         };
     }
 
+    // `${!arr[@]}` / `${!arr[*]}` key/index listing: enumerate an associative
+    // array's keys (insertion order) or an indexed array's indices. Must be
+    // checked before the plain `${!var}` indirect form because `arr[@]` is not
+    // a valid bare name.
+    if let Some(reference) = content.strip_prefix('!') {
+        if let Some((_, ArrayIndex::All)) = parse_array_reference(reference) {
+            return ParameterExpansion {
+                parameter: reference.to_string(),
+                operation: Some(ParameterOperation::Indices {
+                    star: reference.contains("[*]"),
+                }),
+            };
+        }
+    }
+
     // `${!var}` indirect expansion. (`${!prefix*}`/`${!prefix@}` name listing
-    // and `${!arr[@]}` key listing are not modelled here.)
+    // is not modelled here.)
     if let Some(parameter) = content.strip_prefix('!') {
         if is_valid_name(parameter) {
             return ParameterExpansion {
@@ -2967,6 +2988,7 @@ fn serialize_parameter(parameter: &ParameterExpansion) -> String {
             )
         }
         Some(ParameterOperation::Indirect) => format!("${{!{}}}", parameter.parameter),
+        Some(ParameterOperation::Indices { .. }) => format!("${{!{}}}", parameter.parameter),
         Some(ParameterOperation::Transform { op }) => {
             format!("${{{}@{}}}", parameter.parameter, op)
         }
@@ -3103,6 +3125,7 @@ fn collect_word_part(part: &WordPart, names: &mut std::collections::BTreeSet<Str
             | Some(ParameterOperation::PatternSubstitute { .. })
             | Some(ParameterOperation::RemoveAffix { .. })
             | Some(ParameterOperation::Indirect)
+            | Some(ParameterOperation::Indices { .. })
             | Some(ParameterOperation::Transform { .. })
             | None => {}
         },
@@ -4209,6 +4232,16 @@ impl AssocArray {
         self.order
             .iter()
             .filter_map(|key| self.values.get(key).cloned())
+            .collect()
+    }
+
+    /// Insertion-ordered keys, filtered to keys still present in the map. Used
+    /// by `${!A[@]}` / `${!A[*]}` key listing.
+    fn ordered_keys(&self) -> Vec<String> {
+        self.order
+            .iter()
+            .filter(|key| self.values.contains_key(*key))
+            .cloned()
             .collect()
     }
 
@@ -6979,6 +7012,12 @@ impl<D: CommandDispatcher> Interpreter<D> {
                 }
             }
         }
+        // `"${!arr[@]}"`: like `"${arr[@]}"`, each key/index stays a SEPARATE
+        // field even inside double quotes. The `[*]` form joins into one field
+        // (handled by the fall-through join below).
+        if let Some(ParameterOperation::Indices { star: false }) = &parameter.operation {
+            return self.expand_parameter(parameter, false);
+        }
         vec![self.expand_parameter(parameter, true).join(" ")]
     }
 
@@ -7103,6 +7142,30 @@ impl<D: CommandDispatcher> Interpreter<D> {
                     return vec![String::new()];
                 }
                 vec![self.lookup_parameter(&target)]
+            }
+            Some(ParameterOperation::Indices { star }) => {
+                // `${!arr[@]}` / `${!arr[*]}`: enumerate the array's keys
+                // (associative, insertion order) or indices (indexed array,
+                // 0-based). With `[*]` quoted, join the list on a single space;
+                // otherwise return each key/index as a separate word.
+                let Some((array, ArrayIndex::All)) = parse_array_reference(&parameter.parameter)
+                else {
+                    return vec![String::new()];
+                };
+                let keys = if let Some(assoc) = self.state.assoc_arrays.get(array) {
+                    assoc.ordered_keys()
+                } else if let Some(values) = self.state.arrays.get(array) {
+                    (0..values.len()).map(|index| index.to_string()).collect()
+                } else {
+                    Vec::new()
+                };
+                if quoted && *star {
+                    return vec![keys.join(" ")];
+                }
+                if keys.is_empty() {
+                    return Vec::new();
+                }
+                keys
             }
             Some(ParameterOperation::Transform { op }) => {
                 if *op == 'P' {
@@ -7563,7 +7626,55 @@ impl<D: CommandDispatcher> Interpreter<D> {
     }
 
     fn eval_arithmetic(&mut self, source: &str) -> i64 {
-        ArithmeticEvaluator::new(source, &mut self.state).parse()
+        let expanded = self.expand_arithmetic_dollar_braces(source);
+        ArithmeticEvaluator::new(&expanded, &mut self.state).parse()
+    }
+
+    /// Pre-expand braced `${...}` parameter expansions inside an arithmetic
+    /// source before the arithmetic tokenizer runs. In bash, parameter/command
+    /// expansion happens BEFORE arithmetic evaluation, so a `${arr[$k]:-0}`
+    /// default-value form (which the arithmetic grammar cannot parse) must be
+    /// resolved to its textual value first. The bare `name`/`$name`/`arr[i]`
+    /// operand forms are left untouched — the evaluator reads those directly so
+    /// that arithmetic assignment lvalues keep working.
+    fn expand_arithmetic_dollar_braces(&mut self, source: &str) -> String {
+        let chars: Vec<char> = source.chars().collect();
+        let mut out = String::new();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '$' && chars.get(i + 1).copied() == Some('{') {
+                // Find the matching close brace, honoring nesting so an inner
+                // `${...}` (e.g. a default value referencing another variable)
+                // does not terminate the scan early.
+                let mut depth = 0i32;
+                let mut j = i + 1;
+                while j < chars.len() {
+                    match chars[j] {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                if j < chars.len() && depth == 0 {
+                    let construct: String = chars[i..=j].iter().collect();
+                    if let Some(word) = parse_single_word_construct(&construct) {
+                        let value = self.expand_word_to_string(&word);
+                        out.push_str(&value);
+                        i = j + 1;
+                        continue;
+                    }
+                }
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out
     }
 
     /// Drain any pending arithmetic error raised during expansion (e.g. division
@@ -8027,6 +8138,32 @@ fn parse_subscript_reference(parameter: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((name, &inner[open + 1..]))
+}
+
+/// Parse a single `${...}`-style construct into the `Word` it represents, for
+/// pre-expansion of braced parameter expansions inside arithmetic. Returns the
+/// command-name `Word` of the parsed one-command script when the construct is a
+/// single word with no assignments/arguments; otherwise `None`.
+fn parse_single_word_construct(text: &str) -> Option<Word> {
+    let script = parse(text).ok()?;
+    if script.statements.len() != 1 {
+        return None;
+    }
+    let statement = &script.statements[0];
+    if statement.pipelines.len() != 1 {
+        return None;
+    }
+    let pipeline = &statement.pipelines[0];
+    if pipeline.commands.len() != 1 {
+        return None;
+    }
+    let Command::Simple(simple) = &pipeline.commands[0] else {
+        return None;
+    };
+    if !simple.assignments.is_empty() || !simple.args.is_empty() {
+        return None;
+    }
+    simple.name.clone()
 }
 
 fn parse_array_reference(parameter: &str) -> Option<(&str, ArrayIndex)> {
@@ -10002,11 +10139,42 @@ mod tests {
                 stderr: "",
                 exit_code: 0,
             },
+            // tee-plugin.test.ts:491 multi-line script: build and query. A
+            // `declare -A counts` associative array is populated by a `for`
+            // loop that increments `counts[$w]` via arithmetic for each word in
+            // "the cat sat on the mat the cat" (the=3 cat=2 sat=1 on=1 mat=1),
+            // then `for k in "${!counts[@]}"` iterates the keys, prints
+            // "$k: ${counts[$k]}" per line, and pipes through `sort` so the
+            // output order is deterministic regardless of key iteration order.
+            Case {
+                script: "declare -A counts\nfor w in the cat sat on the mat the cat; do\n  counts[$w]=$(( ${counts[$w]:-0} + 1 ))\ndone\nfor k in \"${!counts[@]}\"; do echo \"$k: ${counts[$k]}\"; done | sort",
+                stdout: "cat: 2\nmat: 1\non: 1\nsat: 1\nthe: 3\n",
+                stderr: "",
+                exit_code: 0,
+            },
             // tee-plugin.test.ts:541 multi-pipeline with mixed success/failure and $?
             Case {
                 script: "true; echo $?; false; echo $?; true; echo $?",
                 stdout: "0\n1\n0\n",
                 stderr: "",
+                exit_code: 0,
+            },
+            // tee-plugin.test.ts:537 trap and exit code interaction. The
+            // upstream `assertSameSemantics` helper asserts the TeePlugin-wrapped
+            // run yields byte-identical stdout/stderr/exitCode to the PLAIN run
+            // (not to host bash). Just Bash does not implement the `trap`
+            // builtin: `dispatchBuiltin` returns null for `trap`, so it falls
+            // through to external-command resolution and fails "command not
+            // found", while `echo before` still prints. Both the plain and
+            // tee-wrapped interpreter runs do exactly this, so the transform
+            // preserves semantics. The Rust port has no tee transform, so the
+            // equivalent proof is that the interpreter deterministically emits
+            // "before" on stdout, the `trap: command not found` diagnostic on
+            // stderr, and the subshell's last command (`echo before`) exit 0.
+            Case {
+                script: "(trap \"echo trapped\" EXIT; echo before)",
+                stdout: "before\n",
+                stderr: "trap: command not found\n",
                 exit_code: 0,
             },
             // tee-plugin.test.ts:557 variable in loop body used after loop
