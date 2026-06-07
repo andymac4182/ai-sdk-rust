@@ -8119,9 +8119,7 @@ fn normalize_markdown_output(input: &str) -> String {
 fn command_rg(state: &mut ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
     let request = match parse_rg_args(args) {
         Ok(RgParseResult::Help) => {
-            return stdout_result(
-                "rg recursively search the current directory for lines matching a pattern\n",
-            );
+            return stdout_result(rg_help_text());
         }
         Ok(RgParseResult::TypeList) => return stdout_result(rg_type_list()),
         Ok(RgParseResult::Search(request)) => *request,
@@ -8361,6 +8359,9 @@ struct RgOptions {
     explicit_context: Option<usize>,
     multiline: bool,
     multiline_dotall: bool,
+    /// `-z`/`--search-zip`: transparently decompress gzip-format files (those
+    /// whose name ends in `.gz` and that carry the gzip magic) before searching.
+    search_zip: bool,
     /// `--pre COMMAND`: preprocessor command run on each candidate file; its
     /// stdout is searched in place of the raw file content.
     preprocessor: Option<String>,
@@ -8420,6 +8421,7 @@ impl Default for RgOptions {
             explicit_context: None,
             multiline: false,
             multiline_dotall: false,
+            search_zip: false,
             preprocessor: None,
             preprocessor_globs: Vec::new(),
         }
@@ -8555,6 +8557,7 @@ fn parse_rg_option(
             options.line_number = Some(true);
         }
         "--passthru" | "--passthrough" => options.passthru = true,
+        "--search-zip" => options.search_zip = true,
         "--multiline" => options.multiline = true,
         "--multiline-dotall" => {
             // ripgrep: --multiline-dotall implies --multiline and makes `.`
@@ -8670,6 +8673,7 @@ fn parse_rg_option(
         "-a" => options.text = true,
         "-0" => options.null_separator = true,
         "-b" => options.byte_offset = true,
+        "-z" => options.search_zip = true,
         "-L" => options.follow_symlinks = true,
         "-r" => options.replace = Some(rg_option_value(args, index, "-r")?),
         "-e" => patterns.push(rg_option_value(args, index, "-e")?),
@@ -8866,6 +8870,7 @@ fn parse_rg_short_flags(
             'a' => options.text = true,
             '0' => options.null_separator = true,
             'b' => options.byte_offset = true,
+            'z' => options.search_zip = true,
             'L' => options.follow_symlinks = true,
             'U' => options.multiline = true,
             // Each `u` steps unrestricted mode one level, mirroring the upstream
@@ -8933,18 +8938,111 @@ fn rg_parse_filesize(value: &str) -> Option<usize> {
     number_part.parse::<usize>().ok().map(|n| n * multiplier)
 }
 
+/// `rg --help`: mirror upstream `showHelp(rgHelp)` from `commands/rg/rg.ts`
+/// and `commands/help.ts`. The description is a multi-line string indented two
+/// spaces per non-empty line (blank lines stay blank), followed by the option
+/// lines under an `Options:` heading.
+fn rg_help_text() -> String {
+    let description = [
+        "rg (ripgrep) recursively searches directories for a regex pattern.",
+        "Unlike grep, rg is recursive by default and respects .gitignore files.",
+        "",
+        "EXAMPLES:",
+        "  rg foo                    Search for 'foo' in current directory",
+        "  rg foo src/               Search in src/ directory",
+        "  rg -i foo                 Case-insensitive search",
+        "  rg -w foo                 Match whole words only",
+        "  rg -t js foo              Search only JavaScript files",
+        "  rg -g '*.ts' foo          Search files matching glob",
+        "  rg --hidden foo           Include hidden files",
+        "  rg -l foo                 List files with matches only",
+    ];
+    let options = [
+        "-e, --regexp PATTERN    search for PATTERN (can be used multiple times)",
+        "-f, --file FILE         read patterns from FILE, one per line",
+        "-i, --ignore-case       case-insensitive search",
+        "-s, --case-sensitive    case-sensitive search (overrides smart-case)",
+        "-S, --smart-case        smart case (default: case-insensitive unless pattern has uppercase)",
+        "-F, --fixed-strings     treat pattern as literal string",
+        "-w, --word-regexp       match whole words only",
+        "-x, --line-regexp       match whole lines only",
+        "-v, --invert-match      select non-matching lines",
+        "-r, --replace TEXT      replace matches with TEXT",
+        "-c, --count             print count of matching lines per file",
+        "    --count-matches     print count of individual matches per file",
+        "-l, --files-with-matches print only file names with matches",
+        "    --files-without-match print file names without matches",
+        "    --files             list files that would be searched",
+        "-o, --only-matching     print only matching parts",
+        "-m, --max-count NUM     stop after NUM matches per file",
+        "-q, --quiet             suppress output, exit 0 on match",
+        "    --stats             print search statistics",
+        "-n, --line-number       print line numbers (default: on)",
+        "-N, --no-line-number    do not print line numbers",
+        "-I, --no-filename       suppress the prefixing of file names",
+        "-0, --null              use NUL as filename separator",
+        "-b, --byte-offset       show byte offset of each match",
+        "    --column            show column number of first match",
+        "    --vimgrep           show results in vimgrep format",
+        "    --json              show results in JSON Lines format",
+        "-A NUM                  print NUM lines after each match",
+        "-B NUM                  print NUM lines before each match",
+        "-C NUM                  print NUM lines before and after each match",
+        "    --context-separator SEP  separator for context groups (default: --)",
+        "-U, --multiline         match patterns across lines",
+        "-z, --search-zip        search in compressed files (gzip only)",
+        "-g, --glob GLOB         include files matching GLOB",
+        "-t, --type TYPE         only search files of TYPE (e.g., js, py, ts)",
+        "-T, --type-not TYPE     exclude files of TYPE",
+        "-L, --follow            follow symbolic links",
+        "-u, --unrestricted      reduce filtering (-u: no ignore, -uu: +hidden, -uuu: +binary)",
+        "-a, --text              search binary files as text",
+        "    --hidden            search hidden files and directories",
+        "    --no-ignore         don't respect .gitignore/.ignore files",
+        "-d, --max-depth NUM     maximum search depth",
+        "    --sort TYPE         sort files (path, none)",
+        "    --heading           show file path above matches",
+        "    --passthru          print all lines (non-matches use - separator)",
+        "    --include-zero      include files with 0 matches in count output",
+        "    --type-list         list all available file types",
+        "    --help              display this help and exit",
+    ];
+    let mut output = String::new();
+    output.push_str("rg - recursively search for a pattern\n\n");
+    output.push_str("Usage: rg [OPTIONS] PATTERN [PATH ...]\n");
+    output.push_str("\nDescription:\n");
+    for line in description {
+        if line.is_empty() {
+            output.push('\n');
+        } else {
+            output.push_str("  ");
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output.push_str("\nOptions:\n");
+    for opt in options {
+        output.push_str("  ");
+        output.push_str(opt);
+        output.push('\n');
+    }
+    output
+}
+
+/// `--type-list`: mirror upstream `formatTypeList`. Types are sorted by name;
+/// each line is `name: <patterns>` where extensions render as `*<ext>` and
+/// globs render verbatim, joined by `, `.
 fn rg_type_list() -> String {
-    [
-        "js: *.js, *.jsx",
-        "ts: *.ts, *.tsx",
-        "py: *.py",
-        "rust: *.rs",
-        "md: *.md, *.markdown, *.mdown",
-        "json: *.json",
-        "html: *.html, *.htm",
-    ]
-    .join("\n")
-        + "\n"
+    let mut entries: Vec<&(&str, &[&str], &[&str])> = rg_file_types().iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut lines = Vec::with_capacity(entries.len());
+    for (name, extensions, globs) in entries {
+        let mut patterns: Vec<String> = Vec::new();
+        patterns.extend(extensions.iter().map(|ext| format!("*.{ext}")));
+        patterns.extend(globs.iter().map(|glob| (*glob).to_string()));
+        lines.push(format!("{name}: {}", patterns.join(", ")));
+    }
+    lines.join("\n") + "\n"
 }
 
 #[derive(Clone, Debug)]
@@ -9242,8 +9340,29 @@ fn rg_push_input(
     ) {
         return;
     }
-    let Ok(text) = fs.read_file(candidate.path) else {
-        return;
+    // `-z`/`--search-zip`: when the candidate is a `.gz` file carrying the gzip
+    // magic, inflate it and search the decompressed content (rg-search.ts
+    // readFileContent). A non-gzip `.gz` or a decompression failure falls back
+    // to the raw file content.
+    let text = if request.options.search_zip && candidate.path.ends_with(".gz") {
+        match fs.read_file_buffer(candidate.path) {
+            Ok(buffer) if rg_is_gzip(&buffer) => match gzip_inflate(&buffer) {
+                Ok(decompressed) => bytes_to_string(&decompressed, BufferEncoding::Utf8),
+                Err(_) => return,
+            },
+            Ok(_) => {
+                let Ok(text) = fs.read_file(candidate.path) else {
+                    return;
+                };
+                text
+            }
+            Err(_) => return,
+        }
+    } else {
+        let Ok(text) = fs.read_file(candidate.path) else {
+            return;
+        };
+        text
     };
     // `--max-filesize` skips files whose byte size exceeds the limit
     // (rg-search.ts: `stat.size > options.maxFilesize`). The virtual filesystem
@@ -9356,35 +9475,77 @@ fn rg_type_filters_match(path: &str, options: &RgOptions) -> bool {
         .any(|type_name| rg_path_matches_type(&registry, path, type_name))
 }
 
-/// Default ripgrep-style type definitions, expressed as the file extensions
-/// that belong to each type name (and its aliases).
-fn rg_default_type_definitions() -> Vec<(&'static str, Vec<String>)> {
-    [
-        ("js", &["js", "jsx"][..]),
-        ("javascript", &["js", "jsx"][..]),
-        ("ts", &["ts", "tsx"][..]),
-        ("typescript", &["ts", "tsx"][..]),
-        ("py", &["py"][..]),
-        ("python", &["py"][..]),
-        ("rs", &["rs"][..]),
-        ("rust", &["rs"][..]),
-        ("css", &["css"][..]),
-        ("md", &["md", "markdown", "mdown"][..]),
-        ("markdown", &["md", "markdown", "mdown"][..]),
-        ("json", &["json"][..]),
-        ("html", &["html", "htm"][..]),
-        ("txt", &["txt"][..]),
-        ("text", &["txt"][..]),
-        ("log", &["log"][..]),
-    ]
-    .into_iter()
-    .map(|(name, extensions)| {
+/// Default ripgrep-style type definitions, mirroring upstream
+/// `commands/rg/file-types.ts` `FILE_TYPES`. Each entry is
+/// `(name, extensions_without_dot, literal_globs)`. Extensions are matched as
+/// `*.<ext>`; globs (e.g. `Rakefile`, `Dockerfile.*`, `Cargo.toml`) are matched
+/// verbatim. Keep this list in sync with upstream so `-t`/`--type`,
+/// `--type-not`, and `--type-list` all agree with ripgrep.
+fn rg_file_types() -> &'static [(
+    &'static str,
+    &'static [&'static str],
+    &'static [&'static str],
+)] {
+    &[
+        // Web languages
+        ("js", &["js", "mjs", "cjs", "jsx"], &[]),
+        ("ts", &["ts", "tsx", "mts", "cts"], &[]),
+        ("html", &["html", "htm", "xhtml"], &[]),
+        ("css", &["css", "scss", "sass", "less"], &[]),
+        ("json", &["json", "jsonc", "json5"], &[]),
+        ("xml", &["xml", "xsl", "xslt"], &[]),
+        // Systems languages
+        ("c", &["c", "h"], &[]),
+        ("cpp", &["cpp", "cc", "cxx", "hpp", "hh", "hxx", "h"], &[]),
+        ("rust", &["rs"], &[]),
+        ("go", &["go"], &[]),
+        ("zig", &["zig"], &[]),
+        // JVM languages
+        ("java", &["java"], &[]),
+        ("kotlin", &["kt", "kts"], &[]),
+        ("scala", &["scala", "sc"], &[]),
+        ("clojure", &["clj", "cljc", "cljs", "edn"], &[]),
+        // Scripting languages
+        ("py", &["py", "pyi", "pyw"], &[]),
+        ("rb", &["rb", "rake", "gemspec"], &["Rakefile", "Gemfile"]),
+        ("php", &["php", "phtml", "php3", "php4", "php5"], &[]),
+        ("perl", &["pl", "pm", "pod", "t"], &[]),
+        ("lua", &["lua"], &[]),
+        // Shell
         (
-            name,
-            extensions.iter().map(|ext| (*ext).to_string()).collect(),
-        )
-    })
-    .collect()
+            "sh",
+            &["sh", "bash", "zsh", "fish"],
+            &[".bashrc", ".zshrc", ".profile"],
+        ),
+        ("bat", &["bat", "cmd"], &[]),
+        ("ps", &["ps1", "psm1", "psd1"], &[]),
+        // Data/Config
+        ("yaml", &["yaml", "yml"], &[]),
+        ("toml", &["toml"], &["Cargo.toml", "pyproject.toml"]),
+        ("ini", &["ini", "cfg", "conf"], &[]),
+        ("csv", &["csv", "tsv"], &[]),
+        // Documentation
+        ("md", &["md", "mdx", "markdown", "mdown", "mkd"], &[]),
+        ("markdown", &["md", "mdx", "markdown", "mdown", "mkd"], &[]),
+        ("rst", &["rst"], &[]),
+        ("txt", &["txt", "text"], &[]),
+        ("tex", &["tex", "ltx", "sty", "cls"], &[]),
+        // Other
+        ("sql", &["sql"], &[]),
+        ("graphql", &["graphql", "gql"], &[]),
+        ("proto", &["proto"], &[]),
+        (
+            "make",
+            &["mk", "mak"],
+            &["Makefile", "GNUmakefile", "makefile"],
+        ),
+        (
+            "docker",
+            &[],
+            &["Dockerfile", "Dockerfile.*", "*.dockerfile"],
+        ),
+        ("tf", &["tf", "tfvars"], &[]),
+    ]
 }
 
 /// Resolved type registry: maps a type name to the set of glob patterns it
@@ -9392,11 +9553,10 @@ fn rg_default_type_definitions() -> Vec<(&'static str, Vec<String>)> {
 /// and `--type-add` in argument order so later flags override earlier state.
 fn rg_type_registry(options: &RgOptions) -> BTreeMap<String, Vec<String>> {
     let mut registry: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (name, extensions) in rg_default_type_definitions() {
-        registry
-            .entry(name.to_string())
-            .or_default()
-            .extend(extensions.into_iter().map(|ext| format!("*.{ext}")));
+    for (name, extensions, globs) in rg_file_types() {
+        let entry = registry.entry((*name).to_string()).or_default();
+        entry.extend(extensions.iter().map(|ext| format!("*.{ext}")));
+        entry.extend(globs.iter().map(|glob| (*glob).to_string()));
     }
     for cleared in &options.type_clears {
         registry.insert(cleared.clone(), Vec::new());
@@ -10043,10 +10203,11 @@ fn rg_render_json(
             continue;
         }
         files_with_match += 1;
-        let file_matches: usize = line_matches
-            .iter()
-            .map(|line_match| line_match.only_matches.len().max(1))
-            .sum();
+        // Upstream JSON stats use `result.matchCount`, which counts matching
+        // *lines* (one per matching line, regardless of how many submatches that
+        // line contains) — see search-engine/matcher.ts. Both `matched_lines`
+        // and `matches` report this line count.
+        let file_matches = line_matches.len();
         total_matches += file_matches;
         if quiet {
             continue;
@@ -30829,6 +30990,318 @@ fn virtual_gzip_unpack_bytes(content: &str) -> Result<Vec<u8>, &'static str> {
 
 fn virtual_gzip_unpack(content: &str) -> Result<String, &'static str> {
     virtual_gzip_unpack_bytes(content).map(|bytes| bytes_to_string(&bytes, BufferEncoding::Utf8))
+}
+
+/// Returns true when `bytes` begins with the gzip magic number (RFC 1952),
+/// mirroring upstream rg-search.ts `isGzip` (`buffer[0] === 0x1f && [1] ===
+/// 0x8b`). Used by `rg -z`/`--search-zip` to decide whether to inflate.
+fn rg_is_gzip(bytes: &[u8]) -> bool {
+    bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b
+}
+
+/// Decompress a real RFC 1952 gzip stream (header + RFC 1951 DEFLATE body),
+/// returning the inflated bytes. This is the inflate side of `gunzipSync`,
+/// needed so `rg -z` can search files compressed with a real zlib gzip (the
+/// virtual-container codec used by the `gzip` command only round-trips its own
+/// format). Returns `Err` on a malformed stream.
+fn gzip_inflate(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
+    if bytes.len() < 10 || bytes[0] != 0x1f || bytes[1] != 0x8b {
+        return Err("not in gzip format");
+    }
+    if bytes[2] != 8 {
+        return Err("unknown compression method");
+    }
+    let flags = bytes[3];
+    let mut pos = 10usize;
+    // FEXTRA
+    if flags & 0x04 != 0 {
+        if pos + 2 > bytes.len() {
+            return Err("truncated gzip header");
+        }
+        let xlen = u16::from_le_bytes([bytes[pos], bytes[pos + 1]]) as usize;
+        pos += 2 + xlen;
+    }
+    // FNAME
+    if flags & 0x08 != 0 {
+        while pos < bytes.len() && bytes[pos] != 0 {
+            pos += 1;
+        }
+        pos += 1;
+    }
+    // FCOMMENT
+    if flags & 0x10 != 0 {
+        while pos < bytes.len() && bytes[pos] != 0 {
+            pos += 1;
+        }
+        pos += 1;
+    }
+    // FHCRC
+    if flags & 0x02 != 0 {
+        pos += 2;
+    }
+    if pos > bytes.len() {
+        return Err("truncated gzip header");
+    }
+    inflate_raw(&bytes[pos..])
+}
+
+/// Raw DEFLATE (RFC 1951) decoder. Decodes a sequence of blocks (stored,
+/// fixed-Huffman, dynamic-Huffman) into the original bytes. Trailing bytes
+/// (the gzip CRC32/ISIZE footer) after the final block are ignored.
+fn inflate_raw(data: &[u8]) -> Result<Vec<u8>, &'static str> {
+    let mut reader = BitReader::new(data);
+    let mut out: Vec<u8> = Vec::new();
+    loop {
+        let bfinal = reader.read_bits(1)?;
+        let btype = reader.read_bits(2)?;
+        match btype {
+            0 => {
+                // Stored block: skip to byte boundary, read LEN/NLEN, copy.
+                reader.align_byte();
+                let len = reader.read_u16_le()? as usize;
+                let _nlen = reader.read_u16_le()?;
+                for _ in 0..len {
+                    out.push(reader.read_byte()?);
+                }
+            }
+            1 => {
+                let (lit, dist) = fixed_huffman_tables();
+                inflate_block(&mut reader, &lit, &dist, &mut out)?;
+            }
+            2 => {
+                let (lit, dist) = read_dynamic_tables(&mut reader)?;
+                inflate_block(&mut reader, &lit, &dist, &mut out)?;
+            }
+            _ => return Err("invalid deflate block type"),
+        }
+        if bfinal == 1 {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// LSB-first bit reader over a byte slice, as DEFLATE requires.
+struct BitReader<'a> {
+    data: &'a [u8],
+    byte_pos: usize,
+    bit_pos: u32,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            byte_pos: 0,
+            bit_pos: 0,
+        }
+    }
+
+    fn read_bits(&mut self, count: u32) -> Result<u32, &'static str> {
+        let mut result = 0u32;
+        for i in 0..count {
+            if self.byte_pos >= self.data.len() {
+                return Err("unexpected end of deflate stream");
+            }
+            let bit = (self.data[self.byte_pos] >> self.bit_pos) & 1;
+            result |= (bit as u32) << i;
+            self.bit_pos += 1;
+            if self.bit_pos == 8 {
+                self.bit_pos = 0;
+                self.byte_pos += 1;
+            }
+        }
+        Ok(result)
+    }
+
+    fn align_byte(&mut self) {
+        if self.bit_pos != 0 {
+            self.bit_pos = 0;
+            self.byte_pos += 1;
+        }
+    }
+
+    fn read_byte(&mut self) -> Result<u8, &'static str> {
+        if self.byte_pos >= self.data.len() {
+            return Err("unexpected end of deflate stream");
+        }
+        let value = self.data[self.byte_pos];
+        self.byte_pos += 1;
+        Ok(value)
+    }
+
+    fn read_u16_le(&mut self) -> Result<u16, &'static str> {
+        let lo = self.read_byte()? as u16;
+        let hi = self.read_byte()? as u16;
+        Ok(lo | (hi << 8))
+    }
+}
+
+/// A canonical-Huffman decode table built from a list of code lengths.
+struct HuffmanDecoder {
+    // For each symbol: its code length (0 = unused).
+    counts: Vec<u16>,
+    symbols: Vec<u16>,
+}
+
+impl HuffmanDecoder {
+    fn new(lengths: &[u8]) -> Self {
+        let max_bits = lengths.iter().copied().max().unwrap_or(0) as usize;
+        let mut counts = vec![0u16; max_bits + 1];
+        for &len in lengths {
+            if len > 0 {
+                counts[len as usize] += 1;
+            }
+        }
+        // Compute the first symbol index for each length (offsets), then place
+        // symbols in canonical order.
+        let mut offsets = vec![0u16; max_bits + 2];
+        for len in 1..=max_bits {
+            offsets[len + 1] = offsets[len] + counts[len];
+        }
+        let mut symbols = vec![0u16; lengths.iter().filter(|&&l| l > 0).count()];
+        for (symbol, &len) in lengths.iter().enumerate() {
+            if len > 0 {
+                let slot = offsets[len as usize] as usize;
+                symbols[slot] = symbol as u16;
+                offsets[len as usize] += 1;
+            }
+        }
+        Self { counts, symbols }
+    }
+
+    fn decode(&self, reader: &mut BitReader<'_>) -> Result<u16, &'static str> {
+        let mut code: i32 = 0;
+        let mut first: i32 = 0;
+        let mut index: i32 = 0;
+        for len in 1..self.counts.len() {
+            code |= reader.read_bits(1)? as i32;
+            let count = self.counts[len] as i32;
+            if code - first < count {
+                return Ok(self.symbols[(index + (code - first)) as usize]);
+            }
+            index += count;
+            first += count;
+            first <<= 1;
+            code <<= 1;
+        }
+        Err("invalid huffman code")
+    }
+}
+
+fn fixed_huffman_tables() -> (HuffmanDecoder, HuffmanDecoder) {
+    let mut lit_lengths = [0u8; 288];
+    for (i, len) in lit_lengths.iter_mut().enumerate() {
+        *len = if i < 144 {
+            8
+        } else if i < 256 {
+            9
+        } else if i < 280 {
+            7
+        } else {
+            8
+        };
+    }
+    let dist_lengths = [5u8; 30];
+    (
+        HuffmanDecoder::new(&lit_lengths),
+        HuffmanDecoder::new(&dist_lengths),
+    )
+}
+
+fn read_dynamic_tables(
+    reader: &mut BitReader<'_>,
+) -> Result<(HuffmanDecoder, HuffmanDecoder), &'static str> {
+    let hlit = reader.read_bits(5)? as usize + 257;
+    let hdist = reader.read_bits(5)? as usize + 1;
+    let hclen = reader.read_bits(4)? as usize + 4;
+    const ORDER: [usize; 19] = [
+        16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+    ];
+    let mut code_length_lengths = [0u8; 19];
+    for &idx in ORDER.iter().take(hclen) {
+        code_length_lengths[idx] = reader.read_bits(3)? as u8;
+    }
+    let code_length_decoder = HuffmanDecoder::new(&code_length_lengths);
+    let total = hlit + hdist;
+    let mut lengths: Vec<u8> = Vec::with_capacity(total);
+    while lengths.len() < total {
+        let symbol = code_length_decoder.decode(reader)?;
+        match symbol {
+            0..=15 => lengths.push(symbol as u8),
+            16 => {
+                let repeat = (reader.read_bits(2)? + 3) as usize;
+                let prev = *lengths.last().ok_or("invalid repeat in deflate")?;
+                lengths.extend(std::iter::repeat_n(prev, repeat));
+            }
+            17 => {
+                let repeat = (reader.read_bits(3)? + 3) as usize;
+                lengths.extend(std::iter::repeat_n(0u8, repeat));
+            }
+            18 => {
+                let repeat = (reader.read_bits(7)? + 11) as usize;
+                lengths.extend(std::iter::repeat_n(0u8, repeat));
+            }
+            _ => return Err("invalid code length symbol"),
+        }
+    }
+    if lengths.len() > total {
+        return Err("too many code lengths in deflate");
+    }
+    let lit = HuffmanDecoder::new(&lengths[..hlit]);
+    let dist = HuffmanDecoder::new(&lengths[hlit..total]);
+    Ok((lit, dist))
+}
+
+fn inflate_block(
+    reader: &mut BitReader<'_>,
+    lit: &HuffmanDecoder,
+    dist: &HuffmanDecoder,
+    out: &mut Vec<u8>,
+) -> Result<(), &'static str> {
+    // Length and distance base/extra-bit tables (RFC 1951 sections 3.2.5).
+    const LENGTH_BASE: [u16; 29] = [
+        3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
+        131, 163, 195, 227, 258,
+    ];
+    const LENGTH_EXTRA: [u8; 29] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+    ];
+    const DIST_BASE: [u16; 30] = [
+        1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
+        2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
+    ];
+    const DIST_EXTRA: [u8; 30] = [
+        0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12,
+        13, 13,
+    ];
+    loop {
+        let symbol = lit.decode(reader)?;
+        match symbol {
+            0..=255 => out.push(symbol as u8),
+            256 => return Ok(()),
+            257..=285 => {
+                let idx = (symbol - 257) as usize;
+                let length = LENGTH_BASE[idx] as usize
+                    + reader.read_bits(LENGTH_EXTRA[idx] as u32)? as usize;
+                let dist_symbol = dist.decode(reader)? as usize;
+                if dist_symbol >= DIST_BASE.len() {
+                    return Err("invalid distance symbol");
+                }
+                let distance = DIST_BASE[dist_symbol] as usize
+                    + reader.read_bits(DIST_EXTRA[dist_symbol] as u32)? as usize;
+                if distance == 0 || distance > out.len() {
+                    return Err("invalid back-reference distance");
+                }
+                let start = out.len() - distance;
+                for i in 0..length {
+                    let byte = out[start + i];
+                    out.push(byte);
+                }
+            }
+            _ => return Err("invalid literal/length symbol"),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
