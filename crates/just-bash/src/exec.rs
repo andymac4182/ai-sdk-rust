@@ -33075,6 +33075,25 @@ fn eval_test_expr(state: &ExecState<'_>, args: &[String]) -> Result<bool, String
         [single] => Ok(!single.is_empty()),
         [op, path] if matches!(op.as_str(), "-e" | "-f" | "-d" | "-s" | "-c") => {
             let resolved = resolve_path(&state.cwd, path);
+            if op == "-c" {
+                // Character special file. Mirrors upstream
+                // `interpreter/helpers/file-tests.ts` (case "-c"): the virtual
+                // filesystem has no real device nodes, so `-c` is true only for
+                // the fixed set of recognized character-device paths (matched on
+                // the cwd-resolved path, NOT on a `stat`). A regular file living
+                // at e.g. `/fake/dev/null` is therefore not a character device.
+                return Ok(matches!(
+                    resolved.as_str(),
+                    "/dev/null"
+                        | "/dev/zero"
+                        | "/dev/random"
+                        | "/dev/urandom"
+                        | "/dev/tty"
+                        | "/dev/stdin"
+                        | "/dev/stdout"
+                        | "/dev/stderr"
+                ));
+            }
             let fs = state
                 .session
                 .inner
@@ -33087,7 +33106,6 @@ fn eval_test_expr(state: &ExecState<'_>, args: &[String]) -> Result<bool, String
                 "-f" => stat.is_ok_and(|stat| stat.is_file),
                 "-d" => stat.is_ok_and(|stat| stat.is_directory),
                 "-s" => stat.is_ok_and(|stat| stat.size > 0),
-                "-c" => false,
                 _ => false,
             })
         }
@@ -43599,5 +43617,68 @@ mod head_parity_tests {
                 .starts_with("head - output the first part of files\n\n")
         );
         assert!(r.stdout.contains("Usage: head [OPTION]... [FILE]...\n"));
+    }
+
+    // Behavioral parity (fs): `test -c PATH` (character special file).
+    //
+    // Locks the upstream `interpreter/helpers/file-tests.ts` case "-c" against
+    // the cross-fs suites:
+    //   - fs/overlay-fs/overlay-fs.security.test.ts
+    //       "should correctly identify actual /dev/null as char device"
+    //       -> `test -c /dev/null && echo yes || echo no` == "yes"
+    //       "should not identify non-device paths ending in /dev/null ..."
+    //       -> regular file at `/fake/dev/null` is NOT a char device == "no"
+    //   - fs/in-memory-fs/in-memory-fs.security.test.ts (same `/fake/dev/null`).
+    //
+    // The virtual filesystem has no real device nodes, so `-c` is true only for
+    // the fixed recognized character-device paths (matched on the cwd-resolved
+    // path, never on a stat). Previously Rust returned `false` for every `-c`.
+    #[test]
+    fn test_c_recognizes_virtual_char_devices() {
+        // Each recognized device path reports as a character device.
+        for dev in [
+            "/dev/null",
+            "/dev/zero",
+            "/dev/random",
+            "/dev/urandom",
+            "/dev/tty",
+            "/dev/stdin",
+            "/dev/stdout",
+            "/dev/stderr",
+        ] {
+            let r =
+                crate::runtime::Bash::new().exec(format!("test -c {dev} && echo yes || echo no"));
+            assert_eq!(
+                r.stdout.trim(),
+                "yes",
+                "`test -c {dev}` should be a char device, got {:?}",
+                r.stdout
+            );
+            assert_eq!(r.exit_code, 0, "{dev}");
+        }
+    }
+
+    #[test]
+    fn test_c_regular_file_at_dev_null_path_is_not_char_device() {
+        // A real regular file living at a path that ends in `/dev/null` (or any
+        // non-recognized path) must NOT be treated as a character device.
+        let r = crate::runtime::Bash::with_options(crate::runtime::BashOptions {
+            files: [("/fake/dev/null".to_string(), "not a device".to_string())]
+                .into_iter()
+                .collect(),
+            cwd: Some("/".to_string()),
+            ..Default::default()
+        })
+        .exec("test -c /fake/dev/null && echo yes || echo no");
+        assert_eq!(r.stdout.trim(), "no", "stderr={:?}", r.stderr);
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn test_c_nonexistent_path_is_not_char_device() {
+        // Bare missing path: not a recognized device -> "no".
+        let r = crate::runtime::Bash::new().exec("test -c /no/such/thing && echo yes || echo no");
+        assert_eq!(r.stdout.trim(), "no");
+        assert_eq!(r.exit_code, 0);
     }
 }
