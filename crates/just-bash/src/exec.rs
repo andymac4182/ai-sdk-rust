@@ -4438,57 +4438,150 @@ fn command_mv(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
 }
 
 fn command_ln(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
+    // Mirrors packages/just-bash/src/commands/ln/ln.ts.
     if args.iter().any(|arg| arg == "--help") {
-        return stdout_result(
-            "Usage: ln [OPTION]... TARGET LINK_NAME\nCreate hard or symbolic links.\n  -s, --symbolic\n  -f, --force\n",
-        );
+        return stdout_result(LN_HELP);
     }
     let mut symbolic = false;
     let mut force = false;
-    let mut paths = Vec::new();
-    for arg in args {
-        match arg.as_str() {
-            "-s" | "--symbolic" => symbolic = true,
-            "-f" | "--force" => force = true,
-            _ if arg.starts_with('-') && arg.len() > 1 => {
-                for flag in arg[1..].chars() {
-                    match flag {
-                        's' => symbolic = true,
-                        'f' => force = true,
-                        _ => return stderr_result(1, format!("ln: invalid option -- '{flag}'\n")),
-                    }
-                }
+    let mut verbose = false;
+    let mut arg_idx = 0usize;
+
+    // Parse options: stop at the first non-`-` operand (matches TS loop).
+    while arg_idx < args.len() && args[arg_idx].starts_with('-') {
+        let arg = args[arg_idx].as_str();
+        match arg {
+            "-s" | "--symbolic" => {
+                symbolic = true;
+                arg_idx += 1;
             }
-            _ => paths.push(arg),
+            "-f" | "--force" => {
+                force = true;
+                arg_idx += 1;
+            }
+            "-v" | "--verbose" => {
+                verbose = true;
+                arg_idx += 1;
+            }
+            "-n" | "--no-dereference" => {
+                // Accepted but no special behavior (matches TS).
+                arg_idx += 1;
+            }
+            "--" => {
+                arg_idx += 1;
+                break;
+            }
+            _ if arg.len() > 1
+                && arg.starts_with('-')
+                && !arg.starts_with("--")
+                && arg[1..].chars().all(|c| matches!(c, 's' | 'f' | 'v' | 'n')) =>
+            {
+                // Combined short flags like -sf, -sfv, etc.
+                if arg.contains('s') {
+                    symbolic = true;
+                }
+                if arg.contains('f') {
+                    force = true;
+                }
+                if arg.contains('v') {
+                    verbose = true;
+                }
+                // -n accepted but not implemented.
+                arg_idx += 1;
+            }
+            _ => return unknown_option_result("ln", arg),
         }
     }
-    if paths.len() < 2 {
+
+    let remaining = &args[arg_idx..];
+    if remaining.len() < 2 {
         return stderr_result(1, "ln: missing file operand\n");
     }
-    let target_arg = paths[0];
-    let link_arg = paths[1];
+    let target_arg = remaining[0].as_str();
+    let link_arg = remaining[1].as_str();
     let link_path = resolve_path(&state.cwd, link_arg);
     let mut fs = match state.session.inner.fs.lock() {
         Ok(fs) => fs,
         Err(_) => return stderr_result(1, "ln: filesystem lock poisoned\n"),
     };
-    if force && fs.exists(&link_path) {
-        let _ = fs.rm(
-            &link_path,
-            RmOptions {
-                recursive: true,
-                force: true,
-            },
-        );
+
+    // If the link already exists, either remove it (-f) or fail with "File exists".
+    if fs.exists(&link_path) {
+        if force {
+            if fs
+                .rm(
+                    &link_path,
+                    RmOptions {
+                        recursive: false,
+                        force: true,
+                    },
+                )
+                .is_err()
+            {
+                return stderr_result(
+                    1,
+                    format!("ln: cannot remove '{link_arg}': Permission denied\n"),
+                );
+            }
+        } else {
+            return stderr_result(
+                1,
+                format!(
+                    "ln: failed to create {}link '{link_arg}': File exists\n",
+                    if symbolic { "symbolic " } else { "" }
+                ),
+            );
+        }
     }
+
     let result = if symbolic {
+        // Symlink target is stored as-is (relative or absolute).
         fs.symlink(target_arg, &link_path)
     } else {
-        fs.link(&resolve_path(&state.cwd, target_arg), &link_path)
+        let target_path = resolve_path(&state.cwd, target_arg);
+        if !fs.exists(&target_path) {
+            return stderr_result(
+                1,
+                format!("ln: failed to access '{target_arg}': No such file or directory\n"),
+            );
+        }
+        fs.link(&target_path, &link_path)
     };
+
     match result {
-        Ok(()) => CommandResult::default(),
-        Err(error) => stderr_result(1, format!("ln: {link_arg}: {}\n", fs_error_label(&error))),
+        Ok(()) => {
+            let stdout = if verbose {
+                format!("'{link_arg}' -> '{target_arg}'\n")
+            } else {
+                String::new()
+            };
+            stdout_result(stdout)
+        }
+        Err(error) => {
+            // EPERM on a hard link maps to the directory-not-allowed message (TS).
+            if matches!(error.kind(), JustBashErrorKind::PermissionDenied) {
+                return stderr_result(
+                    1,
+                    format!("ln: '{target_arg}': hard link not allowed for directory\n"),
+                );
+            }
+            let message = crate::sanitize::sanitize_error_message(&error.to_string());
+            stderr_result(1, format!("ln: {message}\n"))
+        }
+    }
+}
+
+const LN_HELP: &str = "ln - make links between files\n\nUsage: ln [OPTIONS] TARGET LINK_NAME\n\nOptions:\n  -s      create a symbolic link instead of a hard link\n  -f      remove existing destination files\n  -n      treat LINK_NAME as a normal file if it is a symbolic link to a directory\n  -v      print name of each linked file\n      --help display this help and exit\n";
+
+fn unknown_option_result(cmd: &str, option: &str) -> CommandResult {
+    // Mirrors unknownOption() in commands/help.ts: long options get
+    // "unrecognized option '--xxx'", short options "invalid option -- 'x'"
+    // where only the leading dash is stripped (TS `option.replace(/^-/, "")`).
+    if option.starts_with("--") {
+        stderr_result(1, format!("{cmd}: unrecognized option '{option}'\n"))
+    } else {
+        let trimmed = option.strip_prefix('-').unwrap_or(option);
+        stderr_result(1, format!("{cmd}: invalid option -- '{trimmed}'\n"))
     }
 }
 
@@ -40937,6 +41030,144 @@ mod tests {
 
     fn jb() -> crate::runtime::Bash {
         crate::runtime::Bash::new()
+    }
+
+    // Builds a Bash with seeded files, mirroring `new Bash({ files })` in TS.
+    fn jb_files(files: &[(&str, &str)]) -> crate::runtime::Bash {
+        use std::collections::BTreeMap;
+        crate::runtime::Bash::with_options(crate::runtime::BashOptions {
+            files: files
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<BTreeMap<_, _>>(),
+            ..crate::runtime::BashOptions::default()
+        })
+    }
+
+    // commands/ln/ln.test.ts — behavioral parity for the `ln` command.
+    #[test]
+    fn ln_creates_symbolic_link() {
+        let env = jb_files(&[("/target.txt", "hello world\n")]);
+        assert_eq!(env.exec("ln -s /target.txt /link.txt").exit_code, 0);
+        assert_eq!(env.exec("cat /link.txt").stdout, "hello world\n");
+    }
+
+    #[test]
+    fn ln_creates_relative_symbolic_link() {
+        let env = jb_files(&[("/dir/target.txt", "content\n")]);
+        assert_eq!(env.exec("ln -s target.txt /dir/link.txt").exit_code, 0);
+        assert_eq!(env.exec("cat /dir/link.txt").stdout, "content\n");
+    }
+
+    #[test]
+    fn ln_allows_dangling_symlink() {
+        let env = jb();
+        assert_eq!(env.exec("ln -s /nonexistent /link.txt").exit_code, 0);
+        assert_eq!(env.exec("cat /link.txt").exit_code, 1);
+    }
+
+    #[test]
+    fn ln_errors_if_symlink_already_exists() {
+        let env = jb_files(&[("/target.txt", "hello\n"), ("/link.txt", "existing\n")]);
+        let r = env.exec("ln -s /target.txt /link.txt");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(
+            r.stderr,
+            "ln: failed to create symbolic link '/link.txt': File exists\n"
+        );
+    }
+
+    #[test]
+    fn ln_errors_if_hard_link_already_exists() {
+        let env = jb_files(&[("/target.txt", "hello\n"), ("/link.txt", "existing\n")]);
+        let r = env.exec("ln /target.txt /link.txt");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(
+            r.stderr,
+            "ln: failed to create link '/link.txt': File exists\n"
+        );
+    }
+
+    #[test]
+    fn ln_overwrites_with_force_flag() {
+        let env = jb_files(&[
+            ("/target.txt", "new content\n"),
+            ("/link.txt", "old content\n"),
+        ]);
+        assert_eq!(env.exec("ln -sf /target.txt /link.txt").exit_code, 0);
+        assert_eq!(env.exec("cat /link.txt").stdout, "new content\n");
+    }
+
+    #[test]
+    fn ln_creates_hard_link() {
+        let env = jb_files(&[("/original.txt", "hello world\n")]);
+        assert_eq!(env.exec("ln /original.txt /hardlink.txt").exit_code, 0);
+        let orig = env.exec("cat /original.txt").stdout;
+        assert_eq!(env.exec("cat /hardlink.txt").stdout, orig);
+    }
+
+    #[test]
+    fn ln_errors_when_hard_link_target_missing() {
+        let r = jb().exec("ln /nonexistent.txt /link.txt");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(
+            r.stderr,
+            "ln: failed to access '/nonexistent.txt': No such file or directory\n"
+        );
+    }
+
+    #[test]
+    fn ln_errors_when_hard_linking_directory() {
+        let env = jb_files(&[("/dir/file.txt", "test\n")]);
+        let r = env.exec("ln /dir /dirlink");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(
+            r.stderr,
+            "ln: '/dir': hard link not allowed for directory\n"
+        );
+    }
+
+    #[test]
+    fn ln_errors_on_missing_operand() {
+        let r = jb().exec("ln");
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("missing file operand"), "{:?}", r.stderr);
+    }
+
+    #[test]
+    fn ln_shows_help() {
+        let r = jb().exec("ln --help");
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.contains("ln"), "{:?}", r.stdout);
+        assert!(r.stdout.contains("link"), "{:?}", r.stdout);
+    }
+
+    #[test]
+    fn ln_verbose_prints_link_mapping() {
+        let env = jb_files(&[("/target.txt", "hi\n")]);
+        let r = env.exec("ln -sv /target.txt /link.txt");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "'/link.txt' -> '/target.txt'\n");
+    }
+
+    #[test]
+    fn ln_accepts_n_flag() {
+        let env = jb_files(&[("/target.txt", "hi\n")]);
+        assert_eq!(env.exec("ln -sn /target.txt /link.txt").exit_code, 0);
+    }
+
+    #[test]
+    fn ln_unknown_short_option() {
+        let r = jb().exec("ln -z a b");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(r.stderr, "ln: invalid option -- 'z'\n");
+    }
+
+    #[test]
+    fn ln_unknown_long_option() {
+        let r = jb().exec("ln --bogus a b");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(r.stderr, "ln: unrecognized option '--bogus'\n");
     }
 
     // complete.test.ts:71 "complete with no args and no specs"
