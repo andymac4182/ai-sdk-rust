@@ -28952,7 +28952,28 @@ fn display_width_boundary(input: &str, width: usize) -> usize {
 
 fn command_nl(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
     if args.iter().any(|arg| arg == "--help") {
-        return stdout_result("Usage: nl [OPTION]... [FILE]...\nNumber lines.\n");
+        return stdout_result(concat!(
+            "nl - number lines of files\n",
+            "\n",
+            "Usage: nl [OPTION]... [FILE]...\n",
+            "\n",
+            "Description:\n",
+            "  Write each FILE to standard output, with line numbers added. If no FILE is specified, standard input is read.\n",
+            "\n",
+            "Options:\n",
+            "  -b STYLE     Body numbering style: a (all), t (non-empty), n (none)\n",
+            "  -n FORMAT    Number format: ln (left), rn (right), rz (right zeros)\n",
+            "  -w WIDTH     Number width (default: 6)\n",
+            "  -s SEP       Separator after number (default: TAB)\n",
+            "  -v START     Starting line number (default: 1)\n",
+            "  -i INCR      Line number increment (default: 1)\n",
+            "\n",
+            "Examples:\n",
+            "  nl file.txt              # Number non-empty lines\n",
+            "  nl -ba file.txt          # Number all lines\n",
+            "  nl -n rz -w 3 file.txt   # Right-justified with zeros\n",
+            "  nl -s ': ' file.txt      # Use ': ' as separator\n",
+        ));
     }
     let mut number_all = false;
     let mut number_none = false;
@@ -40698,5 +40719,255 @@ mod tests {
         let batch = xan_run_with_files("find /dir -type f -exec ls {} +", files);
         assert_eq!(batch.stdout, "/dir/file1.txt\n\n/dir/file2.txt\n");
         assert_eq!(batch.exit_code, 0);
+    }
+
+    // Behavioral parity (commands/nl): full port of the upstream
+    // vercel-labs/just-bash nl.test.ts and nl.utf8-stdin.test.ts suites.
+    // Locks the `nl --help` output (previously diverged: emitted a stub that
+    // lacked the lowercase word "number") plus every numbering/format/option
+    // and error case so they can never silently regress.
+    #[test]
+    fn nl_behavioral_parity_upstream_cases() {
+        struct Case {
+            cmd: &'static str,
+            files: &'static [(&'static str, &'static str)],
+            stdout: Option<&'static str>,
+            stderr_contains: Option<&'static str>,
+            exit: i32,
+        }
+        let cases = [
+            Case {
+                cmd: "printf 'a\\nb\\nc' | nl",
+                files: &[],
+                stdout: Some("     1\ta\n     2\tb\n     3\tc"),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "nl /test.txt",
+                files: &[("/test.txt", "line1\nline2\nline3\n")],
+                stdout: Some("     1\tline1\n     2\tline2\n     3\tline3\n"),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "printf 'a\\n\\nb\\n' | nl",
+                files: &[],
+                stdout: Some("     1\ta\n      \t\n     2\tb\n"),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "printf 'a\\n\\nb\\n' | nl -ba",
+                files: &[],
+                stdout: Some("     1\ta\n     2\t\n     3\tb\n"),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "printf 'a\\n\\nb\\n' | nl -b a",
+                files: &[],
+                stdout: Some("     1\ta\n     2\t\n     3\tb\n"),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "printf 'a\\nb\\n' | nl -bn",
+                files: &[],
+                stdout: Some("      \ta\n      \tb\n"),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "printf 'a\\nb\\n' | nl -n ln",
+                files: &[],
+                stdout: Some("1     \ta\n2     \tb\n"),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "printf 'a\\nb\\n' | nl -n rz",
+                files: &[],
+                stdout: Some("000001\ta\n000002\tb\n"),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "printf 'a\\nb\\n' | nl -w 3",
+                files: &[],
+                stdout: Some("  1\ta\n  2\tb\n"),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "printf 'a\\nb\\n' | nl -w 3 -n rz",
+                files: &[],
+                stdout: Some("001\ta\n002\tb\n"),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "printf 'a\\nb\\n' | nl -s ': '",
+                files: &[],
+                stdout: Some("     1: a\n     2: b\n"),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "printf 'a\\nb\\n' | nl -v 10",
+                files: &[],
+                stdout: Some("    10\ta\n    11\tb\n"),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "printf 'a\\nb\\nc\\n' | nl -i 5",
+                files: &[],
+                stdout: Some("     1\ta\n     6\tb\n    11\tc\n"),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "printf 'a\\nb\\nc\\n' | nl -ba -n rz -w 4 -s '|' -v 100 -i 10",
+                files: &[],
+                stdout: Some("0100|a\n0110|b\n0120|c\n"),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "printf '' | nl",
+                files: &[],
+                stdout: Some(""),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "printf 'hello' | nl",
+                files: &[],
+                stdout: Some("     1\thello"),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "nl /a.txt /b.txt",
+                files: &[("/a.txt", "one\ntwo\n"), ("/b.txt", "three\nfour\n")],
+                stdout: Some("     1\tone\n     2\ttwo\n     3\tthree\n     4\tfour\n"),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "nl -v 10 /a.txt /b.txt",
+                files: &[("/a.txt", "one\n"), ("/b.txt", "two\n")],
+                stdout: Some("    10\tone\n    11\ttwo\n"),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "nl /nonexistent.txt",
+                files: &[],
+                stdout: None,
+                stderr_contains: Some("no such file or directory"),
+                exit: 1,
+            },
+            Case {
+                cmd: "printf 'x' | nl -b x",
+                files: &[],
+                stdout: None,
+                stderr_contains: Some("invalid body numbering style"),
+                exit: 1,
+            },
+            Case {
+                cmd: "printf 'x' | nl -n xx",
+                files: &[],
+                stdout: None,
+                stderr_contains: Some("invalid line numbering format"),
+                exit: 1,
+            },
+            Case {
+                cmd: "printf 'x' | nl -w abc",
+                files: &[],
+                stdout: None,
+                stderr_contains: Some("invalid line number field width"),
+                exit: 1,
+            },
+            Case {
+                cmd: "printf 'a\\nb\\nc\\n' | nl -v -1",
+                files: &[],
+                stdout: Some("    -1\ta\n     0\tb\n     1\tc\n"),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "printf 'a\\n   \\nb\\n' | nl",
+                files: &[],
+                stdout: Some("     1\ta\n      \t   \n     2\tb\n"),
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "printf 'x' | nl -x",
+                files: &[],
+                stdout: None,
+                stderr_contains: Some("invalid option"),
+                exit: 1,
+            },
+            Case {
+                cmd: "printf 'x' | nl --unknown",
+                files: &[],
+                stdout: None,
+                stderr_contains: Some("unrecognized option"),
+                exit: 1,
+            },
+            Case {
+                cmd: "nl --help",
+                files: &[],
+                stdout: None,
+                stderr_contains: None,
+                exit: 0,
+            },
+            Case {
+                cmd: "cat /in.txt | nl",
+                files: &[("/in.txt", "한글\ncafé\n")],
+                stdout: None,
+                stderr_contains: None,
+                exit: 0,
+            },
+        ];
+        let mut fails = Vec::new();
+        for (idx, c) in cases.iter().enumerate() {
+            let r = xan_run_with_files(c.cmd, c.files);
+            if r.exit_code != c.exit {
+                fails.push(format!(
+                    "[{idx}] {} EXIT got={} want={} stderr={:?}",
+                    c.cmd, r.exit_code, c.exit, r.stderr
+                ));
+                continue;
+            }
+            if let Some(want) = c.stdout {
+                if r.stdout != want {
+                    fails.push(format!(
+                        "[{idx}] {} STDOUT got={:?} want={:?}",
+                        c.cmd, r.stdout, want
+                    ));
+                }
+            }
+            if let Some(want) = c.stderr_contains {
+                if !r.stderr.to_lowercase().contains(&want.to_lowercase()) {
+                    fails.push(format!(
+                        "[{idx}] {} STDERR got={:?} want_contains={:?}",
+                        c.cmd, r.stderr, want
+                    ));
+                }
+            }
+            if c.cmd == "nl --help" && (!r.stdout.contains("nl") || !r.stdout.contains("number")) {
+                fails.push(format!("[{idx}] help missing nl/number: {:?}", r.stdout));
+            }
+            if c.cmd == "cat /in.txt | nl"
+                && (!r.stdout.contains("한글") || !r.stdout.contains("café"))
+            {
+                fails.push(format!("[{idx}] utf8 missing: {:?}", r.stdout));
+            }
+        }
+        assert!(fails.is_empty(), "DIVERGENCES:\n{}", fails.join("\n"));
     }
 }
