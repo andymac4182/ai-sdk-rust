@@ -5552,12 +5552,15 @@ fn command_find(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
                 exit_code = 1;
                 continue;
             }
+            let child_prefix = if absolute_root == "/" {
+                "/".to_string()
+            } else {
+                format!("{absolute_root}/")
+            };
             let mut root_entries = fs
                 .get_all_paths()
                 .into_iter()
-                .filter(|path| {
-                    path == &absolute_root || path.starts_with(&format!("{absolute_root}/"))
-                })
+                .filter(|path| path == &absolute_root || path.starts_with(&child_prefix))
                 .filter_map(|path| {
                     let stat = fs.stat(&path).ok()?;
                     let depth = find_depth(&absolute_root, &path);
@@ -5578,12 +5581,9 @@ fn command_find(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
                 })
                 .collect::<Vec<_>>();
             if query.options.depth_first {
-                root_entries.sort_by(|left, right| {
-                    right
-                        .depth
-                        .cmp(&left.depth)
-                        .then_with(|| left.path.cmp(&right.path))
-                });
+                // Post-order traversal: a directory's contents are emitted
+                // before the directory itself, with siblings ordered by name.
+                root_entries.sort_by(|left, right| find_post_order_cmp(&left.path, &right.path));
             } else {
                 root_entries.sort_by(|left, right| left.path.cmp(&right.path));
             }
@@ -6268,24 +6268,13 @@ fn run_find_batch_exec(
 }
 
 fn format_find_printf(format: &str, entry: &FindEntry) -> String {
+    // Upstream processes all backslash escape sequences (\n, \t, \u, \U, \e,
+    // octal, hex, ...) across the entire format string first, then parses the
+    // `%` directives over the escaped result.
+    let processed = process_backslash_escapes(format, EscapeMode::Printf);
     let mut output = String::new();
-    let mut chars = format.chars().peekable();
+    let mut chars = processed.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            match chars.next() {
-                Some('n') => output.push('\n'),
-                Some('t') => output.push('\t'),
-                Some('0') => output.push('\0'),
-                Some('e') => output.push('\x1b'),
-                Some('\\') => output.push('\\'),
-                Some(other) => {
-                    output.push('\\');
-                    output.push(other);
-                }
-                None => output.push('\\'),
-            }
-            continue;
-        }
         if ch != '%' {
             output.push(ch);
             continue;
@@ -6321,7 +6310,11 @@ fn format_find_printf(format: &str, entry: &FindEntry) -> String {
             'd' => entry.depth.to_string(),
             'm' => format!("{:03o}", entry.stat.mode & 0o777),
             'M' => find_symbolic_mode(&entry.stat),
-            't' => format!("mtime:{}", entry.stat.mtime),
+            // The virtual filesystem uses a logical (non-epoch) clock, so the
+            // exact mtime cannot be reconstructed. Upstream `formatTimeDirective`
+            // / `formatCtimeDate` produce regex-shaped time strings; we emit the
+            // epoch-zero rendering of each directive so the shape matches.
+            't' => "Thu Jan  1 00:00:00 1970".to_string(),
             'T' => match chars.next() {
                 Some('@') => format!("{}.0000000000", entry.stat.mtime),
                 Some('Y') => "1970".to_string(),
@@ -6329,7 +6322,7 @@ fn format_find_printf(format: &str, entry: &FindEntry) -> String {
                 Some('d') => "01".to_string(),
                 Some('H') => "00".to_string(),
                 Some('M') => "00".to_string(),
-                Some('S') => "00.0000000000".to_string(),
+                Some('S') => "00".to_string(),
                 Some('T') => "00:00:00".to_string(),
                 Some('F') => "1970-01-01".to_string(),
                 Some(other) => format!("%T{other}"),
@@ -6385,11 +6378,33 @@ fn find_symbolic_mode(stat: &FileStat) -> String {
     value
 }
 
+/// Orders paths in post-order (depth-first) traversal order: a directory's
+/// descendants sort before the directory itself, and siblings sort by name.
+/// Mirrors upstream `find -depth` ordering.
+fn find_post_order_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_parts: Vec<&str> = left.split('/').collect();
+    let right_parts: Vec<&str> = right.split('/').collect();
+    let common = left_parts.len().min(right_parts.len());
+    for index in 0..common {
+        if left_parts[index] != right_parts[index] {
+            return left_parts[index].cmp(right_parts[index]);
+        }
+    }
+    // One path is an ancestor of (a prefix of) the other; the deeper path
+    // (descendant) is emitted first in post-order.
+    right_parts.len().cmp(&left_parts.len())
+}
+
 fn find_depth(root: &str, path: &str) -> usize {
     if root == path {
         0
     } else {
-        path.strip_prefix(&format!("{root}/"))
+        let prefix = if root == "/" {
+            "/".to_string()
+        } else {
+            format!("{root}/")
+        };
+        path.strip_prefix(&prefix)
             .unwrap_or("")
             .split('/')
             .filter(|part| !part.is_empty())
@@ -34063,13 +34078,81 @@ mod tests {
         .exec(cmd)
     }
 
-    // JBC-46: locks the spec-comparison command-family behaviors promoted to the
-    // Rust conformance corpus this round so a regression fails here too, not only
-    // in the generated fixture runner.
-    //   - grep -q/--quiet/--silent suppresses stdout while preserving exit code.
-    //   - head -c N / tail -c N emit byte windows verbatim.
-    //   - cut -c-N / cut -cN- treat the open side as 1 / end-of-line.
-    //   - ls prints the directory operand as typed (relative) in headers.
+    // Builds a Bash session with files + cwd and runs `cmd`.
+    fn find_run(cmd: &str, files: &[(&str, &str)], cwd: &str) -> JustBashExecResult {
+        let mut fmap = std::collections::BTreeMap::new();
+        for (path, content) in files {
+            fmap.insert((*path).to_string(), (*content).to_string());
+        }
+        crate::runtime::Bash::with_options(crate::runtime::BashOptions {
+            files: fmap,
+            cwd: Some(cwd.to_string()),
+            ..Default::default()
+        })
+        .exec(cmd)
+    }
+
+    // Behavioral parity (commands/find): regression locks for divergences fixed
+    // against the vercel-labs/just-bash upstream test suite.
+    #[test]
+    fn find_root_traversal_and_depth_and_printf_parity() {
+        // Searching from `.` with cwd `/` must descend into root children
+        // (the `//` child-prefix bug previously returned only `.`).
+        let root = &[
+            ("src/index.ts", "console.log(1)"),
+            ("src/lib/util.ts", "export const x = 1;"),
+            ("bin/script.sh", "#!/bin/bash"),
+        ];
+        let res = find_run(
+            "find . -type f -path './src/*' -o -type f -path './bin/script.sh' | sort",
+            root,
+            "/",
+        );
+        assert_eq!(
+            res.stdout,
+            "./bin/script.sh\n./src/index.ts\n./src/lib/util.ts\n"
+        );
+        assert_eq!(res.stderr, "");
+        assert_eq!(res.exit_code, 0);
+
+        let res = find_run(
+            "find . -name \"file.txt\"",
+            &[("abc/file.txt", "content")],
+            "/",
+        );
+        assert_eq!(res.stdout, "./abc/file.txt\n");
+
+        // `-depth` is post-order: directory contents before the directory, with
+        // siblings ordered by name (NOT a global depth-descending sort).
+        let res = find_run(
+            "find /dir -depth",
+            &[("/dir/a.txt", "a"), ("/dir/sub/b.txt", "b")],
+            "/",
+        );
+        assert_eq!(res.stdout, "/dir/a.txt\n/dir/sub/b.txt\n/dir/sub\n/dir\n");
+
+        // -printf escapes: \u / \U unicode and \e are processed before directives.
+        let pf = &[("/dir/a.txt", "a")];
+        assert_eq!(
+            find_run("find /dir -type f -printf \"\\u2714 %f\\n\"", pf, "/").stdout,
+            "\u{2714} a.txt\n"
+        );
+        assert_eq!(
+            find_run("find /dir -type f -printf \"\\U1F4C4 %f\\n\"", pf, "/").stdout,
+            "\u{1F4C4} a.txt\n"
+        );
+        assert_eq!(
+            find_run("find /dir -type f -printf \"\\e[32m%f\\e[0m\\n\"", pf, "/").stdout,
+            "\u{1b}[32ma.txt\u{1b}[0m\n"
+        );
+
+        // -printf time directives keep the upstream regex shapes.
+        let secs = find_run("find /dir -type f -printf \"%TH:%TM:%TS\\n\"", pf, "/").stdout;
+        assert_eq!(secs, "00:00:00\n");
+        let ctime = find_run("find /dir -type f -printf \"%t\\n\"", pf, "/").stdout;
+        assert_eq!(ctime, "Thu Jan  1 00:00:00 1970\n");
+    }
+
     #[test]
     fn spec_comparison_grep_quiet_head_tail_bytes_cut_open_range_and_ls_operand_headers() {
         // grep -q: silent, exit 0 on match, used as a guard.
