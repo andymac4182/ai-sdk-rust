@@ -45054,3 +45054,713 @@ mod grep_spec_regex_parity_tests {
         assert_case("grep -E '[[:digit:]]'", "x9y\n", "x9y\n", 0);
     }
 }
+
+#[cfg(test)]
+mod find_parity_tests {
+    //! Behavioral parity regression suite for `find`, ported from upstream
+    //! `commands/find/*.test.ts`. Each assertion mirrors one upstream `it(...)`
+    //! case and asserts the same stdout/stderr/exit so the command output can
+    //! never silently regress. Cases requiring per-file `mtime` seeding
+    //! (`-mtime N/+N/-N`, `-newer <existing>`) are omitted because the public
+    //! `BashOptions` API has no per-file mtime seeding; they remain covered by
+    //! upstream TS.
+    use crate::runtime::{Bash, BashOptions};
+    use std::collections::BTreeMap;
+
+    fn mk(files: &[(&str, &str)], cwd: Option<&str>) -> Bash {
+        let mut m = BTreeMap::new();
+        for (k, v) in files {
+            m.insert((*k).to_string(), (*v).to_string());
+        }
+        Bash::with_options(BashOptions {
+            files: m,
+            cwd: cwd.map(|s| s.to_string()),
+            ..BashOptions::default()
+        })
+    }
+
+    fn proj() -> Bash {
+        mk(
+            &[
+                ("/project/README.md", "# Project"),
+                ("/project/src/index.ts", "export {}"),
+                (
+                    "/project/src/utils/helpers.ts",
+                    "export function helper() {}",
+                ),
+                (
+                    "/project/src/utils/format.ts",
+                    "export function format() {}",
+                ),
+                ("/project/tests/index.test.ts", "test(\"works\", () => {})"),
+                ("/project/package.json", "{}"),
+                ("/project/tsconfig.json", "{}"),
+            ],
+            Some("/project"),
+        )
+    }
+
+    fn assert_run(b: &Bash, cmd: &str, out: &str, err: &str, code: i32) {
+        let r = b.exec(cmd);
+        assert_eq!(r.stdout, out, "stdout mismatch for `{cmd}`");
+        assert_eq!(r.stderr, err, "stderr mismatch for `{cmd}`");
+        assert_eq!(r.exit_code, code, "exit mismatch for `{cmd}`");
+    }
+
+    #[test]
+    fn basic() {
+        assert_run(
+            &proj(),
+            "find /project",
+            "/project\n/project/README.md\n/project/package.json\n/project/src\n/project/src/index.ts\n/project/src/utils\n/project/src/utils/format.ts\n/project/src/utils/helpers.ts\n/project/tests\n/project/tests/index.test.ts\n/project/tsconfig.json\n",
+            "",
+            0,
+        );
+        assert_run(
+            &proj(),
+            "find /project -name \"*.ts\"",
+            "/project/src/index.ts\n/project/src/utils/format.ts\n/project/src/utils/helpers.ts\n/project/tests/index.test.ts\n",
+            "",
+            0,
+        );
+        assert_run(
+            &proj(),
+            "find /project -type f",
+            "/project/README.md\n/project/package.json\n/project/src/index.ts\n/project/src/utils/format.ts\n/project/src/utils/helpers.ts\n/project/tests/index.test.ts\n/project/tsconfig.json\n",
+            "",
+            0,
+        );
+        assert_run(
+            &proj(),
+            "find /project -type d",
+            "/project\n/project/src\n/project/src/utils\n/project/tests\n",
+            "",
+            0,
+        );
+        assert_run(&proj(), "find . -name \"*.md\"", "./README.md\n", "", 0);
+        assert_run(
+            &proj(),
+            "find /project -name \"index.ts\"",
+            "/project/src/index.ts\n",
+            "",
+            0,
+        );
+        assert_run(
+            &proj(),
+            "find /nonexistent",
+            "",
+            "find: /nonexistent: No such file or directory\n",
+            1,
+        );
+        assert_run(
+            &proj(),
+            "find /project -name \"???*.json\"",
+            "/project/package.json\n/project/tsconfig.json\n",
+            "",
+            0,
+        );
+        assert_run(
+            &proj(),
+            "find /project -unknown",
+            "",
+            "find: unknown predicate '-unknown'\n",
+            1,
+        );
+        assert_run(
+            &proj(),
+            "find /project --badoption",
+            "",
+            "find: unknown predicate '--badoption'\n",
+            1,
+        );
+        let r = proj().exec("find /project -type x");
+        assert!(r.stderr.contains("Unknown argument to -type"));
+        assert_eq!(r.exit_code, 1);
+        let h = proj().exec("find --help");
+        assert!(
+            h.stdout.contains("find")
+                && h.stdout.contains("-name")
+                && h.stdout.contains("-maxdepth")
+        );
+        assert_eq!(h.exit_code, 0);
+    }
+
+    #[test]
+    fn multiple_paths_and_special_chars() {
+        let mp = mk(
+            &[
+                ("/dir1/a.txt", "a"),
+                ("/dir2/b.txt", "b"),
+                ("/dir3/c.txt", "c"),
+            ],
+            None,
+        );
+        assert_run(
+            &mp,
+            "find /dir1 /dir2 -name \"*.txt\"",
+            "/dir1/a.txt\n/dir2/b.txt\n",
+            "",
+            0,
+        );
+        let mp2 = mk(&[("/dir1/a.txt", "a")], None);
+        assert_run(
+            &mp2,
+            "find /dir1 /nonexistent -type f",
+            "/dir1/a.txt\n",
+            "find: /nonexistent: No such file or directory\n",
+            1,
+        );
+        let sc = mk(
+            &[
+                ("/dir/file with spaces.txt", "content"),
+                ("/dir/another file.txt", "content"),
+                ("/dir/normal.txt", "content"),
+            ],
+            None,
+        );
+        assert_run(
+            &sc,
+            "find /dir -name \"* *\"",
+            "/dir/another file.txt\n/dir/file with spaces.txt\n",
+            "",
+            0,
+        );
+        let root = mk(&[("abc/file.txt", "content")], Some("/"));
+        assert_run(
+            &root,
+            "find . -name \"file.txt\"",
+            "./abc/file.txt\n",
+            "",
+            0,
+        );
+        let root2 = mk(&[("/project/src/index.ts", "content")], Some("/project"));
+        assert_run(
+            &root2,
+            "find /project/ -name \"*.ts\"",
+            "/project/src/index.ts\n",
+            "",
+            0,
+        );
+    }
+
+    #[test]
+    fn depth() {
+        assert_run(&proj(), "find /project -maxdepth 0", "/project\n", "", 0);
+        assert_run(
+            &proj(),
+            "find /project -maxdepth 1",
+            "/project\n/project/README.md\n/project/package.json\n/project/src\n/project/tests\n/project/tsconfig.json\n",
+            "",
+            0,
+        );
+        assert_run(
+            &proj(),
+            "find /project -maxdepth 2 -name \"*.ts\"",
+            "/project/src/index.ts\n/project/tests/index.test.ts\n",
+            "",
+            0,
+        );
+        assert_run(
+            &proj(),
+            "find /project -mindepth 1 -type d",
+            "/project/src\n/project/src/utils\n/project/tests\n",
+            "",
+            0,
+        );
+        assert_run(
+            &proj(),
+            "find /project -mindepth 1 -maxdepth 1 -type f",
+            "/project/README.md\n/project/package.json\n/project/tsconfig.json\n",
+            "",
+            0,
+        );
+        let dd = mk(&[("/dir/a.txt", "a"), ("/dir/sub/b.txt", "b")], None);
+        assert_run(
+            &dd,
+            "find /dir -depth",
+            "/dir/a.txt\n/dir/sub/b.txt\n/dir/sub\n/dir\n",
+            "",
+            0,
+        );
+    }
+
+    #[test]
+    fn operators() {
+        assert_run(
+            &proj(),
+            "find /project -name \"*.md\" -o -name \"*.json\"",
+            "/project/README.md\n/project/package.json\n/project/tsconfig.json\n",
+            "",
+            0,
+        );
+        assert_run(
+            &proj(),
+            "find /project -name \"*.md\" -or -name \"*.json\"",
+            "/project/README.md\n/project/package.json\n/project/tsconfig.json\n",
+            "",
+            0,
+        );
+        assert_run(
+            &proj(),
+            "find /project -type f -name \"*.ts\" -o -type d",
+            "/project\n/project/src\n/project/src/index.ts\n/project/src/utils\n/project/src/utils/format.ts\n/project/src/utils/helpers.ts\n/project/tests\n/project/tests/index.test.ts\n",
+            "",
+            0,
+        );
+        assert_run(
+            &proj(),
+            "find /project -type f -and -name \"*.json\"",
+            "/project/package.json\n/project/tsconfig.json\n",
+            "",
+            0,
+        );
+        assert_run(
+            &proj(),
+            "find /project \\( -name \"*.ts\" -o -name \"*.json\" \\)",
+            "/project/package.json\n/project/src/index.ts\n/project/src/utils/format.ts\n/project/src/utils/helpers.ts\n/project/tests/index.test.ts\n/project/tsconfig.json\n",
+            "",
+            0,
+        );
+        assert_run(
+            &proj(),
+            "find /project -type f \\( -name \"*.md\" -o -name \"*.json\" \\) -exec cat {} \\;",
+            "# Project{}{}",
+            "",
+            0,
+        );
+        assert_run(
+            &proj(),
+            "find /project -type f -not -name \"*.ts\"",
+            "/project/README.md\n/project/package.json\n/project/tsconfig.json\n",
+            "",
+            0,
+        );
+        assert_run(
+            &proj(),
+            "find /project -type f ! -name \"*.ts\"",
+            "/project/README.md\n/project/package.json\n/project/tsconfig.json\n",
+            "",
+            0,
+        );
+        let pc = mk(
+            &[
+                ("/dir/a.txt", "a"),
+                ("/dir/b.txt", "b"),
+                ("/dir/c.txt", "c"),
+            ],
+            None,
+        );
+        assert_run(
+            &pc,
+            "find /dir -type f -name \"a.txt\" -o -name \"b.txt\" -name \"c.txt\"",
+            "/dir/a.txt\n",
+            "",
+            0,
+        );
+        assert_run(
+            &pc,
+            "find /dir \\( -name \"a.txt\" -o -name \"b.txt\" \\) -type f",
+            "/dir/a.txt\n/dir/b.txt\n",
+            "",
+            0,
+        );
+    }
+
+    #[test]
+    fn patterns_and_prune() {
+        let in1 = mk(
+            &[
+                ("/dir/README.md", ""),
+                ("/dir/readme.txt", ""),
+                ("/dir/Readme.rst", ""),
+                ("/dir/other.txt", ""),
+            ],
+            None,
+        );
+        assert_run(
+            &in1,
+            "find /dir -iname \"readme*\"",
+            "/dir/README.md\n/dir/Readme.rst\n/dir/readme.txt\n",
+            "",
+            0,
+        );
+        assert_run(
+            &proj(),
+            "find /project -path \"*/utils/*\"",
+            "/project/src/utils/format.ts\n/project/src/utils/helpers.ts\n",
+            "",
+            0,
+        );
+        let ip = mk(
+            &[("/Project/SRC/file.ts", ""), ("/Project/src/other.ts", "")],
+            None,
+        );
+        assert_run(
+            &ip,
+            "find /Project -ipath \"*src*\"",
+            "/Project/SRC\n/Project/SRC/file.ts\n/Project/src\n/Project/src/other.ts\n",
+            "",
+            0,
+        );
+        let rx = mk(
+            &[
+                ("/dir/file.txt", ""),
+                ("/dir/file.js", ""),
+                ("/dir/sub/other.txt", ""),
+            ],
+            None,
+        );
+        assert_run(
+            &rx,
+            "find /dir -regex \".*\\.txt\"",
+            "/dir/file.txt\n/dir/sub/other.txt\n",
+            "",
+            0,
+        );
+        let rx3 = mk(
+            &[
+                ("/dir/FILE.TXT", ""),
+                ("/dir/file.txt", ""),
+                ("/dir/other.js", ""),
+            ],
+            None,
+        );
+        assert_run(
+            &rx3,
+            "find /dir -iregex \".*\\.txt\"",
+            "/dir/FILE.TXT\n/dir/file.txt\n",
+            "",
+            0,
+        );
+        let em = mk(
+            &[("/dir/empty.txt", ""), ("/dir/notempty.txt", "content")],
+            None,
+        );
+        assert_run(&em, "find /dir -empty -type f", "/dir/empty.txt\n", "", 0);
+        let pr = mk(
+            &[
+                ("/dir/skip/hidden.txt", ""),
+                ("/dir/skip/inside/nested.txt", ""),
+                ("/dir/include/file.txt", ""),
+            ],
+            None,
+        );
+        assert_run(
+            &pr,
+            "find /dir -name skip -prune -o -type f -print",
+            "/dir/include/file.txt\n",
+            "",
+            0,
+        );
+        let pr3 = mk(
+            &[
+                ("/project/dist/bundle.js", ""),
+                ("/project/src/index.ts", ""),
+                ("/project/README.md", ""),
+            ],
+            None,
+        );
+        assert_run(
+            &pr3,
+            "find /project -type d -name dist -prune -o -type f -print",
+            "/project/README.md\n/project/src/index.ts\n",
+            "",
+            0,
+        );
+        let fp = mk(
+            &[
+                ("/repos/project1/pulls/1.json", "{}"),
+                ("/repos/project1/pulls/2.json", "{}"),
+                ("/repos/project1/issues/1.json", "{}"),
+                ("/repos/project2/pulls/3.json", "{}"),
+                ("/repos/project2/other/4.json", "{}"),
+            ],
+            None,
+        );
+        assert_run(
+            &fp,
+            "find /repos -path \"*/pulls/*.json\" -type f",
+            "/repos/project1/pulls/1.json\n/repos/project1/pulls/2.json\n/repos/project2/pulls/3.json\n",
+            "",
+            0,
+        );
+    }
+
+    #[test]
+    fn exec_and_actions() {
+        let ex = mk(
+            &[
+                ("/dir/a.txt", "aaa"),
+                ("/dir/b.txt", "bbb"),
+                ("/dir/c.txt", "ccc"),
+            ],
+            None,
+        );
+        assert_run(
+            &ex,
+            "find /dir -type f -name \"*.txt\" -exec cat {} +",
+            "aaabbbccc",
+            "",
+            0,
+        );
+        let ex2 = mk(
+            &[
+                ("/dir/a.txt", "line1\nline2\n"),
+                ("/dir/b.txt", "line1\nline2\nline3\n"),
+            ],
+            None,
+        );
+        assert_run(
+            &ex2,
+            "find /dir -type f -name \"*.txt\" -exec wc -l {} +",
+            "  2 /dir/a.txt\n  3 /dir/b.txt\n  5 total\n",
+            "",
+            0,
+        );
+        let ex4 = mk(&[("/dir/a.txt", "aaa"), ("/dir/b.txt", "bbb")], None);
+        assert_run(
+            &ex4,
+            "find /dir -type f -name \"*.txt\" -exec echo FILE: {} \\;",
+            "FILE: /dir/a.txt\nFILE: /dir/b.txt\n",
+            "",
+            0,
+        );
+        let ex5 = mk(&[("/dir/a.txt", "a"), ("/dir/b.txt", "b")], None);
+        assert_run(
+            &ex5,
+            "find /dir -type f -name \"*.txt\" -print0",
+            "/dir/a.txt\0/dir/b.txt\0",
+            "",
+            0,
+        );
+        let xe5 = mk(
+            &[("/dir/a.txt", ""), ("/dir/b.txt", ""), ("/dir/c.txt", "")],
+            None,
+        );
+        assert_run(
+            &xe5,
+            "find /dir -name \"*.txt\" -exec echo {} +",
+            "/dir/a.txt /dir/b.txt /dir/c.txt\n",
+            "",
+            0,
+        );
+        let xe6 = mk(
+            &[
+                ("/dir/file1.txt", "content1"),
+                ("/dir/file2.txt", "content2"),
+            ],
+            None,
+        );
+        assert_run(
+            &xe6,
+            "find /dir -type f -exec ls {} +",
+            "/dir/file1.txt\n\n/dir/file2.txt\n",
+            "",
+            0,
+        );
+        let xe7 = mk(&[("/dir/file.txt", "")], None);
+        let r = xe7.exec("find /dir -name \"*.txt\" -exec echo {} foo");
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("-exec"));
+        // -delete deepest-first
+        let d = mk(
+            &[
+                ("/dir/a.txt", "a"),
+                ("/dir/sub/b.txt", "b"),
+                ("/dir/sub/deep/c.txt", "c"),
+            ],
+            None,
+        );
+        d.exec("find /dir -name \"*.txt\" -delete");
+        assert_run(&d, "find /dir -type f", "", "", 0);
+        // -delete on non-empty directory fails
+        let d2 = mk(&[("/dir/subdir/file.txt", "content")], None);
+        assert_run(
+            &d2,
+            "find /dir -type d -name subdir -delete",
+            "",
+            "find: cannot delete '/dir/subdir': ENOTEMPTY: directory not empty, rm '/dir/subdir'\n",
+            1,
+        );
+        // quoted command name with spaces
+        let q = mk(
+            &[("/bin/my cmd.sh", "echo FIND:$1\n"), ("/dir/f.txt", "")],
+            None,
+        );
+        q.exec("chmod +x '/bin/my cmd.sh'");
+        assert_run(
+            &q,
+            "find /dir -type f -exec '/bin/my cmd.sh' {} \\;",
+            "FIND:/dir/f.txt\n",
+            "",
+            0,
+        );
+    }
+
+    #[test]
+    fn perm_and_size() {
+        let b = mk(
+            &[
+                ("/dir/exec.sh", "#!/bin/bash"),
+                ("/dir/group-exec.txt", "text"),
+                ("/dir/no-exec.txt", "text"),
+            ],
+            None,
+        );
+        b.exec("chmod 755 /dir/exec.sh");
+        b.exec("chmod 654 /dir/group-exec.txt");
+        b.exec("chmod 644 /dir/no-exec.txt");
+        assert_run(&b, "find /dir -type f -perm 755", "/dir/exec.sh\n", "", 0);
+        assert_run(&b, "find /dir -type f -perm -100", "/dir/exec.sh\n", "", 0);
+        assert_run(
+            &b,
+            "find /dir -type f -perm /111",
+            "/dir/exec.sh\n/dir/group-exec.txt\n",
+            "",
+            0,
+        );
+        let sz = mk(
+            &[
+                ("/dir/large.txt", &"x".repeat(1000)),
+                ("/dir/small.txt", "tiny"),
+            ],
+            None,
+        );
+        assert_run(
+            &sz,
+            "find /dir -type f -size +100c",
+            "/dir/large.txt\n",
+            "",
+            0,
+        );
+        assert_run(
+            &sz,
+            "find /dir -type f -size -100c",
+            "/dir/small.txt\n",
+            "",
+            0,
+        );
+        let sz2 = mk(
+            &[("/dir/exact.txt", "12345"), ("/dir/other.txt", "1234")],
+            None,
+        );
+        assert_run(
+            &sz2,
+            "find /dir -type f -size 5c",
+            "/dir/exact.txt\n",
+            "",
+            0,
+        );
+    }
+
+    #[test]
+    fn printf() {
+        let pf = mk(&[("/dir/a.txt", "aaa"), ("/dir/b.txt", "bbb")], None);
+        assert_run(
+            &pf,
+            "find /dir -type f -name \"*.txt\" -printf \"%f\\n\"",
+            "a.txt\nb.txt\n",
+            "",
+            0,
+        );
+        let pf4 = mk(&[("/dir/a.txt", "hello")], None);
+        assert_run(
+            &pf4,
+            "find /dir -type f -printf \"%f %s\\n\"",
+            "a.txt 5\n",
+            "",
+            0,
+        );
+        let pf5 = mk(
+            &[
+                ("/dir/a.txt", "a"),
+                ("/dir/sub/b.txt", "b"),
+                ("/dir/sub/deep/c.txt", "c"),
+            ],
+            None,
+        );
+        assert_run(
+            &pf5,
+            "find /dir -type f -printf \"%d %f\\n\"",
+            "1 a.txt\n2 b.txt\n3 c.txt\n",
+            "",
+            0,
+        );
+        let pf6 = mk(&[("/dir/sub/file.txt", "content")], None);
+        assert_run(
+            &pf6,
+            "find /dir -type f -printf \"%P\\n\"",
+            "sub/file.txt\n",
+            "",
+            0,
+        );
+        let b = mk(
+            &[("/dir/exec.sh", "#!/bin/bash"), ("/dir/file.txt", "text")],
+            None,
+        );
+        b.exec("chmod 755 /dir/exec.sh");
+        b.exec("chmod 644 /dir/file.txt");
+        assert_run(
+            &b,
+            "find /dir -type f -printf \"%f %m\\n\"",
+            "exec.sh 755\nfile.txt 644\n",
+            "",
+            0,
+        );
+        let m = mk(&[("/dir/exec.sh", "#!/bin/bash")], None);
+        m.exec("chmod 755 /dir/exec.sh");
+        assert_run(
+            &m,
+            "find /dir -type f -printf \"%M %f\\n\"",
+            "-rwxr-xr-x exec.sh\n",
+            "",
+            0,
+        );
+        let w1 = mk(&[("/dir/a.txt", "a")], None);
+        assert_run(
+            &w1,
+            "find /dir -type f -printf \"[%10f]\\n\"",
+            "[     a.txt]\n",
+            "",
+            0,
+        );
+        assert_run(
+            &w1,
+            "find /dir -type f -printf \"[%-10f]\\n\"",
+            "[a.txt     ]\n",
+            "",
+            0,
+        );
+        let w2 = mk(&[("/dir/longfilename.txt", "a")], None);
+        assert_run(
+            &w2,
+            "find /dir -type f -printf \"[%.3f]\\n\"",
+            "[lon]\n",
+            "",
+            0,
+        );
+        let es = mk(&[("/dir/a.txt", "a"), ("/dir/b.txt", "b")], None);
+        assert_run(
+            &es,
+            "find /dir -type f -name \"*.txt\" -printf \"%f\\0\"",
+            "a.txt\0b.txt\0",
+            "",
+            0,
+        );
+        let es5 = mk(&[("/dir/a.txt", "a")], None);
+        assert_run(
+            &es5,
+            "find /dir -type f -printf \"\\u2714 %f\\n\"",
+            "\u{2714} a.txt\n",
+            "",
+            0,
+        );
+        assert_run(
+            &es5,
+            "find /dir -type f -printf \"\\U1F4C4 %f\\n\"",
+            "\u{1F4C4} a.txt\n",
+            "",
+            0,
+        );
+    }
+}
