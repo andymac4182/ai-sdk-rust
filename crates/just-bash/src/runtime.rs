@@ -6098,20 +6098,16 @@ and exhibited clearly, with a label attached.\n";
         // becomes wrong.
         //
         // Upstream rows covered (file:line):
-        //   misc.test.ts:1080 (-z gzip) — real DEFLATE decompression is not
-        //   implemented, so the compression-search flag is rejected rather than
-        //   silently mis-handling a real gzip buffer.
-        let rejected = |args: &str, opt: &str| {
-            let r = home_bash(&[("f.txt", "hello\n")]).exec(args);
-            assert_eq!(r.exit_code, 1, "{args}");
-            assert_eq!(r.stdout, "", "{args}");
-            assert_eq!(
-                r.stderr,
-                format!("rg: unrecognized option '{opt}'\n"),
-                "{args}"
-            );
-        };
-        rejected("rg -z hello f.txt", "-z");
+        //   misc.test.ts:1080 (-z gzip) — real RFC 1952 gzip + RFC 1951 DEFLATE
+        //   inflation IS now implemented, so `-z` transparently decompresses a
+        //   `.gz` file before searching (see
+        //   `rg_search_zip_decompresses_real_gzip_file`). On a plain (non-`.gz`)
+        //   file the flag is a no-op and the search runs against the raw bytes.
+        let r = home_bash(&[("f.txt", "hello\n")]).exec("rg -z hello f.txt");
+        assert_eq!(r.exit_code, 0, "rg -z hello f.txt");
+        // Single explicit file argument: no filename prefix and no line number.
+        assert_eq!(r.stdout, "hello\n", "rg -z hello f.txt");
+        assert_eq!(r.stderr, "", "rg -z hello f.txt");
 
         // misc.test.ts:454 (--pre) and :468 (--pre-glob): the `--pre` preprocessor
         // is now implemented. The preprocessor command runs as `<pre> <file>` and
@@ -6317,12 +6313,16 @@ and exhibited clearly, with a label attached.\n";
         // --no-include-zero count override.
         unrecognized("rg --no-include-zero -c hello f.txt", "--no-include-zero");
 
-        // Non-gzip compression search (-z / --search-zip): real DEFLATE/gzip
-        // decompression is not implemented (the crate's gzip subsystem uses a
-        // base64 container, not raw DEFLATE), so the -z flag is left unwired and
-        // rejected rather than silently mis-handling a real gzip buffer.
-        unrecognized("rg -z hello f.txt", "-z");
-        unrecognized("rg --search-zip hello f.txt", "--search-zip");
+        // NB: `-z`/`--search-zip` IS now implemented (real RFC 1952 gzip +
+        // RFC 1951 DEFLATE inflation), matching upstream rg-search.ts. On a
+        // plain (non-`.gz`) file the flag is a no-op and the search proceeds
+        // normally; see `rg_search_zip_decompresses_real_gzip_file` for the
+        // gzip-inflation path.
+        let r = home_bash(&[("f.txt", "ab\nhello\n")]).exec("rg -z hello f.txt");
+        assert_eq!(r.exit_code, 0, "rg -z hello f.txt");
+        // Single explicit file argument: no filename prefix and no line number.
+        assert_eq!(r.stdout, "hello\n", "rg -z hello f.txt");
+        assert_eq!(r.stderr, "", "rg -z hello f.txt");
 
         // Output/format flags the upstream skip-suite documents as unimplemented.
         unrecognized("rg --crlf hello f.txt", "--crlf");
@@ -21001,6 +21001,151 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         assert_eq!(
             submatches[2],
             serde_json::json!({ "match": { "text": "foo" }, "start": 16, "end": 19 })
+        );
+    }
+
+    #[test]
+    fn rg_json_stats_count_matching_lines_not_submatches() {
+        // imported-tests/json.test.ts:124 "should output all matches with
+        // correct submatches": a single line with three `foo` matches reports
+        // `matched_lines: 1` and `matches: 1` (upstream stats use the matching
+        // *line* count `result.matchCount`, not the submatch total).
+        let result =
+            home_bash(&[("test.txt", "foo bar foo baz foo\n")]).exec("rg --json foo test.txt");
+        assert_eq!(result.exit_code, 0);
+        let msgs = rg_json_messages(&result.stdout);
+        let end = msgs.iter().find(|m| m["type"] == "end").unwrap();
+        assert_eq!(end["data"]["stats"]["matched_lines"], serde_json::json!(1));
+        assert_eq!(end["data"]["stats"]["matches"], serde_json::json!(1));
+        let summary = msgs.iter().find(|m| m["type"] == "summary").unwrap();
+        assert_eq!(
+            summary["data"]["stats"]["matched_lines"],
+            serde_json::json!(1)
+        );
+        assert_eq!(summary["data"]["stats"]["matches"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn rg_type_list_matches_upstream_format_type_list() {
+        // rg.filtering.test.ts:34 / imported-tests/misc.test.ts:1167. The full
+        // list mirrors upstream file-types.ts `formatTypeList`: types sorted by
+        // name, extensions rendered as `*.<ext>`, literal globs verbatim.
+        let result = home_bash(&[]).exec("rg --type-list");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stderr, "");
+        assert_eq!(
+            result.stdout,
+            "bat: *.bat, *.cmd\n\
+c: *.c, *.h\n\
+clojure: *.clj, *.cljc, *.cljs, *.edn\n\
+cpp: *.cpp, *.cc, *.cxx, *.hpp, *.hh, *.hxx, *.h\n\
+css: *.css, *.scss, *.sass, *.less\n\
+csv: *.csv, *.tsv\n\
+docker: Dockerfile, Dockerfile.*, *.dockerfile\n\
+go: *.go\n\
+graphql: *.graphql, *.gql\n\
+html: *.html, *.htm, *.xhtml\n\
+ini: *.ini, *.cfg, *.conf\n\
+java: *.java\n\
+js: *.js, *.mjs, *.cjs, *.jsx\n\
+json: *.json, *.jsonc, *.json5\n\
+kotlin: *.kt, *.kts\n\
+lua: *.lua\n\
+make: *.mk, *.mak, Makefile, GNUmakefile, makefile\n\
+markdown: *.md, *.mdx, *.markdown, *.mdown, *.mkd\n\
+md: *.md, *.mdx, *.markdown, *.mdown, *.mkd\n\
+perl: *.pl, *.pm, *.pod, *.t\n\
+php: *.php, *.phtml, *.php3, *.php4, *.php5\n\
+proto: *.proto\n\
+ps: *.ps1, *.psm1, *.psd1\n\
+py: *.py, *.pyi, *.pyw\n\
+rb: *.rb, *.rake, *.gemspec, Rakefile, Gemfile\n\
+rst: *.rst\n\
+rust: *.rs\n\
+scala: *.scala, *.sc\n\
+sh: *.sh, *.bash, *.zsh, *.fish, .bashrc, .zshrc, .profile\n\
+sql: *.sql\n\
+tex: *.tex, *.ltx, *.sty, *.cls\n\
+tf: *.tf, *.tfvars\n\
+toml: *.toml, Cargo.toml, pyproject.toml\n\
+ts: *.ts, *.tsx, *.mts, *.cts\n\
+txt: *.txt, *.text\n\
+xml: *.xml, *.xsl, *.xslt\n\
+yaml: *.yaml, *.yml\n\
+zig: *.zig\n"
+        );
+    }
+
+    #[test]
+    fn rg_help_matches_upstream_show_help() {
+        // imported-tests/feature.test.ts: `rg --help` renders the full ripgrep
+        // help via showHelp(rgHelp) (commands/rg/rg.ts + commands/help.ts).
+        let result = home_bash(&[]).exec("rg --help");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stderr, "");
+        assert!(
+            result
+                .stdout
+                .starts_with("rg - recursively search for a pattern\n\n")
+        );
+        assert!(
+            result
+                .stdout
+                .contains("Usage: rg [OPTIONS] PATTERN [PATH ...]\n")
+        );
+        assert!(result.stdout.contains("\nDescription:\n"));
+        assert!(
+            result
+                .stdout
+                .contains("  rg (ripgrep) recursively searches directories for a regex pattern.\n")
+        );
+        assert!(result.stdout.contains("\nOptions:\n"));
+        assert!(
+            result
+                .stdout
+                .contains("  -z, --search-zip        search in compressed files (gzip only)\n")
+        );
+        assert!(
+            result
+                .stdout
+                .contains("      --help              display this help and exit\n")
+        );
+    }
+
+    #[test]
+    fn rg_search_zip_decompresses_real_gzip_file() {
+        // imported-tests/misc.test.ts:1080 "should search gzip files with -z":
+        // a real zlib gzip of SHERLOCK is inflated transparently before search.
+        const SHERLOCK_GZ: &[u8] = &[
+            31, 139, 8, 0, 0, 0, 0, 0, 0, 19, 85, 143, 49, 110, 196, 48, 12, 4, 123, 189, 98, 31,
+            96, 220, 7, 210, 6, 65, 250, 20, 169, 105, 137, 62, 9, 150, 69, 131, 164, 236, 243,
+            239, 3, 57, 64, 128, 116, 44, 102, 103, 151, 31, 162, 240, 204, 120, 151, 232, 162,
+            248, 38, 55, 105, 6, 89, 224, 185, 24, 78, 209, 154, 38, 144, 65, 246, 93, 140, 19, 92,
+            110, 254, 43, 179, 86, 137, 107, 248, 148, 186, 177, 177, 77, 176, 30, 35, 155, 161,
+            180, 155, 216, 85, 142, 210, 34, 15, 87, 98, 231, 232, 229, 224, 33, 92, 177, 117, 115,
+            80, 61, 233, 178, 48, 243, 52, 156, 132, 131, 245, 66, 37, 125, 50, 248, 229, 220, 124,
+            186, 53, 202, 214, 171, 15, 73, 237, 113, 125, 252, 21, 227, 183, 56, 68, 106, 131, 87,
+            138, 14, 66, 172, 124, 98, 81, 217, 64, 56, 139, 237, 35, 103, 174, 116, 66, 20, 132,
+            165, 210, 122, 15, 138, 229, 73, 10, 178, 252, 22, 230, 238, 255, 191, 71, 38, 27, 147,
+            50, 29, 140, 226, 112, 90, 185, 65, 186, 99, 17, 69, 46, 27, 168, 37, 164, 110, 206,
+            105, 10, 227, 230, 87, 46, 115, 113, 78, 163, 159, 180, 94, 19, 206, 226, 25, 132, 74,
+            51, 87, 144, 59, 197, 204, 233, 17, 126, 0, 116, 180, 22, 151, 111, 1, 0, 0,
+        ];
+        let bash = Bash::with_options(BashOptions {
+            cwd: Some("/home/user".to_string()),
+            binary_files: BTreeMap::from([(
+                "/home/user/sherlock.gz".to_string(),
+                SHERLOCK_GZ.to_vec(),
+            )]),
+            ..BashOptions::default()
+        });
+        let result = bash.exec("rg -z Sherlock sherlock.gz");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stderr, "");
+        assert_eq!(
+            result.stdout,
+            "For the Doctor Watsons of this world, as opposed to the Sherlock\n\
+be, to a very large extent, the result of luck. Sherlock Holmes\n"
         );
     }
 
