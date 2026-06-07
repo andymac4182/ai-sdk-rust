@@ -45,8 +45,10 @@ pub const JUST_BASH_TIMEOUT_EXIT_CODE: i32 = 124;
 /// Default timeout for a Just Bash execution, in milliseconds.
 pub const JUST_BASH_DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
-/// Default maximum captured stdout or stderr length.
-pub const JUST_BASH_DEFAULT_MAX_OUTPUT_LENGTH: usize = 50_000;
+/// Default maximum captured stdout or stderr length. Mirrors upstream's
+/// `DEFAULT_LIMITS.maxOutputSize` (10 MB) so unbounded sessions stream large
+/// command output (e.g. `gunzip -c` of a 200 KB payload) verbatim.
+pub const JUST_BASH_DEFAULT_MAX_OUTPUT_LENGTH: usize = 10 * 1024 * 1024;
 
 /// Default maximum size (in bytes) of a single working string buffer before an
 /// execution-limit error is raised. Mirrors the upstream
@@ -29724,13 +29726,16 @@ fn command_gzip(
     let decompress_command = command == "gunzip" || command == "zcat";
     let stdout_command = command == "zcat";
     if args.iter().any(|arg| arg == "--help") {
-        let action = if decompress_command {
-            "decompress"
-        } else {
-            "compress"
+        // Mirror upstream help summaries so callers can grep for the documented
+        // behavior: gzip "compress", gunzip "decompress", zcat "decompress to
+        // stdout".
+        let summary = match command {
+            "zcat" => "decompress files to stdout",
+            "gunzip" => "decompress files",
+            _ => "compress or expand files",
         };
         return stdout_result(format!(
-            "{command} - {action} files\nUsage: {command} [OPTION]... [FILE]...\n"
+            "{command} - {summary}\nUsage: {command} [OPTION]... [FILE]...\n"
         ));
     }
     let mut options = GzipOptions {
@@ -30149,10 +30154,25 @@ fn virtual_gzip_pack(content: &str) -> String {
 /// byte-clean: arbitrary non-UTF-8 payloads (high bytes, null bytes, every byte
 /// value) round-trip verbatim, mirroring upstream's binary-safe gzip/gunzip.
 fn virtual_gzip_unpack_bytes(content: &str) -> Result<Vec<u8>, &'static str> {
-    let Some(encoded) = content.strip_prefix(VIRTUAL_GZIP_PREFIX) else {
-        return Err("not in gzip format");
-    };
-    content_to_bytes(encoded, BufferEncoding::Base64).map_err(|_| "not in gzip format")
+    if let Some(encoded) = content.strip_prefix(VIRTUAL_GZIP_PREFIX) {
+        return content_to_bytes(encoded, BufferEncoding::Base64).map_err(|_| "not in gzip format");
+    }
+    // Byte-stdin (`stdinKind: 'bytes'`) carries each input byte as a latin1
+    // char. When a virtual-gzip file is read with `readFileBuffer` (which yields
+    // the UTF-8 bytes of the stored container string) and fed back through such
+    // a byte channel, the `\u{1f}\u{8b}` prefix arrives UTF-8-encoded
+    // (0x1f 0xc2 0x8b ...). Recover the canonical container by mapping the
+    // latin1 chars back to their bytes and UTF-8-decoding before retrying.
+    if content.chars().all(|character| (character as u32) <= 0xff) {
+        let raw: Vec<u8> = content.chars().map(|character| character as u8).collect();
+        if let Ok(decoded) = std::str::from_utf8(&raw) {
+            if let Some(encoded) = decoded.strip_prefix(VIRTUAL_GZIP_PREFIX) {
+                return content_to_bytes(encoded, BufferEncoding::Base64)
+                    .map_err(|_| "not in gzip format");
+            }
+        }
+    }
+    Err("not in gzip format")
 }
 
 fn virtual_gzip_unpack(content: &str) -> Result<String, &'static str> {
@@ -42684,5 +42704,471 @@ mod fold_parity_tests {
         let r = bash.exec("cat /in.txt | fold -w 2", JustBashExecOptions::new());
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "한글\nca\nfé\n");
+    }
+}
+
+#[cfg(test)]
+mod gzip_parity_tests {
+    //! Behavioral parity regression suite for `gzip`/`gunzip`/`zcat`, ported
+    //! from upstream `commands/gzip/*.test.ts`. Each block mirrors one upstream
+    //! `it(...)` case and asserts the same stdout/stderr/exit so the command
+    //! output can never silently regress.
+    use crate::runtime::{Bash, BashOptions};
+    use crate::{JustBashExecOptions, JustBashSession, JustBashSessionOptions};
+    use std::collections::BTreeMap;
+
+    fn bash_files(files: &[(&str, &str)]) -> Bash {
+        let mut m = BTreeMap::new();
+        for (k, v) in files {
+            m.insert(k.to_string(), v.to_string());
+        }
+        Bash::with_options(BashOptions {
+            files: m,
+            ..Default::default()
+        })
+    }
+
+    fn bash_binary(files: &[(&str, Vec<u8>)]) -> Bash {
+        let mut m = BTreeMap::new();
+        for (k, v) in files {
+            m.insert(k.to_string(), v.clone());
+        }
+        Bash::with_options(BashOptions {
+            binary_files: m,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn audit_all() {
+        let mut fails: Vec<String> = Vec::new();
+        macro_rules! chk {
+            ($name:expr, $cond:expr) => {
+                if !($cond) {
+                    fails.push($name.to_string());
+                }
+            };
+        }
+
+        // compresses a file and removes original
+        {
+            let b = bash_files(&[("/test.txt", "Hello, World!")]);
+            let r = b.exec("gzip test.txt");
+            chk!("compress: exit", r.exit_code == 0);
+            chk!("compress: stderr empty", r.stderr.is_empty());
+            let ls = b.exec("ls /");
+            chk!(
+                "compress: original removed",
+                !ls.stdout.contains("test.txt\n")
+            );
+            chk!("compress: gz exists", ls.stdout.contains("test.txt.gz"));
+        }
+        // keeps original with -k
+        {
+            let b = bash_files(&[("/test.txt", "Hello, World!")]);
+            let r = b.exec("gzip -k test.txt");
+            chk!("keep: exit", r.exit_code == 0);
+            let ls = b.exec("ls /");
+            chk!("keep: original", ls.stdout.contains("test.txt\n"));
+            chk!("keep: gz", ls.stdout.contains("test.txt.gz"));
+        }
+        // -c magic bytes
+        {
+            let b = bash_files(&[("/test.txt", "Hello, World!")]);
+            let r = b.exec("gzip -c test.txt");
+            chk!("c: exit", r.exit_code == 0);
+            let bytes: Vec<char> = r.stdout.chars().collect();
+            chk!("c: magic0", bytes.first().map(|c| *c as u32) == Some(0x1f));
+            chk!("c: magic1", bytes.get(1).map(|c| *c as u32) == Some(0x8b));
+            let ls = b.exec("ls /");
+            chk!("c: original", ls.stdout.contains("test.txt"));
+            chk!("c: no gz", !ls.stdout.contains("test.txt.gz"));
+        }
+        // refuses overwrite without -f
+        {
+            let b = bash_files(&[("/test.txt", "Hello, World!"), ("/test.txt.gz", "existing")]);
+            let r = b.exec("gzip test.txt");
+            chk!("nooverwrite: exit", r.exit_code == 1);
+            chk!("nooverwrite: msg", r.stderr.contains("already exists"));
+        }
+        // overwrite with -f
+        {
+            let b = bash_files(&[("/test.txt", "Hello, World!"), ("/test.txt.gz", "existing")]);
+            let r = b.exec("gzip -f test.txt");
+            chk!("overwrite: exit", r.exit_code == 0);
+        }
+        // skip .gz suffix
+        {
+            let b = bash_files(&[("/test.txt.gz", "already compressed")]);
+            let r = b.exec("gzip test.txt.gz");
+            chk!("alreadygz: exit", r.exit_code == 1);
+            chk!(
+                "alreadygz: msg",
+                r.stderr.contains("already has .gz suffix")
+            );
+        }
+        // multiple files
+        {
+            let b = bash_files(&[("/a.txt", "File A"), ("/b.txt", "File B")]);
+            let r = b.exec("gzip a.txt b.txt");
+            chk!("multi: exit", r.exit_code == 0);
+            let ls = b.exec("ls /");
+            chk!("multi: a", ls.stdout.contains("a.txt.gz"));
+            chk!("multi: b", ls.stdout.contains("b.txt.gz"));
+        }
+        // custom suffix -S
+        {
+            let b = bash_files(&[("/test.txt", "Hello, World!")]);
+            let r = b.exec("gzip -S .z test.txt");
+            chk!("suffix: exit", r.exit_code == 0);
+            let ls = b.exec("ls /");
+            chk!("suffix: z", ls.stdout.contains("test.txt.z"));
+        }
+        // verbose -v
+        {
+            let b = bash_files(&[("/test.txt", "Hello, World!")]);
+            let r = b.exec("gzip -v test.txt");
+            chk!("verbose: exit", r.exit_code == 0);
+            chk!("verbose: name", r.stderr.contains("test.txt:"));
+            chk!("verbose: pct", r.stderr.contains("%"));
+        }
+        // decompress -d
+        {
+            let b = bash_files(&[("/test.txt", "Hello, World!")]);
+            b.exec("gzip test.txt");
+            let r = b.exec("gzip -d test.txt.gz");
+            chk!("decomp: exit", r.exit_code == 0);
+            let cat = b.exec("cat test.txt");
+            chk!("decomp: content", cat.stdout == "Hello, World!");
+        }
+        // refuse decompress without suffix
+        {
+            let b = bash_files(&[("/test.txt", "not compressed")]);
+            let r = b.exec("gzip -d test.txt");
+            chk!("nosuffix: exit", r.exit_code == 1);
+            chk!("nosuffix: msg", r.stderr.contains("unknown suffix"));
+        }
+        // detect non-gzip
+        {
+            let b = bash_files(&[("/test.txt.gz", "not actually gzip")]);
+            let r = b.exec("gzip -d test.txt.gz");
+            chk!("nongzip: exit", r.exit_code == 1);
+            chk!("nongzip: msg", r.stderr.contains("not in gzip format"));
+        }
+        // levels 1-9
+        for level in 1..=9 {
+            let b = bash_files(&[("/test.txt", "Hello, World!")]);
+            let r = b.exec(format!("gzip -{level} -k test.txt"));
+            chk!("level: exit", r.exit_code == 0);
+        }
+        // --fast --best
+        {
+            let b = bash_files(&[("/test.txt", "Hello, World!")]);
+            chk!(
+                "fast: exit",
+                b.exec("gzip --fast -k test.txt").exit_code == 0
+            );
+            let b2 = bash_files(&[("/test.txt", "Hello, World!")]);
+            chk!(
+                "best: exit",
+                b2.exec("gzip --best -k test.txt").exit_code == 0
+            );
+        }
+        // stdin
+        {
+            let b = Bash::new();
+            let r = b.exec("echo 'Hello' | gzip | base64");
+            chk!("stdin: exit", r.exit_code == 0);
+            chk!("stdin: len", !r.stdout.is_empty());
+        }
+        {
+            let b = Bash::new();
+            let r = b.exec("echo 'Hello' | gzip - | base64");
+            chk!("stdindash: exit", r.exit_code == 0);
+        }
+        // --help
+        {
+            let b = Bash::new();
+            let r = b.exec("gzip --help");
+            chk!("help: exit", r.exit_code == 0);
+            chk!("help: gzip", r.stdout.contains("gzip"));
+            chk!("help: compress", r.stdout.contains("compress"));
+        }
+        // non-existent
+        {
+            let b = Bash::new();
+            let r = b.exec("gzip nonexistent.txt");
+            chk!("noexist: exit", r.exit_code == 1);
+            chk!(
+                "noexist: msg",
+                r.stderr.contains("No such file or directory")
+            );
+        }
+        // unknown option
+        {
+            let b = Bash::new();
+            let r = b.exec("gzip --unknown");
+            chk!("unknown: exit", r.exit_code == 1);
+            chk!("unknown: msg", r.stderr.contains("unrecognized option"));
+        }
+        // directory without -r
+        {
+            let b = bash_files(&[("/dir/file.txt", "content")]);
+            let r = b.exec("gzip dir");
+            chk!("dir: exit", r.exit_code == 1);
+            chk!("dir: msg", r.stderr.contains("is a directory"));
+        }
+        // -l
+        {
+            let b = bash_files(&[("/test.txt", "Hello, World! This is a test.")]);
+            b.exec("gzip test.txt");
+            let r = b.exec("gzip -l test.txt.gz");
+            chk!("list: exit", r.exit_code == 0);
+            chk!("list: compressed", r.stdout.contains("compressed"));
+            chk!("list: uncompressed", r.stdout.contains("uncompressed"));
+            chk!("list: pct", r.stdout.contains("%"));
+        }
+        // -t valid
+        {
+            let b = bash_files(&[("/test.txt", "Hello, World!")]);
+            b.exec("gzip test.txt");
+            let r = b.exec("gzip -t test.txt.gz");
+            chk!("test: exit", r.exit_code == 0);
+        }
+        // -tv OK
+        {
+            let b = bash_files(&[("/test.txt", "Hello, World!")]);
+            b.exec("gzip test.txt");
+            let r = b.exec("gzip -tv test.txt.gz");
+            chk!("testv: exit", r.exit_code == 0);
+            chk!("testv: OK", r.stderr.contains("OK"));
+        }
+        // -t corrupt
+        {
+            let b = bash_files(&[("/corrupt.gz", "not valid gzip data")]);
+            let r = b.exec("gzip -t corrupt.gz");
+            chk!("corrupt: exit", r.exit_code == 1);
+            chk!("corrupt: msg", r.stderr.contains("not in gzip format"));
+        }
+        // -r recursive
+        {
+            let b = bash_files(&[
+                ("/dir/a.txt", "File A"),
+                ("/dir/b.txt", "File B"),
+                ("/dir/sub/c.txt", "File C"),
+            ]);
+            let r = b.exec("gzip -r dir");
+            chk!("rec: exit", r.exit_code == 0);
+            let f = b.exec("find dir -name '*.gz'");
+            chk!("rec: a", f.stdout.contains("a.txt.gz"));
+            chk!("rec: b", f.stdout.contains("b.txt.gz"));
+            chk!("rec: c", f.stdout.contains("c.txt.gz"));
+        }
+        // -q quiet
+        {
+            let b = bash_files(&[("/test.txt.gz", "not valid")]);
+            let r = b.exec("gzip -qd test.txt.gz");
+            chk!("quiet: exit", r.exit_code == 1);
+            chk!("quiet: stderr empty", r.stderr.is_empty());
+        }
+        // gunzip default
+        {
+            let b = bash_files(&[("/test.txt", "Hello, World!")]);
+            b.exec("gzip test.txt");
+            let r = b.exec("gunzip test.txt.gz");
+            chk!("gunzip: exit", r.exit_code == 0);
+            let cat = b.exec("cat test.txt");
+            chk!("gunzip: content", cat.stdout == "Hello, World!");
+        }
+        // gunzip help
+        {
+            let b = Bash::new();
+            let r = b.exec("gunzip --help");
+            chk!("gunziphelp: exit", r.exit_code == 0);
+            chk!("gunziphelp: gunzip", r.stdout.contains("gunzip"));
+            chk!("gunziphelp: decompress", r.stdout.contains("decompress"));
+        }
+        // gunzip -c
+        {
+            let b = bash_files(&[("/test.txt", "Hello, World!")]);
+            b.exec("gzip test.txt");
+            let r = b.exec("gunzip -c test.txt.gz");
+            chk!("gunzipc: exit", r.exit_code == 0);
+            chk!("gunzipc: content", r.stdout == "Hello, World!");
+            let ls = b.exec("ls /");
+            chk!("gunzipc: gz exists", ls.stdout.contains("test.txt.gz"));
+        }
+        // zcat
+        {
+            let b = bash_files(&[("/test.txt", "Hello, World!")]);
+            b.exec("gzip test.txt");
+            let r = b.exec("zcat test.txt.gz");
+            chk!("zcat: exit", r.exit_code == 0);
+            chk!("zcat: content", r.stdout == "Hello, World!");
+            let ls = b.exec("ls /");
+            chk!("zcat: gz exists", ls.stdout.contains("test.txt.gz"));
+        }
+        // zcat help
+        {
+            let b = Bash::new();
+            let r = b.exec("zcat --help");
+            chk!("zcathelp: exit", r.exit_code == 0);
+            chk!("zcathelp: zcat", r.stdout.contains("zcat"));
+            chk!("zcathelp: stdout", r.stdout.contains("stdout"));
+        }
+        // zcat multiple
+        {
+            let b = bash_files(&[("/a.txt", "File A\n"), ("/b.txt", "File B\n")]);
+            b.exec("gzip a.txt b.txt");
+            let r = b.exec("zcat a.txt.gz b.txt.gz");
+            chk!("zcatmulti: exit", r.exit_code == 0);
+            chk!("zcatmulti: content", r.stdout == "File A\nFile B\n");
+        }
+        // binary high bytes
+        {
+            let b = bash_binary(&[("/binary.bin", vec![0x80, 0x90, 0xa0, 0xb0, 0xff])]);
+            b.exec("gzip -k /binary.bin");
+            b.exec("rm /binary.bin");
+            b.exec("gunzip /binary.bin.gz");
+            let r = b.exec("cat /binary.bin");
+            let cs: Vec<u32> = r.stdout.chars().map(|c| c as u32).collect();
+            chk!("binhigh: bytes", cs == vec![0x80, 0x90, 0xa0, 0xb0, 0xff]);
+        }
+        // null bytes
+        {
+            let b = bash_binary(&[("/nulls.bin", vec![0x41, 0x00, 0x42, 0x00, 0x43])]);
+            b.exec("gzip -k /nulls.bin");
+            b.exec("rm /nulls.bin");
+            b.exec("gunzip /nulls.bin.gz");
+            let r = b.exec("cat /nulls.bin");
+            chk!("nulls: content", r.stdout == "A\u{0}B\u{0}C");
+        }
+        // all byte values
+        {
+            let all: Vec<u8> = (0u16..256).map(|i| i as u8).collect();
+            let b = bash_binary(&[("/allbytes.bin", all)]);
+            b.exec("gzip -k /allbytes.bin");
+            b.exec("rm /allbytes.bin");
+            b.exec("gunzip /allbytes.bin.gz");
+            let r = b.exec("cat /allbytes.bin");
+            let cs: Vec<u32> = r.stdout.chars().map(|c| c as u32).collect();
+            chk!("allbytes: len", cs.len() == 256);
+            chk!("allbytes: vals", cs == (0..256).collect::<Vec<u32>>());
+        }
+        // stdin compress > file then gunzip -c
+        {
+            let b = bash_files(&[("/data.txt", "test data for compression")]);
+            b.exec("cat /data.txt | gzip -c > /compressed.gz");
+            let r = b.exec("gunzip -c /compressed.gz");
+            chk!("pipefile: content", r.stdout == "test data for compression");
+        }
+        // decompress from stdin
+        {
+            let b = bash_files(&[("/data.txt", "original content")]);
+            b.exec("gzip -k /data.txt");
+            let r = b.exec("cat /data.txt.gz | gunzip");
+            chk!("decstdin: content", r.stdout == "original content");
+        }
+        // piped binary high bytes
+        {
+            let b = bash_binary(&[("/binary.bin", vec![0x80, 0xff, 0x90, 0xab])]);
+            b.exec("gzip -c /binary.bin > /binary.bin.gz");
+            let r = b.exec("cat /binary.bin.gz | gunzip -c");
+            let cs: Vec<u32> = r.stdout.chars().map(|c| c as u32).collect();
+            chk!("pipebin: bytes", cs == vec![0x80, 0xff, 0x90, 0xab]);
+        }
+        // zcat piped
+        {
+            let b = bash_files(&[("/data.txt", "zcat test content")]);
+            b.exec("gzip -k /data.txt");
+            let r = b.exec("cat /data.txt.gz | zcat");
+            chk!("zcatpipe: content", r.stdout == "zcat test content");
+        }
+        // UTF-8 file
+        {
+            let orig = "Hello 中文 日本語 한국어 🎉";
+            let b = bash_files(&[("/unicode.txt", orig)]);
+            b.exec("gzip -c /unicode.txt > /unicode.txt.gz");
+            let r = b.exec("gunzip -c /unicode.txt.gz");
+            chk!("utf8file: content", r.stdout == orig);
+        }
+        // UTF-8 via stdin pipe
+        {
+            let orig = "Привет мир 你好世界";
+            let b = bash_files(&[("/unicode.txt", orig)]);
+            b.exec("cat /unicode.txt | gzip -c > /compressed.gz");
+            let r = b.exec("gunzip -c /compressed.gz");
+            chk!("utf8stdin: content", r.stdout == orig);
+        }
+        // UTF-8 emoji
+        {
+            let orig = "🚀🎉🔥💯";
+            let b = bash_files(&[("/emoji.txt", orig)]);
+            b.exec("gzip -c /emoji.txt > /emoji.txt.gz");
+            let r = b.exec("gunzip -c /emoji.txt.gz");
+            chk!("utf8emoji: content", r.stdout == orig);
+        }
+        // utf8-stdin round-trip gzip|gunzip
+        {
+            let b = bash_files(&[("/in.txt", "한글 / café / 漢字\n")]);
+            let r = b.exec("cat /in.txt | gzip | gunzip");
+            chk!("rtutf8: exit", r.exit_code == 0);
+            chk!("rtutf8: content", r.stdout == "한글 / café / 漢字\n");
+        }
+        // security: big gunzip -c
+        {
+            let big = "A".repeat(200000);
+            let b = Bash::new();
+            b.write_file("/big.txt", &big).unwrap();
+            b.exec("gzip /big.txt");
+            let r = b.exec("gunzip -c /big.txt.gz");
+            chk!("secbig: content", r.stdout == big);
+            chk!("secbig: stderr", r.stderr.is_empty());
+            chk!("secbig: exit", r.exit_code == 0);
+        }
+        // security: file extraction limit
+        {
+            let session = JustBashSession::with_options(
+                JustBashSessionOptions::new().with_max_output_length(128),
+            );
+            session
+                .write_file("/payload.txt", &"X".repeat(200))
+                .unwrap();
+            session.exec("gzip /payload.txt", JustBashExecOptions::new());
+            let r = session.exec("gunzip /payload.txt.gz", JustBashExecOptions::new());
+            chk!("seclimit: stdout", r.stdout.is_empty());
+            chk!(
+                "seclimit: stderr",
+                r.stderr
+                    == "gunzip: /payload.txt.gz: decompressed data exceeds limit (128 bytes)\n"
+            );
+            chk!("seclimit: exit", r.exit_code == 1);
+            chk!("seclimit: src exists", !session.file_exists("/payload.txt"));
+        }
+        // security: stdin limit
+        {
+            let session = JustBashSession::with_options(
+                JustBashSessionOptions::new().with_max_output_length(128),
+            );
+            session
+                .write_file("/payload.txt", &"Y".repeat(200))
+                .unwrap();
+            session.exec("gzip /payload.txt", JustBashExecOptions::new());
+            let compressed = session.read_file_buffer("/payload.txt.gz").unwrap();
+            let r = session.exec(
+                "gunzip -c",
+                JustBashExecOptions::new().with_stdin_bytes(compressed),
+            );
+            chk!("secstdin: stdout", r.stdout.is_empty());
+            chk!(
+                "secstdin: stderr",
+                r.stderr == "gunzip: stdin: decompressed data exceeds limit (128 bytes)\n"
+            );
+            chk!("secstdin: exit", r.exit_code == 1);
+        }
+
+        if !fails.is_empty() {
+            panic!("GZIP AUDIT FAILURES ({}): {:?}", fails.len(), fails);
+        }
     }
 }
