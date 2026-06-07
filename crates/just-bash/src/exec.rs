@@ -30907,6 +30907,21 @@ fn command_base64(state: &ExecState<'_>, args: &[String], stdin: &str) -> Comman
     }
 }
 
+/// Recovers the raw stdin bytes for a byte-clean command. When the upstream
+/// pipe stage marked stdin as a raw byte buffer (`stdinKind: 'bytes'`, or bytes
+/// forwarded from an earlier byte-clean stage such as `cat /binary.bin`), the
+/// carrier is a latin1 (char-per-byte) string, so decode it back to its exact
+/// bytes rather than UTF-8 re-encoding it (which would expand high bytes such as
+/// 0x80 into a two-byte UTF-8 sequence and corrupt the round-trip).
+fn stdin_to_raw_bytes(state: &ExecState<'_>, stdin: &str) -> Vec<u8> {
+    if state.stdin_bytes {
+        if let Ok(bytes) = content_to_bytes(stdin.to_string(), BufferEncoding::Latin1) {
+            return bytes;
+        }
+    }
+    stdin.as_bytes().to_vec()
+}
+
 fn collect_binary_inputs(
     state: &ExecState<'_>,
     paths: &[String],
@@ -30914,7 +30929,7 @@ fn collect_binary_inputs(
     command: &str,
 ) -> Result<Vec<u8>, CommandResult> {
     if paths.is_empty() || (paths.len() == 1 && paths[0] == "-") {
-        return Ok(stdin.as_bytes().to_vec());
+        return Ok(stdin_to_raw_bytes(state, stdin));
     }
     let fs = state
         .session
@@ -30925,7 +30940,7 @@ fn collect_binary_inputs(
     let mut output = Vec::new();
     for path in paths {
         if path == "-" {
-            output.extend_from_slice(stdin.as_bytes());
+            output.extend_from_slice(&stdin_to_raw_bytes(state, stdin));
             continue;
         }
         let resolved = resolve_path(&state.cwd, path);
@@ -32783,7 +32798,29 @@ fn split_control(script: &str) -> Vec<(ControlOp, String)> {
                 quote = None;
                 current.push(ch);
             }
+            // Inside double quotes, a backslash still escapes the next character
+            // (notably `\"`); inside single quotes it is literal. Either way the
+            // escaped char must not be treated as a control operator. Carry both
+            // the backslash and the escaped char through verbatim so the
+            // tokenizer (which re-parses the quoted word) sees the same input.
+            Some('"') if ch == '\\' => {
+                current.push(ch);
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
             Some(_) => current.push(ch),
+            // Outside any quotes, `\X` escapes X (bash removes the backslash at
+            // tokenization time). The escaped character — including a `;`, `&`,
+            // `|`, or newline that would otherwise separate statements (e.g. the
+            // `\;` terminator of `find -exec ... \;`) — is part of the current
+            // word, so keep the backslash and char together and never split here.
+            None if ch == '\\' => {
+                current.push(ch);
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
             None if ch == '\'' || ch == '"' => {
                 quote = Some(ch);
                 current.push(ch);
@@ -33158,6 +33195,24 @@ fn tokenize_with_quote_flags(
                 quote = Some(ch);
                 started = true;
                 glob_quoted = true;
+            }
+            // Outside any quotes, `\X` is a quoted single character: the
+            // backslash is removed and X is taken literally (so `\;` becomes a
+            // `;` word — the `find -exec ... \;` terminator — and `\ ` is a
+            // literal space rather than a word separator). A trailing backslash
+            // with no following character is kept verbatim. Marking the word
+            // glob-quoted prevents the escaped char from being treated as a glob
+            // metacharacter, matching bash's quote removal.
+            None if ch == '\\' => {
+                started = true;
+                match chars.get(index + 1).copied() {
+                    Some(next) => {
+                        current.push(next);
+                        glob_quoted = true;
+                        index += 1;
+                    }
+                    None => current.push(ch),
+                }
             }
             None | Some('"') if ch == '$' => {
                 started = true;
@@ -36355,6 +36410,39 @@ mod tests {
             0
         );
         assert!(!time.file_exists("/tmp/timeout-nested-time-marker"));
+
+        // timeout.nested-cancellation.test.ts:35 — cancels find -exec subcommands
+        // and prevents late side effects. `timeout 0.01 find ... -exec bash -c
+        // 'sleep 0.05; echo > MARKER' \;` must cancel the inner `bash -c` while it
+        // sleeps. This exercises the `\;` exec terminator: the backslash-escaped
+        // semicolon must stay attached to the find command (not split the
+        // statement) and tokenize to a bare `;` so the `-exec` action parses, then
+        // the cooperative deadline fires (exit 124) before the marker is written.
+        let find = JustBashSession::new();
+        let find_result = find.exec(
+            concat!(
+                "mkdir -p /tmp/timeout-nested-find\n",
+                "touch /tmp/timeout-nested-find/a.txt\n",
+                "timeout 0.01 find /tmp/timeout-nested-find -type f -exec bash -c ",
+                "'sleep 0.05; echo FIND_LATE > /tmp/timeout-nested-find-marker' \\;\n",
+                "echo \"TIMEOUT_EXIT=$?\"",
+            ),
+            JustBashExecOptions::new(),
+        );
+        // The `find -exec` parses (no "missing argument to `-exec'" error) and the
+        // wrapped command is cancelled by the deadline, so `$?` is 124.
+        assert_eq!(find_result.stderr, "");
+        assert_eq!(find_result.stdout, "TIMEOUT_EXIT=124\n");
+        assert!(
+            !find.file_exists("/tmp/timeout-nested-find-marker"),
+            "find -exec subcommand side effect leaked past the timeout deadline",
+        );
+        assert_eq!(
+            find.exec("sleep 0.15", JustBashExecOptions::new())
+                .exit_code,
+            0
+        );
+        assert!(!find.file_exists("/tmp/timeout-nested-find-marker"));
     }
 
     #[test]
@@ -37340,6 +37428,35 @@ mod tests {
         let high_dat = bash.exec("base64 /high.dat", JustBashExecOptions::new());
         assert_eq!(high_dat.stdout, "//79/A==\n");
         assert_eq!(high_dat.exit_code, 0);
+
+        // base64.binary.test.ts:172 should handle large files via pipe. A 512KB
+        // binary file (pattern (i*7)%256, full 0..255 byte range) is round-tripped
+        // through a multi-stage pipe `cat | base64 | base64 -d > file`. The first
+        // stage reads raw bytes from the virtual file and marks the pipe stdin as
+        // a byte buffer; `base64` (encode) now recovers those exact bytes from the
+        // latin1 carrier instead of UTF-8 re-encoding them, so the encode/decode
+        // round-trip writes the original bytes back verbatim.
+        let pipe_size = 512 * 1024usize;
+        let pattern: Vec<u8> = (0..pipe_size).map(|i| ((i * 7) % 256) as u8).collect();
+        write("/medium.bin", pattern.clone());
+        let pipe = bash.exec(
+            "cat /medium.bin | base64 | base64 -d > /output.bin",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(pipe.exit_code, 0);
+        let output = bash
+            .inner
+            .fs
+            .lock()
+            .unwrap()
+            .read_file_buffer("/output.bin")
+            .unwrap();
+        assert_eq!(output.len(), pipe_size);
+        for i in (0..pipe_size).step_by(5000) {
+            assert_eq!(output[i], ((i * 7) % 256) as u8);
+        }
+        // Full byte-exact equality so any mid-pipe corruption fails the test.
+        assert_eq!(output, pattern);
     }
 
     // Helper mirroring upstream `parseWidthPrecision`'s observable result
