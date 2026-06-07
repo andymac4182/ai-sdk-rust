@@ -11557,79 +11557,205 @@ Usage: awk [-F fs] [-v var=value] 'program' [file ...]\n",
     stdout_result(stdout)
 }
 
-fn command_head(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
-    let mut lines = 10;
-    let mut bytes: Option<usize> = None;
-    let mut paths = Vec::new();
-    let mut index = 0;
-    while let Some(arg) = args.get(index) {
-        if arg == "-c" || arg == "--bytes" {
-            if let Some(value) = args
-                .get(index + 1)
-                .and_then(|value| value.parse::<usize>().ok())
-            {
-                bytes = Some(value);
-            }
-            index += 2;
-        } else if let Some(value) = arg
-            .strip_prefix("--bytes=")
-            .or_else(|| arg.strip_prefix("-c"))
-            .filter(|value| !value.is_empty())
-            .and_then(|value| value.parse::<usize>().ok())
-        {
-            bytes = Some(value);
-            index += 1;
-        } else if arg == "-n" {
-            if let Some(value) = args
-                .get(index + 1)
-                .and_then(|value| value.parse::<usize>().ok())
-            {
-                lines = value;
-            }
-            index += 2;
-        } else if let Some(value) = arg.strip_prefix("-n").and_then(|value| value.parse().ok()) {
-            lines = value;
-            index += 1;
-        } else if let Some(value) = arg
-            .strip_prefix('-')
-            .and_then(|value| value.parse::<usize>().ok())
-        {
-            lines = value;
-            index += 1;
+/// Help text matching upstream `showHelp(headHelp)` from `commands/head/head.ts`.
+const HEAD_HELP: &str = concat!(
+    "head - output the first part of files\n\n",
+    "Usage: head [OPTION]... [FILE]...\n\n",
+    "Options:\n",
+    "  -c, --bytes=NUM    print the first NUM bytes\n",
+    "  -n, --lines=NUM    print the first NUM lines (default 10)\n",
+    "  -q, --quiet        never print headers giving file names\n",
+    "  -v, --verbose      always print headers giving file names\n",
+    "      --help         display this help and exit\n",
+);
+
+/// Parsed `head` arguments, mirroring upstream `parseHeadTailArgs(args, "head")`
+/// from `commands/head/head-tail-shared.ts`.
+struct HeadOptions {
+    /// JS `parseInt` result for the line count (None == NaN).
+    lines: Option<i64>,
+    /// JS `parseInt` result for the byte count when `-c`/`--bytes` was given.
+    bytes: Option<Option<i64>>,
+    quiet: bool,
+    verbose: bool,
+    files: Vec<String>,
+}
+
+/// Parse `head` args exactly like upstream `parseHeadTailArgs`. Returns the raw
+/// (possibly invalid) numeric parses so the caller can produce the same
+/// validation errors as TS. Returns `Err` for unknown options.
+fn parse_head_args(args: &[String]) -> Result<HeadOptions, CommandResult> {
+    let mut lines: Option<i64> = Some(10);
+    let mut bytes: Option<Option<i64>> = None;
+    let mut quiet = false;
+    let mut verbose = false;
+    let mut files = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "-n" && i + 1 < args.len() {
+            i += 1;
+            lines = js_parse_int_base10(&args[i]);
+        } else if let Some(rest) = arg.strip_prefix("-n") {
+            // `-nN` attached form (also handles `-n` alone -> parseInt("") == NaN).
+            lines = js_parse_int_base10(rest);
+        } else if arg == "-c" && i + 1 < args.len() {
+            i += 1;
+            bytes = Some(js_parse_int_base10(&args[i]));
+        } else if let Some(rest) = arg.strip_prefix("-c") {
+            bytes = Some(js_parse_int_base10(rest));
+        } else if let Some(rest) = arg.strip_prefix("--bytes=") {
+            bytes = Some(js_parse_int_base10(rest));
+        } else if let Some(rest) = arg.strip_prefix("--lines=") {
+            lines = js_parse_int_base10(rest);
+        } else if arg == "-q" || arg == "--quiet" || arg == "--silent" {
+            quiet = true;
+        } else if arg == "-v" || arg == "--verbose" {
+            verbose = true;
+        } else if is_head_numeric_flag(arg) {
+            // `-NUM` form, e.g. `head -2`.
+            lines = js_parse_int_base10(&arg[1..]);
+        } else if arg.starts_with("--") || (arg.starts_with('-') && arg != "-") {
+            // Any remaining `--xxx` long option or `-x` short cluster (but not a
+            // bare `-`, which is a stdin operand) is an unknown option.
+            return Err(unknown_option_result("head", arg));
         } else {
-            paths.push(arg.clone());
-            index += 1;
+            files.push(args[i].clone());
         }
+        i += 1;
     }
-    let inputs = match collect_named_text_inputs(state, &paths, stdin, "head") {
-        Ok(input) => input,
-        Err(error) => return stderr_result(1, format!("head: {error}\n")),
-    };
-    let mut stdout = String::new();
-    let multiple_files = paths.len() > 1;
-    for (input_index, input) in inputs.iter().enumerate() {
-        if multiple_files {
-            if input_index > 0 {
-                stdout.push('\n');
+
+    Ok(HeadOptions {
+        lines,
+        bytes,
+        quiet,
+        verbose,
+        files,
+    })
+}
+
+/// Matches TS `arg.match(/^-\d+$/)`: a dash followed by one or more digits.
+fn is_head_numeric_flag(arg: &str) -> bool {
+    match arg.strip_prefix('-') {
+        Some(rest) => !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()),
+        None => false,
+    }
+}
+
+/// Port of upstream `getHead`: first N lines (or first N bytes when `bytes`).
+fn get_head(content: &str, lines: i64, bytes: Option<i64>) -> String {
+    if let Some(byte_count) = bytes {
+        let raw = content.as_bytes();
+        let take = (byte_count.max(0) as usize).min(raw.len());
+        return String::from_utf8_lossy(&raw[..take]).into_owned();
+    }
+
+    if lines == 0 {
+        return String::new();
+    }
+
+    let bytes_buf = content.as_bytes();
+    let len = bytes_buf.len();
+    let mut pos = 0usize;
+    let mut line_count: i64 = 0;
+    while pos < len && line_count < lines {
+        match content[pos..].find('\n') {
+            None => {
+                // No more newlines; rest of content is the last line.
+                let mut out = content.to_string();
+                out.push('\n');
+                return out;
             }
-            stdout.push_str(&format!("==> {} <==\n", input.label));
+            Some(rel) => {
+                line_count += 1;
+                pos = pos + rel + 1;
+            }
         }
-        if let Some(byte_count) = bytes {
-            // `head -c N` emits the first N bytes verbatim (no added newline).
-            let raw = input.text.as_bytes();
-            let take = byte_count.min(raw.len());
-            stdout.push_str(&String::from_utf8_lossy(&raw[..take]));
-            continue;
-        }
-        let selected = input
-            .text
-            .lines()
-            .take(lines)
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        stdout.push_str(&join_lines_with_newline(&selected));
     }
-    stdout_result(stdout)
+
+    if pos > 0 {
+        String::from_utf8_lossy(&bytes_buf[..pos]).into_owned()
+    } else {
+        String::new()
+    }
+}
+
+fn command_head(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(HEAD_HELP);
+    }
+
+    let opts = match parse_head_args(args) {
+        Ok(opts) => opts,
+        Err(err) => return err,
+    };
+
+    // Validate bytes: NaN or < 0 -> invalid number of bytes.
+    if let Some(parsed) = opts.bytes {
+        match parsed {
+            Some(b) if b >= 0 => {}
+            _ => return stderr_result(1, "head: invalid number of bytes\n"),
+        }
+    }
+    // Validate lines: NaN or < 0 -> invalid number of lines.
+    let lines = match opts.lines {
+        Some(n) if n >= 0 => n,
+        _ => return stderr_result(1, "head: invalid number of lines\n"),
+    };
+    let bytes = opts.bytes.map(|parsed| parsed.unwrap_or(0));
+
+    // No files: read from stdin, no headers.
+    if opts.files.is_empty() {
+        return stdout_result(get_head(stdin, lines, bytes));
+    }
+
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut exit_code = 0;
+
+    // -v always shows headers, -q never, default shows for multiple files.
+    let show_headers = opts.verbose || (!opts.quiet && opts.files.len() > 1);
+    let mut files_processed = 0;
+
+    for file in &opts.files {
+        let resolved = resolve_path(&state.cwd, file);
+        let content = {
+            let fs = match state.session.inner.fs.lock() {
+                Ok(fs) => fs,
+                Err(_) => return stderr_result(1, "head: filesystem lock poisoned\n"),
+            };
+            match fs.stat(&resolved) {
+                Ok(stat) if stat.is_directory => Err(()),
+                Ok(_) => fs.read_file(&resolved).map_err(|_| ()),
+                Err(_) => Err(()),
+            }
+        };
+
+        match content {
+            Ok(text) => {
+                if show_headers {
+                    if files_processed > 0 {
+                        stdout.push('\n');
+                    }
+                    stdout.push_str(&format!("==> {file} <==\n"));
+                }
+                stdout.push_str(&get_head(&text, lines, bytes));
+                files_processed += 1;
+            }
+            Err(()) => {
+                stderr.push_str(&format!("head: {file}: No such file or directory\n"));
+                exit_code = 1;
+            }
+        }
+    }
+
+    CommandResult {
+        stdout,
+        stderr,
+        exit_code,
+        ..CommandResult::default()
+    }
 }
 
 fn command_tail(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
@@ -42529,5 +42655,211 @@ mod comm_parity_tests {
         assert!(r.stdout.contains("café"));
         assert!(r.stdout.contains("한글"));
         assert!(r.stdout.contains("漢字"));
+    }
+}
+
+#[cfg(test)]
+mod head_parity_tests {
+    // Behavioral parity (commands/head): regression locks against the
+    // vercel-labs/just-bash upstream head.test.ts, head.binary.test.ts, and
+    // head.utf8-stdin.test.ts suites.
+    use std::collections::BTreeMap;
+
+    fn run_files(cmd: &str, files: &[(&str, &str)]) -> crate::JustBashExecResult {
+        let mut fmap = BTreeMap::new();
+        for (path, content) in files {
+            fmap.insert((*path).to_string(), (*content).to_string());
+        }
+        crate::runtime::Bash::with_options(crate::runtime::BashOptions {
+            files: fmap,
+            ..Default::default()
+        })
+        .exec(cmd)
+    }
+
+    fn run(cmd: &str) -> crate::JustBashExecResult {
+        crate::runtime::Bash::new().exec(cmd)
+    }
+
+    #[test]
+    fn default_first_10_lines() {
+        let lines: String = (1..=20)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let r = run_files("head /test.txt", &[("/test.txt", &lines)]);
+        assert_eq!(
+            r.stdout,
+            "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n"
+        );
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn n_separate_and_attached_and_num() {
+        let files = [("/test.txt", "a\nb\nc\nd\ne\n")];
+        assert_eq!(run_files("head -n 3 /test.txt", &files).stdout, "a\nb\nc\n");
+        assert_eq!(run_files("head -n3 /test.txt", &files).stdout, "a\nb\nc\n");
+        assert_eq!(run_files("head -2 /test.txt", &files).stdout, "a\nb\n");
+    }
+
+    #[test]
+    fn fewer_lines_than_requested() {
+        let r = run_files("head -n 10 /test.txt", &[("/test.txt", "a\nb\n")]);
+        assert_eq!(r.stdout, "a\nb\n");
+    }
+
+    #[test]
+    fn multiple_files_headers() {
+        let r = run_files(
+            "head /a.txt /b.txt",
+            &[("/a.txt", "aaa\n"), ("/b.txt", "bbb\n")],
+        );
+        assert_eq!(r.stdout, "==> /a.txt <==\naaa\n\n==> /b.txt <==\nbbb\n");
+    }
+
+    #[test]
+    fn missing_file_errors() {
+        let r = run("head /missing.txt");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(r.stderr, "head: /missing.txt: No such file or directory\n");
+    }
+
+    #[test]
+    fn missing_file_among_present_still_processes() {
+        let r = run_files("head /a.txt /missing.txt", &[("/a.txt", "aaa\n")]);
+        assert_eq!(r.stdout, "==> /a.txt <==\naaa\n");
+        assert_eq!(r.stderr, "head: /missing.txt: No such file or directory\n");
+        assert_eq!(r.exit_code, 1);
+    }
+
+    #[test]
+    fn reads_from_stdin() {
+        let r = run("echo -e \"a\\nb\\nc\\nd\\ne\" | head -n 2");
+        assert_eq!(r.stdout, "a\nb\n");
+    }
+
+    #[test]
+    fn empty_file_ok() {
+        let r = run_files("head /empty.txt", &[("/empty.txt", "")]);
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "");
+    }
+
+    #[test]
+    fn n_one_and_no_trailing_newline() {
+        assert_eq!(
+            run_files("head -n 1 /test.txt", &[("/test.txt", "first\nsecond\n")]).stdout,
+            "first\n"
+        );
+        assert_eq!(
+            run_files("head -n 1 /test.txt", &[("/test.txt", "no newline")]).stdout,
+            "no newline\n"
+        );
+        assert_eq!(
+            run_files(
+                "head -n 1 /test.txt",
+                &[("/test.txt", "first\nsecond\nthird\n")]
+            )
+            .stdout,
+            "first\n"
+        );
+    }
+
+    #[test]
+    fn quiet_and_verbose_flags() {
+        let files = [("/a.txt", "aaa\n"), ("/b.txt", "bbb\n")];
+        // -q / --quiet / --silent suppress headers even for multiple files.
+        assert_eq!(
+            run_files("head -q /a.txt /b.txt", &files).stdout,
+            "aaa\nbbb\n"
+        );
+        assert_eq!(
+            run_files("head --quiet /a.txt /b.txt", &files).stdout,
+            "aaa\nbbb\n"
+        );
+        assert_eq!(
+            run_files("head --silent /a.txt /b.txt", &files).stdout,
+            "aaa\nbbb\n"
+        );
+        // -v / --verbose force a header even for a single file.
+        assert_eq!(
+            run_files("head -v /a.txt", &[("/a.txt", "aaa\n")]).stdout,
+            "==> /a.txt <==\naaa\n"
+        );
+    }
+
+    #[test]
+    fn long_lines_and_bytes_options() {
+        let files = [("/test.txt", "a\nb\nc\nd\n")];
+        assert_eq!(
+            run_files("head --lines=2 /test.txt", &files).stdout,
+            "a\nb\n"
+        );
+        assert_eq!(run_files("head --bytes=3 /test.txt", &files).stdout, "a\nb");
+    }
+
+    #[test]
+    fn invalid_numbers_error() {
+        let files = [("/test.txt", "a\nb\nc\n")];
+        let r = run_files("head -n abc /test.txt", &files);
+        assert_eq!(r.stderr, "head: invalid number of lines\n");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(r.stdout, "");
+
+        let r = run_files("head -c abc /test.txt", &files);
+        assert_eq!(r.stderr, "head: invalid number of bytes\n");
+        assert_eq!(r.exit_code, 1);
+
+        let r = run_files("head -n -5 /test.txt", &files);
+        assert_eq!(r.stderr, "head: invalid number of lines\n");
+        assert_eq!(r.exit_code, 1);
+    }
+
+    #[test]
+    fn unknown_options_error() {
+        let files = [("/test.txt", "a\n")];
+        let r = run_files("head --bad /test.txt", &files);
+        assert_eq!(r.stderr, "head: unrecognized option '--bad'\n");
+        assert_eq!(r.exit_code, 1);
+
+        let r = run_files("head -x /test.txt", &files);
+        assert_eq!(r.stderr, "head: invalid option -- 'x'\n");
+        assert_eq!(r.exit_code, 1);
+    }
+
+    #[test]
+    fn binary_first_n_lines() {
+        // L1\nL2\nL3\n
+        let bin = "L1\nL2\nL3\n";
+        let r = run_files("head -n 2 /binary.bin", &[("/binary.bin", bin)]);
+        assert_eq!(r.stdout, "L1\nL2\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn bytes_first_n() {
+        let r = run_files("head -c 3 /binary.bin", &[("/binary.bin", "ABCDE")]);
+        assert_eq!(r.stdout, "ABC");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn utf8_stdin_multibyte_preserved() {
+        let r = run_files("cat /in.txt | head -1", &[("/in.txt", "한글\nfoo\n漢字\n")]);
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "한글\n");
+    }
+
+    #[test]
+    fn help_flag() {
+        let r = run("head --help");
+        assert_eq!(r.exit_code, 0);
+        assert!(
+            r.stdout
+                .starts_with("head - output the first part of files\n\n")
+        );
+        assert!(r.stdout.contains("Usage: head [OPTION]... [FILE]...\n"));
     }
 }
