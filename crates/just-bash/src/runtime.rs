@@ -4041,10 +4041,13 @@ and exhibited clearly, with a label attached.\n";
             five().exec("sed '2c replaced' /test/alpha.txt").stdout,
             "alpha\nreplaced\ngamma\ndelta\n"
         );
-        // :105 `2,3c replaced` changes a range, emitting the text once.
+        // :105 `2,3c replaced` changes a range; the upstream just-bash port
+        // (commands/sed/sed.ts `state.changedText`) emits the replacement text for
+        // EVERY matched line of the range, not once at the range end, so lines 2
+        // and 3 each print `replaced`.
         assert_eq!(
             five().exec("sed '2,3c replaced' /test/alpha.txt").stdout,
-            "alpha\nreplaced\ndelta\n"
+            "alpha\nreplaced\nreplaced\ndelta\n"
         );
         // :114 `n;p` reads the next line, then prints (every other line).
         assert_eq!(
@@ -4110,6 +4113,61 @@ and exhibited clearly, with a label attached.\n";
                 .exec("sed '2,3{s/e/E/g;s/a/A/g}' /test/alpha.txt")
                 .stdout,
             "alpha\nbEtA\ngAmmA\ndelta\n"
+        );
+    }
+
+    /// BP1 regression for the `c` (change) command applied to an address range.
+    /// The upstream just-bash port (`commands/sed/executor.ts` `case "change"`
+    /// sets `state.changedText`; `commands/sed/sed.ts` prints it each cycle)
+    /// emits the replacement text for EVERY matched line of the range — it does
+    /// not collapse a range to a single emission the way GNU sed does. The Rust
+    /// engine previously gated emission to the final line of the range
+    /// (`sed_change_emits_now`), diverging from the port. These rows lock the
+    /// port's per-line behavior across numeric, `$`-terminated, and pattern
+    /// ranges so the regression cannot return.
+    #[test]
+    fn bp1_sed_change_command_emits_text_for_every_matched_range_line() {
+        let session = |content: &str| {
+            Bash::with_options(BashOptions {
+                files: [("/test.txt", content)]
+                    .iter()
+                    .map(|(p, c)| (p.to_string(), c.to_string()))
+                    .collect::<BTreeMap<_, _>>(),
+                cwd: Some("/".to_string()),
+                ..BashOptions::default()
+            })
+        };
+
+        // sed.commands.test.ts:105 — numeric range `2,3c` prints `replaced` twice.
+        assert_eq!(
+            session("alpha\nbeta\ngamma\ndelta\n")
+                .exec("sed '2,3c replaced' /test.txt")
+                .stdout,
+            "alpha\nreplaced\nreplaced\ndelta\n"
+        );
+
+        // Single-addressed `c` still emits exactly once (sed.commands.test.ts:99).
+        assert_eq!(
+            session("alpha\nbeta\ngamma\ndelta\n")
+                .exec("sed '2c replaced' /test.txt")
+                .stdout,
+            "alpha\nreplaced\ngamma\ndelta\n"
+        );
+
+        // `$`-terminated range: every line from 2 to the last is changed.
+        assert_eq!(
+            session("a\nb\nc\nd\n")
+                .exec("sed '2,$c X' /test.txt")
+                .stdout,
+            "a\nX\nX\nX\n"
+        );
+
+        // Pattern range `/b/,/d/c`: each matched line emits the change text.
+        assert_eq!(
+            session("a\nb\nc\nd\ne\n")
+                .exec("sed '/b/,/d/c X' /test.txt")
+                .stdout,
+            "a\nX\nX\nX\ne\n"
         );
     }
 
