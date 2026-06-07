@@ -4801,8 +4801,9 @@ fn mode_string(stat: &FileStat) -> String {
 
 fn command_tee(state: &mut ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
     if args.iter().any(|arg| arg == "--help") {
+        // Mirror upstream showHelp(teeHelp) output exactly.
         return stdout_result(
-            "tee - read from standard input and write to standard output and files\nUsage: tee [OPTION]... [FILE]...\n  -a, --append\n",
+            "tee - read from stdin and write to stdout and files\n\nUsage: tee [OPTION]... [FILE]...\n\nOptions:\n  -a, --append     append to the given FILEs, do not overwrite\n      --help       display this help and exit\n",
         );
     }
     let mut append = false;
@@ -4818,17 +4819,32 @@ fn command_tee(state: &mut ExecState<'_>, args: &[String], stdin: &str) -> Comma
         Ok(fs) => fs,
         Err(_) => return stderr_result(1, "tee: filesystem lock poisoned\n"),
     };
+    // Mirror upstream tee: a failing write does not abort tee. Every file is
+    // attempted, each failure appends a line to stderr and forces exit 1, and
+    // stdin still passes through to stdout regardless. Upstream hardcodes the
+    // "No such file or directory" message for any write error in its catch.
+    let mut stderr = String::new();
+    let mut exit_code = 0;
     for path in paths {
-        if let Err(error) = fs.write_redirection(
-            &state.cwd,
-            path,
-            OutputPayload::Text(stdin.to_string()),
-            append,
-        ) {
-            return stderr_result(1, format!("tee: {path}: {}\n", fs_error_label(&error)));
+        if fs
+            .write_redirection(
+                &state.cwd,
+                path,
+                OutputPayload::Text(stdin.to_string()),
+                append,
+            )
+            .is_err()
+        {
+            stderr.push_str(&format!("tee: {path}: No such file or directory\n"));
+            exit_code = 1;
         }
     }
-    stdout_result(stdin.to_string())
+    CommandResult {
+        stdout: stdin.to_string(),
+        stderr,
+        exit_code,
+        ..CommandResult::default()
+    }
 }
 
 fn command_file(state: &ExecState<'_>, args: &[String]) -> CommandResult {
@@ -38143,6 +38159,83 @@ mod tests {
                 .starts_with("diff - compare files line by line\n\n"),
             "help: {:?}",
             r.stdout
+        );
+    }
+
+    #[test]
+    fn tee_command_rows_match_upstream() {
+        // Mirrors commands/tee/tee.test.ts plus the error-path behavior of
+        // upstream tee.ts: failures never abort the command, stdin still passes
+        // through to stdout, and exit becomes 1 with a hardcoded message.
+
+        // tee.test.ts:5 - echo hello | tee passes stdin through to stdout
+        let bash = JustBashSession::new();
+        let r = bash.exec("echo hello | tee", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "hello\n");
+        assert_eq!(r.exit_code, 0);
+
+        // tee.test.ts:12 - echo hello | tee output.txt writes file and stdout
+        let bash = JustBashSession::new();
+        let r = bash.exec("echo hello | tee output.txt", JustBashExecOptions::new());
+        assert_eq!(r.stdout, "hello\n");
+        assert_eq!(
+            bash.exec("cat output.txt", JustBashExecOptions::new())
+                .stdout,
+            "hello\n"
+        );
+
+        // tee.test.ts:20 - multiple files all receive the content
+        let bash = JustBashSession::new();
+        let r = bash.exec(
+            "echo hello | tee file1.txt file2.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "hello\n");
+        assert_eq!(
+            bash.exec("cat file1.txt", JustBashExecOptions::new())
+                .stdout,
+            "hello\n"
+        );
+        assert_eq!(
+            bash.exec("cat file2.txt", JustBashExecOptions::new())
+                .stdout,
+            "hello\n"
+        );
+
+        // tee.test.ts:30 - -a appends to an existing file
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_cwd("/")
+                .with_file("/test.txt", "existing\n"),
+        );
+        let r = bash.exec(
+            "echo appended | tee -a test.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "appended\n");
+        assert_eq!(bash.read_file("/test.txt").unwrap(), "existing\nappended\n");
+
+        // tee.test.ts:40 - --append behaves the same as -a
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_cwd("/")
+                .with_file("/test.txt", "existing\n"),
+        );
+        bash.exec(
+            "echo appended | tee --append test.txt",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(bash.read_file("/test.txt").unwrap(), "existing\nappended\n");
+
+        // tee.test.ts:49 - --help mentions tee and stdin and exits 0
+        let bash = JustBashSession::new();
+        let r = bash.exec("tee --help", JustBashExecOptions::new());
+        assert!(r.stdout.contains("tee"));
+        assert!(r.stdout.contains("stdin"));
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(
+            r.stdout,
+            "tee - read from stdin and write to stdout and files\n\nUsage: tee [OPTION]... [FILE]...\n\nOptions:\n  -a, --append     append to the given FILEs, do not overwrite\n      --help       display this help and exit\n"
         );
     }
 
