@@ -31735,35 +31735,17 @@ fn command_date(args: &[String]) -> CommandResult {
         index += 1;
     }
     let parts = utc_parts(timestamp);
-    let output = if iso {
-        format!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}+00:00",
-            parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second
-        )
-    } else if rfc {
-        format!(
-            "{}, {:02} {} {:04} {:02}:{:02}:{:02} +0000",
-            weekday_name(parts.weekday),
-            parts.day,
-            month_name(parts.month),
-            parts.year,
-            parts.hour,
-            parts.minute,
-            parts.second
-        )
-    } else if let Some(format) = format {
+    // Mirror upstream date.ts: -I/-R/default all route through the same
+    // strftime formatter so %z renders as "+0000" (not "+00:00") and the
+    // default day field is space-padded via %e, matching GNU date.
+    let output = if let Some(format) = format {
         format_date_string(&format, timestamp, parts)
+    } else if iso {
+        format_date_string("%Y-%m-%dT%H:%M:%S%z", timestamp, parts)
+    } else if rfc {
+        format_date_string("%a, %d %b %Y %H:%M:%S %z", timestamp, parts)
     } else {
-        format!(
-            "{} {} {:02} {:02}:{:02}:{:02} UTC {:04}",
-            weekday_name(parts.weekday),
-            month_name(parts.month),
-            parts.day,
-            parts.hour,
-            parts.minute,
-            parts.second,
-            parts.year
-        )
+        format_date_string("%a %b %e %H:%M:%S %Z %Y", timestamp, parts)
     };
     stdout_result(format!("{output}\n"))
 }
@@ -31875,6 +31857,7 @@ fn format_date_string(format: &str, timestamp: i64, parts: UtcParts) -> String {
             Some('Y') => output.push_str(&format!("{:04}", parts.year)),
             Some('m') => output.push_str(&format!("{:02}", parts.month)),
             Some('d') => output.push_str(&format!("{:02}", parts.day)),
+            Some('e') => output.push_str(&format!("{:2}", parts.day)),
             Some('F') => output.push_str(&format!(
                 "{:04}-{:02}-{:02}",
                 parts.year, parts.month, parts.day
@@ -31894,9 +31877,18 @@ fn format_date_string(format: &str, timestamp: i64, parts: UtcParts) -> String {
             Some('M') => output.push_str(&format!("{:02}", parts.minute)),
             Some('S') => output.push_str(&format!("{:02}", parts.second)),
             Some('a') => output.push_str(weekday_name(parts.weekday)),
-            Some('b') => output.push_str(month_name(parts.month)),
+            Some('b') | Some('h') => output.push_str(month_name(parts.month)),
             Some('s') => output.push_str(&timestamp.to_string()),
             Some('p') => output.push_str(if parts.hour < 12 { "AM" } else { "PM" }),
+            Some('P') => output.push_str(if parts.hour < 12 { "am" } else { "pm" }),
+            Some('R') => output.push_str(&format!("{:02}:{:02}", parts.hour, parts.minute)),
+            Some('u') => {
+                // ISO weekday: Monday=1..Sunday=7 (Sunday is 0 in `weekday`).
+                let u = if parts.weekday == 0 { 7 } else { parts.weekday };
+                output.push_str(&u.to_string());
+            }
+            Some('w') => output.push_str(&parts.weekday.to_string()),
+            Some('y') => output.push_str(&format!("{:02}", parts.year.rem_euclid(100))),
             Some('n') => output.push('\n'),
             Some('t') => output.push('\t'),
             Some('Z') => output.push_str("UTC"),
@@ -34671,8 +34663,102 @@ mod tests {
         .exec(cmd)
     }
 
-    // Behavioral parity (commands/find): regression locks for divergences fixed
-    // against the vercel-labs/just-bash upstream test suite.
+    // Behavioral parity (commands/date): regression locks against the
+    // vercel-labs/just-bash upstream date.test.ts suite.
+    fn date_run(cmd: &str) -> JustBashExecResult {
+        crate::runtime::Bash::new().exec(cmd)
+    }
+
+    #[test]
+    fn date_iso_offset_is_plus0000_not_colon() {
+        // Upstream -I routes through %z which renders "+0000" (no colon).
+        let r = date_run("date -I");
+        assert!(
+            r.stdout.contains("+0000"),
+            "-I must contain +0000, got {:?}",
+            r.stdout
+        );
+        assert!(!r.stdout.contains("+00:00"), "-I must not use colon offset");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn date_rfc_offset_is_plus0000() {
+        let r = date_run("date -R");
+        assert!(r.stdout.contains("+0000"), "-R must contain +0000");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn date_format_specifiers_parity() {
+        // Deterministic via -d so the asserted output is exact.
+        let base = "date -d '2024-01-15T09:07:05Z'";
+        let cases: &[(&str, &str)] = &[
+            ("+%%", "%\n"),
+            ("+%Y-%m-%d", "2024-01-15\n"),
+            ("+%F", "2024-01-15\n"),
+            ("+%T", "09:07:05\n"),
+            ("+%H", "09\n"),
+            ("+%I", "09\n"),
+            ("+%M", "07\n"),
+            ("+%S", "05\n"),
+            ("+%a", "Mon\n"),
+            ("+%b", "Jan\n"),
+            ("+%h", "Jan\n"),
+            ("+%p", "AM\n"),
+            ("+%P", "am\n"),
+            ("+%R", "09:07\n"),
+            ("+%e", "15\n"),
+            ("+%u", "1\n"),
+            ("+%w", "1\n"),
+            ("+%y", "24\n"),
+            ("+%z", "+0000\n"),
+            ("+%Z", "UTC\n"),
+            ("'+%Y%n%m'", "2024\n01\n"),
+            ("'+%Y%t%m'", "2024\t01\n"),
+        ];
+        for (fmt, expected) in cases {
+            let r = date_run(&format!("{base} {fmt}"));
+            assert_eq!(&r.stdout, expected, "fmt {fmt}");
+            assert_eq!(r.stderr, "", "fmt {fmt}");
+            assert_eq!(r.exit_code, 0, "fmt {fmt}");
+        }
+
+        // %e is space-padded to width 2 (GNU date / upstream %e).
+        let r = date_run("date -d '2024-01-05T00:00:00Z' +%e");
+        assert_eq!(r.stdout, " 5\n");
+        // Default output also uses %e (space-padded day).
+        let r = date_run("date -d '2024-01-05T01:02:03Z'");
+        assert_eq!(r.stdout, "Fri Jan  5 01:02:03 UTC 2024\n");
+    }
+
+    #[test]
+    fn date_options_and_errors_parity() {
+        let r = date_run("date -d '2024-01-15T12:00:00' +%Y-%m-%d");
+        assert_eq!(r.stdout, "2024-01-15\n");
+        let r = date_run("date --date='2024-06-20T12:00:00' +%F");
+        assert_eq!(r.stdout, "2024-06-20\n");
+        let r = date_run("date -u +%Z");
+        assert_eq!(r.stdout, "UTC\n");
+        let r = date_run("date -u +%z");
+        assert_eq!(r.stdout, "+0000\n");
+        let r = date_run("date -d '2024-01-15T00:00:00Z' '+%H:%M:%S'");
+        assert_eq!(r.stdout, "00:00:00\n");
+
+        let r = date_run("date --unknown");
+        assert!(r.stderr.contains("unrecognized option"));
+        assert_eq!(r.exit_code, 1);
+        let r = date_run("date -z");
+        assert!(r.stderr.contains("invalid option"));
+        assert_eq!(r.exit_code, 1);
+        let r = date_run("date -d 'invalid date string xyz'");
+        assert!(r.stderr.contains("invalid date"));
+        assert_eq!(r.exit_code, 1);
+        let r = date_run("date --help");
+        assert!(r.stdout.contains("date") && r.stdout.contains("FORMAT"));
+        assert_eq!(r.exit_code, 0);
+    }
+
     #[test]
     fn find_root_traversal_and_depth_and_printf_parity() {
         // Searching from `.` with cwd `/` must descend into root children
