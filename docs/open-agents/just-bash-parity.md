@@ -19,11 +19,11 @@ Rows are intentionally fail-closed: no row is verified until a sibling implement
 | Non-test TS/TSX source files | 423 |
 | Test files | 485 |
 | Test cases | 9936 |
-| Portable pending cases | 1 |
-| Portable verified cases | 8736 |
+| Portable pending cases | 0 |
+| Portable verified cases | 8737 |
 | JS-only documented cases | 1199 |
 | Type-system impossible cases | 0 |
-| Strict gate gaps | 1 |
+| Strict gate gaps | 0 |
 | Inventory check command | node scripts/just-bash-test-inventory.mjs --check |
 | Strict gate command | node scripts/just-bash-test-inventory.mjs --strict |
 | Conformance plan | docs/open-agents/just-bash-conformance.md |
@@ -302,7 +302,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | fs:read-write-fs | 179 | 0 | 143 | 36 | 0 |
 | packages/just-bash | helpers | 14 | 0 | 14 | 0 | 0 |
 | packages/just-bash | interpreter:builtins | 245 | 0 | 245 | 0 | 0 |
-| packages/just-bash | interpreter:core | 240 | 1 | 236 | 3 | 0 |
+| packages/just-bash | interpreter:core | 240 | 0 | 237 | 3 | 0 |
 | packages/just-bash | interpreter:expansion | 37 | 0 | 37 | 0 | 0 |
 | packages/just-bash | interpreter:helpers | 22 | 0 | 22 | 0 | 0 |
 | packages/just-bash | network | 243 | 0 | 243 | 0 | 0 |
@@ -333,7 +333,6 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 
 | Rust owner crate/module | Gap reason | Rows |
 | --- | --- | --- |
-| pending:just-bash-parser-interpreter | portable-pending | 1 |
 
 ## Test File Inventory
 
@@ -703,7 +702,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | fs:core | packages/just-bash/src/fs/sanitize-error.test.ts | 1 | 0 | 1 | 0 | 0 | crates/just-bash::sanitize |
 | packages/just-bash | helpers | packages/just-bash/src/helpers/shell-quote.test.ts | 14 | 0 | 14 | 0 | 0 | crates/just-bash::shell-quote |
 | packages/just-bash | interpreter:core | packages/just-bash/src/interpreter/arithmetic.test.ts | 66 | 0 | 66 | 0 | 0 | crates/just-bash::parser-interpreter; crates/just-bash::shell::arithmetic |
-| packages/just-bash | interpreter:core | packages/just-bash/src/interpreter/assoc-array.test.ts | 20 | 1 | 18 | 1 | 0 | crates/just-bash::parser-interpreter; pending:just-bash-parser-interpreter |
+| packages/just-bash | interpreter:core | packages/just-bash/src/interpreter/assoc-array.test.ts | 20 | 0 | 19 | 1 | 0 | crates/just-bash::parser-interpreter |
 | packages/just-bash | interpreter:builtins | packages/just-bash/src/interpreter/builtins/break.test.ts | 14 | 0 | 14 | 0 | 0 | crates/just-bash::shell::builtins::break |
 | packages/just-bash | interpreter:builtins | packages/just-bash/src/interpreter/builtins/cd.test.ts | 10 | 0 | 10 | 0 | 0 | crates/just-bash::exec::builtins::cd |
 | packages/just-bash | interpreter:builtins | packages/just-bash/src/interpreter/builtins/complete.test.ts | 11 | 0 | 11 | 0 | 0 | crates/just-bash::parser-interpreter |
@@ -8287,7 +8286,7 @@ Do not classify missing behavior as nonportable. Until a sibling thread proves a
 | packages/just-bash | interpreter:core | packages/just-bash/src/interpreter/assoc-array.test.ts | 208 | array element access | key-value sequence initialization | it.skip | js-only-documented | crates/just-bash::parser-interpreter | jbpi_interpreter_upstream_skipped_assoc_and_recursive_arith_rows_documented | Upstream `it.skip` ("TODO: spec test fixes" / key-value sequence initialization): bash would fold `declare -A A=(1 2 3)` into `['1']=2 ['3']=''`. The Rust port does not implement positional key-value-sequence initialisation for associative arrays, so the array is left empty — matching the upstream skip rather than the eventual bash semantics. The named Rust test pins the current empty-array behavior so this documented exception fails if it silently changes. |
 | packages/just-bash | interpreter:core | packages/just-bash/src/interpreter/assoc-array.test.ts | 220 | array element access | variable key lookup | it | portable-verified | crates/just-bash::parser-interpreter | jbpi_interpreter_assoc_array_rows_match_upstream | JB-PI verifies the portable associative-array rows through the Rust shell: `declare -A` declaration and string-key assignment (single/double quoted, spaces), literal `declare -A A=(...)` initialisation, redeclare-without-reset, arithmetic-context reads/writes that key on the LITERAL subscript (`A[K]` -> "K"), string-to-int coercion, compound assignment, post-increment, `${A[@]}` value enumeration, unset-key empty expansion, and variable-key lookup `${A[$key]}`/`${A["$i$i"]}`. |
 | packages/just-bash | interpreter:core | packages/just-bash/src/interpreter/assoc-array.test.ts | 234 | array element access | self-reference in assignment (bash behavior) | it | portable-verified | crates/just-bash::parser-interpreter | jbpi_interpreter_assoc_array_rows_match_upstream | JB-PI verifies the portable associative-array rows through the Rust shell: `declare -A` declaration and string-key assignment (single/double quoted, spaces), literal `declare -A A=(...)` initialisation, redeclare-without-reset, arithmetic-context reads/writes that key on the LITERAL subscript (`A[K]` -> "K"), string-to-int coercion, compound assignment, post-increment, `${A[@]}` value enumeration, unset-key empty expansion, and variable-key lookup `${A[$key]}`/`${A["$i$i"]}`. |
-| packages/just-bash | interpreter:core | packages/just-bash/src/interpreter/assoc-array.test.ts | 254 | array element access | nested array index in array literal | it | portable-pending | pending:just-bash-parser-interpreter | pending:just-bash-parser-interpreter | Inventory-only pending row; do not execute host shell commands as a Just Bash fallback. |
+| packages/just-bash | interpreter:core | packages/just-bash/src/interpreter/assoc-array.test.ts | 254 | array element access | nested array index in array literal | it | portable-verified | crates/just-bash::parser-interpreter | jbpi_interpreter_nested_array_index_in_array_literal_row_matches_upstream | JB-PI verifies the portable indexed-array literal row through the Rust shell: `a=([0]=1+2+3 [a[0]]=10 [a[6]]=hello)` resolves each subscript as arithmetic against the array being constructed (`a[0]` reads "1+2+3" -> 6, `a[6]` reads "10" -> 10), yielding keys 0/6/10 with values "1+2+3"/"10"/"hello". The RHS is stored literally (not arithmetic-folded). Required teaching `ArithmeticEvaluator::read_lvalue` to recursively evaluate a stored element string ("1+2+3") as arithmetic rather than only parsing a bare integer literal. |
 | packages/just-bash | interpreter:builtins | packages/just-bash/src/interpreter/builtins/break.test.ts | 6 | (top-level) | should exit for loop early | it | portable-verified | crates/just-bash::shell::builtins::break | r5_interpreter_builtin_break_matches_upstream | R5 verifies the portable `break` builtin 1:1 with break.test.ts: exiting for/while/until loops early, `break n` multi-level and single-level breaks, level exceeding loop depth, silent no-op outside a loop, fatal numeric-argument-required errors (non-numeric/zero/negative) with exit 128, fatal too-many-arguments error with exit 1, and break inside case/if/function nested in a loop. |
 | packages/just-bash | interpreter:builtins | packages/just-bash/src/interpreter/builtins/break.test.ts | 19 | (top-level) | should exit while loop early | it | portable-verified | crates/just-bash::shell::builtins::break | r5_interpreter_builtin_break_matches_upstream | R5 verifies the portable `break` builtin 1:1 with break.test.ts: exiting for/while/until loops early, `break n` multi-level and single-level breaks, level exceeding loop depth, silent no-op outside a loop, fatal numeric-argument-required errors (non-numeric/zero/negative) with exit 128, fatal too-many-arguments error with exit 1, and break inside case/if/function nested in a loop. |
 | packages/just-bash | interpreter:builtins | packages/just-bash/src/interpreter/builtins/break.test.ts | 34 | (top-level) | should exit until loop early | it | portable-verified | crates/just-bash::shell::builtins::break | r5_interpreter_builtin_break_matches_upstream | R5 verifies the portable `break` builtin 1:1 with break.test.ts: exiting for/while/until loops early, `break n` multi-level and single-level breaks, level exceeding loop depth, silent no-op outside a loop, fatal numeric-argument-required errors (non-numeric/zero/negative) with exit 128, fatal too-many-arguments error with exit 1, and break inside case/if/function nested in a loop. |

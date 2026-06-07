@@ -8671,21 +8671,50 @@ impl<'a> ArithmeticEvaluator<'a> {
     fn read_lvalue(&mut self, lvalue: &ArithLValue) -> i64 {
         match lvalue {
             ArithLValue::Scalar(name) => self.resolve_name(name),
-            ArithLValue::Element { name, index } => self
-                .state
-                .arrays
-                .get(name)
-                .and_then(|values| values.get(*index))
-                .and_then(|value| parse_arith_literal(value.trim()))
-                .unwrap_or(0),
-            ArithLValue::AssocElement { name, key } => self
-                .state
-                .assoc_arrays
-                .get(name)
-                .and_then(|assoc| assoc.get(key))
-                .and_then(|value| parse_arith_literal(value.trim()))
-                .unwrap_or(0),
+            ArithLValue::Element { name, index } => {
+                let raw = self
+                    .state
+                    .arrays
+                    .get(name)
+                    .and_then(|values| values.get(*index))
+                    .map(|value| value.trim().to_string());
+                self.eval_stored_arith(raw)
+            }
+            ArithLValue::AssocElement { name, key } => {
+                let raw = self
+                    .state
+                    .assoc_arrays
+                    .get(name)
+                    .and_then(|assoc| assoc.get(key))
+                    .map(|value| value.trim().to_string());
+                self.eval_stored_arith(raw)
+            }
         }
+    }
+
+    /// Evaluate a stored array-element string as arithmetic. A direct integer
+    /// literal returns immediately; any other non-empty expression (e.g.
+    /// `"1+2+3"`) is re-tokenized and evaluated recursively, matching bash which
+    /// treats array-element values as arithmetic operands. An empty/unset slot
+    /// is 0.
+    fn eval_stored_arith(&mut self, raw: Option<String>) -> i64 {
+        let Some(raw) = raw else { return 0 };
+        if raw.is_empty() {
+            return 0;
+        }
+        if let Some(value) = parse_arith_literal(&raw) {
+            return value;
+        }
+        if self.depth > 64 {
+            return 0;
+        }
+        let mut nested = ArithmeticEvaluator {
+            tokens: tokenize_arithmetic(&raw),
+            pos: 0,
+            state: self.state,
+            depth: self.depth + 1,
+        };
+        nested.parse()
     }
 
     fn write_lvalue(&mut self, lvalue: &ArithLValue, value: i64) {
@@ -16954,6 +16983,28 @@ greet World",
         // L234 self-reference assignment form `bar=(['key']='value1')`.
         let r = shell().exec("declare -A bar\nbar=(['key']='value1')\necho ${bar['key']}");
         assert_eq!(r.stdout.trim(), "value1", "L234");
+    }
+
+    /// Covers the portable `assoc-array.test.ts:254` row ("nested array index in
+    /// array literal") through the Rust shell. An INDEXED-array literal
+    /// `a=([0]=1+2+3 [a[0]]=10 [a[6]]=hello)` resolves each subscript as an
+    /// arithmetic expression against the array being constructed:
+    /// - `[0]` -> key 0, value the literal string "1+2+3" (RHS is not arithmetic).
+    /// - `[a[0]]` -> `a[0]` reads "1+2+3" which arithmetic-evaluates to 6, so the
+    ///   element lands at key 6 with value "10".
+    /// - `[a[6]]` -> `a[6]` reads "10" which evaluates to 10, so the element lands
+    ///   at key 10 with value "hello".
+    /// The assertion fails if subscripts are keyed on literal text (assoc-style),
+    /// if the in-progress array is not visible to later subscripts, or if the RHS
+    /// is wrongly arithmetic-folded.
+    #[test]
+    fn jbpi_interpreter_nested_array_index_in_array_literal_row_matches_upstream() {
+        // L254 nested array index in array literal.
+        let r = shell().exec(
+            "a=([0]=1+2+3 [a[0]]=10 [a[6]]=hello)\nfor k in 0 6 10; do echo \"$k=${a[$k]}\"; done",
+        );
+        assert_eq!(r.exit_code, 0, "L254 exit");
+        assert_eq!(r.stdout, "0=1+2+3\n6=10\n10=hello\n", "L254 stdout");
     }
 
     /// Covers the portable indexed-array arithmetic-subscript rows of
