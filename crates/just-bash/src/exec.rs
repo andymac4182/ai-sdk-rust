@@ -4107,57 +4107,48 @@ fn command_ls(state: &ExecState<'_>, args: &[String]) -> CommandResult {
     let mut stderr = String::new();
     let mut exit_code = 0;
     let multi = paths.len() > 1;
-    // GNU `ls` groups non-directory operands first (as a single block), then
-    // lists each directory operand under its own header. A blank line separates
-    // consecutive blocks, so `ls file.txt dir` prints the file, a blank line,
-    // then `dir:` and its contents.
-    let mut file_block = String::new();
-    let mut dir_blocks: Vec<String> = Vec::new();
-    for raw_path in paths.iter() {
+    // Upstream vercel-labs/just-bash `ls` (commands/ls/ls.ts) processes operands
+    // strictly in argument order and inserts a single blank line before each
+    // operand after the first, unless stdout already ends with a blank line:
+    //   `if (i > 0 && stdout && !stdout.endsWith("\n\n")) stdout += "\n";`
+    // This separates EVERY operand (files and directories alike), so
+    // `ls file1 file2` -> "file1\n\nfile2\n". This intentionally differs from GNU
+    // `ls` (which groups non-directory operands into one block); we match the
+    // upstream engine's behavior, not GNU's.
+    for (index, raw_path) in paths.iter().enumerate() {
+        if index > 0 && !stdout.is_empty() && !stdout.ends_with("\n\n") {
+            stdout.push('\n');
+        }
         let path = resolve_path(&state.cwd, raw_path);
         match fs.stat(&path) {
             Ok(stat) if stat.is_file || (options.directories_only && stat.is_directory) => {
-                file_block.push_str(&format_ls_name(&fs, raw_path, &path, &stat, &options));
-                file_block.push('\n');
+                stdout.push_str(&format_ls_name(&fs, raw_path, &path, &stat, &options));
+                stdout.push('\n');
             }
             Ok(_) => {
-                // GNU `ls` echoes the directory operand exactly as the user
-                // typed it in the header (and in recursive sub-headers),
-                // including `.` for the implicit current-directory operand.
+                // Upstream echoes the directory operand exactly as the user typed
+                // it in the header (and recursive sub-headers), including `.` for
+                // the implicit current-directory operand.
                 let display_path = raw_path.as_str();
-                let mut block = String::new();
                 if multi || options.recursive {
-                    block.push_str(display_path);
-                    block.push_str(":\n");
+                    stdout.push_str(display_path);
+                    stdout.push_str(":\n");
                 }
-                block.push_str(&format_ls_directory(&fs, &path, &options));
+                stdout.push_str(&format_ls_directory(&fs, &path, &options));
                 if options.recursive {
-                    block.push_str(&format_ls_recursive_children(
+                    stdout.push_str(&format_ls_recursive_children(
                         &fs,
                         &path,
                         display_path,
                         &options,
                     ));
                 }
-                dir_blocks.push(block);
             }
             Err(_) => {
                 stderr.push_str(&format!("ls: {path}: No such file or directory\n"));
                 exit_code = 2;
             }
         }
-    }
-    let mut emitted_block = false;
-    if !file_block.is_empty() {
-        stdout.push_str(&file_block);
-        emitted_block = true;
-    }
-    for block in dir_blocks {
-        if emitted_block {
-            stdout.push('\n');
-        }
-        stdout.push_str(&block);
-        emitted_block = true;
     }
     CommandResult {
         stdout,
@@ -40686,5 +40677,26 @@ mod tests {
             "stderr={}",
             r.stderr
         );
+    }
+
+    // Behavioral parity: upstream vercel-labs/just-bash `ls` (commands/ls/ls.ts)
+    // inserts a blank line before each operand after the first, so multiple
+    // explicit non-directory operands are blank-separated. Exercised upstream by
+    // find.exec.test.ts "should work with ls command in batch mode"
+    // (`find /dir -type f -exec ls {} +`).
+    #[test]
+    fn ls_multiple_file_operands_are_blank_line_separated() {
+        let files = &[
+            ("/dir/file1.txt", "content1"),
+            ("/dir/file2.txt", "content2"),
+        ];
+        let direct = xan_run_with_files("ls /dir/file1.txt /dir/file2.txt", files);
+        assert_eq!(direct.stdout, "/dir/file1.txt\n\n/dir/file2.txt\n");
+        assert_eq!(direct.exit_code, 0);
+
+        // The upstream batch-mode case: find passes both files to a single `ls`.
+        let batch = xan_run_with_files("find /dir -type f -exec ls {} +", files);
+        assert_eq!(batch.stdout, "/dir/file1.txt\n\n/dir/file2.txt\n");
+        assert_eq!(batch.exit_code, 0);
     }
 }
