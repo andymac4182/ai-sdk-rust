@@ -32038,11 +32038,36 @@ fn command_rev(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandRe
     // shred valid UTF-8 into garbage. File contents are already UTF-8 text.
     // (mirrors upstream rev.ts decodeBytesToUtf8 on ctx.stdin)
     let decoded_stdin = decode_binary_to_utf8(stdin);
-    let input = match collect_text_inputs(state, &paths, &decoded_stdin) {
-        Ok(input) => input,
-        Err(error) => return stderr_result(1, format!("rev: {error}\n")),
+    // Mirror upstream rev.ts: with no file operands, read stdin; otherwise
+    // process each operand, treating "-" as stdin. The error message uses the
+    // original operand (e.g. "rev: foo: No such file or directory").
+    if paths.is_empty() {
+        return stdout_result(reverse_lines(&decoded_stdin));
+    }
+    let fs = match state.session.inner.fs.lock() {
+        Ok(fs) => fs,
+        Err(_) => return stderr_result(1, "rev: filesystem lock poisoned\n"),
     };
-    stdout_result(reverse_lines(&input))
+    let mut output = String::new();
+    for path in &paths {
+        if path == "-" {
+            output.push_str(&reverse_lines(&decoded_stdin));
+            continue;
+        }
+        let resolved = resolve_path(&state.cwd, path);
+        match fs.read_file(&resolved) {
+            Ok(content) => output.push_str(&reverse_lines(&content)),
+            Err(_) => {
+                return CommandResult {
+                    stdout: output,
+                    stderr: format!("rev: {path}: No such file or directory\n"),
+                    exit_code: 1,
+                    ..CommandResult::default()
+                };
+            }
+        }
+    }
+    stdout_result(output)
 }
 
 fn reverse_lines(input: &str) -> String {
@@ -40686,5 +40711,129 @@ mod tests {
             "stderr={}",
             r.stderr
         );
+    }
+
+    // commands/rev parity (vercel-labs/just-bash rev.test.ts + rev.utf8-stdin.test.ts).
+    #[test]
+    fn rev_reverses_simple_string() {
+        let r = jb().exec("echo 'hello' | rev");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "olleh\n");
+    }
+
+    #[test]
+    fn rev_reverses_multiple_lines_no_trailing_newline() {
+        let r = jb().exec("printf 'abc\\ndef\\nghi' | rev");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "cba\nfed\nihg");
+    }
+
+    #[test]
+    fn rev_reverses_multiple_lines_with_trailing_newline() {
+        let r = jb().exec("printf 'abc\\ndef\\n' | rev");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "cba\nfed\n");
+    }
+
+    #[test]
+    fn rev_handles_empty_input() {
+        let r = jb().exec("printf '' | rev");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "");
+    }
+
+    #[test]
+    fn rev_handles_empty_lines() {
+        let r = jb().exec("printf 'a\\n\\nb\\n' | rev");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "a\n\nb\n");
+    }
+
+    #[test]
+    fn rev_reads_from_file() {
+        let r = xan_run_with_files("rev /test.txt", &[("/test.txt", "hello\nworld\n")]);
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "olleh\ndlrow\n");
+    }
+
+    #[test]
+    fn rev_reads_from_multiple_files() {
+        let r = xan_run_with_files(
+            "rev /a.txt /b.txt",
+            &[("/a.txt", "abc\n"), ("/b.txt", "def\n")],
+        );
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "cba\nfed\n");
+    }
+
+    #[test]
+    fn rev_file_not_found_uses_original_operand() {
+        let r = jb().exec("rev /nonexistent.txt");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(
+            r.stderr,
+            "rev: /nonexistent.txt: No such file or directory\n"
+        );
+    }
+
+    #[test]
+    fn rev_handles_unicode() {
+        let r = jb().exec("echo '日本語' | rev");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "語本日\n");
+    }
+
+    #[test]
+    fn rev_handles_emoji() {
+        let r = jb().exec("echo '👋🌍' | rev");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "🌍👋\n");
+    }
+
+    #[test]
+    fn rev_help_mentions_name_and_reverse() {
+        let r = jb().exec("rev --help");
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.to_lowercase().contains("rev"));
+        assert!(r.stdout.to_lowercase().contains("reverse"));
+    }
+
+    #[test]
+    fn rev_unknown_short_flag() {
+        let r = jb().exec("echo 'test' | rev -x");
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("invalid option"), "stderr={}", r.stderr);
+    }
+
+    #[test]
+    fn rev_unknown_long_flag() {
+        let r = jb().exec("echo 'test' | rev --unknown");
+        assert_eq!(r.exit_code, 1);
+        assert!(
+            r.stderr.contains("unrecognized option"),
+            "stderr={}",
+            r.stderr
+        );
+    }
+
+    #[test]
+    fn rev_dash_is_stdin() {
+        let r = jb().exec("echo 'hello' | rev -");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "olleh\n");
+    }
+
+    #[test]
+    fn rev_double_dash_ends_options() {
+        let r = xan_run_with_files("rev -- /-file.txt", &[("/-file.txt", "test\n")]);
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "tset\n");
+    }
+
+    #[test]
+    fn rev_reverses_utf8_stdin_by_codepoint() {
+        let r = xan_run_with_files("cat /in.txt | rev", &[("/in.txt", "한글\n")]);
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "글한\n");
     }
 }
