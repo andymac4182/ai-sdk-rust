@@ -19900,13 +19900,46 @@ impl Default for YqOptions {
     }
 }
 
+/// Help text for `yq --help`, mirroring the upstream `showHelp` output so the
+/// summary line advertises "YAML/XML/INI/CSV/TOML" exactly as TS does.
+fn yq_help_text() -> String {
+    let mut out = String::new();
+    out.push_str("yq - command-line YAML/XML/INI/CSV/TOML processor\n\n");
+    out.push_str("Usage: yq [OPTIONS] [FILTER] [FILE]\n");
+    out.push_str("\nOptions:\n");
+    for opt in [
+        "-p, --input-format=FMT   input format: yaml (default), xml, json, ini, csv, toml",
+        "-o, --output-format=FMT  output format: yaml (default), json, xml, ini, csv, toml",
+        "-i, --inplace            modify file in-place",
+        "-r, --raw-output         output strings without quotes (json only)",
+        "-c, --compact            compact output (json only)",
+        "-e, --exit-status        set exit status based on output",
+        "-s, --slurp              read entire input into array",
+        "-n, --null-input         don't read any input",
+        "-j, --join-output        don't print newlines after each output",
+        "-f, --front-matter       extract and process front-matter only",
+        "-P, --prettyPrint        pretty print output",
+        "-I, --indent=N           set indent level (default: 2)",
+        "    --xml-attribute-prefix=STR  XML attribute prefix (default: +@)",
+        "    --xml-content-name=STR  XML text content name (default: +content)",
+        "    --csv-delimiter=CHAR CSV delimiter (default: auto-detect)",
+        "    --csv-header         CSV has header row (default: true)",
+        "    --help               display this help and exit",
+    ] {
+        out.push_str("  ");
+        out.push_str(opt);
+        out.push('\n');
+    }
+    out
+}
+
 fn command_yq(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
     let options = match parse_yq_options(args) {
         Ok(options) => options,
         Err(result) => return result,
     };
     if options.filter == "__help__" {
-        return stdout_result("yq - YAML/JSON processor\nUsage: yq [options] <filter> [file]\n");
+        return stdout_result(yq_help_text());
     }
     let inputs = match collect_yq_inputs_full(state, &options, stdin) {
         Ok(inputs) => inputs,
@@ -20044,12 +20077,12 @@ fn parse_yq_options(args: &[String]) -> Result<YqOptions, CommandResult> {
             return Ok(options);
         }
         if let Some(format) = arg.strip_prefix("--input-format=") {
-            options.input_format = Some(validate_yq_format(format, "input")?);
+            options.input_format = Some(validate_yq_format(format, arg)?);
             index += 1;
             continue;
         }
         if let Some(format) = arg.strip_prefix("--output-format=") {
-            options.output_format = validate_yq_format(format, "output")?;
+            options.output_format = validate_yq_format(format, arg)?;
             index += 1;
             continue;
         }
@@ -20060,6 +20093,19 @@ fn parse_yq_options(args: &[String]) -> Result<YqOptions, CommandResult> {
         }
         if let Some(prefix) = arg.strip_prefix("--xml-attribute-prefix=") {
             options.xml_attribute_prefix = prefix.to_string();
+            index += 1;
+            continue;
+        }
+        if arg.strip_prefix("--xml-content-name=").is_some() {
+            // Accepted for upstream compatibility; the content key is not
+            // surfaced by the current renderer, so the value is ignored.
+            index += 1;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--indent=") {
+            if let Ok(indent) = value.parse() {
+                options.indent = indent;
+            }
             index += 1;
             continue;
         }
@@ -20074,7 +20120,18 @@ fn parse_yq_options(args: &[String]) -> Result<YqOptions, CommandResult> {
                 index += 1;
                 continue;
             }
-            "-i" | "--in-place" => {
+            "--csv-header" => {
+                options.csv_header = true;
+                index += 1;
+                continue;
+            }
+            "-P" | "--prettyPrint" => {
+                // prettyPrint is accepted for upstream compatibility; YAML/JSON
+                // output is already produced in the upstream-matching shape.
+                index += 1;
+                continue;
+            }
+            "-i" | "--in-place" | "--inplace" => {
                 options.in_place = true;
                 index += 1;
                 continue;
@@ -20108,7 +20165,8 @@ fn parse_yq_options(args: &[String]) -> Result<YqOptions, CommandResult> {
                 let Some(format) = args.get(index + 1) else {
                     return Err(stderr_result(1, "yq: missing argument to -p\n"));
                 };
-                options.input_format = Some(validate_yq_format(format, "input")?);
+                options.input_format =
+                    Some(validate_yq_format(format, &format!("{arg} {format}"))?);
                 index += 2;
                 continue;
             }
@@ -20116,11 +20174,11 @@ fn parse_yq_options(args: &[String]) -> Result<YqOptions, CommandResult> {
                 let Some(format) = args.get(index + 1) else {
                     return Err(stderr_result(1, "yq: missing argument to -o\n"));
                 };
-                options.output_format = validate_yq_format(format, "output")?;
+                options.output_format = validate_yq_format(format, &format!("{arg} {format}"))?;
                 index += 2;
                 continue;
             }
-            "-I" => {
+            "-I" | "--indent" => {
                 if let Some(indent) = args.get(index + 1).and_then(|value| value.parse().ok()) {
                     options.indent = indent;
                     index += 2;
@@ -20144,14 +20202,15 @@ fn parse_yq_options(args: &[String]) -> Result<YqOptions, CommandResult> {
                         'i' => options.in_place = true,
                         'f' => options.front_matter = true,
                         's' => options.slurp = true,
+                        'P' => { /* prettyPrint: accepted, no effect on output here */ }
                         _ => {
-                            return Err(stderr_result(1, format!("yq: unknown option: -{flag}\n")));
+                            return Err(yq_unknown_option(&format!("-{flag}")));
                         }
                     }
                 }
             }
             _ if arg.starts_with('-') && arg != "-" => {
-                return Err(stderr_result(1, format!("yq: unknown option: {arg}\n")));
+                return Err(yq_unknown_option(arg));
             }
             _ if options.filter.is_empty() => options.filter = arg.clone(),
             _ => options.paths.push(arg.clone()),
@@ -20179,14 +20238,29 @@ fn unescape_yq_delimiter(raw: &str) -> Option<char> {
     decoded.chars().next()
 }
 
-fn validate_yq_format(format: &str, kind: &str) -> Result<String, CommandResult> {
+/// Build the same error result `help.ts`'s `unknownOption` produces: long
+/// options (`--foo`) report "unrecognized option '<opt>'"; everything else
+/// reports "invalid option -- '<opt sans leading dash>'". Exit code 1.
+fn yq_unknown_option(option: &str) -> CommandResult {
+    let msg = if option.starts_with("--") {
+        format!("yq: unrecognized option '{option}'\n")
+    } else {
+        format!(
+            "yq: invalid option -- '{}'\n",
+            option.trim_start_matches('-')
+        )
+    };
+    stderr_result(1, msg)
+}
+
+/// Validate a yq format token. `original` is the verbatim option string (e.g.
+/// `--input-format=xml` or `-p xml`) so a rejection mirrors the upstream
+/// `unknownOption` message exactly.
+fn validate_yq_format(format: &str, original: &str) -> Result<String, CommandResult> {
     let normalized = format.to_ascii_lowercase();
     match normalized.as_str() {
         "yaml" | "yml" | "json" | "xml" | "csv" | "ini" | "toml" | "tsv" => Ok(normalized),
-        _ => Err(stderr_result(
-            1,
-            format!("yq: invalid {kind} format: {format}\n"),
-        )),
+        _ => Err(yq_unknown_option(original)),
     }
 }
 
@@ -20211,7 +20285,8 @@ fn read_yq_input(
                 .map_err(|_| stderr_result(1, "yq: filesystem lock poisoned\n"))?
                 .read_file(&resolved)
                 .map_err(|_| {
-                    stderr_result(1, format!("yq: {resolved}: No such file or directory\n"))
+                    // Upstream yq reports a missing input file with exit code 2.
+                    stderr_result(2, format!("yq: {resolved}: No such file or directory\n"))
                 })?;
             Ok((text, Some(resolved)))
         }
@@ -21133,6 +21208,44 @@ fn tokenize_xml(input: &str) -> Result<Vec<XmlToken>, String> {
                     .find("-->")
                     .ok_or_else(|| "xml: unterminated comment".to_string())?;
                 i += end + 3;
+                continue;
+            }
+            // CDATA sections hold literal text; their content must not be
+            // parsed as markup (mirrors fast-xml-parser, which surfaces the
+            // raw characters as text). Anything between `<![CDATA[` and `]]>`
+            // is emitted verbatim.
+            if input[i..].starts_with("<![CDATA[") {
+                let rest = &input[i + 9..];
+                let end = rest
+                    .find("]]>")
+                    .ok_or_else(|| "xml: unterminated CDATA section".to_string())?;
+                let cdata = &rest[..end];
+                if !cdata.trim().is_empty() {
+                    tokens.push(XmlToken::Text(cdata.trim().to_string()));
+                }
+                i += 9 + end + 3;
+                continue;
+            }
+            // Skip other declarations such as <!DOCTYPE ...> (no entity
+            // expansion — XXE defense). DOCTYPE may contain a `[...]` internal
+            // subset, so scan to the matching `>` past any bracketed block.
+            if input[i..].starts_with("<!") {
+                let after = &input[i + 2..];
+                let mut depth = 0usize;
+                let mut consumed = None;
+                for (off, ch) in after.char_indices() {
+                    match ch {
+                        '[' => depth += 1,
+                        ']' => depth = depth.saturating_sub(1),
+                        '>' if depth == 0 => {
+                            consumed = Some(off);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                let off = consumed.ok_or_else(|| "xml: unterminated declaration".to_string())?;
+                i += 2 + off + 1;
                 continue;
             }
             let close = input[i..]
