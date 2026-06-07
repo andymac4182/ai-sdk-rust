@@ -3296,6 +3296,37 @@ and exhibited clearly, with a label attached.\n";
     }
 
     #[test]
+    fn structured_data_jq_invalid_json_parse_error_rows() {
+        // maps packages/just-bash/src/commands/jq/jq.test.ts "error handling" rows:
+        // jq's hand-rolled JSON stream parser reports the upstream message
+        // `Invalid JSON at position N: unexpected '...'` (exit 5), not serde's
+        // internal phrasing.
+        let env = Bash::new();
+
+        let result = env.exec("echo 'not json' | jq '.'");
+        assert_eq!(result.stdout, "");
+        assert_eq!(
+            result.stderr,
+            "jq: parse error: Invalid JSON at position 0: unexpected 'not'\n"
+        );
+        assert_eq!(result.exit_code, 5);
+
+        // Leading whitespace is skipped before the position is reported, and the
+        // unexpected token is truncated at the next whitespace boundary.
+        let result = env.exec("echo '  foo bar' | jq '.'");
+        assert_eq!(
+            result.stderr,
+            "jq: parse error: Invalid JSON at position 2: unexpected 'foo'\n"
+        );
+        assert_eq!(result.exit_code, 5);
+
+        // Valid JSON still parses; only genuinely malformed input errors.
+        let result = env.exec("echo '{\"a\":1}' | jq -c '.'");
+        assert_eq!(result.stdout, "{\"a\":1}\n");
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
     fn text_search_grep_rg_sed_and_awk_close_upstream_rows() {
         let env = Bash::with_options(BashOptions {
             files: BTreeMap::from([
