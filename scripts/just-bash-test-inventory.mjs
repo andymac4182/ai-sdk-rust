@@ -3108,12 +3108,12 @@ const jbc20CaseGroups = [
   },
   {
     file: 'packages/just-bash/src/commands/timeout/timeout.nested-cancellation.test.ts',
-    lines: [8, 64],
+    lines: [8, 35, 64],
     status: 'portable-verified',
     owner: 'crates/just-bash::exec::timeout',
     rustTest: 'jbc_timeout_nested_cancellation_prevents_late_side_effects',
     notes:
-      'R17JB verifies that an enclosing `timeout 0.01` cancels a nested subcommand driven by xargs (line 8) and by the /usr/bin/time wrapper (line 64): the cooperative deadline returns exit 124 while the inner `bash -c sleep` is still running, so the subcommand’s post-sleep marker write never reaches the virtual filesystem now or after a further wait. The find -exec case at line 35 stays portable-pending: it depends on backslash-escaped `\\;` terminator handling in command splitting, deferred to a focused find/escaping unit.',
+      'R17JB/R19JB verify that an enclosing `timeout 0.01` cancels a nested subcommand driven by xargs (line 8), find -exec (line 35), and the /usr/bin/time wrapper (line 64): the cooperative deadline returns exit 124 while the inner `bash -c sleep` is still running, so the subcommand’s post-sleep marker write never reaches the virtual filesystem now or after a further wait. R19JB closes line 35 by fixing backslash-escaped `\\;` terminator handling: split_control no longer splits a statement at an escaped `;`, and the tokenizer unescapes unquoted `\\;` to a bare `;` so `find -exec ... \\;` parses and runs under the deadline.',
   },
   {
     file: 'packages/just-bash/src/commands/time/time.utf8-stdin.test.ts',
@@ -5506,12 +5506,12 @@ const jbc38CaseGroups = [
   },
   {
     file: 'packages/just-bash/src/commands/base64/base64.binary.test.ts',
-    lines: [6, 19, 32, 52, 82, 94, 108, 121, 134],
+    lines: [6, 19, 32, 52, 82, 94, 108, 121, 134, 172],
     status: 'portable-verified',
     owner: 'crates/just-bash::exec::base64-binary',
     rustTest: 'jbc_base64_binary_and_stdin_rows_match_upstream',
     notes:
-      'JBC verifies byte-exact base64 encode/decode round-trips through virtual files and ASCII/UTF-8 stdin, plus invalid-UTF-8/null/high byte file encodes; decode is byte-clean via stdout_bytes redirection. Raw non-UTF-8 binary piped through stdin (lines 65, 172) stays pending because the virtual pipeline carries stdin/stdout as UTF-8 byte-strings.',
+      'JBC verifies byte-exact base64 encode/decode round-trips through virtual files and ASCII/UTF-8 stdin, plus invalid-UTF-8/null/high byte file encodes; decode is byte-clean via stdout_bytes redirection. R19JB closes line 172 (large files via pipe): a 512KB binary file (full 0..255 byte range) round-trips through `cat | base64 | base64 -d > file` because the byte-clean pipe carrier is recovered via latin1 in collect_binary_inputs (honoring state.stdin_bytes) instead of UTF-8 re-encoding the carrier. Raw non-UTF-8 binary piped through stdin round-trip (line 65) stays pending.',
   },
   {
     file: 'packages/just-bash/src/commands/base64/base64.test.ts',
