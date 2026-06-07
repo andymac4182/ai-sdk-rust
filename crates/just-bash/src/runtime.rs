@@ -13395,28 +13395,34 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
             env.exec("echo 'null' | yq -o json 'env.EMPTY'").stdout,
             "\"\"\n"
         );
-        assert_eq!(env.exec("yq '.name' /missing.yaml").exit_code, 1);
-        assert_eq!(env.exec("yq --unknown '.'").exit_code, 1);
-        assert!(env.exec("yq --help").stdout.contains("YAML"));
+        // Upstream yq returns exit code 2 for a missing input file (yq.test.ts:287).
+        assert_eq!(env.exec("yq '.name' /missing.yaml").exit_code, 2);
+        // Upstream routes unknown options through `unknownOption` (help.ts):
+        // long options report "unrecognized option", short options report
+        // "invalid option". The exit code is 1.
+        let unknown = env.exec("yq --unknown '.'");
+        assert_eq!(unknown.exit_code, 1);
+        assert!(unknown.stderr.contains("unrecognized option"));
+        assert!(env.exec("yq --help").stdout.contains("YAML/XML"));
         assert!(
             env.exec("yq --input-format=nope '.' /data.yaml")
                 .stderr
-                .contains("invalid input format")
+                .contains("unrecognized option")
         );
         assert!(
             env.exec("yq --output-format=nope '.' /data.yaml")
                 .stderr
-                .contains("invalid output format")
+                .contains("unrecognized option")
         );
         assert!(
             env.exec("yq -p nope '.' /data.yaml")
                 .stderr
-                .contains("invalid input format")
+                .contains("invalid option")
         );
         assert!(
             env.exec("yq -o nope '.' /data.yaml")
                 .stderr
-                .contains("invalid output format")
+                .contains("invalid option")
         );
         assert_eq!(env.exec("echo 'true' | yq -e '.'").exit_code, 0);
         assert_eq!(env.exec("echo 'null' | yq -e '.'").exit_code, 1);
@@ -17706,13 +17712,23 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
             "anchor: &anchor_name\n  shared: data\n",
             "reference: *anchor_name\n",
         );
+        // Full upstream special.xml fixture, including the CDATA section that
+        // exercises literal-text passthrough (the parser must not treat the
+        // <script> inside CDATA as markup).
         let special_xml = concat!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
             "<root xmlns:custom=\"http://example.com/custom\">\n",
             "  <!-- XML special cases -->\n",
             "  <empty></empty>\n",
             "  <self-closing/>\n",
+            "  <whitespace>  trimmed  </whitespace>\n",
+            "  <cdata><![CDATA[<script>alert(\"test\")</script>]]></cdata>\n",
+            "  <entities>&lt;tag&gt; &amp; &quot;quotes&quot;</entities>\n",
+            "  <unicode>Hello &#19990;&#30028;</unicode>\n",
+            "  <mixed-content>Text <b>bold</b> more text</mixed-content>\n",
             "  <multiple-attrs id=\"1\" class=\"item\" data-value=\"test\" enabled=\"true\"/>\n",
+            "  <namespaced custom:attr=\"value\">namespaced content</namespaced>\n",
+            "  <numbers>\n    <int>42</int>\n    <float>3.14</float>\n    <negative>-17</negative>\n  </numbers>\n",
             "  <nested>\n    <level1>\n      <level2>\n        <level3>deep value</level3>\n      </level2>\n    </level1>\n  </nested>\n",
             "  <repeated>\n    <item>first</item>\n    <item>second</item>\n    <item>third</item>\n  </repeated>\n",
             "</root>\n",
@@ -17785,6 +17801,90 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         assert_eq!(inplace.stdout, "");
         let read_back = env.exec("cat /inplace.yaml");
         assert!(read_back.stdout.contains("version: \"2.0\""));
+    }
+
+    /// Behavioral-parity regression for commands/yq option-error reporting,
+    /// help text, the missing-file exit code, and XML CDATA/DOCTYPE handling.
+    ///
+    /// These mirror the upstream vitest expectations that the prior Rust port
+    /// diverged from:
+    /// - yq.test.ts:287 missing file -> exit code 2.
+    /// - yq.test.ts:305 unknown long option -> "unrecognized option".
+    /// - yq.test.ts:313 `--help` advertises "YAML/XML".
+    /// - yq.test.ts:324/331 `--input-format=`/`--output-format=` bad value ->
+    ///   "unrecognized option".
+    /// - yq.test.ts:340/347 `-p`/`-o` bad value -> "invalid option".
+    /// - yq.fixtures.test.ts special.xml CDATA passthrough (no markup parse).
+    /// - yq.yaml-security.test.ts:119 XXE: DOCTYPE internal subset is skipped
+    ///   and the entity is not expanded.
+    #[test]
+    fn structured_data_yq_option_errors_help_and_xml_cdata_rows() {
+        let env = Bash::with_options(BashOptions {
+            files: BTreeMap::from([
+                ("/data.yaml".to_string(), "name: test\n".to_string()),
+                (
+                    "/cdata.xml".to_string(),
+                    "<root><cdata><![CDATA[<script>alert(\"x\")</script>]]></cdata><safe>value</safe></root>".to_string(),
+                ),
+                (
+                    "/xxe.xml".to_string(),
+                    concat!(
+                        "<?xml version=\"1.0\"?>\n",
+                        "<!DOCTYPE foo [\n",
+                        "  <!ENTITY xxe SYSTEM \"file:///etc/passwd\">\n",
+                        "]>\n",
+                        "<root><data>&xxe;</data></root>",
+                    )
+                    .to_string(),
+                ),
+            ]),
+            ..BashOptions::default()
+        });
+
+        // Missing input file -> exit code 2 with the standard message.
+        let missing = env.exec("yq '.' /nonexistent.yaml");
+        assert_eq!(missing.exit_code, 2);
+        assert!(missing.stderr.contains("No such file or directory"));
+
+        // Unknown long option (yq.test.ts:305).
+        let unknown = env.exec("yq --unknown '.' /data.yaml");
+        assert_eq!(unknown.exit_code, 1);
+        assert!(unknown.stderr.contains("unrecognized option"));
+
+        // Help advertises the multi-format processor (yq.test.ts:313).
+        let help = env.exec("yq --help");
+        assert_eq!(help.exit_code, 0);
+        assert!(help.stdout.contains("yq"));
+        assert!(help.stdout.contains("YAML/XML"));
+
+        // Long-option format validation -> "unrecognized option".
+        let bad_in_long = env.exec("echo '{}' | yq --input-format=badformat");
+        assert_eq!(bad_in_long.exit_code, 1);
+        assert!(bad_in_long.stderr.contains("unrecognized option"));
+        let bad_out_long = env.exec("echo '{}' | yq --output-format=badformat");
+        assert_eq!(bad_out_long.exit_code, 1);
+        assert!(bad_out_long.stderr.contains("unrecognized option"));
+
+        // Short-option format validation -> "invalid option".
+        let bad_in_short = env.exec("echo '{}' | yq -p badformat");
+        assert_eq!(bad_in_short.exit_code, 1);
+        assert!(bad_in_short.stderr.contains("invalid option"));
+        let bad_out_short = env.exec("echo '{}' | yq -o badformat");
+        assert_eq!(bad_out_short.exit_code, 1);
+        assert!(bad_out_short.stderr.contains("invalid option"));
+
+        // CDATA: the literal <script> must not be parsed as markup; the
+        // sibling <safe> element is still reachable.
+        let cdata = env.exec("yq -p xml '.root.safe' /cdata.xml");
+        assert_eq!(cdata.exit_code, 0);
+        assert_eq!(cdata.stdout.trim(), "value");
+
+        // XXE: DOCTYPE with an internal subset is skipped (no entity
+        // expansion) and parsing does not surface /etc/passwd contents.
+        let xxe = env.exec("yq -p xml '.root.data' /xxe.xml");
+        if xxe.exit_code == 0 {
+            assert!(!xxe.stdout.contains("root:"));
+        }
     }
 
     #[test]
