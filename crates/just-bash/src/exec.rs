@@ -29263,63 +29263,91 @@ fn format_line_number(value: i64, format: &str, width: usize) -> String {
 }
 
 fn command_xargs(state: &mut ExecState<'_>, args: &[String], stdin: String) -> CommandResult {
+    // Mirrors upstream commands/xargs/xargs.ts. `--help` is matched anywhere.
     if args.iter().any(|arg| arg == "--help") {
-        return stdout_result(
-            "Usage: xargs [OPTION]... [COMMAND [INITIAL-ARGS]...]\nBuild and execute command lines from standard input.\n",
-        );
+        return stdout_result(xargs_help_text());
     }
-    let mut batch_size = usize::MAX;
-    let mut replace = None::<String>;
-    let mut delimiter = None::<char>;
+
+    let mut replace: Option<String> = None;
+    let mut delimiter: Option<String> = None;
+    let mut null_separator = false;
+    let mut max_args: Option<usize> = None;
     let mut verbose = false;
     let mut no_run_if_empty = false;
-    let mut command = Vec::new();
-    let mut index = 0;
-    while let Some(arg) = args.get(index) {
-        match arg.as_str() {
-            "-n" => {
-                let Some(value) = args.get(index + 1) else {
-                    return stderr_result(1, "xargs: option requires an argument -- 'n'\n");
-                };
-                batch_size = value.parse().unwrap_or(usize::MAX);
-                index += 1;
+    let mut command_start = 0usize;
+
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "-I" && i + 1 < args.len() {
+            i += 1;
+            replace = Some(args[i].clone());
+            command_start = i + 1;
+        } else if arg == "-d" && i + 1 < args.len() {
+            i += 1;
+            delimiter = Some(parse_xargs_delimiter(&args[i]));
+            command_start = i + 1;
+        } else if arg == "-n" && i + 1 < args.len() {
+            i += 1;
+            // parseInt semantics: leading digits, otherwise NaN -> no limit.
+            max_args = parse_int_prefix(&args[i]);
+            command_start = i + 1;
+        } else if arg == "-P" && i + 1 < args.len() {
+            // -P NUM (parallelism). Execution is sequential here, but the value
+            // must still be consumed so it is not mistaken for the command.
+            i += 1;
+            command_start = i + 1;
+        } else if arg == "-0" || arg == "--null" {
+            null_separator = true;
+            command_start = i + 1;
+        } else if arg == "-t" || arg == "--verbose" {
+            verbose = true;
+            command_start = i + 1;
+        } else if arg == "-r" || arg == "--no-run-if-empty" {
+            no_run_if_empty = true;
+            command_start = i + 1;
+        } else if arg.starts_with("--") {
+            return xargs_unknown_option(arg);
+        } else if arg.starts_with('-') && arg.len() > 1 {
+            // Combined short options: only the boolean flags 0/t/r are allowed.
+            for c in arg.chars().skip(1) {
+                if !matches!(c, '0' | 't' | 'r') {
+                    return xargs_unknown_option(&format!("-{c}"));
+                }
             }
-            "-I" => {
-                let Some(value) = args.get(index + 1) else {
-                    return stderr_result(1, "xargs: option requires an argument -- 'I'\n");
-                };
-                replace = Some(value.clone());
-                index += 1;
+            if arg.contains('0') {
+                null_separator = true;
             }
-            "-0" => delimiter = Some('\0'),
-            "-d" => {
-                let Some(value) = args.get(index + 1) else {
-                    return stderr_result(1, "xargs: option requires an argument -- 'd'\n");
-                };
-                delimiter = parse_xargs_delimiter(value);
-                index += 1;
+            if arg.contains('t') {
+                verbose = true;
             }
-            "-t" => verbose = true,
-            "-r" => no_run_if_empty = true,
-            "-P" => {
-                index += 1;
+            if arg.contains('r') {
+                no_run_if_empty = true;
             }
-            _ if arg.starts_with("-P") && arg.len() > 2 => {}
-            _ => {
-                command.extend_from_slice(&args[index..]);
-                break;
-            }
+            command_start = i + 1;
+        } else {
+            // First non-option argument starts the command.
+            command_start = i;
+            break;
         }
-        index += 1;
+        i += 1;
     }
+
+    let mut command: Vec<String> = args[command_start.min(args.len())..].to_vec();
     if command.is_empty() {
         command.push("echo".to_string());
     }
-    let items = split_xargs_input(&stdin, delimiter);
-    if items.is_empty() && no_run_if_empty {
+
+    let items = split_xargs_input(&stdin, null_separator, delimiter.as_deref());
+
+    if items.is_empty() {
+        // With or without -r, an empty item list runs nothing.
+        let _ = no_run_if_empty;
         return CommandResult::default();
     }
-    let batches = if let Some(marker) = replace.as_deref() {
+
+    let batches: Vec<Vec<String>> = if let Some(marker) = replace.as_deref() {
+        // -I mode: run command once per item, replacing marker in each argument.
         items
             .iter()
             .map(|item| {
@@ -29328,58 +29356,144 @@ fn command_xargs(state: &mut ExecState<'_>, args: &[String], stdin: String) -> C
                     .map(|arg| arg.replace(marker, item))
                     .collect::<Vec<_>>()
             })
-            .collect::<Vec<_>>()
-    } else {
-        let batch_size = batch_size.max(1);
+            .collect()
+    } else if let Some(n) = max_args {
+        // -n mode: batch items.
+        let n = n.max(1);
         items
-            .chunks(batch_size)
+            .chunks(n)
             .map(|chunk| {
                 let mut tokens = command.clone();
                 tokens.extend(chunk.iter().cloned());
                 tokens
             })
-            .collect::<Vec<_>>()
+            .collect()
+    } else {
+        // Default: all items on one command line.
+        let mut tokens = command.clone();
+        tokens.extend(items.iter().cloned());
+        vec![tokens]
     };
+
     let mut combined = CommandResult::default();
-    for tokens in batches {
+    for tokens in &batches {
         if verbose {
-            combined.stderr.push_str(&tokens.join(" "));
+            let cmd_line = tokens
+                .iter()
+                .map(|a| xargs_quote_arg(a))
+                .collect::<Vec<_>>()
+                .join(" ");
+            combined.stderr.push_str(&cmd_line);
             combined.stderr.push('\n');
         }
-        let result = execute_tokens(state, &tokens, String::new());
+        let result = execute_tokens(state, tokens, String::new());
         combined.stdout.push_str(&result.stdout);
         combined.stderr.push_str(&result.stderr);
-        combined.exit_code = result.exit_code;
         if result.exit_code != 0 {
-            break;
+            combined.exit_code = result.exit_code;
         }
     }
     combined
 }
 
-fn parse_xargs_delimiter(value: &str) -> Option<char> {
-    match value {
-        "\\n" => Some('\n'),
-        "\\t" => Some('\t'),
-        "\\\\" => Some('\\'),
-        "" => None,
-        other => other.chars().next(),
+fn xargs_help_text() -> String {
+    let mut out = String::from("xargs - build and execute command lines from standard input\n\n");
+    out.push_str("Usage: xargs [OPTION]... [COMMAND [INITIAL-ARGS]]\n");
+    out.push_str("\nOptions:\n");
+    for opt in [
+        "-I REPLACE   replace occurrences of REPLACE with input",
+        "-d DELIM     use DELIM as input delimiter (e.g., -d '\\n' for newline)",
+        "-n NUM       use at most NUM arguments per command line",
+        "-P NUM       run at most NUM processes at a time",
+        "-0, --null   items are separated by null, not whitespace",
+        "-t, --verbose  print commands before executing",
+        "-r, --no-run-if-empty  do not run command if input is empty",
+        "    --help   display this help and exit",
+    ] {
+        out.push_str("  ");
+        out.push_str(opt);
+        out.push('\n');
+    }
+    out
+}
+
+/// Mirrors `unknownOption("xargs", option)` from commands/help.ts.
+fn xargs_unknown_option(option: &str) -> CommandResult {
+    let msg = if let Some(rest) = option.strip_prefix("--") {
+        format!("xargs: unrecognized option '--{rest}'\n")
+    } else {
+        let short = option.strip_prefix('-').unwrap_or(option);
+        format!("xargs: invalid option -- '{short}'\n")
+    };
+    stderr_result(1, msg)
+}
+
+/// Mirrors the JS `quoteArg` helper used by xargs verbose (`-t`) output.
+fn xargs_quote_arg(arg: &str) -> String {
+    let needs_quote = arg
+        .chars()
+        .any(|c| c.is_whitespace() || "\"'\\$`!*?[]{}();&|<>#".contains(c));
+    if needs_quote {
+        let mut escaped = String::with_capacity(arg.len() + 2);
+        escaped.push('"');
+        for c in arg.chars() {
+            if matches!(c, '\\' | '"' | '`' | '$') {
+                escaped.push('\\');
+            }
+            escaped.push(c);
+        }
+        escaped.push('"');
+        escaped
+    } else {
+        arg.to_string()
     }
 }
 
-fn split_xargs_input(input: &str, delimiter: Option<char>) -> Vec<String> {
-    match delimiter {
-        Some(delimiter) => input
-            .split(delimiter)
-            .map(str::trim)
-            .filter(|item| !item.is_empty())
+/// Mirrors JS `parseInt(value, 10)` followed by the `maxArgs !== null` guard:
+/// returns `None` when there are no leading digits (NaN -> no batching).
+fn parse_int_prefix(value: &str) -> Option<usize> {
+    let trimmed = value.trim_start();
+    let digits: String = trimmed.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse::<usize>().ok()
+}
+
+/// Mirrors the `-d` delimiter escape handling: sequential replacement of
+/// `\n`, `\t`, `\r`, `\0`, `\\`. The result may be a multi-character string.
+fn parse_xargs_delimiter(value: &str) -> String {
+    value
+        .replace("\\n", "\n")
+        .replace("\\t", "\t")
+        .replace("\\r", "\r")
+        .replace("\\0", "\0")
+        .replace("\\\\", "\\")
+}
+
+fn split_xargs_input(input: &str, null_separator: bool, delimiter: Option<&str>) -> Vec<String> {
+    if null_separator {
+        input
+            .split('\0')
+            .filter(|s| !s.is_empty())
             .map(ToString::to_string)
-            .collect(),
-        None => input
+            .collect()
+    } else if let Some(delim) = delimiter {
+        // Strip a single trailing newline (echo adds one) before splitting,
+        // then split on the exact delimiter string. Items are NOT trimmed.
+        let input = input.strip_suffix('\n').unwrap_or(input);
+        if delim.is_empty() {
+            return input.split_whitespace().map(ToString::to_string).collect();
+        }
+        input
+            .split(delim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .collect()
+    } else {
+        // Default: split on whitespace, drop empties.
+        input
             .split_whitespace()
-            .filter(|item| !item.is_empty())
+            .filter(|s| !s.is_empty())
             .map(ToString::to_string)
-            .collect(),
+            .collect()
     }
 }
 
@@ -41645,5 +41759,269 @@ mod tests {
             }
         }
         assert!(fails.is_empty(), "DIVERGENCES:\n{}", fails.join("\n"));
+    }
+}
+
+#[cfg(test)]
+mod xargs_parity_tests {
+    //! Behavioral parity for `commands/xargs`, mirroring upstream
+    //! packages/just-bash/src/commands/xargs/*. Each assertion ports an exact
+    //! input->expected case from the upstream Vitest suites, plus a few
+    //! behaviors exercised by the upstream implementation (option parsing,
+    //! verbose quoting, delimiter handling) that previously diverged.
+    use super::*;
+
+    fn run(files: &[(&str, &str)], script: &str) -> JustBashExecResult {
+        let mut opts = JustBashSessionOptions::new();
+        for (path, content) in files {
+            opts = opts.with_file(*path, *content);
+        }
+        JustBashSession::with_options(opts).exec(script, JustBashExecOptions::new())
+    }
+
+    #[test]
+    fn basic_usage_matches_upstream() {
+        assert_eq!(run(&[], r#"echo "a b c" | xargs"#).stdout, "a b c\n");
+        let files = [("/file1.txt", "content1"), ("/file2.txt", "content2")];
+        assert_eq!(
+            run(&files, r#"echo "/file1.txt /file2.txt" | xargs cat"#).stdout,
+            "content1content2"
+        );
+        let empty = run(&[], r#"echo "" | xargs"#);
+        assert_eq!(empty.stdout, "");
+        assert_eq!(empty.exit_code, 0);
+    }
+
+    #[test]
+    fn n_option_batches() {
+        assert_eq!(
+            run(&[], r#"echo "a b c" | xargs -n 1 echo"#).stdout,
+            "a\nb\nc\n"
+        );
+        assert_eq!(
+            run(&[], r#"echo "a b c d" | xargs -n 2 echo"#).stdout,
+            "a b\nc d\n"
+        );
+        assert_eq!(
+            run(&[], r#"echo "a b c" | xargs -n 2 echo"#).stdout,
+            "a b\nc\n"
+        );
+    }
+
+    #[test]
+    fn replace_string_option() {
+        assert_eq!(
+            run(&[], "echo \"a\nb\nc\" | xargs -I {} echo file-{}").stdout,
+            "file-a\nfile-b\nfile-c\n"
+        );
+        assert_eq!(
+            run(&[], r#"echo "x" | xargs -I % echo %-%"#).stdout,
+            "x-x\n"
+        );
+        let files = [("/src/a.txt", "content-a"), ("/src/b.txt", "content-b")];
+        assert_eq!(
+            run(
+                &files,
+                "echo \"/src/a.txt\n/src/b.txt\" | xargs -I {} cat {}"
+            )
+            .stdout,
+            "content-acontent-b"
+        );
+    }
+
+    #[test]
+    fn null_separator_option() {
+        // -0 splits null-separated input.
+        assert_eq!(
+            run(&[], "printf 'a\\0b\\0c' | xargs -0 echo").stdout,
+            "a b c\n"
+        );
+        // --null long form.
+        assert_eq!(
+            run(&[], "printf 'a\\0b\\0c' | xargs --null echo").stdout,
+            "a b c\n"
+        );
+    }
+
+    #[test]
+    fn custom_delimiter_option() {
+        assert_eq!(
+            run(&[], r#"echo "a:b:c" | xargs -d : echo"#).stdout,
+            "a b c\n"
+        );
+        assert_eq!(
+            run(
+                &[],
+                "echo -e \"file1.txt\\nfile2.txt\\nfile3.txt\" | xargs -d '\\n' echo"
+            )
+            .stdout,
+            "file1.txt file2.txt file3.txt\n"
+        );
+        assert_eq!(
+            run(&[], "printf \"a\\tb\\tc\" | xargs -d '\\t' echo").stdout,
+            "a b c\n"
+        );
+        assert_eq!(
+            run(&[], r#"echo "a:b:c:d:e" | xargs -d : -n 2 echo"#).stdout,
+            "a b\nc d\ne\n"
+        );
+        assert_eq!(
+            run(&[], r#"echo "x:y:z" | xargs -d : -I {} echo "item: {}""#).stdout,
+            "item: x\nitem: y\nitem: z\n"
+        );
+        // Items keep their internal/leading spaces (no per-item trim).
+        assert_eq!(
+            run(
+                &[],
+                r#"echo "hello world:foo bar:test" | xargs -d : -n 1 echo"#
+            )
+            .stdout,
+            "hello world\nfoo bar\ntest\n"
+        );
+        assert_eq!(run(&[], r#"echo "a::b" | xargs -d : echo"#).stdout, "a b\n");
+        assert_eq!(
+            run(&[], "echo \"a\\\\b\\\\c\" | xargs -d '\\\\' echo").stdout,
+            "a b c\n"
+        );
+        // Leading space inside an item is preserved through the command.
+        assert_eq!(
+            run(&[], r#"printf ' a: b' | xargs -d : echo"#).stdout,
+            " a  b\n"
+        );
+        let files = [
+            ("/data/file1.txt", "content1"),
+            ("/data/file2.txt", "content2"),
+            ("/data/file3.txt", "content3"),
+        ];
+        assert_eq!(
+            run(
+                &files,
+                r#"echo "/data/file1.txt:/data/file2.txt:/data/file3.txt" | xargs -d : cat"#
+            )
+            .stdout,
+            "content1content2content3"
+        );
+    }
+
+    #[test]
+    fn verbose_option_quotes_special_args() {
+        assert_eq!(
+            run(&[], r#"echo "x y" | xargs -t echo"#).stderr,
+            "echo x y\n"
+        );
+        assert_eq!(
+            run(&[], r#"echo "x y" | xargs --verbose echo"#).stderr,
+            "echo x y\n"
+        );
+        // Arg with a space is double-quoted in verbose output.
+        assert_eq!(
+            run(&[], "printf 'a b:c' | xargs -d : -t echo").stderr,
+            "echo \"a b\" c\n"
+        );
+    }
+
+    #[test]
+    fn no_run_if_empty_option() {
+        assert_eq!(run(&[], r#"echo "" | xargs -r echo "nonempty""#).stdout, "");
+        assert_eq!(
+            run(&[], r#"echo "" | xargs --no-run-if-empty echo nonempty"#).stdout,
+            ""
+        );
+    }
+
+    #[test]
+    fn combined_short_flags() {
+        // -tr combines verbose + no-run-if-empty.
+        assert_eq!(
+            run(&[], r#"echo "x y" | xargs -tr echo"#).stderr,
+            "echo x y\n"
+        );
+    }
+
+    #[test]
+    fn unknown_options_error() {
+        let long = run(&[], r#"echo "x" | xargs --bogus echo"#);
+        assert_eq!(long.stderr, "xargs: unrecognized option '--bogus'\n");
+        assert_eq!(long.exit_code, 1);
+
+        let short = run(&[], r#"echo "x" | xargs -z echo"#);
+        assert_eq!(short.stderr, "xargs: invalid option -- 'z'\n");
+        assert_eq!(short.exit_code, 1);
+    }
+
+    #[test]
+    fn parallel_option_runs_in_order() {
+        assert_eq!(
+            run(&[], r#"echo "a b c" | xargs -P 2 -n 1 echo item:"#).stdout,
+            "item: a\nitem: b\nitem: c\n"
+        );
+        assert_eq!(
+            run(&[], "echo -e \"x\\ny\\nz\" | xargs -P 3 -I {} echo file-{}").stdout,
+            "file-x\nfile-y\nfile-z\n"
+        );
+        assert_eq!(
+            run(&[], r#"echo "1 2 3" | xargs -P 1 -n 1 echo"#).stdout,
+            "1\n2\n3\n"
+        );
+        let files = [
+            ("/a.txt", "content-a"),
+            ("/b.txt", "content-b"),
+            ("/c.txt", "content-c"),
+        ];
+        assert_eq!(
+            run(
+                &files,
+                r#"echo "/a.txt /b.txt /c.txt" | xargs -P 2 -n 1 cat"#
+            )
+            .stdout,
+            "content-acontent-bcontent-c"
+        );
+    }
+
+    #[test]
+    fn exit_code_propagates() {
+        let r = run(&[], r#"echo "missing.txt" | xargs cat"#);
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("No such file"));
+    }
+
+    #[test]
+    fn help_lists_options() {
+        let r = run(&[], "xargs --help");
+        assert!(r.stdout.contains("xargs"));
+        assert!(r.stdout.contains("build and execute"));
+        assert!(r.stdout.contains("-I"));
+        assert!(r.stdout.contains("-n"));
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn reads_utf8_from_stdin() {
+        let files = [("/in.txt", "한글\ncafé\n漢字\n")];
+        let r = run(&files, "cat /in.txt | xargs echo");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "한글 café 漢字\n");
+    }
+
+    #[test]
+    fn command_name_quoting() {
+        let files = [("/bin/my cmd.sh", "echo XARGS:$1\n")];
+        let mut opts = JustBashSessionOptions::new();
+        for (p, c) in files {
+            opts = opts.with_file(p, c);
+        }
+        let s = JustBashSession::with_options(opts);
+        assert_eq!(
+            s.exec("chmod +x '/bin/my cmd.sh'", JustBashExecOptions::new())
+                .exit_code,
+            0
+        );
+        let r = s.exec(
+            "printf '/dir/f.txt\\n' | xargs -I {} '/bin/my cmd.sh' {}",
+            JustBashExecOptions::new(),
+        );
+        assert_eq!(r.stdout, "XARGS:/dir/f.txt\n");
+        assert_eq!(r.stderr, "");
+        assert_eq!(r.exit_code, 0);
     }
 }
