@@ -5673,17 +5673,60 @@ fn display_mv_dest(dest_arg: &str, target: &str, dest_is_dir: bool) -> String {
     }
 }
 
+/// Mirrors upstream `showHelp(findHelp)` from commands/find/find.ts: the
+/// `name - summary` header, `Usage:` line, then an indented `Options:` block.
+fn find_help_text() -> String {
+    const OPTIONS: &[&str] = &[
+        "-name PATTERN    file name matches shell pattern PATTERN",
+        "-iname PATTERN   like -name but case insensitive",
+        "-path PATTERN    file path matches shell pattern PATTERN",
+        "-ipath PATTERN   like -path but case insensitive",
+        "-regex PATTERN   file path matches regular expression PATTERN",
+        "-iregex PATTERN  like -regex but case insensitive",
+        "-type TYPE       file is of type: f (regular file), d (directory)",
+        "-empty           file is empty or directory is empty",
+        "-mtime N         file's data was modified N*24 hours ago",
+        "-newer FILE      file was modified more recently than FILE",
+        "-size N[ckMGb]   file uses N units of space (c=bytes, k=KB, M=MB, G=GB, b=512B blocks)",
+        "-perm MODE       file's permission bits are exactly MODE (octal)",
+        "-perm -MODE      all permission bits MODE are set",
+        "-perm /MODE      any permission bits MODE are set",
+        "-maxdepth LEVELS descend at most LEVELS directories",
+        "-mindepth LEVELS do not apply tests at levels less than LEVELS",
+        "-depth           process directory contents before directory itself",
+        "-prune           do not descend into this directory",
+        "-not, !          negate the following expression",
+        "-a, -and         logical AND (default)",
+        "-o, -or          logical OR",
+        "-exec CMD {} ;   execute CMD on each file ({} is replaced by filename)",
+        "-exec CMD {} +   execute CMD with multiple files at once",
+        "-print           print the full file name (default action)",
+        "-print0          print the full file name followed by a null character",
+        "-printf FORMAT   print FORMAT with directives: %f %h %p %P %s %d %m %M %t",
+        "-delete          delete found files/directories",
+        "    --help       display this help and exit",
+    ];
+    let mut output = String::from("find - search for files in a directory hierarchy\n\n");
+    output.push_str("Usage: find [path...] [expression]\n");
+    output.push_str("\nOptions:\n");
+    for opt in OPTIONS {
+        output.push_str("  ");
+        output.push_str(opt);
+        output.push('\n');
+    }
+    output
+}
+
 fn command_find(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
-    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        return stdout_result(
-            "Usage: find [path...] [expression]\n  -name PATTERN\n  -type f|d\n  -maxdepth N\n  -mindepth N\n  -print\n  -print0\n  -printf FORMAT\n  -delete\n  -exec CMD {} ;\n",
-        );
+    if args.iter().any(|arg| arg == "--help") {
+        return stdout_result(find_help_text());
     }
     let query = match parse_find_query(args) {
         Ok(query) => query,
         Err(result) => return result,
     };
     let has_explicit_action = find_expr_has_action(&query.expression);
+    let path_pruning_hint = extract_path_pruning_hint(&query.expression);
     let mut stdout = String::new();
     let mut stderr = String::new();
     let mut exit_code = 0;
@@ -5743,6 +5786,19 @@ fn command_find(state: &mut ExecState<'_>, args: &[String]) -> CommandResult {
                     .any(|prefix| entry.path.starts_with(&format!("{prefix}/")))
                 {
                     continue;
+                }
+                // `-path "*/X/*.ext" -type f` pruning: a directory named `X`
+                // does not descend into its own subdirectories (mirrors
+                // upstream `extractPathPruningHints` + `inTerminalDir`). Only
+                // direct file children of `X` can match, so prune any
+                // sub-directory of a terminal directory from traversal.
+                if let Some(terminal) = path_pruning_hint.terminal_dir.as_deref() {
+                    if entry.stat.is_directory
+                        && find_path_under_terminal_dir(&entry.path, &absolute_root, terminal)
+                    {
+                        pruned_prefixes.push(entry.path.clone());
+                        continue;
+                    }
                 }
                 let evaluation = evaluate_find_expr(&query.expression, &entry, &fs);
                 if evaluation.prune && entry.stat.is_directory {
@@ -6331,6 +6387,82 @@ fn find_pattern_match(pattern: &str, value: &str, ignore_case: bool) -> bool {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct PathPruningHint {
+    terminal_dir: Option<String>,
+}
+
+/// Mirrors upstream `extractPathPruningHints`: when the expression is a
+/// `-path "*/X/*"` / `-path "*/X/*.ext"` pattern combined with `-type f`,
+/// the literal directory segment `X` is a "terminal" directory — find does
+/// not descend into its subdirectories, so only direct file children match.
+fn extract_path_pruning_hint(expr: &FindExpr) -> PathPruningHint {
+    let mut patterns = Vec::new();
+    let mut has_type_file = false;
+    collect_path_pruning_facts(expr, &mut patterns, &mut has_type_file);
+    if !has_type_file || patterns.len() != 1 {
+        return PathPruningHint::default();
+    }
+    let parts: Vec<&str> = patterns[0].split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() < 2 {
+        return PathPruningHint::default();
+    }
+    // Find the last literal segment before a trailing wildcard filename.
+    for i in (0..parts.len().saturating_sub(1)).rev() {
+        let part = parts[i];
+        if !part.contains('*')
+            && !part.contains('?')
+            && !part.contains('[')
+            && part != "."
+            && part != ".."
+        {
+            let next = parts[i + 1];
+            if next.contains('*') || next.contains('?') {
+                return PathPruningHint {
+                    terminal_dir: Some(part.to_string()),
+                };
+            }
+            break;
+        }
+    }
+    PathPruningHint::default()
+}
+
+fn collect_path_pruning_facts(expr: &FindExpr, paths: &mut Vec<String>, has_type_file: &mut bool) {
+    match expr {
+        FindExpr::Path { pattern, .. } => paths.push(pattern.clone()),
+        FindExpr::Type('f') => *has_type_file = true,
+        FindExpr::Not(inner) => collect_path_pruning_facts(inner, paths, has_type_file),
+        FindExpr::And(left, right) | FindExpr::Or(left, right) => {
+            collect_path_pruning_facts(left, paths, has_type_file);
+            collect_path_pruning_facts(right, paths, has_type_file);
+        }
+        _ => {}
+    }
+}
+
+/// True when `path` lies strictly below a directory named `terminal` (relative
+/// to `root`): i.e. one of its ancestor segments equals `terminal` but the
+/// final segment does not. Such entries are pruned from traversal because find
+/// never descends into a terminal directory's subdirectories.
+fn find_path_under_terminal_dir(path: &str, root: &str, terminal: &str) -> bool {
+    let relative = if root == "/" {
+        path.strip_prefix('/').unwrap_or(path)
+    } else {
+        match path.strip_prefix(&format!("{root}/")) {
+            Some(rest) => rest,
+            None => return false,
+        }
+    };
+    let segments: Vec<&str> = relative.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.len() < 2 {
+        return false;
+    }
+    // Any ancestor segment (all but the last) named `terminal` means this
+    // entry is below a terminal directory.
+    segments[..segments.len() - 1].contains(&terminal)
+}
+
 fn find_expr_has_action(expr: &FindExpr) -> bool {
     match expr {
         FindExpr::Action(_) => true,
@@ -6352,10 +6484,13 @@ fn run_find_action(
         FindAction::Print0 => stdout_result(format!("{}\0", entry.display_path)),
         FindAction::Printf(format) => stdout_result(format_find_printf(format, entry)),
         FindAction::Delete => match state.session.inner.fs.lock() {
+            // Upstream `-delete` always calls `rm` non-recursively
+            // (`{ recursive: false }`); a non-empty directory therefore fails
+            // with the underlying ENOTEMPTY rm error rather than being removed.
             Ok(mut fs) => match fs.rm(
                 &entry.path,
                 RmOptions {
-                    recursive: entry.stat.is_directory,
+                    recursive: false,
                     force: false,
                 },
             ) {
@@ -35538,6 +35673,99 @@ mod tests {
         assert_eq!(secs, "00:00:00\n");
         let ctime = find_run("find /dir -type f -printf \"%t\\n\"", pf, "/").stdout;
         assert_eq!(ctime, "Thu Jan  1 00:00:00 1970\n");
+    }
+
+    #[test]
+    fn find_help_matches_upstream_showhelp_format() {
+        // Mirrors upstream `showHelp(findHelp)`: `name - summary` header, a
+        // `Usage:` line, then an indented `Options:` block. The Rust output
+        // must match byte-for-byte.
+        let r = find_run("find --help", &[("/dir/a.txt", "a")], "/");
+        let expected = "find - search for files in a directory hierarchy\n\nUsage: find [path...] [expression]\n\nOptions:\n  -name PATTERN    file name matches shell pattern PATTERN\n  -iname PATTERN   like -name but case insensitive\n  -path PATTERN    file path matches shell pattern PATTERN\n  -ipath PATTERN   like -path but case insensitive\n  -regex PATTERN   file path matches regular expression PATTERN\n  -iregex PATTERN  like -regex but case insensitive\n  -type TYPE       file is of type: f (regular file), d (directory)\n  -empty           file is empty or directory is empty\n  -mtime N         file's data was modified N*24 hours ago\n  -newer FILE      file was modified more recently than FILE\n  -size N[ckMGb]   file uses N units of space (c=bytes, k=KB, M=MB, G=GB, b=512B blocks)\n  -perm MODE       file's permission bits are exactly MODE (octal)\n  -perm -MODE      all permission bits MODE are set\n  -perm /MODE      any permission bits MODE are set\n  -maxdepth LEVELS descend at most LEVELS directories\n  -mindepth LEVELS do not apply tests at levels less than LEVELS\n  -depth           process directory contents before directory itself\n  -prune           do not descend into this directory\n  -not, !          negate the following expression\n  -a, -and         logical AND (default)\n  -o, -or          logical OR\n  -exec CMD {} ;   execute CMD on each file ({} is replaced by filename)\n  -exec CMD {} +   execute CMD with multiple files at once\n  -print           print the full file name (default action)\n  -print0          print the full file name followed by a null character\n  -printf FORMAT   print FORMAT with directives: %f %h %p %P %s %d %m %M %t\n  -delete          delete found files/directories\n      --help       display this help and exit\n";
+        assert_eq!(r.stdout, expected);
+        assert_eq!(r.stderr, "");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn find_delete_uses_non_recursive_rm_and_reports_enotempty() {
+        // Upstream `-delete` always calls `rm` with `{ recursive: false }`, so
+        // a non-empty directory fails with the underlying ENOTEMPTY rm error
+        // (rather than being recursively removed).
+        let r = find_run(
+            "find /dir -type d -name subdir -delete",
+            &[("/dir/subdir/file.txt", "content")],
+            "/",
+        );
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(
+            r.stderr,
+            "find: cannot delete '/dir/subdir': ENOTEMPTY: directory not empty, rm '/dir/subdir'\n"
+        );
+
+        // Empty directory deletes successfully.
+        let bash = crate::runtime::Bash::with_options(crate::runtime::BashOptions {
+            files: {
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("/dir/subdir/.keep".to_string(), String::new());
+                m
+            },
+            cwd: Some("/".to_string()),
+            ..Default::default()
+        });
+        bash.exec("rm /dir/subdir/.keep");
+        bash.exec("find /dir -type d -empty -delete");
+        assert_eq!(bash.exec("ls /dir").stdout, "");
+    }
+
+    #[test]
+    fn find_path_terminal_dir_pruning_matches_upstream() {
+        // `-path "*/X/*.ext" -type f` extracts a pruning hint: a directory
+        // named `X` is "terminal" and find does not descend into its
+        // subdirectories, so only direct file children of `X` match.
+        let files = &[
+            ("/data/pulls/1.json", "{}"),
+            ("/data/pulls/2.json", "{}"),
+            ("/data/pulls/pulls/nested.json", "{}"),
+            ("/data/pulls/other/deep.json", "{}"),
+        ];
+        let r = find_run("find /data -path \"*/pulls/*.json\" -type f", files, "/");
+        let mut lines: Vec<&str> = r
+            .stdout
+            .trim()
+            .split('\n')
+            .filter(|l| !l.is_empty())
+            .collect();
+        lines.sort_unstable();
+        assert_eq!(lines, vec!["/data/pulls/1.json", "/data/pulls/2.json"]);
+        assert_eq!(r.exit_code, 0);
+
+        // 10 repos * 20 pulls = 200 direct pull children, none nested.
+        let mut big = Vec::new();
+        for repo in 1..=10 {
+            for pull in 1..=20 {
+                big.push((
+                    Box::leak(format!("/repos/project{repo}/pulls/{pull}.json").into_boxed_str())
+                        as &str,
+                    "{}",
+                ));
+            }
+            for issue in 1..=10 {
+                big.push((
+                    Box::leak(format!("/repos/project{repo}/issues/{issue}.json").into_boxed_str())
+                        as &str,
+                    "{}",
+                ));
+            }
+        }
+        let r = find_run("find /repos -path \"*/pulls/*.json\" -type f", &big, "/");
+        let count = r
+            .stdout
+            .trim()
+            .split('\n')
+            .filter(|l| !l.is_empty())
+            .count();
+        assert_eq!(count, 200);
     }
 
     #[test]
