@@ -29132,9 +29132,28 @@ fn unexpand_line(input: &str, tab_width: usize, all: bool) -> String {
     output
 }
 
+const FOLD_HELP: &str = concat!(
+    "fold - wrap each input line to fit in specified width\n",
+    "\n",
+    "Usage: fold [OPTION]... [FILE]...\n",
+    "\n",
+    "Description:\n",
+    "  Wrap input lines in each FILE, writing to standard output. If no FILE is specified, standard input is read.\n",
+    "\n",
+    "Options:\n",
+    "  -w WIDTH    Use WIDTH columns instead of 80\n",
+    "  -s          Break at spaces\n",
+    "  -b          Count bytes rather than columns\n",
+    "\n",
+    "Examples:\n",
+    "  fold -w 40 file.txt           # Wrap at 40 columns\n",
+    "  fold -sw 40 file.txt          # Word wrap at 40 columns\n",
+    "  echo 'long line' | fold -w 5  # Force wrap at 5\n",
+);
+
 fn command_fold(state: &ExecState<'_>, args: &[String], stdin: &str) -> CommandResult {
     if args.iter().any(|arg| arg == "--help") {
-        return stdout_result("Usage: fold [OPTION]... [FILE]...\nWrap input lines.\n");
+        return stdout_result(FOLD_HELP);
     }
     let mut width = 80usize;
     let mut spaces = false;
@@ -42529,5 +42548,141 @@ mod comm_parity_tests {
         assert!(r.stdout.contains("café"));
         assert!(r.stdout.contains("한글"));
         assert!(r.stdout.contains("漢字"));
+    }
+}
+
+#[cfg(test)]
+mod fold_parity_tests {
+    use crate::{JustBashExecOptions, JustBashSession, JustBashSessionOptions};
+
+    fn exec(script: &str) -> crate::JustBashExecResult {
+        JustBashSession::new().exec(script, JustBashExecOptions::new())
+    }
+
+    #[test]
+    fn wraps_at_80_columns_by_default() {
+        let long = "a".repeat(100);
+        let r = exec(&format!("echo '{long}' | fold"));
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(
+            r.stdout,
+            format!("{}\n{}\n", "a".repeat(80), "a".repeat(20))
+        );
+    }
+
+    #[test]
+    fn wraps_at_specified_width() {
+        let r = exec("echo 'hello world' | fold -w 5");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "hello\n worl\nd\n");
+    }
+
+    #[test]
+    fn wraps_at_specified_width_attached() {
+        let r = exec("echo '1234567890' | fold -w5");
+        assert_eq!(r.stdout, "12345\n67890\n");
+    }
+
+    #[test]
+    fn breaks_at_spaces() {
+        let r = exec("echo 'hello world foo bar' | fold -sw 10");
+        assert_eq!(r.stdout, "hello \nworld foo \nbar\n");
+    }
+
+    #[test]
+    fn breaks_at_spaces_word_fits_exactly() {
+        let r = exec("echo 'abc defgh' | fold -sw 6");
+        assert_eq!(r.stdout, "abc \ndefgh\n");
+    }
+
+    #[test]
+    fn empty_and_blank_lines() {
+        assert_eq!(exec("printf '' | fold").stdout, "");
+        assert_eq!(exec("printf 'a\\n\\nb\\n' | fold -w 5").stdout, "a\n\nb\n");
+    }
+
+    #[test]
+    fn trailing_newline_handling() {
+        assert_eq!(exec("printf 'hello\\n' | fold -w 5").stdout, "hello\n");
+        assert_eq!(exec("printf 'hello' | fold -w 5").stdout, "hello");
+    }
+
+    #[test]
+    fn tabs_expand_to_eight_column_boundary() {
+        let r = exec("printf '\\tabc' | fold -w 10");
+        assert_eq!(r.stdout, "\tab\nc");
+    }
+
+    #[test]
+    fn combined_sb_flags() {
+        let r = exec("echo 'hello world' | fold -sb -w 8");
+        assert_eq!(r.stdout, "hello \nworld\n");
+    }
+
+    #[test]
+    fn errors_on_invalid_and_zero_width() {
+        let r = exec("echo 'x' | fold -w abc");
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("invalid number of columns"));
+        let r = exec("echo 'x' | fold -w 0");
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("invalid number of columns"));
+    }
+
+    #[test]
+    fn errors_on_unknown_flags() {
+        let r = exec("echo 'x' | fold -x");
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("invalid option"));
+        let r = exec("echo 'x' | fold --unknown");
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("unrecognized option"));
+    }
+
+    #[test]
+    fn help_contains_fold_and_lowercase_wrap() {
+        let r = exec("fold --help");
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.contains("fold"));
+        // Upstream showHelp emits the summary "wrap each input line ...",
+        // so the lowercase word "wrap" must be present.
+        assert!(r.stdout.contains("wrap"));
+    }
+
+    #[test]
+    fn reads_from_files() {
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new()
+                .with_file("/test.txt", "1234567890\n")
+                .with_file("/a.txt", "aaaaaaaaaa\n")
+                .with_file("/b.txt", "bbbbbbbbbb\n"),
+        );
+        assert_eq!(
+            bash.exec("fold -w 5 /test.txt", JustBashExecOptions::new())
+                .stdout,
+            "12345\n67890\n"
+        );
+        assert_eq!(
+            bash.exec("fold -w 5 /a.txt /b.txt", JustBashExecOptions::new())
+                .stdout,
+            "aaaaa\naaaaa\nbbbbb\nbbbbb\n"
+        );
+        let r = bash.exec("fold /nonexistent.txt", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 1);
+        assert!(
+            r.stderr
+                .to_lowercase()
+                .contains("no such file or directory")
+        );
+    }
+
+    #[test]
+    fn wraps_by_codepoint_not_byte() {
+        let bash = JustBashSession::with_options(
+            JustBashSessionOptions::new().with_file("/in.txt", "한글café\n"),
+        );
+        let r = bash.exec("cat /in.txt | fold -w 2", JustBashExecOptions::new());
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.stdout, "한글\nca\nfé\n");
     }
 }
