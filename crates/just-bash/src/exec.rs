@@ -1515,12 +1515,28 @@ fn execute_simple_command(
     let stdin = match stdin_redirect {
         Some(StdinSource::File(path)) => {
             let path = resolve_path(&state.cwd, &path);
-            match state.session.inner.fs.lock() {
-                Ok(fs) => match fs.read_file(&path) {
-                    Ok(content) => content,
+            let bytes = match state.session.inner.fs.lock() {
+                Ok(fs) => match fs.read_file_buffer(&path) {
+                    Ok(bytes) => bytes,
                     Err(_) => return stderr_result(1, format!("bash: {path}: No such file\n")),
                 },
                 Err(_) => return stderr_result(1, "bash: filesystem lock poisoned\n"),
+            };
+            // A `<` redirect feeds the file's raw bytes to stdin. Binary content
+            // (invalid UTF-8) is carried as a latin1 (char-per-byte) buffer with
+            // `stdin_bytes` set, so byte-clean consumers (`wc -c`, `tar`, ...) see
+            // the true on-disk byte count instead of a UTF-8-expanded one — the
+            // same raw-byte carrier the pipe path uses (e.g. `cat bin | tar -t`).
+            // Valid UTF-8 stays a normal text string (stdin_bytes cleared).
+            match String::from_utf8(bytes) {
+                Ok(text) => {
+                    state.stdin_bytes = false;
+                    text
+                }
+                Err(error) => {
+                    state.stdin_bytes = true;
+                    ByteString::from_bytes(error.into_bytes()).to_latin1()
+                }
             }
         }
         // Here-string: the word, with parameter/command expansion, plus a newline.
@@ -43680,5 +43696,24 @@ mod head_parity_tests {
         let r = crate::runtime::Bash::new().exec("test -c /no/such/thing && echo yes || echo no");
         assert_eq!(r.stdout.trim(), "no");
         assert_eq!(r.exit_code, 0);
+    }
+
+    // Behavioral parity: a `<` input redirection from a binary file must feed the
+    // raw on-disk bytes to stdin (latin1 char-per-byte carrier with stdin_bytes),
+    // so byte-clean consumers like `wc -c` report the true byte count. Bytes 0xff
+    // and 0xfe are never valid UTF-8, so without the raw carrier they get
+    // replacement-expanded and over-counted (returning 9 instead of 5).
+    #[test]
+    fn wc_c_input_redirection_from_binary_file_counts_raw_bytes() {
+        let bash = crate::runtime::Bash::with_options(crate::runtime::BashOptions {
+            binary_files: std::collections::BTreeMap::from([(
+                "/file".to_string(),
+                vec![0x00u8, 0x01, 0x02, 0xff, 0xfe],
+            )]),
+            ..crate::runtime::BashOptions::default()
+        });
+        let result = bash.exec("wc -c < /file");
+        assert_eq!(result.stdout.trim(), "5");
+        assert_eq!(result.exit_code, 0);
     }
 }
