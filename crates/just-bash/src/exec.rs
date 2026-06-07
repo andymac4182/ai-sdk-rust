@@ -27937,9 +27937,22 @@ fn render_sql_text_value(raw: &str) -> String {
 fn sql_value_delimited(value: &SqlValue, null_value: &str, separator: &str) -> String {
     let value = sql_value_text(value, null_value);
     if separator == "," {
-        csv_escape_field(&value, separator)
+        sqlite_csv_escape_field(&value)
     } else {
         value
+    }
+}
+
+/// CSV field escaping for sqlite3's `-csv` mode. Mirrors upstream
+/// `formatters.ts::escapeCsvField`: real sqlite3 wraps a field in double quotes
+/// when it contains a comma, double quote, single quote, or newline (the
+/// single-quote trigger is sqlite3-specific and differs from the generic CSV
+/// escaper used elsewhere). Embedded double quotes are doubled.
+fn sqlite_csv_escape_field(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\'') || value.contains('\n') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
     }
 }
 

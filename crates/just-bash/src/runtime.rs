@@ -20518,6 +20518,45 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         );
     }
 
+    /// Regression: sqlite3 `-csv` mode wraps a field in double quotes when it
+    /// contains a comma, double quote, single quote, or newline (the
+    /// single-quote trigger is sqlite3-specific, mirroring upstream
+    /// `formatters.ts::escapeCsvField`). Previously the field
+    /// `he said 'hello'` was emitted unquoted because the shared CSV escaper
+    /// did not treat single quotes as special.
+    #[test]
+    fn structured_data_sqlite3_csv_escapes_single_quote_field_rows() {
+        let env = bash();
+
+        // sqlite3.formatters.test.ts:31 — a string containing an embedded single
+        // quote is wrapped in double quotes (the single quote itself is kept).
+        assert_eq!(
+            env.exec("sqlite3 -csv :memory: \"SELECT 'he said ''hello'''\"")
+                .stdout,
+            "\"he said 'hello'\"\n"
+        );
+
+        // sqlite3.output-modes.test.ts:6 — fields without special characters stay
+        // unquoted (negative control so the trigger isn't over-eager).
+        assert_eq!(
+            env.exec(
+                "sqlite3 -csv :memory: \"CREATE TABLE t(a,b); INSERT INTO t VALUES(1,'hello'),(2,'world'); SELECT * FROM t\""
+            )
+            .stdout,
+            "1,hello\n2,world\n"
+        );
+
+        // sqlite3.output-modes.test.ts:15 — comma and newline triggers still wrap
+        // and the double-quote doubling rule continues to apply.
+        assert_eq!(
+            env.exec(
+                "sqlite3 -csv :memory: \"CREATE TABLE t(a); INSERT INTO t VALUES('hello,world'),('has\nnewline'); SELECT * FROM t\""
+            )
+            .stdout,
+            "\"hello,world\"\n\"has\nnewline\"\n"
+        );
+    }
+
     /// Maps real-command pipeline and short-circuit rows from
     /// `packages/just-bash/src/syntax/operators.test.ts` and `set-errexit.test.ts`
     /// that exercise the registry-backed `Bash` runtime (head/tail/grep/find/mkdir
