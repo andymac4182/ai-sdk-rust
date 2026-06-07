@@ -238,6 +238,73 @@ fn jbc45_real_fs_symlink_target_sanitizer_cases() {
     );
 }
 
+/// Ports `packages/just-bash/src/fs/cross-fs-security.test.ts` "symlink readlink
+/// sanitization" rows (L387 within-root relative link, L398 relative target that
+/// escapes root reduced to basename) to the host-backed `readlink` sanitiser.
+/// Upstream's `ReadWriteFs.readlink` resolves the raw OS target against the
+/// link's directory and either returns the within-root virtual path (relative to
+/// the link's dir) or, when the target escapes the sandbox root, only the raw
+/// target's basename — so no `..` traversal or real outside-root path structure
+/// leaks. The Rust [`sanitize_readlink_target`] mirrors that contract; each
+/// assertion fails if the sanitiser regresses.
+#[test]
+fn jbc45_readlink_target_sanitizer_handles_relative_escape() {
+    // The sandbox is mounted at the host directory `/tmp/xfs-sandbox`. A
+    // pre-existing within-root relative link (`hello.txt`) round-trips: the
+    // resolved target `/tmp/xfs-sandbox/hello.txt` stays in root, and relative to
+    // the link's `/` virtual directory it is `hello.txt` (cross-fs-security L387).
+    assert_eq!(
+        sanitize_readlink_target(
+            "/rl-rel",
+            "/tmp/xfs-sandbox",
+            "hello.txt",
+            "/tmp/xfs-sandbox",
+        ),
+        "hello.txt",
+    );
+
+    // A relative target that traverses OUT of the sandbox
+    // (`../xfs-outside/secret.txt`) resolves to `/tmp/xfs-outside/secret.txt`,
+    // which is outside the root. It MUST collapse to the basename `secret.txt`:
+    // no `..` component and no leak of the real outside directory
+    // (cross-fs-security L398).
+    let escaped = sanitize_readlink_target(
+        "/rl-rel-escape",
+        "/tmp/xfs-sandbox",
+        "../xfs-outside/secret.txt",
+        "/tmp/xfs-sandbox",
+    );
+    assert_eq!(escaped, "secret.txt");
+    assert!(!escaped.contains(".."), "target leaked `..`: {escaped}");
+    assert!(
+        !escaped.contains("xfs-outside"),
+        "target leaked the real outside directory: {escaped}"
+    );
+
+    // An absolute target outside the root is likewise reduced to its basename.
+    assert_eq!(
+        sanitize_readlink_target(
+            "/rl-abs",
+            "/tmp/xfs-sandbox",
+            "/etc/passwd",
+            "/tmp/xfs-sandbox"
+        ),
+        "passwd",
+    );
+
+    // A nested within-root link presents the target relative to the link's own
+    // virtual directory (`/sub/rl` -> `nested.txt`).
+    assert_eq!(
+        sanitize_readlink_target(
+            "/sub/rl",
+            "/tmp/xfs-sandbox/sub",
+            "nested.txt",
+            "/tmp/xfs-sandbox",
+        ),
+        "nested.txt",
+    );
+}
+
 #[test]
 fn upstream_interface_contract_symlinks_keep_absolute_targets_virtual() {
     let mut fs = VirtualFileSystem::new();
