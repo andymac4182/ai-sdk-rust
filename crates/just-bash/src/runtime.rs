@@ -6098,9 +6098,9 @@ and exhibited clearly, with a label attached.\n";
         // becomes wrong.
         //
         // Upstream rows covered (file:line):
-        //   misc.test.ts:454 (--pre), :468 (--pre-glob), :1080 (-z gzip) — the
-        //   Rust port rejects the file-preprocessing / compression-search flags as
-        //   unrecognized options rather than implementing the JS feature.
+        //   misc.test.ts:1080 (-z gzip) — real DEFLATE decompression is not
+        //   implemented, so the compression-search flag is rejected rather than
+        //   silently mis-handling a real gzip buffer.
         let rejected = |args: &str, opt: &str| {
             let r = home_bash(&[("f.txt", "hello\n")]).exec(args);
             assert_eq!(r.exit_code, 1, "{args}");
@@ -6111,9 +6111,27 @@ and exhibited clearly, with a label attached.\n";
                 "{args}"
             );
         };
-        rejected("rg --pre 'cat' hello f.txt", "--pre");
-        rejected("rg --pre-glob '*.dat' hello f.txt", "--pre-glob");
         rejected("rg -z hello f.txt", "-z");
+
+        // misc.test.ts:454 (--pre) and :468 (--pre-glob): the `--pre` preprocessor
+        // is now implemented. The preprocessor command runs as `<pre> <file>` and
+        // its stdout is searched in place of the raw file content.
+        //   :454 — `rg --pre 'cat' test file.txt` over "original content\n" finds
+        //   no `test`, so it exits 1.
+        let r =
+            home_bash(&[("file.txt", "original content\n")]).exec("rg --pre 'cat' test file.txt");
+        assert_eq!(r.exit_code, 1, "--pre cat no-match exit");
+        assert_eq!(r.stdout, "", "--pre cat no-match stdout");
+        //   :468 — `--pre-glob '*.dat'` restricts preprocessing to .dat files but
+        //   both files are still searched; `cat` is identity, so both match.
+        let r = home_bash(&[("file.txt", "hello world\n"), ("file.dat", "hello world\n")])
+            .exec("rg --pre 'cat' --pre-glob '*.dat' hello");
+        assert_eq!(r.exit_code, 0, "--pre-glob exit");
+        assert!(
+            r.stdout.contains("hello world"),
+            "--pre-glob stdout: {:?}",
+            r.stdout
+        );
 
         // misc.test.ts:1108 binary_convert / binary.test.ts:305
         // (matching_files_inconsistent_with_count): a NUL-containing file is a
@@ -6299,12 +6317,10 @@ and exhibited clearly, with a label attached.\n";
         // --no-include-zero count override.
         unrecognized("rg --no-include-zero -c hello f.txt", "--no-include-zero");
 
-        // File preprocessing (--pre / --pre-glob).
-        unrecognized("rg --pre cat hello f.txt", "--pre");
-        unrecognized("rg --pre-glob '*.txt' hello f.txt", "--pre-glob");
-
-        // Non-gzip compression search (-z / --search-zip): only gzip is supported,
-        // and the Rust port does not wire up the -z flag at all.
+        // Non-gzip compression search (-z / --search-zip): real DEFLATE/gzip
+        // decompression is not implemented (the crate's gzip subsystem uses a
+        // base64 container, not raw DEFLATE), so the -z flag is left unwired and
+        // rejected rather than silently mis-handling a real gzip buffer.
         unrecognized("rg -z hello f.txt", "-z");
         unrecognized("rg --search-zip hello f.txt", "--search-zip");
 
@@ -6349,24 +6365,19 @@ and exhibited clearly, with a label attached.\n";
             pcre.stderr
         );
 
+        // Bare look-behind/look-ahead (without -P) fails the standard regex build.
+        // ripgrep / the upstream JS port surface every regex-build failure as the
+        // single `rg: invalid regex: <patterns>` line (rg-search.ts), so the Rust
+        // port emits that rather than an engine-specific look-around diagnostic.
         let look_behind = home_bash(&[("f.txt", "ab\nhello\n")]).exec("rg '(?<=a)b' f.txt");
         assert_eq!(look_behind.exit_code, 2, "look-behind");
         assert_eq!(look_behind.stdout, "", "look-behind");
-        assert!(
-            look_behind.stderr.contains("look-around")
-                || look_behind.stderr.contains("look-behind"),
-            "look-behind stderr: {:?}",
-            look_behind.stderr
-        );
+        assert_eq!(look_behind.stderr, "rg: invalid regex: (?<=a)b\n");
 
         let look_ahead = home_bash(&[("f.txt", "ab\nhello\n")]).exec("rg '(?=a)' f.txt");
         assert_eq!(look_ahead.exit_code, 2, "look-ahead");
         assert_eq!(look_ahead.stdout, "", "look-ahead");
-        assert!(
-            look_ahead.stderr.contains("look-around") || look_ahead.stderr.contains("look-ahead"),
-            "look-ahead stderr: {:?}",
-            look_ahead.stderr
-        );
+        assert_eq!(look_ahead.stderr, "rg: invalid regex: (?=a)\n");
     }
 
     #[test]
@@ -11274,7 +11285,14 @@ type B struct {\n\tObjectID string `json:\"objectID\"`\n\tTaskID   int    `json:
         );
         let invalid = home_bash(&[("file.txt", "hello\n")]).exec("rg '['");
         assert_eq!(invalid.exit_code, 2);
-        assert!(invalid.stderr.contains("regex"));
+        // ripgrep / the upstream JS port collapse any regex-build failure into a
+        // single `rg: invalid regex: <patterns>` line (rg.edge-cases.test.ts:286
+        // `toContain("invalid regex")`), not the engine's verbose parse diagnostic.
+        assert_eq!(invalid.stderr, "rg: invalid regex: [\n");
+        // `*` (repetition with no preceding expression) takes the same path.
+        let star = home_bash(&[("file.txt", "hello\n")]).exec("rg '*'");
+        assert_eq!(star.exit_code, 2);
+        assert_eq!(star.stderr, "rg: invalid regex: *\n");
         assert_home_exec(&[("file.txt", "hello\n")], "rg -q hello", 0, "");
         assert_home_exec(
             &[("file.txt", "hello world\n")],
