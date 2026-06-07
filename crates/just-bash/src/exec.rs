@@ -2843,6 +2843,8 @@ fn command_grep(
         word_regexp,
         line_regexp,
         mode,
+        // grep/egrep emulate the RE2(JS) engine's regex semantics.
+        true,
     ) {
         Ok(matcher) => matcher,
         Err(error) => return stderr_result(2, format!("grep: {error}\n")),
@@ -3204,6 +3206,7 @@ impl LineMatcher {
         word_regexp: bool,
         line_regexp: bool,
         mode: GrepMode,
+        emulate_re2js: bool,
     ) -> Result<Self, String> {
         if mode == GrepMode::Fixed {
             return Ok(Self::Fixed {
@@ -3231,7 +3234,7 @@ impl LineMatcher {
                 })
                 .map_err(|error| error.to_string());
         }
-        let pattern = normalize_grep_regex(pattern, mode);
+        let pattern = normalize_grep_regex(pattern, mode, emulate_re2js)?;
         let pattern = if line_regexp {
             format!("^(?:{})$", pattern)
         } else if word_regexp {
@@ -3509,10 +3512,23 @@ fn push_regex_literal(output: &mut String, ch: char) {
     output.push(ch);
 }
 
-fn normalize_grep_regex(pattern: &str, mode: GrepMode) -> String {
+/// Normalize a grep-style regex into a pattern the Rust `regex` crate accepts.
+///
+/// `emulate_re2js` selects the strict JS-RegExp/RE2(JS) emulation used by
+/// `grep`/`egrep`/`fgrep` (literalizing malformed braces, rejecting stacked
+/// quantifiers and over-large intervals). The `rg` (ripgrep) path passes
+/// `false`: it accepts native PCRE-style constructs such as `(?P<name>...)`
+/// verbatim and only normalizes POSIX bracket leading members.
+fn normalize_grep_regex(
+    pattern: &str,
+    mode: GrepMode,
+    emulate_re2js: bool,
+) -> Result<String, String> {
     let pattern = pattern.replace("[[:<:]]", r"\b").replace("[[:>:]]", r"\b");
     let pattern = if mode == GrepMode::BasicRegex {
-        normalize_basic_grep_regex(&pattern)
+        normalize_basic_grep_regex(&pattern)?
+    } else if emulate_re2js {
+        normalize_extended_grep_regex(&pattern)?
     } else {
         pattern
     };
@@ -3526,7 +3542,7 @@ fn normalize_grep_regex(pattern: &str, mode: GrepMode) -> String {
 /// a class, so rewrite each bracket expression: escape the leading literal `]`
 /// and escape any literal `[` that is not part of a `[:class:]`/`[.coll.]`/
 /// `[=equiv=]` construct. Everything else is copied byte-for-byte.
-fn normalize_posix_leading_bracket(pattern: &str) -> String {
+fn normalize_posix_leading_bracket(pattern: &str) -> Result<String, String> {
     let chars = pattern.chars().collect::<Vec<_>>();
     let mut output = String::new();
     let mut index = 0;
@@ -3563,6 +3579,9 @@ fn normalize_posix_leading_bracket(pattern: &str) -> String {
                         // POSIX named-class / collating / equivalence construct:
                         // copy verbatim through its matching closing delimiter.
                         let delimiter = chars[index + 1];
+                        // Collect the construct body so a `[:name:]` class name
+                        // can be validated (RE2 rejects unknown class names).
+                        let mut body = String::new();
                         output.push('[');
                         output.push(delimiter);
                         index += 2;
@@ -3573,8 +3592,19 @@ fn normalize_posix_leading_bracket(pattern: &str) -> String {
                                 index += 2;
                                 break;
                             }
+                            body.push(chars[index]);
                             output.push(chars[index]);
                             index += 1;
+                        }
+                        if delimiter == ':' {
+                            // Negated classes are written `[:^name:]`; strip the
+                            // leading `^` before checking the class name.
+                            let name = body.strip_prefix('^').unwrap_or(&body);
+                            if !is_known_posix_class(name) {
+                                return Err(format!(
+                                    "Invalid regular expression: Unknown POSIX class name [[:{body}:]]"
+                                ));
+                            }
                         }
                     }
                     '[' => {
@@ -3598,112 +3628,418 @@ fn normalize_posix_leading_bracket(pattern: &str) -> String {
         output.push(ch);
         index += 1;
     }
-    output
+    Ok(output)
 }
 
-fn normalize_basic_grep_regex(pattern: &str) -> String {
+/// Known POSIX character-class names accepted by the RE2 engine used upstream.
+/// An unknown name inside `[[:name:]]` is a syntax error (grep exit status 2).
+fn is_known_posix_class(name: &str) -> bool {
+    matches!(
+        name,
+        "alnum"
+            | "alpha"
+            | "ascii"
+            | "blank"
+            | "cntrl"
+            | "digit"
+            | "graph"
+            | "lower"
+            | "print"
+            | "punct"
+            | "space"
+            | "upper"
+            | "word"
+            | "xdigit"
+    )
+}
+
+/// `BADRPT` error message text used when a repetition operator has nothing to
+/// repeat (mirrors GNU grep's exit status 2 / JS RegExp "Nothing to repeat").
+const GREP_BADRPT: &str = "Invalid regular expression: Nothing to repeat";
+
+/// Convert a Basic Regular Expression (BRE) into a pattern the Rust `regex`
+/// crate accepts, faithfully porting upstream `escapeRegexForBasicGrep`.
+///
+/// In BRE, `+ ? | ( ) { }` are literal unless escaped, `*` is literal at the
+/// start of the pattern/group (or after `^`), `^` is an anchor only at the
+/// start of the pattern/group, and `$` is an anchor only at the end of the
+/// pattern or just before `\)`. A repetition operator that directly follows an
+/// unquantifiable position (e.g. `a*\{1\}` or `a\{1\}*`) is an error, matching
+/// GNU grep's `BADRPT` (exit status 2) and JS RegExp's "Nothing to repeat".
+fn normalize_basic_grep_regex(pattern: &str) -> Result<String, String> {
     let chars = pattern.chars().collect::<Vec<_>>();
     let mut output = String::new();
     let mut index = 0;
-    let mut in_class = false;
+    // True at the start of the pattern or of a `\(...\)` group / after `\|`,
+    // where `*` and `^` carry their literal/anchor meaning.
+    let mut at_atom_start = true;
+    // True when the previous emitted token was a repetition quantifier, so a
+    // following quantifier has "nothing to repeat".
+    let mut prev_was_quantifier = false;
     while index < chars.len() {
-        match chars[index] {
-            '\\' if index + 1 < chars.len() => match chars[index + 1] {
+        let ch = chars[index];
+        // Bracket expressions copy through unchanged; they are a single atom.
+        if ch == '[' {
+            output.push('[');
+            index += 1;
+            if matches!(chars.get(index), Some('^' | '!')) {
+                output.push(chars[index]);
+                index += 1;
+            }
+            if chars.get(index) == Some(&']') {
+                output.push(']');
+                index += 1;
+            }
+            while index < chars.len() && chars[index] != ']' {
+                if chars[index] == '\\' && index + 1 < chars.len() {
+                    output.push(chars[index]);
+                    output.push(chars[index + 1]);
+                    index += 2;
+                } else {
+                    output.push(chars[index]);
+                    index += 1;
+                }
+            }
+            if chars.get(index) == Some(&']') {
+                output.push(']');
+                index += 1;
+            }
+            at_atom_start = false;
+            prev_was_quantifier = false;
+            continue;
+        }
+
+        if ch == '\\' && index + 1 < chars.len() {
+            let next = chars[index + 1];
+            match next {
+                '|' => {
+                    output.push('|');
+                    index += 2;
+                    at_atom_start = true;
+                    prev_was_quantifier = false;
+                    continue;
+                }
                 '(' => {
                     output.push_str("(?:");
                     index += 2;
+                    at_atom_start = true;
+                    prev_was_quantifier = false;
+                    continue;
                 }
                 ')' => {
                     output.push(')');
                     index += 2;
+                    at_atom_start = false;
+                    prev_was_quantifier = false;
+                    continue;
                 }
-                '|' | '+' | '?' => {
-                    output.push(chars[index + 1]);
+                '+' | '?' => {
+                    // GNU BRE extension: `\+`/`\?` are repetition operators.
+                    if at_atom_start || prev_was_quantifier {
+                        return Err(GREP_BADRPT.to_string());
+                    }
+                    output.push(next);
                     index += 2;
+                    at_atom_start = false;
+                    prev_was_quantifier = true;
+                    continue;
                 }
-                '{' => {
-                    if let Some((interval, next_index)) = basic_grep_interval(&chars, index + 2) {
+                '{' => match basic_grep_interval(&chars, index + 2) {
+                    IntervalParse::Interval(interval, next_index) => {
+                        if at_atom_start || prev_was_quantifier {
+                            return Err(GREP_BADRPT.to_string());
+                        }
                         output.push_str(&interval);
                         index = next_index;
-                    } else {
-                        output.push('\\');
-                        output.push('{');
-                        index += 2;
+                        at_atom_start = false;
+                        prev_was_quantifier = true;
+                        continue;
                     }
+                    IntervalParse::TooLarge => return Err(GREP_BADBR.to_string()),
+                    IntervalParse::Literal => {
+                        output.push_str(r"\{");
+                        index += 2;
+                        at_atom_start = false;
+                        prev_was_quantifier = false;
+                        continue;
+                    }
+                },
+                '}' => {
+                    output.push_str(r"\}");
+                    index += 2;
+                    at_atom_start = false;
+                    prev_was_quantifier = false;
+                    continue;
                 }
                 other => {
                     output.push('\\');
                     output.push(other);
                     index += 2;
+                    at_atom_start = false;
+                    prev_was_quantifier = false;
+                    continue;
                 }
-            },
-            '[' => {
-                in_class = true;
-                output.push('[');
-                index += 1;
             }
-            ']' if in_class => {
-                in_class = false;
-                output.push(']');
-                index += 1;
-            }
-            '*' if !in_class && basic_grep_star_is_literal(&chars, index) => {
+        }
+
+        match ch {
+            '*' if at_atom_start => {
+                // Leading `*` is a literal character, not a quantifier.
                 output.push_str(r"\*");
                 index += 1;
+                // Stay at atom start so consecutive `*`s remain literal.
+                continue;
             }
-            '^' if !in_class && !basic_grep_caret_is_anchor(&chars, index) => {
+            '*' => {
+                if prev_was_quantifier {
+                    return Err(GREP_BADRPT.to_string());
+                }
+                output.push('*');
+                index += 1;
+                at_atom_start = false;
+                prev_was_quantifier = true;
+                continue;
+            }
+            '^' => {
+                if at_atom_start {
+                    output.push('^');
+                    index += 1;
+                    // After `^`, `*` is still literal.
+                    continue;
+                }
                 output.push_str(r"\^");
                 index += 1;
+                prev_was_quantifier = false;
+                continue;
+            }
+            '$' => {
+                let at_end = index == chars.len() - 1;
+                let before_group_end =
+                    index + 2 < chars.len() && chars[index + 1] == '\\' && chars[index + 2] == ')';
+                if at_end || before_group_end {
+                    output.push('$');
+                } else {
+                    output.push_str(r"\$");
+                }
+                index += 1;
+                at_atom_start = false;
+                prev_was_quantifier = false;
+                continue;
+            }
+            '+' | '?' | '|' | '(' | ')' | '{' | '}' => {
+                output.push('\\');
+                output.push(ch);
+                index += 1;
+                at_atom_start = false;
+                prev_was_quantifier = false;
+                continue;
             }
             other => {
                 output.push(other);
                 index += 1;
+                at_atom_start = false;
+                prev_was_quantifier = false;
+                continue;
             }
         }
     }
-    output
+    Ok(output)
 }
 
-fn basic_grep_interval(chars: &[char], mut index: usize) -> Option<(String, usize)> {
+/// Convert an Extended Regular Expression (ERE) into a pattern the Rust `regex`
+/// crate accepts, mirroring JS RegExp (Annex B) semantics used upstream.
+///
+/// A `{` begins an interval quantifier only when it matches `{\d+(,\d*)?}`;
+/// otherwise the brace is a literal. A repetition operator (`* + ?` or a valid
+/// interval) that directly follows an unquantifiable position is an error
+/// (`BADRPT`, exit status 2), matching JS RegExp's "Nothing to repeat".
+fn normalize_extended_grep_regex(pattern: &str) -> Result<String, String> {
+    let chars = pattern.chars().collect::<Vec<_>>();
+    let mut output = String::new();
+    let mut index = 0;
+    // True at the start of the pattern, of a `(...)` group, or after `|`.
+    let mut at_atom_start = true;
+    let mut prev_was_quantifier = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        // Bracket expressions copy through unchanged; treat as a single atom.
+        if ch == '[' {
+            output.push('[');
+            index += 1;
+            if matches!(chars.get(index), Some('^' | '!')) {
+                output.push(chars[index]);
+                index += 1;
+            }
+            if chars.get(index) == Some(&']') {
+                output.push(']');
+                index += 1;
+            }
+            while index < chars.len() && chars[index] != ']' {
+                if chars[index] == '\\' && index + 1 < chars.len() {
+                    output.push(chars[index]);
+                    output.push(chars[index + 1]);
+                    index += 2;
+                } else {
+                    output.push(chars[index]);
+                    index += 1;
+                }
+            }
+            if chars.get(index) == Some(&']') {
+                output.push(']');
+                index += 1;
+            }
+            at_atom_start = false;
+            prev_was_quantifier = false;
+            continue;
+        }
+        if ch == '\\' && index + 1 < chars.len() {
+            output.push('\\');
+            output.push(chars[index + 1]);
+            index += 2;
+            at_atom_start = false;
+            prev_was_quantifier = false;
+            continue;
+        }
+        match ch {
+            '(' => {
+                output.push('(');
+                index += 1;
+                at_atom_start = true;
+                prev_was_quantifier = false;
+            }
+            ')' => {
+                output.push(')');
+                index += 1;
+                at_atom_start = false;
+                prev_was_quantifier = false;
+            }
+            '|' => {
+                output.push('|');
+                index += 1;
+                at_atom_start = true;
+                prev_was_quantifier = false;
+            }
+            '*' | '+' | '?' => {
+                if at_atom_start || prev_was_quantifier {
+                    return Err(GREP_BADRPT.to_string());
+                }
+                output.push(ch);
+                index += 1;
+                at_atom_start = false;
+                prev_was_quantifier = true;
+            }
+            '{' => match extended_grep_interval(&chars, index + 1) {
+                IntervalParse::Interval(interval, next_index) => {
+                    if at_atom_start || prev_was_quantifier {
+                        return Err(GREP_BADRPT.to_string());
+                    }
+                    output.push_str(&interval);
+                    index = next_index;
+                    at_atom_start = false;
+                    prev_was_quantifier = true;
+                }
+                IntervalParse::TooLarge => return Err(GREP_BADBR.to_string()),
+                IntervalParse::Literal => {
+                    // Not a valid interval: the brace is a literal character.
+                    output.push_str(r"\{");
+                    index += 1;
+                    at_atom_start = false;
+                    prev_was_quantifier = false;
+                }
+            },
+            '}' => {
+                output.push_str(r"\}");
+                index += 1;
+                at_atom_start = false;
+                prev_was_quantifier = false;
+            }
+            other => {
+                output.push(other);
+                index += 1;
+                at_atom_start = false;
+                prev_was_quantifier = false;
+            }
+        }
+    }
+    Ok(output)
+}
+
+/// Maximum repetition count accepted in an interval `{n}` / `{n,m}`. Matches the
+/// RE2(JS) engine used upstream; a count above this is a `BADBR` error
+/// (exit status 2), not a literal brace.
+const GREP_MAX_INTERVAL: u64 = 1000;
+
+/// `BADBR` error text used when an interval count exceeds the engine limit.
+const GREP_BADBR: &str = "Invalid regular expression: Interval count too large";
+
+/// Classification of a `{...}` body in a grep interval expression.
+enum IntervalParse {
+    /// A well-formed interval; carries `({n,m}, index past the close)`.
+    Interval(String, usize),
+    /// Not an interval; the brace is a literal character.
+    Literal,
+    /// A syntactically valid interval whose count exceeds the engine limit.
+    TooLarge,
+}
+
+/// Parse a BRE interval `n\}`, `n,\}`, or `n,m\}` starting at `index` (just past
+/// the `\{`).
+fn basic_grep_interval(chars: &[char], mut index: usize) -> IntervalParse {
     let start = index;
     while index + 1 < chars.len() {
         if chars[index] == '\\' && chars[index + 1] == '}' {
             let body = chars[start..index].iter().collect::<String>();
-            if basic_grep_interval_body_is_valid(&body) {
-                return Some((format!("{{{body}}}"), index + 2));
-            }
-            return None;
+            return classify_grep_interval_body(&body, index + 2);
         }
         index += 1;
     }
-    None
+    IntervalParse::Literal
 }
 
-fn basic_grep_interval_body_is_valid(body: &str) -> bool {
-    if body.is_empty() {
-        return false;
+/// Parse an ERE interval `n}`, `n,}`, or `n,m}` starting at `index` (just past
+/// the `{`).
+fn extended_grep_interval(chars: &[char], mut index: usize) -> IntervalParse {
+    let start = index;
+    while index < chars.len() {
+        if chars[index] == '}' {
+            let body = chars[start..index].iter().collect::<String>();
+            return classify_grep_interval_body(&body, index + 1);
+        }
+        index += 1;
     }
+    IntervalParse::Literal
+}
+
+/// Classify an interval body (`n`, `n,`, `n,m`); `next_index` is the position
+/// just past the closing brace.
+fn classify_grep_interval_body(body: &str, next_index: usize) -> IntervalParse {
+    if body.is_empty() {
+        return IntervalParse::Literal;
+    }
+    let valid_count = |s: &str| !s.is_empty() && s.chars().all(|ch| ch.is_ascii_digit());
+    let over_limit = |s: &str| {
+        s.parse::<u64>()
+            .map(|n| n > GREP_MAX_INTERVAL)
+            .unwrap_or(true)
+    };
     let parts = body.split(',').collect::<Vec<_>>();
     match parts.as_slice() {
-        [count] => !count.is_empty() && count.chars().all(|ch| ch.is_ascii_digit()),
-        [min, max] => {
-            !min.is_empty()
-                && min.chars().all(|ch| ch.is_ascii_digit())
-                && max.chars().all(|ch| ch.is_ascii_digit())
+        [count] if valid_count(count) => {
+            if over_limit(count) {
+                IntervalParse::TooLarge
+            } else {
+                IntervalParse::Interval(format!("{{{body}}}"), next_index)
+            }
         }
-        _ => false,
+        [min, max] if valid_count(min) && (max.is_empty() || valid_count(max)) => {
+            if over_limit(min) || (!max.is_empty() && over_limit(max)) {
+                IntervalParse::TooLarge
+            } else {
+                IntervalParse::Interval(format!("{{{body}}}"), next_index)
+            }
+        }
+        _ => IntervalParse::Literal,
     }
-}
-
-fn basic_grep_star_is_literal(chars: &[char], index: usize) -> bool {
-    if index == 0 {
-        return true;
-    }
-    matches!(chars.get(index.wrapping_sub(1)), Some('^' | '|' | '('))
-}
-
-fn basic_grep_caret_is_anchor(chars: &[char], index: usize) -> bool {
-    index == 0 || (index >= 2 && chars[index - 2] == '\\' && matches!(chars[index - 1], '(' | '|'))
 }
 
 fn fixed_line_match(
@@ -7722,6 +8058,8 @@ fn command_rg(state: &mut ExecState<'_>, args: &[String], stdin: &str) -> Comman
                 request.options.word_regexp,
                 request.options.line_regexp,
                 mode,
+                // ripgrep accepts native PCRE-style regex syntax verbatim.
+                false,
             )
         })
         .collect::<Result<Vec<_>, _>>()
@@ -9284,7 +9622,7 @@ fn rg_build_multiline_regexes(
             let normalized = if options.fixed {
                 regex::escape(pattern)
             } else {
-                normalize_grep_regex(pattern, GrepMode::ExtendedRegex)
+                normalize_grep_regex(pattern, GrepMode::ExtendedRegex, false)?
             };
             let wrapped = if options.line_regexp {
                 format!("^(?:{normalized})$")
@@ -43680,5 +44018,122 @@ mod head_parity_tests {
         let r = crate::runtime::Bash::new().exec("test -c /no/such/thing && echo yes || echo no");
         assert_eq!(r.stdout.trim(), "no");
         assert_eq!(r.exit_code, 0);
+    }
+}
+
+#[cfg(test)]
+mod grep_spec_regex_parity_tests {
+    //! Behavioral parity (commands/grep, BRE/ERE): regression locks ported from
+    //! the vercel-labs/just-bash upstream GNU grep spec corpus
+    //! (`spec-tests/grep/cases/gnu-bre.tests`, `gnu-ere.tests`). Each case feeds
+    //! the same stdin/pattern as upstream and asserts the upstream-expected
+    //! stdout + exit status. The upstream oracle treats malformed braces /
+    //! unescaped metacharacters as literals (JS RegExp Annex-B semantics) and
+    //! errors (exit 2) on stacked repetition operators ("Nothing to repeat").
+    use std::collections::BTreeMap;
+
+    fn run(cmd: &str, stdin: &str) -> crate::JustBashExecResult {
+        let escaped = stdin.replace('\'', "'\\''");
+        let script = format!("printf '%s' '{escaped}' | {cmd}");
+        crate::runtime::Bash::with_options(crate::runtime::BashOptions {
+            files: BTreeMap::from([("/tmp/_keep".to_string(), String::new())]),
+            cwd: Some("/tmp".to_string()),
+            env: BTreeMap::from([("HOME".to_string(), "/tmp".to_string())]),
+            ..Default::default()
+        })
+        .exec(&script)
+    }
+
+    /// `(out, exit)` must match the upstream expected value for `cmd`/`stdin`.
+    fn assert_case(cmd: &str, stdin: &str, expected_out: &str, expected_exit: i32) {
+        let r = run(cmd, stdin);
+        assert_eq!(r.stdout, expected_out, "stdout for `{cmd}`");
+        assert_eq!(r.exit_code, expected_exit, "exit for `{cmd}`");
+    }
+
+    #[test]
+    fn bre_unescaped_metachars_are_literal() {
+        // gnu-bre.tests: `(`, `)`, `{`, and a mid-pattern `$` are literals.
+        assert_case("grep 'a('", "a(\n", "a(\n", 0);
+        assert_case("grep 'a(b'", "a(b\n", "a(b\n", 0);
+        assert_case("grep 'a)'", "a)\n", "a)\n", 0);
+        assert_case("grep 'a$b'", "a$b\n", "a$b\n", 0);
+        assert_case("grep '{'", "{\n", "{\n", 0);
+    }
+
+    #[test]
+    fn bre_stacked_quantifier_is_badrpt() {
+        // gnu-bre.tests: `a*\{1\}` and `a\{1\}*` have nothing to repeat -> exit 2.
+        assert_case(r"grep 'a*\{1\}'", "test\n", "", 2);
+        assert_case(r"grep 'a\{1\}*'", "test\n", "", 2);
+    }
+
+    #[test]
+    fn ere_malformed_braces_are_literal() {
+        // gnu-ere.tests: `{` only starts an interval when well-formed; otherwise
+        // it (and its body) are literal characters.
+        assert_case("grep -E '{'", "{\n", "{\n", 0);
+        assert_case("grep -E '{abc'", "{abc\n", "{abc\n", 0);
+        assert_case("grep -E '{1'", "{1\n", "{1\n", 0);
+        assert_case("grep -E 'a{b'", "a{b\n", "a{b\n", 0);
+        assert_case("grep -E 'a{1'", "a{1\n", "a{1\n", 0);
+        assert_case("grep -E 'a{1a}'", "a{1a}\n", "a{1a}\n", 0);
+        assert_case("grep -E 'a{,2}'", "a{,2}\n", "a{,2}\n", 0);
+        assert_case("grep -E 'a{,}'", "a{,}\n", "a{,}\n", 0);
+        assert_case("grep -E 'a{1,*}'", "a{1,,,}\n", "a{1,,,}\n", 0);
+        assert_case("grep -E 'a*{b}'", "a{b}\n", "a{b}\n", 0);
+    }
+
+    #[test]
+    fn ere_incomplete_interval_is_literal_no_match() {
+        // gnu-ere.tests: `a{1a` becomes `a` + literal `{1a`; against input "aa"
+        // there is no match -> exit 1.
+        assert_case("grep -E 'a{1a'", "aa\n", "", 1);
+    }
+
+    #[test]
+    fn ere_stacked_quantifiers_are_badrpt() {
+        // gnu-ere.tests: stacked repetition operators error with exit 2.
+        for pat in [
+            "a**", "a++", "a*+", "a+*", "a?*", "a?+", "a*{1}", "a?{1}", "a+{1}", "a{1}*", "a{1}+",
+            "a{1}{1}",
+        ] {
+            assert_case(&format!("grep -E '{pat}'"), "test\n", "", 2);
+        }
+        // gnu-bre.tests equivalents.
+        for pat in [r"a*\{1\}", r"a\{1\}*", r"a\{1\}\{1\}"] {
+            assert_case(&format!("grep '{pat}'"), "test\n", "", 2);
+        }
+    }
+
+    #[test]
+    fn interval_count_over_limit_is_badbr() {
+        // gnu-bre.tests `a\{32768\}` and the RE2 limit: counts above 1000 error
+        // (exit 2); counts at/under the limit compile and match normally.
+        assert_case(r"grep 'a\{32768\}'", "test\n", "", 2);
+        assert_case("grep -E 'a{1001}'", "test\n", "", 2);
+        assert_case("grep -E 'a{1,1001}'", "test\n", "", 2);
+        assert_case("grep -E 'a{1001,}'", "test\n", "", 2);
+        // At/under the limit still works.
+        assert_case("grep -E 'a{1000}'", "test\n", "", 1);
+        assert_case("grep -E 'a{2}'", "baad\n", "baad\n", 0);
+    }
+
+    #[test]
+    fn unknown_posix_class_name_is_error() {
+        // gnu-ere.tests ECTYPE rows: an unknown `[[:name:]]` class is a syntax
+        // error (exit 2); a valid class name still matches.
+        for pat in [
+            "a[[:notdef:]]c",
+            "a[[:alph:]]",
+            "a[[:alphabet:]]",
+            "a[[:]:]]b",
+            "a[[:-:]]b",
+        ] {
+            assert_case(&format!("grep -E '{pat}'"), "test\n", "", 2);
+        }
+        // Valid POSIX classes still match.
+        assert_case("grep -E 'a[[:alpha:]]'", "az\n", "az\n", 0);
+        assert_case("grep -E '[[:digit:]]'", "x9y\n", "x9y\n", 0);
     }
 }
