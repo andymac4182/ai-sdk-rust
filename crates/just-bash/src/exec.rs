@@ -8194,18 +8194,15 @@ fn command_rg(state: &mut ExecState<'_>, args: &[String], stdin: &str) -> Comman
                 return stderr_result(2, format!("rg: invalid regex: {}\n", patterns.join(", ")));
             }
         };
-        let inputs = if request.roots.is_empty() && !stdin.is_empty() {
-            vec![RgInput {
-                label: "<stdin>".to_string(),
-                text: stdin.to_string(),
-                explicit_file: false,
-                source_path: None,
-            }]
-        } else {
-            match rg_inputs(state, &request) {
-                Ok(inputs) => inputs,
-                Err(error) => return stderr_result(2, format!("rg: {error}\n")),
-            }
+        // Upstream rg (the just-bash port) NEVER reads piped stdin as search
+        // input: when no path operands are given it defaults to searching `.`
+        // (rg-search.ts: `const paths = inputPaths.length === 0 ? ["."] : ...`).
+        // `ctx.stdin` is consumed only by `-f -` (pattern file from stdin). So we
+        // always resolve real filesystem inputs here rather than treating stdin
+        // as a `<stdin>` document.
+        let inputs = match rg_inputs(state, &request) {
+            Ok(inputs) => inputs,
+            Err(error) => return stderr_result(2, format!("rg: {error}\n")),
         };
         let inputs = match rg_apply_preprocessor(state, &request, inputs) {
             Ok(inputs) => inputs,
@@ -8237,18 +8234,12 @@ fn command_rg(state: &mut ExecState<'_>, args: &[String], stdin: &str) -> Comman
         }
     };
 
-    let inputs = if request.roots.is_empty() && !stdin.is_empty() {
-        vec![RgInput {
-            label: "<stdin>".to_string(),
-            text: stdin.to_string(),
-            explicit_file: false,
-            source_path: None,
-        }]
-    } else {
-        match rg_inputs(state, &request) {
-            Ok(inputs) => inputs,
-            Err(error) => return stderr_result(2, format!("rg: {error}\n")),
-        }
+    // Upstream rg always searches `.` when no path operands are present; piped
+    // stdin is not a search source (only `-f -` consumes stdin). See the
+    // multiline branch above for the matching rg-search.ts reference.
+    let inputs = match rg_inputs(state, &request) {
+        Ok(inputs) => inputs,
+        Err(error) => return stderr_result(2, format!("rg: {error}\n")),
     };
 
     let inputs = match rg_apply_preprocessor(state, &request, inputs) {
@@ -9126,6 +9117,18 @@ fn command_rg_files(state: &ExecState<'_>, request: &RgRequest) -> CommandResult
     }
 }
 
+/// Prefix used to match descendants of a search root. For the filesystem root
+/// (`/`) the child prefix is just `/` (so `/in.txt` is a child); for any other
+/// directory it is `{root}/`. Without this special-case, `format!("{root}/")`
+/// would yield `//` for the root and exclude every top-level file.
+fn rg_child_prefix(root: &str) -> String {
+    if root == "/" {
+        "/".to_string()
+    } else {
+        format!("{root}/")
+    }
+}
+
 fn rg_inputs(state: &ExecState<'_>, request: &RgRequest) -> Result<Vec<RgInput>, String> {
     let fs = state
         .session
@@ -9145,8 +9148,14 @@ fn rg_inputs(state: &ExecState<'_>, request: &RgRequest) -> Result<Vec<RgInput>,
         };
         rg_parse_ignore_content(&content, &state.cwd, &mut ignore_rules);
     }
-    let roots: Vec<(String, Option<String>)> = if request.roots.is_empty() {
-        vec![(state.cwd.clone(), None)]
+    // The third tuple element marks the implicit default root (`rg pat` with no
+    // path operand). Upstream defaults to searching `.` and labels every hit
+    // with a path relative to that `.` (bare `name`), independent of how the cwd
+    // is spelled. Explicit roots, by contrast, label hits with the operand the
+    // user typed (e.g. `rg pat /repo` -> `/repo/a.txt`), so they must NOT be
+    // collapsed to cwd-relative names.
+    let roots: Vec<(String, Option<String>, bool)> = if request.roots.is_empty() {
+        vec![(state.cwd.clone(), None, true)]
     } else {
         request
             .roots
@@ -9169,12 +9178,12 @@ fn rg_inputs(state: &ExecState<'_>, request: &RgRequest) -> Result<Vec<RgInput>,
                         }
                     })
                 };
-                (resolve_path(&state.cwd, root), dot_base)
+                (resolve_path(&state.cwd, root), dot_base, false)
             })
             .collect()
     };
     let mut inputs = Vec::new();
-    for (root, dot_base) in roots {
+    for (root, dot_base, is_implicit_default) in roots {
         let root_stat = fs
             .stat(&root)
             .map_err(|_| format!("{root}: No such file or directory"))?;
@@ -9197,6 +9206,7 @@ fn rg_inputs(state: &ExecState<'_>, request: &RgRequest) -> Result<Vec<RgInput>,
                             format!("./{base}")
                         }
                     }),
+                    implicit_default_root: is_implicit_default,
                 },
             );
             continue;
@@ -9215,10 +9225,12 @@ fn rg_inputs(state: &ExecState<'_>, request: &RgRequest) -> Result<Vec<RgInput>,
                 }
             }
         }
+        let real_root_prefix = rg_child_prefix(&real_root);
+        let root_prefix = rg_child_prefix(&root);
         let mut paths = fs
             .get_all_paths()
             .into_iter()
-            .filter(|path| path.starts_with(&format!("{real_root}/")))
+            .filter(|path| path.starts_with(&real_root_prefix))
             .collect::<Vec<_>>();
         paths.sort();
         for path in &paths {
@@ -9229,7 +9241,7 @@ fn rg_inputs(state: &ExecState<'_>, request: &RgRequest) -> Result<Vec<RgInput>,
             } else if let Some(base) = &dot_base {
                 // Preserve the literal `./` prefix: label as `./` + base + suffix,
                 // where suffix is the path relative to the resolved root.
-                path.strip_prefix(&format!("{root}/")).map(|suffix| {
+                path.strip_prefix(&root_prefix).map(|suffix| {
                     if base.is_empty() {
                         format!("./{suffix}")
                     } else {
@@ -9250,6 +9262,7 @@ fn rg_inputs(state: &ExecState<'_>, request: &RgRequest) -> Result<Vec<RgInput>,
                     path,
                     explicit_file: false,
                     display_override,
+                    implicit_default_root: is_implicit_default,
                 },
             );
         }
@@ -9261,7 +9274,7 @@ fn rg_inputs(state: &ExecState<'_>, request: &RgRequest) -> Result<Vec<RgInput>,
             let mut symlink_dirs = fs
                 .get_all_paths()
                 .into_iter()
-                .filter(|path| path.starts_with(&format!("{real_root}/")))
+                .filter(|path| path.starts_with(&real_root_prefix))
                 .filter(|path| {
                     fs.lstat(path)
                         .map(|stat| stat.is_symbolic_link)
@@ -9274,10 +9287,11 @@ fn rg_inputs(state: &ExecState<'_>, request: &RgRequest) -> Result<Vec<RgInput>,
                 let Ok(target_dir) = fs.realpath(&link_dir) else {
                     continue;
                 };
+                let target_prefix = rg_child_prefix(&target_dir);
                 let mut target_paths = fs
                     .get_all_paths()
                     .into_iter()
-                    .filter(|path| path.starts_with(&format!("{target_dir}/")))
+                    .filter(|path| path.starts_with(&target_prefix))
                     .collect::<Vec<_>>();
                 target_paths.sort();
                 for path in &target_paths {
@@ -9297,6 +9311,7 @@ fn rg_inputs(state: &ExecState<'_>, request: &RgRequest) -> Result<Vec<RgInput>,
                             path,
                             explicit_file: false,
                             display_override: Some(display_label),
+                            implicit_default_root: false,
                         },
                     );
                 }
@@ -9312,6 +9327,12 @@ struct RgCandidate<'a> {
     path: &'a str,
     explicit_file: bool,
     display_override: Option<String>,
+    /// True when this candidate was discovered under the implicit default root
+    /// (`rg pat` with no path operand, i.e. searching `.`). Such hits are
+    /// labelled with the bare path beneath the root, which correctly yields
+    /// `in.txt` for a `/in.txt` file when the cwd is `/` (where the shared
+    /// `relative_display_path` would otherwise fall back to the absolute path).
+    implicit_default_root: bool,
 }
 
 fn rg_push_input(
@@ -9342,10 +9363,20 @@ fn rg_push_input(
     if !stat.is_file {
         return;
     }
-    let label = candidate
-        .display_override
-        .clone()
-        .unwrap_or_else(|| relative_display_path(cwd, candidate.path));
+    let label = candidate.display_override.clone().unwrap_or_else(|| {
+        if candidate.implicit_default_root {
+            // Bare path beneath the implicit `.` root. Strip the root's child
+            // prefix so a `/`-cwd search labels `/in.txt` as `in.txt` rather than
+            // falling back to the absolute path.
+            candidate
+                .path
+                .strip_prefix(&rg_child_prefix(candidate.root))
+                .map(str::to_string)
+                .unwrap_or_else(|| relative_display_path(cwd, candidate.path))
+        } else {
+            relative_display_path(cwd, candidate.path)
+        }
+    });
     if !rg_file_passes_filters(
         candidate.path,
         &label,

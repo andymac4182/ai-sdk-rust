@@ -8603,12 +8603,63 @@ searchdir/real.txt:1:test content\n",
             0,
             "a.txt\n",
         );
+        // Upstream rg never reads piped stdin as search input: with no path
+        // operand it defaults to searching `.` (the cwd), so `cat in.txt | rg`
+        // finds `in.txt` and labels the hit `in.txt:2:` rather than `<stdin>:2:`.
+        // The captured upstream port emits exactly this; the loose upstream
+        // `rg.utf8-stdin` assertion (which only checks the matched line) holds.
         assert_home_exec(
             &[("in.txt", "miss\n한글 found\nmiss\n")],
             "cat in.txt | rg '한글'",
             0,
-            "<stdin>:2:한글 found\n",
+            "in.txt:2:한글 found\n",
         );
+    }
+
+    #[test]
+    fn rg_default_root_search_is_cwd_relative_and_ignores_stdin() {
+        // Behavioral parity: upstream rg (just-bash port) never treats piped
+        // stdin as search input. With no path operand it defaults to searching
+        // `.` and labels hits relative to that root. These rows lock in two
+        // fixes:
+        //  1) a `/`-cwd implicit-default search labels `/in.txt` as `in.txt`
+        //     (not the absolute path), matching upstream's `relativePath === "."`
+        //     output and finding top-level files under root (previously the
+        //     `//` child-prefix excluded them);
+        //  2) piped content is discarded for the search itself, so the result is
+        //     identical with or without an upstream-style `cat | rg` pipeline.
+        let root = Bash::with_options(BashOptions {
+            cwd: Some("/".to_string()),
+            files: BTreeMap::from([(
+                "/in.txt".to_string(),
+                "miss\nhello there\nmiss\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        let direct = root.exec("rg hello");
+        assert_eq!(direct.exit_code, 0);
+        assert_eq!(direct.stdout, "in.txt:2:hello there\n");
+        assert_eq!(direct.stderr, "");
+
+        // Piping unrelated content into rg must not change the search: stdin is
+        // not a search source, so the default `.` search still finds `/in.txt`.
+        let piped = root.exec("cat /in.txt | rg hello");
+        assert_eq!(piped.exit_code, 0);
+        assert_eq!(piped.stdout, "in.txt:2:hello there\n");
+
+        // An explicit absolute root keeps the operand-as-given label, even when
+        // the cwd is `/` (no collapse to a bare/cwd-relative name).
+        let repo = Bash::with_options(BashOptions {
+            cwd: Some("/".to_string()),
+            files: BTreeMap::from([(
+                "/repo/a.txt".to_string(),
+                "alpha\nbeta\ngamma\n".to_string(),
+            )]),
+            ..BashOptions::default()
+        });
+        let explicit = repo.exec("rg beta /repo");
+        assert_eq!(explicit.exit_code, 0);
+        assert_eq!(explicit.stdout, "/repo/a.txt:2:beta\n");
     }
 
     #[test]
